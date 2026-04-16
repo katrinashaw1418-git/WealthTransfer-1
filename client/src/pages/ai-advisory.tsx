@@ -165,8 +165,8 @@ export default function AiAdvisory() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-recommendations"] });
       toast({
-        title: "Recommendations Updated",
-        description: "New AI recommendations generated based on your risk profile.",
+        title: "Insights Updated",
+        description: "New market insights generated based on your risk profile.",
       });
     },
   });
@@ -192,14 +192,14 @@ export default function AiAdvisory() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-recommendations"] });
       toast({
-        title: "Recommendation Applied",
-        description: "The AI recommendation has been successfully implemented.",
+        title: "Insight Acknowledged",
+        description: "The market insight has been noted and recorded.",
       });
     },
     onError: () => {
       toast({
         title: "Application Failed",
-        description: "Unable to apply the recommendation. Please try again.",
+        description: "Unable to process the insight. Please try again.",
         variant: "destructive",
       });
     },
@@ -517,7 +517,7 @@ export default function AiAdvisory() {
         <Card>
           <CardContent className="p-6">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-500">Active Recommendations</h3>
+              <h3 className="text-sm font-medium text-gray-500">Active Insights</h3>
               <Lightbulb className="w-4 h-4 text-yellow-500" />
             </div>
             <p className="text-2xl font-bold">{recommendations?.length || 0}</p>
@@ -644,7 +644,7 @@ export default function AiAdvisory() {
           </Card>
         </div>
 
-        {/* AI Recommendations */}
+        {/* Market Insights */}
         <div className="lg:col-span-2 space-y-6">
           <Card>
             <CardHeader>
@@ -767,7 +767,7 @@ export default function AiAdvisory() {
                           {realMetrics.rebalancingGap < 10
                             ? ' Portfolio is well-balanced.'
                             : realMetrics.rebalancingGap < 25
-                            ? ' Minor rebalancing recommended.'
+                            ? ' Portfolio is reasonably balanced.'
                             : ' Significant rebalancing may be warranted.'}
                         </p>
                       </>
@@ -779,7 +779,7 @@ export default function AiAdvisory() {
               </div>
               <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
                 <p className="text-xs text-amber-800">
-                  This comparison is illustrative only and does not constitute a recommendation to rebalance. 
+                  This comparison is illustrative only and does not constitute personal financial advice. 
                   Contact your adviser to discuss whether changes to your portfolio allocation are appropriate for your circumstances.
                 </p>
               </div>
@@ -1087,19 +1087,19 @@ export default function AiAdvisory() {
         </DialogContent>
       </Dialog>
 
-      {/* Recommendation Details Modal */}
+      {/* Insight Details Modal */}
       <Dialog open={detailsModalOpen} onOpenChange={setDetailsModalOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{selectedRecommendation?.title}</DialogTitle>
             <DialogDescription>
-              Detailed analysis and implementation guidance
+              Detailed analysis and general guidance — not personal advice
             </DialogDescription>
           </DialogHeader>
           {selectedRecommendation && (
             <div className="space-y-4">
               <div className="p-4 bg-gray-50 rounded-lg">
-                <h4 className="font-semibold mb-2">Recommendation Type</h4>
+                <h4 className="font-semibold mb-2">Insight Category</h4>
                 <Badge className="mb-2">
                   {selectedRecommendation.type.replace('_', ' ').toUpperCase()}
                 </Badge>
@@ -1134,7 +1134,7 @@ export default function AiAdvisory() {
                   }}
                   disabled={applyRecommendationMutation.isPending}
                 >
-                  {applyRecommendationMutation.isPending ? "Applying..." : "Apply Recommendation"}
+                  {applyRecommendationMutation.isPending ? "Applying..." : "Acknowledge Insight"}
                 </Button>
                 <Button variant="outline" onClick={() => setDetailsModalOpen(false)}>
                   Close

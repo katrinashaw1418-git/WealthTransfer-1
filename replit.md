@@ -3,6 +3,39 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — AFSL Language Compliance Sweep
+
+### Investments page compliance
+- "Invest Now" button → "Submit Investment Instruction"
+- "Target IRR" → "Indicative Return" throughout product cards and modal
+- "Available Capital" → "Cash Allocation (via external custodian)"
+- "Cash Deposits" category → "Cash & Fixed Income"
+- Removed "wallet" from all user-facing toast messages (now "account")
+- Added full compliance disclaimer footer (past performance, capital risk, general info only, external custodians)
+
+### AI Advisory / Market Insights compliance
+- "Active Recommendations" → "Active Insights"
+- "Recommendation Type" → "Insight Category"
+- "Apply Recommendation" → "Acknowledge Insight"
+- "Minor rebalancing recommended" → "Portfolio is reasonably balanced"
+- All toast messages updated from "recommendation" to "insight" language
+- Comparison disclaimer updated to "does not constitute personal financial advice"
+
+### Compliance page
+- "AI Advisory Limitations" → "Portfolio Insights Limitations" with Corporations Act reference
+- "withdrawals (flat $25 fee)" → "fund transfers (flat $25 fee)"
+
+### Voice settings and narration
+- All "wallet" references → "account" in voice test, commands, and help text
+- "deposit/withdraw" → "inflow/outflow" in voice commands
+- Voice help narration updated accordingly
+
+### Dashboard
+- Internal comment updated from "AI Advisory" to "Market Insights"
+
+### FX Exchange (standalone page, not in active router)
+- "Exchange Now" → "Proceed via AMAX Global"
+
 ## Recent Changes (April 2026) — Landing Page + Route Restructure
 
 ### Public landing page added (`/`)

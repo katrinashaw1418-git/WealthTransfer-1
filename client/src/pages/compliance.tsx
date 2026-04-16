@@ -451,7 +451,7 @@ export default function Compliance() {
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">5. Fees and Charges</h3>
-                <p>AMAX charges fees for certain services including FX conversion (0.5% of converted amount), withdrawals (flat $25 fee), and investment management (per product schedule). All fees are disclosed prior to transaction confirmation.</p>
+                <p>AMAX charges fees for certain services including FX conversion (0.5% of converted amount), fund transfers (flat $25 fee), and investment management (per product schedule). All fees are disclosed prior to transaction confirmation.</p>
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">6. Limitation of Liability</h3>
@@ -552,8 +552,8 @@ export default function Compliance() {
                 <p>Digital assets and crypto investments are subject to additional risks including regulatory uncertainty, technological failures, smart contract vulnerabilities, and extreme price volatility. These are suitable only for experienced investors who can afford total loss.</p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">7. AI Advisory Limitations</h3>
-                <p>AMAX AI advisory tools provide information and educational content only. They do not constitute regulated investment advice. Always consult a qualified financial adviser before making significant investment decisions based on AI-generated insights.</p>
+                <h3 className="font-semibold text-gray-900 text-base mb-2">7. Portfolio Insights Limitations</h3>
+                <p>AMAX portfolio insight tools provide general information and educational content only. They do not constitute personal financial product advice under the Corporations Act 2001 (Cth). Always consult a qualified financial adviser before making significant investment decisions.</p>
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">8. Regulatory Risk</h3>

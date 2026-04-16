@@ -212,7 +212,7 @@ export default function FxExchange() {
                 onClick={handleExchange}
                 disabled={exchangeMutation.isPending || rateLoading}
               >
-                {exchangeMutation.isPending ? "Processing..." : "Exchange Now"}
+                {exchangeMutation.isPending ? "Processing..." : "Proceed via AMAX Global"}
               </Button>
             </CardContent>
           </Card>

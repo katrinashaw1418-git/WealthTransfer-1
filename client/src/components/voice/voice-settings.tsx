@@ -24,7 +24,7 @@ export default function VoiceSettings() {
   const [recognition, setRecognition] = useState<any>(null);
 
   const handleVoiceTest = () => {
-    speak('This is a test of the voice narration system. Your wallet transactions will be announced in this voice.');
+    speak('This is a test of the voice narration system. Your account activity will be announced in this voice.');
   };
 
   const handleListeningToggle = () => {
@@ -87,7 +87,7 @@ export default function VoiceSettings() {
           <div className="space-y-1">
             <Label htmlFor="voice-commands">Voice Commands</Label>
             <p className="text-sm text-muted-foreground">
-              Control your wallet with voice commands
+              Control your account with voice commands
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -124,7 +124,7 @@ export default function VoiceSettings() {
               Listening for voice commands
             </Badge>
             <p className="text-sm text-muted-foreground">
-              Try saying: "balance", "help", "deposit", "withdraw", or "transfer"
+              Try saying: "balance", "help", "inflow", "outflow", or "transfer"
             </p>
           </div>
         )}
@@ -201,10 +201,10 @@ export default function VoiceSettings() {
         <div className="bg-gray-50 dark:bg-gray-900/50 p-4 rounded-lg">
           <h4 className="font-medium mb-2">Available Voice Commands:</h4>
           <ul className="text-sm space-y-1 text-muted-foreground">
-            <li>• "Balance" - Hear your wallet balances</li>
+            <li>• "Balance" - Hear your account balances</li>
             <li>• "Help" - Get list of available commands</li>
-            <li>• "Deposit" - Start a deposit transaction</li>
-            <li>• "Withdraw" - Start a withdrawal transaction</li>
+            <li>• "Inflow" - Record an inflow transaction</li>
+            <li>• "Outflow" - Record an outflow transaction</li>
             <li>• "Transfer" - Start a transfer transaction</li>
             <li>• "Stop listening" - Disable voice commands</li>
           </ul>

@@ -19,7 +19,7 @@ export default function Dashboard() {
           <FxExchangeTool />
         </div>
 
-        {/* Right Column - AI Advisory and Balances */}
+        {/* Right Column - Market Insights and Balances */}
         <div className="space-y-6">
           <AiAdvisoryPanel />
           <CurrencyBalances />

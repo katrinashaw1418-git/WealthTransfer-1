@@ -29,7 +29,7 @@ const categoryLabels = {
   corporate_credit: "Corporate Credit",
   venture_capital: "Venture Capital",
   digital_assets: "Digital Assets",
-  cash_deposit: "Cash Deposits",
+  cash_deposit: "Cash & Fixed Income",
 };
 
 const riskProfileColors = {
@@ -84,7 +84,7 @@ export default function Investments() {
     onSuccess: (response) => {
       toast({
         title: "Investment Created",
-        description: `Successfully invested $${parseFloat(response.investment.investedAmount).toLocaleString()}. New wallet balance: $${parseFloat(response.newBalance).toLocaleString()}`,
+        description: `Investment instruction submitted for $${parseFloat(response.investment.investedAmount).toLocaleString()}. Updated available balance: $${parseFloat(response.newBalance).toLocaleString()}`,
       });
       // Invalidate multiple queries to update UI
       queryClient.invalidateQueries({ queryKey: ["/api/user-investments"] });
@@ -170,13 +170,13 @@ export default function Investments() {
     if (amount > availableBalance) {
       toast({
         title: "Insufficient Funds",
-        description: `You have ${currencySymbols[selectedCurrency] || selectedCurrency}${availableBalance.toLocaleString()} available in ${selectedCurrency} wallet.`,
+        description: `You have ${currencySymbols[selectedCurrency] || selectedCurrency}${availableBalance.toLocaleString()} available in your ${selectedCurrency} account.`,
         variant: "destructive",
       });
       return;
     }
 
-    // Create investment with source currency info for proper wallet deduction
+    // Create investment with source currency info for proper account deduction
     investMutation.mutate({
       productId: selectedProduct.id,
       amount: usdAmount, // USD equivalent for investment
@@ -335,7 +335,7 @@ export default function Investments() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Investment Products</h1>
-          <p className="text-gray-600">Explore and invest in structured wealth management products</p>
+          <p className="text-gray-600">Wholesale products — for eligible investors only. All investments carry risk of capital loss.</p>
         </div>
       </div>
 
@@ -394,7 +394,7 @@ export default function Investments() {
           <Card className="flex flex-col h-32">
             <CardContent className="p-4 flex flex-col justify-between h-full">
               <div className="flex items-center space-x-2">
-                <h3 className="text-xs font-medium text-gray-500">Available Capital</h3>
+                <h3 className="text-xs font-medium text-gray-500">Cash Allocation (via external custodian)</h3>
                 <Select value={selectedCurrency} onValueChange={setSelectedCurrency}>
                   <SelectTrigger className="w-auto min-w-12 h-5 text-xs border border-green-200 rounded px-1 py-0 focus:ring-1 focus:ring-green-500 bg-green-50 hover:bg-green-100 transition-colors font-semibold text-green-700">
                     <SelectValue />
@@ -466,7 +466,7 @@ export default function Investments() {
                   <SelectItem value="corporate_credit">Corporate Credit</SelectItem>
                   <SelectItem value="venture_capital">Venture Capital</SelectItem>
                   <SelectItem value="digital_assets">Digital Assets</SelectItem>
-                  <SelectItem value="cash_deposit">Cash Deposits</SelectItem>
+                  <SelectItem value="cash_deposit">Cash & Fixed Income</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -535,7 +535,7 @@ export default function Investments() {
 
                 <div className="space-y-3 mb-4">
                   <div className="flex justify-between items-center">
-                    <span className="text-sm text-muted-foreground">Target IRR:</span>
+                    <span className="text-sm text-muted-foreground">Indicative Return:</span>
                     <span className="font-semibold text-green-600 text-right">{product.targetNetIrr}</span>
                   </div>
                   <div className="flex justify-between items-center">
@@ -651,7 +651,7 @@ export default function Investments() {
                       setInvestModalOpen(true);
                     }}
                   >
-                    Invest Now
+                    Submit Investment Instruction
                   </Button>
                 </div>
               </CardContent>
@@ -716,7 +716,7 @@ export default function Investments() {
                 <h4 className="font-semibold mb-2">Investment Summary</h4>
                 <div className="space-y-1 text-sm">
                   <div className="flex justify-between">
-                    <span>Target IRR:</span>
+                    <span>Indicative Return:</span>
                     <span className="font-semibold text-green-600">{selectedProduct.targetNetIrr}</span>
                   </div>
                   <div className="flex justify-between">
@@ -789,6 +789,11 @@ export default function Investments() {
           </div>
         </DialogContent>
       </Dialog>
+      <div className="mt-8 pt-4 border-t border-gray-200">
+        <p className="text-xs text-gray-400 leading-relaxed">
+          Past performance is not a reliable indicator of future performance. Indicative returns are targets only and are not guaranteed. All investments carry risk including potential loss of capital. Information on this page is general in nature and does not constitute personal financial product advice. AMAX Wealth is an Authorised Representative of the AFSL holder. Client assets are held with external regulated custodians and are not held by AMAX Wealth.
+        </p>
+      </div>
     </div>
   );
 }

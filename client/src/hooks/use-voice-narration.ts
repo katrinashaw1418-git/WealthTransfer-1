@@ -105,10 +105,10 @@ export function useVoiceNarration() {
     
     switch (type) {
       case 'deposit':
-        message = `Depositing ${amount} ${currency} to your wallet`;
+        message = `Processing inflow of ${amount} ${currency} to your account`;
         break;
       case 'withdraw':
-        message = `Withdrawing ${amount} ${currency} from your wallet`;
+        message = `Processing outflow of ${amount} ${currency} from your account`;
         break;
       case 'exchange':
         message = `Converting ${amount} ${currency} to ${details?.toCurrency || 'another currency'}`;
@@ -177,10 +177,10 @@ export function useVoiceNarration() {
       
       // Process voice commands
       if (transcript.includes('balance')) {
-        speak('Reading your wallet balances', 'high');
+        speak('Reading your account balances', 'high');
         // This would trigger balance narration
       } else if (transcript.includes('help')) {
-        speak('Available commands: say balance to hear your balances, say deposit to make a deposit, say withdraw to make a withdrawal, say transfer to transfer funds', 'high');
+        speak('Available commands: say balance to hear your balances, say inflow to record an inflow, say outflow to record an outflow, say transfer to transfer funds', 'high');
       }
     };
     
