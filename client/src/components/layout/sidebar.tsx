@@ -28,8 +28,8 @@ const navigation = [
   { name: "Investments", href: "/investments", icon: Building2 },
   { name: "Market Insights", href: "/ai-advisory", icon: Bot },
   { name: "Activity", href: "/transactions", icon: History },
-  { name: "Compliance", href: "/compliance", icon: Shield },
-  { name: "Legal", href: "/legal", icon: Scale },
+  { name: "KYC", href: "/compliance", icon: Shield },
+  { name: "Legal & Compliance", href: "/legal", icon: Scale },
 ];
 
 function SidebarContent() {

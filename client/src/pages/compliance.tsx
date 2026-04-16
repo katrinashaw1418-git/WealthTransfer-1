@@ -1,15 +1,8 @@
-import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Shield,
-  CheckCircle,
-  Clock,
-  AlertTriangle,
-  Upload,
   Phone,
   MessageSquare,
   ExternalLink,
@@ -37,22 +30,13 @@ const documents = [
   { name: "Signed risk disclosure", desc: "Acknowledgement of investment risks", status: "Signed", statusColor: "bg-green-100 text-green-700" },
 ];
 
-const regulatoryRows = [
-  { label: "AMAX Wealth Pty Ltd", value: "Authorised Representative under Australian Financial Services Licence" },
-  { label: "AUSTRAC registration", value: "AMAX Global Pty Ltd — Digital currency exchange and remittance provider" },
-  { label: "Client classification", value: "Wholesale client — Corporations Act 2001 (Cth) s761G" },
-  { label: "Dispute resolution", value: "AFCA member — Australian Financial Complaints Authority" },
-  { label: "Record keeping", value: "s912A Corporations Act 2001 (Cth) — 7-year minimum retention" },
-  { label: "Privacy", value: "Privacy Act 1988 (Cth) — Australian Privacy Principles apply" },
-];
-
 export default function Compliance() {
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-bold text-amber-700">Welcome back, Wise</h1>
-          <p className="text-gray-500 text-sm">Compliance centre — AMAX Wealth · 5 accounts · Global</p>
+          <p className="text-gray-500 text-sm">KYC centre — AMAX Wealth · 5 accounts · Global</p>
         </div>
         <Card className="border shadow-sm">
           <CardContent className="p-4 flex items-center gap-4">
@@ -100,10 +84,6 @@ export default function Compliance() {
             <TabsTrigger value="kyc" className="min-w-[120px]">KYC status</TabsTrigger>
             <TabsTrigger value="documents" className="min-w-[120px]">Documents</TabsTrigger>
             <TabsTrigger value="risk" className="min-w-[120px]">Risk profile</TabsTrigger>
-            <TabsTrigger value="regulatory" className="min-w-[120px]">Regulatory</TabsTrigger>
-            <TabsTrigger value="terms" className="min-w-[140px]">Terms &amp; conditions</TabsTrigger>
-            <TabsTrigger value="privacy" className="min-w-[120px]">Privacy policy</TabsTrigger>
-            <TabsTrigger value="risk-disclosure" className="min-w-[120px]">Risk disclosure</TabsTrigger>
           </TabsList>
         </div>
 
@@ -203,169 +183,10 @@ export default function Compliance() {
             </CardContent>
           </Card>
         </TabsContent>
-
-        <TabsContent value="regulatory">
-          <Card>
-            <CardContent className="p-6 space-y-1">
-              <p className="text-sm text-gray-600 mb-4">Regulatory status and licence information applicable to AMAX Wealth services.</p>
-
-              {regulatoryRows.map((row, i) => (
-                <div key={i} className="flex justify-between items-start py-4 border-b border-gray-100 last:border-0 gap-8">
-                  <span className="font-medium text-gray-900 flex-shrink-0">{row.label}</span>
-                  <span className="text-sm text-gray-600 text-right">{row.value}</span>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="terms">
-          <Card>
-            <CardContent className="p-6 space-y-6">
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">1. Nature of services</h3>
-                <p className="text-sm text-gray-700">
-                  AMAX Wealth Pty Ltd provides financial product information and, where authorised, financial product advice as an Authorised Representative under an Australian Financial Services Licence. Services are provided to wholesale clients only as defined under the Corporations Act 2001 (Cth).
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">2. No personal advice without SOA</h3>
-                <p className="text-sm text-gray-700">
-                  General information provided on this platform does not constitute personal financial product advice. Personal advice will only be provided following completion of a fact-find and delivery of a Statement of Advice (SOA) by a licensed financial adviser.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">3. Investment risk acknowledgement</h3>
-                <p className="text-sm text-gray-700">
-                  By using this platform you acknowledge that all investments carry risk, including possible loss of capital. Past performance is not a reliable indicator of future performance. Target returns are indicative only and are not guaranteed.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">4. AI-generated content</h3>
-                <p className="text-sm text-gray-700">
-                  AI-generated insights on this platform are general information only. They do not take into account your personal circumstances and are not regulated investment advice.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">5. Custody of assets</h3>
-                <p className="text-sm text-gray-700">
-                  AMAX Wealth does not hold client funds or assets. All investments are held with external regulated custodians or fund managers. AMAX Wealth provides instruction, reporting, and advisory services only.
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
-                <span>Terms accepted</span>
-                <span>2 Aug 2025</span>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="privacy">
-          <Card>
-            <CardContent className="p-6 space-y-6">
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">Collection of personal information</h3>
-                <p className="text-sm text-gray-700">
-                  AMAX Wealth collects personal information including identity documents, financial information, and transaction records for the purpose of providing financial services, meeting KYC/AML obligations, and complying with regulatory requirements under Australian law.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">Use and disclosure</h3>
-                <p className="text-sm text-gray-700">
-                  Your information is used to provide services, conduct AML/CTF screening, verify wholesale investor status, and comply with ASIC and AUSTRAC reporting obligations. Information is not sold to third parties.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">Storage and security</h3>
-                <p className="text-sm text-gray-700">
-                  Personal information is stored securely in Australia. AMAX Wealth applies the Australian Privacy Principles under the Privacy Act 1988 (Cth). You may request access to or correction of your personal information at any time.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">Contact</h3>
-                <p className="text-sm text-gray-700">
-                  For privacy enquiries contact AMAX Wealth compliance via the adviser contact details on this platform or submit a written request to our registered office.
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
-                <span>Privacy policy acknowledged</span>
-                <span>2 Aug 2025</span>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="risk-disclosure">
-          <Card>
-            <CardContent className="p-6 space-y-6">
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                <p className="text-sm text-amber-800 italic">
-                  All investments carry risk. The value of your investments can go down as well as up. You may receive back less than you invest. Past performance is not a reliable indicator of future results.
-                </p>
-              </div>
-
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">1 &nbsp; Market risk</h3>
-                <p className="text-sm text-gray-700">
-                  Investment values fluctuate with market conditions including interest rate changes, economic developments, geopolitical events, and investor sentiment. Equity and digital asset investments are subject to higher volatility than fixed-income products.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">2 &nbsp; Currency risk</h3>
-                <p className="text-sm text-gray-700">
-                  Multi-currency investments are exposed to foreign exchange fluctuations. Changes in exchange rates can materially affect the value of your holdings when converted to your base currency. FX hedging is available for select products — confirm availability with your adviser.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">3 &nbsp; Liquidity risk</h3>
-                <p className="text-sm text-gray-700">
-                  Some investment products have lock-up periods or limited redemption windows. You may be unable to access your funds on short notice. Always ensure you maintain sufficient liquid reserves outside your AMAX Wealth investments.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">4 &nbsp; Credit risk</h3>
-                <p className="text-sm text-gray-700">
-                  Fixed-income products are subject to the credit risk of the issuer. A downgrade or default may result in partial or total loss of invested capital. Credit ratings are provided as guidance only and are not guarantees of performance.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">5 &nbsp; Concentration risk</h3>
-                <p className="text-sm text-gray-700">
-                  Concentrating investments in a single asset class, sector, or geography increases vulnerability to adverse events. A diversified portfolio aligned to your risk tolerance may reduce concentration exposure — discuss with your adviser.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">6 &nbsp; Technology and digital asset risk</h3>
-                <p className="text-sm text-gray-700">
-                  Digital assets and crypto investments are subject to additional risks including regulatory uncertainty, technological failures, smart contract vulnerabilities, and extreme price volatility. These products are available to wholesale investors only and carry the possibility of total loss of capital.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">7 &nbsp; AI-generated content limitations</h3>
-                <p className="text-sm text-gray-700">
-                  AI tools on this platform provide general information only. They do not constitute regulated financial product advice under the Corporations Act 2001 (Cth). Always consult a licensed financial adviser before making investment decisions based on AI-generated content.
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 mb-2">8 &nbsp; Regulatory risk</h3>
-                <p className="text-sm text-gray-700">
-                  Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX Wealth monitors regulatory developments and will notify clients of material changes affecting their holdings.
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
-                <span>Disclosure acknowledged · Last updated January 2025 · Australian law applies</span>
-                <span>Signed 2 Aug 2025</span>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
       </Tabs>
 
       <div className="text-xs text-gray-400 leading-relaxed pt-4 border-t border-gray-100">
-        Compliance documentation is maintained in accordance with AFSL obligations and ASIC requirements. AMAX Wealth Pty Ltd operates as an Authorised Representative under an Australian Financial Services Licence arrangement. All client data is handled in accordance with the Privacy Act 1988 (Cth).
+        Compliance documentation is maintained in accordance with AFSL obligations and ASIC requirements. For regulatory status, terms, privacy policy, and risk disclosures, see the Legal & Compliance page.
       </div>
     </div>
   );

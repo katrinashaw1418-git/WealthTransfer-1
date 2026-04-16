@@ -3,29 +3,21 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
-## Recent Changes (April 2026) — Legal Hub Page
+## Recent Changes (April 2026) — Compliance / Legal Merge
 
-### Legal hub page built (5 tabs)
-- Route: `/legal` (protected, in sidebar with Scale icon)
-- Tab 1: Financial Services Guide — 7 content sections (AFSL AR intro, financial product advice, investment product access, FX exchange entity separation, fees, conflicts of interest, right to information) + compliance contact callout
-- Tab 2: Complaints & AFCA — 3-step complaint process cards, AFCA green callout with contact details (1800 931 678, info@afca.org.au, GPO Box 3 Melbourne VIC 3001), internal complaint contact card, timeframes card
-- Tab 3: Privacy policy — 6 sections (collection, use/disclosure, storage, cross-border, rights, complaints) referencing Privacy Act 1988 (Cth) and APPs
-- Tab 4: Terms of service — 8 numbered clauses (nature of services, no advice without SOA, wholesale status, investment risk, custody, AI content, FX separation, governing law) + "Terms accepted 2 Aug 2025"
-- Tab 5: Documents — 6 downloadable documents (FSG, risk disclosure, privacy, terms, complaints policy, wholesale certificate template) + IM request callout
-- Footer: AMAX Wealth (AFSL AR) / AMAX Global (AUSTRAC) entity separation, legal links, contact details
+### Legal & Compliance page (merged)
+- Route: `/legal` (sidebar: "Legal & Compliance", Scale icon)
+- 7 tabs: Financial Services Guide, Regulatory, Terms of service, Privacy policy, Risk disclosure, Complaints & AFCA, Documents
+- Absorbs Regulatory, Terms, Privacy, Risk Disclosure from old compliance page (no duplication)
 - File: `client/src/pages/legal.tsx`
 
-## Recent Changes (April 2026) — Compliance Page Overhaul
-
-### Critical fix: FCA COBS → Australian law
-- All FCA/COBS references removed — replaced with Corporations Act 2001 (Cth), ASIC, and applicable Australian law
-- Risk disclosure date updated to January 2025
-
-### Compliance page redesigned to match mockups
-- Header: "Welcome back, Wise" with adviser card (Call/Message buttons, +61 2 8320 1908)
-- Tier 2 verified banner with wholesale investor classification under s761G
-- 4 metric cards: KYC 65%, AML 100%, Document 50%, Risk 0%
-- 7 tabs: KYC status, Documents, Risk profile, Regulatory, Terms & conditions, Privacy policy, Risk disclosure
+### KYC page (slimmed compliance)
+- Route: `/compliance` (sidebar: "KYC", Shield icon)
+- Header: "Welcome back, Wise" with adviser card
+- Tier 2 verified banner, 4 metric cards
+- 3 tabs only: KYC status, Documents, Risk profile
+- Footer links to Legal & Compliance for regulatory/legal content
+- File: `client/src/pages/compliance.tsx`
 
 ### KYC Status tab
 - Wholesale client classification box with s761G reference

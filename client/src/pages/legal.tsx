@@ -2,7 +2,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Download, ExternalLink } from "lucide-react";
+import { Download } from "lucide-react";
 
 const fsgSections = [
   {
@@ -61,6 +61,26 @@ const termsOfService = [
   { num: 8, title: "Governing law", text: "These terms are governed by the laws of New South Wales, Australia. You submit to the non-exclusive jurisdiction of the courts of New South Wales." },
 ];
 
+const regulatoryRows = [
+  { label: "AMAX Wealth Pty Ltd", value: "Authorised Representative under Australian Financial Services Licence" },
+  { label: "AUSTRAC registration", value: "AMAX Global Pty Ltd — Digital currency exchange and remittance provider" },
+  { label: "Client classification", value: "Wholesale client — Corporations Act 2001 (Cth) s761G" },
+  { label: "Dispute resolution", value: "AFCA member — Australian Financial Complaints Authority" },
+  { label: "Record keeping", value: "s912A Corporations Act 2001 (Cth) — 7-year minimum retention" },
+  { label: "Privacy", value: "Privacy Act 1988 (Cth) — Australian Privacy Principles apply" },
+];
+
+const riskItems = [
+  { num: 1, title: "Market risk", text: "Investment values fluctuate with market conditions including interest rate changes, economic developments, geopolitical events, and investor sentiment. Equity and digital asset investments are subject to higher volatility than fixed-income products." },
+  { num: 2, title: "Currency risk", text: "Multi-currency investments are exposed to foreign exchange fluctuations. Changes in exchange rates can materially affect the value of your holdings when converted to your base currency. FX hedging is available for select products — confirm availability with your adviser." },
+  { num: 3, title: "Liquidity risk", text: "Some investment products have lock-up periods or limited redemption windows. You may be unable to access your funds on short notice. Always ensure you maintain sufficient liquid reserves outside your AMAX Wealth investments." },
+  { num: 4, title: "Credit risk", text: "Fixed-income products are subject to the credit risk of the issuer. A downgrade or default may result in partial or total loss of invested capital. Credit ratings are provided as guidance only and are not guarantees of performance." },
+  { num: 5, title: "Concentration risk", text: "Concentrating investments in a single asset class, sector, or geography increases vulnerability to adverse events. A diversified portfolio aligned to your risk tolerance may reduce concentration exposure — discuss with your adviser." },
+  { num: 6, title: "Technology and digital asset risk", text: "Digital assets and crypto investments are subject to additional risks including regulatory uncertainty, technological failures, smart contract vulnerabilities, and extreme price volatility. These products are available to wholesale investors only and carry the possibility of total loss of capital." },
+  { num: 7, title: "AI-generated content limitations", text: "AI tools on this platform provide general information only. They do not constitute regulated financial product advice under the Corporations Act 2001 (Cth). Always consult a licensed financial adviser before making investment decisions based on AI-generated content." },
+  { num: 8, title: "Regulatory risk", text: "Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX Wealth monitors regulatory developments and will notify clients of material changes affecting their holdings." },
+];
+
 const documentLibrary = [
   { name: "Financial Services Guide (FSG)", desc: "Version 1.0 · January 2025 · Required before advice" },
   { name: "Risk disclosure statement", desc: "Version 1.0 · January 2025 · Australian law applies" },
@@ -77,9 +97,11 @@ export default function Legal() {
         <div className="overflow-x-auto">
           <TabsList className="inline-flex h-auto gap-1 bg-slate-700 p-1 rounded-lg min-w-max">
             <TabsTrigger value="fsg" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[160px]">Financial Services Guide</TabsTrigger>
-            <TabsTrigger value="complaints" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[150px]">Complaints &amp; AFCA</TabsTrigger>
-            <TabsTrigger value="privacy" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Privacy policy</TabsTrigger>
+            <TabsTrigger value="regulatory" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Regulatory</TabsTrigger>
             <TabsTrigger value="terms" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[140px]">Terms of service</TabsTrigger>
+            <TabsTrigger value="privacy" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Privacy policy</TabsTrigger>
+            <TabsTrigger value="risk-disclosure" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[130px]">Risk disclosure</TabsTrigger>
+            <TabsTrigger value="complaints" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[150px]">Complaints &amp; AFCA</TabsTrigger>
             <TabsTrigger value="documents" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Documents</TabsTrigger>
           </TabsList>
         </div>
@@ -104,6 +126,62 @@ export default function Legal() {
               <p className="font-semibold text-blue-900 mb-1">Questions about this FSG?</p>
               <p className="text-sm text-blue-800">Contact AMAX Wealth compliance at +61 2 8320 1908 or via adviser messaging in the platform. For complaints, see the Complaints & AFCA tab.</p>
             </div>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="regulatory">
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-2xl font-bold text-amber-700 mb-1">Regulatory status</h2>
+              <p className="text-sm text-gray-500">Regulatory status and licence information applicable to AMAX Wealth services.</p>
+            </div>
+
+            <Card>
+              <CardContent className="p-6 space-y-1">
+                {regulatoryRows.map((row, i) => (
+                  <div key={i} className="flex justify-between items-start py-4 border-b border-gray-100 last:border-0 gap-8">
+                    <span className="font-medium text-gray-900 flex-shrink-0">{row.label}</span>
+                    <span className="text-sm text-gray-600 text-right">{row.value}</span>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="risk-disclosure">
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-2xl font-bold text-amber-700 mb-1">Risk disclosure</h2>
+              <p className="text-sm text-gray-500">Important information about the risks associated with financial products available through AMAX Wealth.</p>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-sm text-amber-800 italic">
+                All investments carry risk. The value of your investments can go down as well as up. You may receive back less than you invest. Past performance is not a reliable indicator of future results.
+              </p>
+            </div>
+
+            <Card>
+              <CardContent className="p-6 space-y-6">
+                {riskItems.map((item) => (
+                  <div key={item.num} className="pb-4 border-b border-gray-100 last:border-0 last:pb-0">
+                    <div className="flex items-start gap-3">
+                      <span className="text-blue-600 font-semibold text-sm mt-0.5">{item.num}</span>
+                      <div>
+                        <p className="font-semibold text-gray-900 mb-1">{item.title}</p>
+                        <p className="text-sm text-gray-700">{item.text}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
+                  <span>Disclosure acknowledged · Last updated January 2025 · Australian law applies</span>
+                  <span>Signed 2 Aug 2025</span>
+                </div>
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
 
