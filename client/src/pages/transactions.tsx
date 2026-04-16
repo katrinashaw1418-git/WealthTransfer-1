@@ -71,8 +71,9 @@ export default function Transactions() {
   const [statusFilter, setStatusFilter] = useState("all");
   const { data: transactions, isLoading, error } = useTransactions();
 
-  const completedCount = transactions?.filter((t: any) => t.status === "completed").length || 0;
-  const pendingCount = transactions?.filter((t: any) => t.status === "pending").length || 0;
+  const nonExchangeTransactions = transactions?.filter((t: any) => t.type !== "exchange") || [];
+  const completedCount = nonExchangeTransactions.filter((t: any) => t.status === "completed").length;
+  const pendingCount = nonExchangeTransactions.filter((t: any) => t.status === "pending").length;
 
   const filteredTransactions = transactions?.filter((transaction: any) => {
     if (transaction.type === "exchange") return false;
@@ -128,7 +129,7 @@ export default function Transactions() {
               <FileText className="w-5 h-5 text-gray-600" />
             </div>
             <div>
-              <p className="text-2xl font-bold">{transactions?.length || 0}</p>
+              <p className="text-2xl font-bold">{nonExchangeTransactions.length}</p>
               <p className="text-xs text-gray-500">Total Records</p>
             </div>
           </CardContent>
