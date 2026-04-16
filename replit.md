@@ -3,6 +3,21 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Onboarding Wizard (Page 1)
+
+### 6-step onboarding fact-find wizard built
+- Route: `/onboarding` (public, accessible pre/post-login)
+- Step 1: Identity — KYC fields (name, DOB, country, email, phone, address) with AML/CTF + Privacy Act notice
+- Step 2: Wholesale verification — 5 s761G/s761GA options, accountant certificate upload (required for net assets/income basis)
+- Step 3: Financial situation — income, assets, liabilities, dependants, employment, existing investments with privacy notice
+- Step 4: Investment objectives — goal (4 options), horizon (4 options), liquidity needs dropdown
+- Step 5: Risk tolerance — slider (0–100) with label, experience (4 levels), knowledge (3 levels)
+- Step 6: Review + submit — summary of all sections, 3 mandatory checkboxes (accuracy, privacy, wholesale declaration)
+- Success screen: SOA in 3–5 business days, links to dashboard and compliance centre
+- Validation: email format, phone length, numeric fields, conditional certificate requirement
+- File: `client/src/pages/onboarding.tsx`
+- No sidebar layout — standalone page with own header
+
 ## Recent Changes (April 2026) — Landing Page Redesign to Match Mockup
 
 ### Stats section updated
