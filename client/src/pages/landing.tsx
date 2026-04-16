@@ -50,7 +50,7 @@ export default function Landing() {
             <Button className="bg-slate-700 text-white hover:bg-slate-600 font-semibold" onClick={() => navigate("/login")}>
               Sign In
             </Button>
-            <Button className="bg-white hover:bg-slate-100 text-slate-900 font-semibold" onClick={() => navigate("/login")}>
+            <Button className="bg-white hover:bg-slate-100 text-slate-900 font-semibold" onClick={() => navigate("/signup")}>
               Apply for Access
             </Button>
           </div>
@@ -74,7 +74,7 @@ export default function Landing() {
               <Button 
                 size="lg" 
                 className="bg-white hover:bg-slate-100 text-slate-900 font-semibold"
-                onClick={() => navigate("/login")}
+                onClick={() => navigate("/signup")}
               >
                 Apply for Access
                 <ArrowRight className="w-4 h-4 ml-2" />
@@ -277,7 +277,7 @@ export default function Landing() {
             <Button 
               size="lg" 
               className="bg-white hover:bg-slate-100 text-slate-900 font-semibold"
-              onClick={() => navigate("/login")}
+              onClick={() => navigate("/signup")}
             >
               Apply for Access
               <ArrowRight className="w-4 h-4 ml-2" />

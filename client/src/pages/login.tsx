@@ -119,7 +119,13 @@ export default function Login() {
           <span>256-bit encrypted · JWT authenticated · Audit logged</span>
         </div>
 
-        <div className="text-center">
+        <div className="text-center space-y-3">
+          <p className="text-sm text-white">
+            Don't have an account?{" "}
+            <Link href="/signup" className="underline hover:text-slate-300">
+              Apply for access
+            </Link>
+          </p>
           <Link href="/" className="inline-flex items-center gap-2 text-sm text-white hover:text-slate-300">
             <ArrowLeft className="w-4 h-4" />
             Back to Home

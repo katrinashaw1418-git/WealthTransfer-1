@@ -674,6 +674,71 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.post("/api/auth/register", async (req, res) => {
+    try {
+      const { email, password, firstName, lastName } = req.body;
+      if (!email || !password || !firstName || !lastName) {
+        return res.status(400).json({ error: "All fields are required" });
+      }
+      if (password.length < 8) {
+        return res.status(400).json({ error: "Password must be at least 8 characters" });
+      }
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ error: "Invalid email address" });
+      }
+      const existingEmail = await storage.getUserByEmail(email);
+      if (existingEmail) {
+        return res.status(409).json({ error: "An account with this email already exists" });
+      }
+      const username = email.split("@")[0] + "_" + Date.now().toString(36);
+      const existingUsername = await storage.getUserByUsername(username);
+      if (existingUsername) {
+        return res.status(409).json({ error: "Please try again" });
+      }
+      const hashed = await hashPassword(password);
+      const user = await storage.createUser({
+        username,
+        email: email.toLowerCase(),
+        password: hashed,
+        firstName,
+        lastName,
+        kycStatus: "pending",
+        userTier: "standard",
+      });
+      await storage.createPortfolio({
+        userId: user.id,
+        totalValue: "0.00",
+        cryptoValue: "0.00",
+        stablecoinValue: "0.00",
+        fiatValue: "0.00",
+        investmentValue: "0.00",
+        monthlyPnl: "0.00",
+        monthlyPnlPercent: "0.00",
+      });
+      const token = signToken({ userId: user.id, username: user.username, email: user.email });
+      await writeAuditLog(user.id, "account_created", "user", String(user.id), { email, authProvider: "email" }, req.ip || null);
+      res.status(201).json({
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          kycStatus: user.kycStatus,
+          userTier: user.userTier,
+        },
+      });
+    } catch (error: any) {
+      console.error("Registration error:", error);
+      if (error.code === "23505") {
+        return res.status(409).json({ error: "An account with this email already exists" });
+      }
+      res.status(500).json({ error: "Registration failed. Please try again." });
+    }
+  });
+
   // Current authenticated user
   app.get("/api/auth/me", async (req, res) => {
     try {

@@ -15,6 +15,7 @@ interface AuthContextValue {
   token: string | null;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
+  register: (data: { email: string; password: string; firstName: string; lastName: string }) => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
 }
@@ -74,6 +75,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(newUser);
   }
 
+  async function register(data: { email: string; password: string; firstName: string; lastName: string }): Promise<void> {
+    const res = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || "Registration failed");
+    }
+    const { token: newToken, user: newUser } = await res.json();
+    localStorage.setItem(TOKEN_KEY, newToken);
+    setToken(newToken);
+    setUser(newUser);
+  }
+
   function logout(): void {
     const storedToken = getStoredToken();
     if (storedToken) {
@@ -88,7 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, logout, isAuthenticated: !!user }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout, isAuthenticated: !!user }}>
       {children}
     </AuthContext.Provider>
   );
