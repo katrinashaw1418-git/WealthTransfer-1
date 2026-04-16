@@ -18,38 +18,39 @@ import {
   FileText,
   Scale,
 } from "lucide-react";
-import amaxLogo from "@assets/AMAX_LOGO_BLUE_1776303944567.jpg";
 
 export default function Landing() {
   const [, navigate] = useLocation();
 
   return (
     <div className="min-h-screen bg-white">
-      <div className="bg-amber-50 border-b border-amber-200 px-4 py-2">
+      <div className="bg-slate-950 border-b border-slate-800 px-4 py-2">
         <div className="max-w-7xl mx-auto flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
-          <p className="text-xs text-amber-800">
+          <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+          <p className="text-xs text-slate-300">
             <strong>Important:</strong> All investments carry risk. The value of investments can go down as well as up. 
             Past performance is not a reliable indicator of future results. This platform is for wholesale investors only.
           </p>
         </div>
       </div>
 
-      <header className="border-b border-gray-100">
+      <header className="bg-slate-900 border-b border-slate-800">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src={amaxLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
+            <div className="w-10 h-10 rounded-lg bg-amber-500 flex items-center justify-center">
+              <TrendingUp className="w-6 h-6 text-slate-900" />
+            </div>
             <div>
-              <span className="text-xl font-bold text-gray-900">AMAX WEALTH</span>
-              <p className="text-xs text-gray-500">Investments / Advice</p>
+              <span className="text-xl font-bold text-white">AMAX WEALTH</span>
+              <p className="text-xs text-slate-400">Investments / Advice</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900">
+            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-slate-300 hover:text-white">
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
-            <Button variant="outline" onClick={() => navigate("/login")}>
+            <Button variant="outline" className="border-slate-600 text-slate-300 hover:bg-slate-800 hover:text-white" onClick={() => navigate("/login")}>
               Sign In
             </Button>
             <Button className="bg-amber-500 hover:bg-amber-400 text-slate-900" onClick={() => navigate("/login")}>
@@ -303,7 +304,9 @@ export default function Landing() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
             <div>
               <div className="flex items-center gap-3 mb-4">
-                <img src={amaxLogo} alt="AMAX Wealth" className="w-8 h-8 rounded-lg" />
+                <div className="w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center">
+                  <TrendingUp className="w-5 h-5 text-slate-900" />
+                </div>
                 <span className="text-lg font-bold text-white">AMAX WEALTH</span>
               </div>
               <p className="text-sm">
