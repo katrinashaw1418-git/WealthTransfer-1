@@ -471,7 +471,7 @@ export default function AiAdvisory() {
                     <Phone className="w-4 h-4 text-white" />
                   </div>
                   <div>
-                    <p className="text-xs text-blue-600 font-medium">+2 8320 1908</p>
+                    <p className="text-xs text-blue-600 font-medium">+61 2 8320 1908</p>
                   </div>
                 </div>
               </div>
@@ -480,7 +480,7 @@ export default function AiAdvisory() {
                 <Button 
                   variant="outline" 
                   size="sm"
-                  onClick={() => window.open('tel:+283201908')}
+                  onClick={() => window.open('tel:+61283201908')}
                   className="flex-1 text-xs hover:bg-blue-50 border-blue-200"
                 >
                   <Phone className="w-3 h-3 mr-1" />
@@ -1057,7 +1057,7 @@ export default function AiAdvisory() {
                 <Phone className="w-4 h-4 text-gray-600" />
                 <span className="text-sm text-gray-700">Wealth Advisory Team</span>
               </div>
-              <p className="text-sm text-gray-600 mt-1">+2 8320 1908</p>
+              <p className="text-sm text-gray-600 mt-1">+61 2 8320 1908</p>
             </div>
             
             <div className="space-y-2">
