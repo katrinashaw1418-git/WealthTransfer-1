@@ -25,7 +25,7 @@ export default function Landing() {
 
   return (
     <div className="min-h-screen bg-white">
-      <div className="bg-slate-950 border-b border-slate-800 px-4 py-2">
+      <div className="bg-slate-900 px-4 py-2">
         <div className="max-w-7xl mx-auto flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
           <p className="text-xs text-slate-300">
@@ -35,7 +35,7 @@ export default function Landing() {
         </div>
       </div>
 
-      <header className="bg-slate-900 border-b border-slate-800">
+      <header className="bg-slate-900">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
@@ -59,7 +59,7 @@ export default function Landing() {
         </div>
       </header>
 
-      <section className="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
+      <section className="bg-slate-900 text-white">
         <div className="max-w-7xl mx-auto px-6 py-24 md:py-32">
           <div className="max-w-3xl">
             <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 mb-6">
