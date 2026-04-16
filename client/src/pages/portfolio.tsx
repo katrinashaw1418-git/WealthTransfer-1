@@ -242,7 +242,7 @@ export default function Portfolio() {
                     <Phone className="w-4 h-4 text-white" />
                   </div>
                   <div>
-                    <p className="text-xs text-blue-600 font-medium">+61 3 9654 1000</p>
+                    <p className="text-xs text-blue-600 font-medium">+61 2 7257 9750</p>
                   </div>
                 </div>
               </div>
@@ -251,7 +251,7 @@ export default function Portfolio() {
                 <Button 
                   variant="outline" 
                   size="sm"
-                  onClick={() => window.open('tel:+61396541000')}
+                  onClick={() => window.open('tel:+61272579750')}
                   className="flex-1 text-xs hover:bg-blue-50 border-blue-200"
                 >
                   <Phone className="w-3 h-3 mr-1" />
@@ -934,7 +934,7 @@ export default function Portfolio() {
           <div className="space-y-4">
             <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
               <p className="text-sm text-blue-700">
-                <strong>Phone:</strong> +61 3 9654 1000
+                <strong>Phone:</strong> +61 2 7257 9750
               </p>
             </div>
             
