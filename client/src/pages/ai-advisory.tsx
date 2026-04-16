@@ -47,7 +47,7 @@ export default function AiAdvisory() {
   return (
     <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-amber-700">Market Insights</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Market Insights</h1>
         <p className="text-gray-500 text-sm">AI-generated general information — not personal financial product advice</p>
       </div>
 
@@ -85,8 +85,8 @@ export default function AiAdvisory() {
       </div>
 
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-        <p className="font-semibold text-amber-900 mb-1">General information only — not personal financial product advice</p>
-        <p className="text-sm text-amber-800">
+        <p className="font-semibold text-gray-900 mb-1">General information only — not personal financial product advice</p>
+        <p className="text-sm text-gray-600">
           AI-generated insights below are general market commentary. They do not take into account your personal financial situation. To receive personal advice, request a Statement of Advice from your adviser.
         </p>
       </div>
@@ -150,7 +150,7 @@ export default function AiAdvisory() {
         <CardContent className="p-6 space-y-4">
           <p className="font-semibold text-gray-900">Allocation comparison — illustrative only</p>
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
-            <p className="text-sm text-amber-800">Not a suggestion to act. Any rebalancing must be discussed with your adviser and documented in a Statement of Advice.</p>
+            <p className="text-sm text-gray-600">Not a suggestion to act. Any rebalancing must be discussed with your adviser and documented in a Statement of Advice.</p>
           </div>
 
           <div className="overflow-x-auto">

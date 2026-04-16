@@ -30,7 +30,7 @@ export default function Compliance() {
   return (
     <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-amber-700">Welcome back, Wise</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Welcome back, Wise</h1>
         <p className="text-gray-500 text-sm">KYC centre — AMAX Wealth · 5 accounts · Global</p>
       </div>
 
@@ -157,7 +157,7 @@ export default function Compliance() {
               </div>
 
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                <p className="text-sm text-amber-800">
+                <p className="text-sm text-gray-600">
                   A formal risk assessment must be completed by your licensed adviser before personal advice can be provided. Your self-assessed profile is used for general information purposes only.
                 </p>
               </div>

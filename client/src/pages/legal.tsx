@@ -109,7 +109,7 @@ export default function Legal() {
         <TabsContent value="fsg">
           <div className="space-y-4">
             <div>
-              <h2 className="text-2xl font-bold text-amber-700 mb-1">Financial Services Guide</h2>
+              <h2 className="text-2xl font-bold text-gray-900 mb-1">Financial Services Guide</h2>
               <p className="text-sm text-gray-500">This FSG is designed to help you decide whether to use the services offered by AMAX Wealth.</p>
             </div>
 
@@ -132,7 +132,7 @@ export default function Legal() {
         <TabsContent value="regulatory">
           <div className="space-y-4">
             <div>
-              <h2 className="text-2xl font-bold text-amber-700 mb-1">Regulatory status</h2>
+              <h2 className="text-2xl font-bold text-gray-900 mb-1">Regulatory status</h2>
               <p className="text-sm text-gray-500">Regulatory status and licence information applicable to AMAX Wealth services.</p>
             </div>
 
@@ -152,12 +152,12 @@ export default function Legal() {
         <TabsContent value="risk-disclosure">
           <div className="space-y-4">
             <div>
-              <h2 className="text-2xl font-bold text-amber-700 mb-1">Risk disclosure</h2>
+              <h2 className="text-2xl font-bold text-gray-900 mb-1">Risk disclosure</h2>
               <p className="text-sm text-gray-500">Important information about the risks associated with financial products available through AMAX Wealth.</p>
             </div>
 
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-              <p className="text-sm text-amber-800 italic">
+              <p className="text-sm text-gray-600 italic">
                 All investments carry risk. The value of your investments can go down as well as up. You may receive back less than you invest. Past performance is not a reliable indicator of future results.
               </p>
             </div>
@@ -188,7 +188,7 @@ export default function Legal() {
         <TabsContent value="complaints">
           <div className="space-y-6">
             <div>
-              <h2 className="text-2xl font-bold text-amber-700 mb-1">Complaints and dispute resolution</h2>
+              <h2 className="text-2xl font-bold text-gray-900 mb-1">Complaints and dispute resolution</h2>
               <p className="text-sm text-gray-500">AMAX Wealth is committed to resolving complaints promptly and fairly. If you have a complaint, please follow the process below.</p>
             </div>
 
@@ -246,7 +246,7 @@ export default function Legal() {
         <TabsContent value="privacy">
           <div className="space-y-4">
             <div>
-              <h2 className="text-2xl font-bold text-amber-700 mb-1">Privacy policy</h2>
+              <h2 className="text-2xl font-bold text-gray-900 mb-1">Privacy policy</h2>
               <p className="text-sm text-gray-500">AMAX Wealth Pty Ltd is committed to protecting your personal information in accordance with the Privacy Act 1988 (Cth) and the Australian Privacy Principles (APPs).</p>
             </div>
 
@@ -268,7 +268,7 @@ export default function Legal() {
         <TabsContent value="terms">
           <div className="space-y-4">
             <div>
-              <h2 className="text-2xl font-bold text-amber-700 mb-1">Terms of service</h2>
+              <h2 className="text-2xl font-bold text-gray-900 mb-1">Terms of service</h2>
               <p className="text-sm text-gray-500">By using AMAX Wealth you agree to these terms. If you do not agree, you must discontinue use of the platform immediately.</p>
             </div>
 
@@ -293,7 +293,7 @@ export default function Legal() {
         <TabsContent value="documents">
           <div className="space-y-4">
             <div>
-              <h2 className="text-2xl font-bold text-amber-700 mb-1">Document library</h2>
+              <h2 className="text-2xl font-bold text-gray-900 mb-1">Document library</h2>
               <p className="text-sm text-gray-500">All regulatory and legal documents for AMAX Wealth. Available to existing clients and prospective investors on request.</p>
             </div>
 
