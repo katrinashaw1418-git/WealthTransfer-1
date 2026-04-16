@@ -8,7 +8,6 @@ import { AuthProvider, useAuth } from "@/contexts/auth";
 import Layout from "@/components/layout/layout";
 import Dashboard from "@/pages/dashboard";
 import WalletsNew from "@/pages/wallets-new";
-import FxExchange from "@/pages/fx-exchange";
 import Portfolio from "@/pages/portfolio";
 import AiAdvisory from "@/pages/ai-advisory";
 import Transactions from "@/pages/transactions";
@@ -51,7 +50,6 @@ function ProtectedApp() {
       <Switch>
         <Route path="/" component={Dashboard} />
         <Route path="/wallets" component={WalletsNew} />
-        <Route path="/fx-exchange" component={FxExchange} />
         <Route path="/portfolio" component={Portfolio} />
         <Route path="/ai-advisory" component={AiAdvisory} />
         <Route path="/transactions" component={Transactions} />

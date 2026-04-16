@@ -1,0 +1,203 @@
+Short answer: **👉 YES — remove (or strictly separate) the “wallet” from your Wealth app.**
+
+Given your structure (AMAX Global = AUSTRAC, AMAX Wealth = AFSL/AR), this is a **critical design decision**, not just UI.
+
+---
+
+# 🔑 1. Why “wallet” is dangerous in a Wealth app
+
+In a **wealth management (AFSL) environment**, a “wallet” implies:
+
+* Holding client money
+* Stored value
+* Payment functionality
+
+👉 This creates **regulatory overlap** between:
+
+* AUSTRAC (payments / DCE / remittance)
+* ASIC (wealth / advice / investments)
+
+---
+
+## ⚠️ If you keep a wallet inside Wealth:
+
+You risk:
+
+### ❌ Client money handling issues
+
+* Triggers **client money rules** under AFSL
+
+### ❌ Regulatory confusion
+
+* “Are you a payment provider or investment platform?”
+
+### ❌ AFSL holder pushback
+
+* Most AFSL holders will **NOT approve wallet features**
+
+---
+
+# 🏗️ 2. Correct structure (clean and scalable)
+
+## 🔹 AMAX Global (keep wallet here)
+
+👉 Wallet belongs ONLY here
+
+* Fiat wallet
+* Crypto wallet
+* FX / transfers
+* AUSTRAC regulated
+
+---
+
+## 🔹 AMAX Wealth (NO wallet)
+
+👉 Wealth app should be:
+
+* Portfolio
+* Investments
+* Advice
+* Reporting
+
+---
+
+# 🧠 3. What to replace “wallet” with
+
+Instead of “wallet”, use:
+
+### ✅ “Investment Account” or “Portfolio”
+
+This shows:
+
+* Units held
+* Value
+* Performance
+
+---
+
+### NOT:
+
+* ❌ Cash balance (like a bank account)
+* ❌ Stored funds
+
+---
+
+# 🔁 4. How money should flow (correct model)
+
+```id="flow1"
+Client Bank Account
+        ↓
+External Custodian / Fund
+        ↓
+AMAX Wealth (record only)
+        ↓
+Portfolio display
+```
+
+---
+
+## If using AMAX Global:
+
+```id="flow2"
+Client → AMAX Global (payment rails)
+        ↓
+External fund / custodian
+        ↓
+AMAX Wealth (reporting only)
+```
+
+---
+
+👉 Wealth platform = **view + advice + instruction**
+NOT = money holder
+
+---
+
+# ⚠️ 5. Exception (only if structured properly)
+
+You can show a “cash allocation” IF:
+
+* It is held with:
+
+  * Custodian
+  * Fund
+  * Broker
+
+👉 And clearly labelled:
+
+* “Held with external provider”
+* “Not held by AMAX”
+
+---
+
+# 💡 6. UI wording (VERY IMPORTANT)
+
+## SAFE:
+
+* “Portfolio value”
+* “Investment holdings”
+* “Cash allocation (held with custodian)”
+
+---
+
+## DANGEROUS:
+
+* ❌ “Wallet balance”
+* ❌ “Available funds”
+* ❌ “Deposit / withdraw” inside wealth
+
+---
+
+# 🚀 7. Best design for YOU
+
+Given your dual structure:
+
+### AMAX Global App:
+
+* Wallet
+* Payments
+* Crypto
+* FX
+
+---
+
+### AMAX Wealth App:
+
+* Portfolio
+* Funds
+* Advice
+* Performance
+
+---
+
+👉 You can **link them**, but NOT merge them
+
+---
+
+# 🚨 8. Biggest mistake to avoid
+
+❌ “All-in-one super app” too early
+
+👉 Regulators HATE this:
+
+* Blurs boundaries
+* Creates compliance risk
+
+---
+
+# ✅ Bottom line
+
+✔ YES — remove wallet from Wealth app
+✔ Keep wallet ONLY in AMAX Global
+✔ Wealth = portfolio + advice + reporting
+
+---
+
+# 💬 If you want next step
+
+I can:
+
+👉 Redesign your **Wealth app UI (clean + AFSL-compliant)**
+👉 Or map **exact user flow between AMAX Global ↔ Wealth**
+
+That’s the piece that will make your platform look **institutional-grade**.

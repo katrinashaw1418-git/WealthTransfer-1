@@ -4,8 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { 
   Home, 
-  Wallet, 
-  ArrowRightLeft, 
+  Briefcase, 
   PieChart, 
   Bot, 
   History, 
@@ -23,12 +22,11 @@ interface SidebarProps {
 
 const navigation = [
   { name: "Dashboard", href: "/", icon: Home },
-  { name: "Wallets", href: "/wallets", icon: Wallet },
-  { name: "FX Exchange", href: "/fx-exchange", icon: ArrowRightLeft },
+  { name: "Holdings", href: "/wallets", icon: Briefcase },
   { name: "Portfolio", href: "/portfolio", icon: PieChart },
   { name: "Investments", href: "/investments", icon: Building2 },
   { name: "AI Advisory", href: "/ai-advisory", icon: Bot },
-  { name: "Transactions", href: "/transactions", icon: History },
+  { name: "Activity", href: "/transactions", icon: History },
   { name: "Compliance", href: "/compliance", icon: Shield },
 ];
 
@@ -82,7 +80,7 @@ function SidebarContent() {
             <User className="w-4 h-4 text-white" />
           </div>
           <div className="flex-1">
-            <p className="text-sm font-medium text-gray-900">John Chen</p>
+            <p className="text-sm font-medium text-gray-900">Wise Investor</p>
             <p className="text-xs text-gray-500">Premium Client</p>
           </div>
           <ChevronRight className="w-4 h-4 text-gray-400" />

@@ -3,6 +3,31 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — AFSL-Compliant UI Redesign
+
+### Removed FX Exchange page
+- FX Exchange removed from routing and sidebar navigation (functionality belongs in AMAX Global, not Wealth)
+
+### Wallets → Investment Holdings redesign
+- Renamed sidebar link from "Wallets" to "Holdings" with Briefcase icon
+- Page now titled "Investment Holdings" with AFSL-compliant language
+- Organized into three sections: Fiat Currency Holdings, Digital Asset Holdings, Stablecoins
+- All sections include custodian disclosure badges ("External Provider", "Licensed Custodian", "Regulated Issuer")
+- Removed deposit/withdraw/transfer actions (those belong in AMAX Global)
+- Added regulatory disclaimer about external custodians and AFSL licensing
+
+### Transactions → Account Activity redesign
+- Renamed sidebar link from "Transactions" to "Activity"
+- Page now titled "Account Activity" with clean list-based layout
+- Uses AFSL-compliant terminology: Inflow/Outflow/Conversion/Acquisition/Disposal instead of deposit/withdraw/etc.
+- Summary cards show Total Records, Settled, and Pending Settlement counts
+- Added regulatory footer about compliance and audit purposes
+- Clean inline status icons and type badges
+
+### User profile updates
+- Default demo username changed to "Wiseinvestor" / "Wise888"
+- Case-insensitive username lookups in both MemStorage and DatabaseStorage
+
 ## Recent Changes (April 2026) — Security Hardening + Live FX Rates (Third Pass)
 
 ### KYC backend enforcement (all money-movement routes)
