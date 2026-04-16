@@ -3,6 +3,40 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Landing Page Redesign to Match Mockup
+
+### Stats section updated
+- "7 Currencies Supported" → "3 Asset classes"
+- "AFSL Regulated Framework" → "Tier 2 Verification tier"
+
+### Platform Capabilities expanded from 3 to 6 cards
+- Portfolio dashboard (Reporting only)
+- Investment products (Wholesale only)
+- General market insights (General info only)
+- Statement of Advice (AFSL regulated)
+- FX exchange (AMAX Global)
+- Compliance centre (Always current)
+
+### Product cards updated
+- "Digital Asset Allocation" → "Bitcoin Tracker Fund" with no IRR (null) — shows "Market-linked — highly variable" and "Total loss is possible"
+- Other products now show "Target IRR X% p.a. (indicative)"
+
+### CTA section
+- "Ready to get started?" → "Ready to apply?"
+- "Call +61 2 8320 1908" → "Speak to an adviser"
+- Added compliance application disclaimer
+
+### Regulatory trust badges added
+- Below hero: "Authorised Representative — AFSL", "AUSTRAC registered — AMAX Global", "AFCA member" with green checkmarks
+- "Wholesale clients only" label
+
+### Footer
+- Added AFCA Member Number placeholder
+
+### Compliance page
+- Added "Wholesale Investor Certificate (s761G/s761GA)" to Documents tab
+- Added amber notice explaining accountant certificate requirements ($2.5M net assets / $250K income)
+
 ## Recent Changes (April 2026) — AFSL Language Compliance Sweep
 
 ### Investments page compliance

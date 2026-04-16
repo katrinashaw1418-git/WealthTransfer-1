@@ -94,24 +94,35 @@ export default function Landing() {
         </div>
       </section>
 
+      <section className="py-6 bg-white border-b">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex flex-wrap items-center justify-center gap-4 text-xs text-gray-500">
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 text-green-500" />Authorised Representative — AFSL</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 text-green-500" />AUSTRAC registered — AMAX Global</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 text-green-500" />AFCA member</span>
+          </div>
+          <p className="text-center text-xs text-gray-400 mt-2">Wholesale clients only</p>
+        </div>
+      </section>
+
       <section className="py-16 bg-gray-50 border-b">
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 text-center">
             <div>
               <p className="text-3xl font-bold text-gray-900">$4.8M+</p>
-              <p className="text-sm text-gray-500 mt-1">Assets Under Reporting</p>
-            </div>
-            <div>
-              <p className="text-3xl font-bold text-gray-900">7</p>
-              <p className="text-sm text-gray-500 mt-1">Currencies Supported</p>
+              <p className="text-sm text-gray-500 mt-1">Assets under reporting</p>
             </div>
             <div>
               <p className="text-3xl font-bold text-gray-900">5</p>
-              <p className="text-sm text-gray-500 mt-1">Investment Products</p>
+              <p className="text-sm text-gray-500 mt-1">Investment products</p>
             </div>
             <div>
-              <p className="text-3xl font-bold text-gray-900">AFSL</p>
-              <p className="text-sm text-gray-500 mt-1">Regulated Framework</p>
+              <p className="text-3xl font-bold text-gray-900">3</p>
+              <p className="text-sm text-gray-500 mt-1">Asset classes</p>
+            </div>
+            <div>
+              <p className="text-3xl font-bold text-gray-900">Tier 2</p>
+              <p className="text-sm text-gray-500 mt-1">Verification tier</p>
             </div>
           </div>
         </div>
@@ -126,42 +137,55 @@ export default function Landing() {
             </p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            <Card className="border-0 shadow-lg">
-              <CardContent className="p-8">
-                <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mb-6">
-                  <BarChart3 className="w-6 h-6 text-blue-600" />
-                </div>
-                <h3 className="text-xl font-semibold text-gray-900 mb-3">Consolidated Reporting</h3>
-                <p className="text-gray-600">
-                  View all positions across fiat currencies, digital assets, and structured investments 
-                  in a single portfolio view. All values are indicative, sourced from external custodians.
-                </p>
-              </CardContent>
-            </Card>
-            <Card className="border-0 shadow-lg">
-              <CardContent className="p-8">
-                <div className="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center mb-6">
-                  <Building2 className="w-6 h-6 text-amber-600" />
-                </div>
-                <h3 className="text-xl font-semibold text-gray-900 mb-3">Structured Products</h3>
-                <p className="text-gray-600">
-                  Access real estate, corporate credit, and digital asset investment products through 
-                  a compliant subscription process with full risk disclosure.
-                </p>
-              </CardContent>
-            </Card>
-            <Card className="border-0 shadow-lg">
-              <CardContent className="p-8">
-                <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mb-6">
-                  <Shield className="w-6 h-6 text-green-600" />
-                </div>
-                <h3 className="text-xl font-semibold text-gray-900 mb-3">Compliance-First</h3>
-                <p className="text-gray-600">
-                  Built under Australian Financial Services Licence arrangements with AFCA membership, 
-                  KYC/AML verification, and full audit trail for all transactions.
-                </p>
-              </CardContent>
-            </Card>
+            {[
+              {
+                icon: BarChart3, bg: "bg-blue-100", fg: "text-blue-600",
+                title: "Portfolio dashboard",
+                desc: "Consolidated view of all holdings across fiat, digital assets, and structured investments with indicative valuations and performance metrics.",
+                link: "Reporting only"
+              },
+              {
+                icon: Building2, bg: "bg-amber-100", fg: "text-amber-600",
+                title: "Investment products",
+                desc: "Structured investment access via real estate, equity, corporate credit, and digital asset products. All products are available to wholesale investors only.",
+                link: "Wholesale only"
+              },
+              {
+                icon: TrendingUp, bg: "bg-green-100", fg: "text-green-600",
+                title: "General market insights",
+                desc: "Market commentary, portfolio analytics, and general information to help you understand market conditions. General information only — not personal financial advice.",
+                link: "General info only"
+              },
+              {
+                icon: FileText, bg: "bg-purple-100", fg: "text-purple-600",
+                title: "Statement of Advice",
+                desc: "Personalised advice delivered through a formal SOA prepared by your licensed adviser. Required before any personal investment recommendations are acted upon.",
+                link: "AFSL regulated"
+              },
+              {
+                icon: Globe, bg: "bg-teal-100", fg: "text-teal-600",
+                title: "FX exchange",
+                desc: "Multi-currency FX conversion executed via AMAX Global Pty Ltd (AUSTRAC registered). Payments and settlement are handled by AMAX Global — separate from the wealth platform.",
+                link: "AMAX Global"
+              },
+              {
+                icon: Shield, bg: "bg-slate-100", fg: "text-slate-600",
+                title: "Compliance centre",
+                desc: "KYC, AML screening, wholesale investor verification, and regulatory documents — all in one place. Maintains your compliance status and audit trail.",
+                link: "Always current"
+              },
+            ].map((item) => (
+              <Card key={item.title} className="border-0 shadow-lg">
+                <CardContent className="p-8">
+                  <div className={`w-12 h-12 ${item.bg} rounded-xl flex items-center justify-center mb-6`}>
+                    <item.icon className={`w-6 h-6 ${item.fg}`} />
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900 mb-3">{item.title}</h3>
+                  <p className="text-gray-600 text-sm mb-3">{item.desc}</p>
+                  <p className="text-xs text-gray-400 italic">{item.link}</p>
+                </CardContent>
+              </Card>
+            ))}
           </div>
         </div>
       </section>
@@ -205,9 +229,9 @@ export default function Landing() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {[
-              { name: "Real Estate Equity Fund", category: "Real Estate", irr: "Target indicative: 8.5%", term: "24 months", min: "$250,000", risk: "Medium" },
-              { name: "Corporate Credit Fund", category: "Corporate Credit", irr: "Target indicative: 6.2%", term: "18 months", min: "$25,000", risk: "Low" },
-              { name: "Digital Asset Allocation", category: "Digital Assets", irr: "Market-linked (variable)", term: "12 months", min: "$25,000", risk: "High" },
+              { name: "Real Estate Equity Fund", category: "Real Estate", irr: "Target IRR 8.5% p.a. (indicative)", term: "24 months", min: "$250,000", risk: "Medium" },
+              { name: "Corporate Credit Fund", category: "Corporate Credit", irr: "Target IRR 6.2% p.a. (indicative)", term: "18 months", min: "$25,000", risk: "Low" },
+              { name: "Bitcoin Tracker Fund", category: "Digital Assets", irr: null, term: "12 months", min: "$25,000", risk: "High" },
             ].map((product) => (
               <Card key={product.name} className="border shadow-sm hover:shadow-md transition-shadow">
                 <CardContent className="p-6">
@@ -221,7 +245,7 @@ export default function Landing() {
                   <div className="space-y-2 text-sm">
                     <div className="flex justify-between">
                       <span className="text-gray-500">Return</span>
-                      <span className="font-medium">{product.irr}</span>
+                      <span className="font-medium">{product.irr ?? "Market-linked — highly variable"}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-gray-500">Term</span>
@@ -232,7 +256,7 @@ export default function Landing() {
                       <span className="font-medium">{product.min}</span>
                     </div>
                   </div>
-                  <p className="text-xs text-gray-400 mt-4">Capital is at risk. Past performance is not indicative of future results.</p>
+                  <p className="text-xs text-gray-400 mt-4">Capital is at risk. {product.irr ? "Past performance is not indicative of future results." : "There is no target return for this product. Total loss is possible."}</p>
                 </CardContent>
               </Card>
             ))}
@@ -268,10 +292,10 @@ export default function Landing() {
 
       <section className="py-20 bg-slate-900 text-white">
         <div className="max-w-3xl mx-auto px-6 text-center">
-          <h2 className="text-3xl font-bold mb-4">Ready to get started?</h2>
+          <h2 className="text-3xl font-bold mb-4">Ready to apply?</h2>
           <p className="text-slate-300 mb-8">
-            Apply for access to the AMAX Wealth platform. Our team will guide you through 
-            the verification and onboarding process.
+            If you meet the wholesale investor criteria, apply for access today. Our compliance team will review your 
+            application and a licensed adviser will be in touch.
           </p>
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Button 
@@ -288,9 +312,13 @@ export default function Landing() {
               onClick={() => window.open('tel:+61283201908')}
             >
               <Phone className="w-4 h-4 mr-2" />
-              Call +61 2 8320 1908
+              Speak to an adviser
             </Button>
           </div>
+          <p className="text-xs text-slate-400 mt-8 max-w-2xl mx-auto">
+            By applying you confirm you are an eligible wholesale investor under the Corporations Act 2001 (Cth). Application does not guarantee 
+            access. A verification process including KYC, AML screening, and wholesale investor certification is required.
+          </p>
         </div>
       </section>
 
@@ -331,6 +359,9 @@ export default function Landing() {
                 <li>info@amaxwealth.com.au</li>
                 <li className="pt-2">
                   <span className="text-xs">AFCA: 1800 931 678</span>
+                </li>
+                <li>
+                  <span className="text-xs">AFCA Member No: [Member Number]</span>
                 </li>
               </ul>
             </div>
