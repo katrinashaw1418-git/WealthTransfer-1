@@ -39,7 +39,7 @@ export default function Landing() {
             <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
             <div>
               <span className="text-xl font-bold text-white">AMAX WEALTH</span>
-              <p className="text-xs text-slate-400">Investments / Advice</p>
+              <p className="text-xs text-white">Investments / Advice</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
