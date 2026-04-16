@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Loader2, Shield, TrendingUp } from "lucide-react";
+import { Loader2, Shield, ArrowLeft } from "lucide-react";
+import darkBlueLogo from "@assets/DARK_BLUE_LOGO_1776310673148.jpg";
 
 export default function Login() {
   const { login, isAuthenticated } = useAuth();
@@ -36,23 +37,21 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
-          <div className="flex items-center justify-center gap-2 mb-4">
-            <div className="w-10 h-10 bg-amber-500 rounded-lg flex items-center justify-center">
-              <TrendingUp className="w-6 h-6 text-slate-900" />
-            </div>
-            <span className="text-2xl font-bold text-white">AMAX</span>
+          <div className="flex items-center justify-center gap-3 mb-4">
+            <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
+            <span className="text-2xl font-bold text-white">AMAX WEALTH</span>
           </div>
           <h1 className="text-3xl font-bold text-white">Welcome back</h1>
-          <p className="text-slate-400">Sign in to your wealth management platform</p>
+          <p className="text-white">Sign in to your wealth management platform</p>
         </div>
 
         <Card className="bg-slate-800 border-slate-700">
           <CardHeader>
             <CardTitle className="text-white">Sign In</CardTitle>
-            <CardDescription className="text-slate-400">
+            <CardDescription className="text-white">
               Enter your credentials to access your portfolio
             </CardDescription>
           </CardHeader>
@@ -65,7 +64,7 @@ export default function Login() {
               )}
 
               <div className="space-y-2">
-                <Label htmlFor="username" className="text-slate-300">Username</Label>
+                <Label htmlFor="username" className="text-white">Username</Label>
                 <Input
                   id="username"
                   type="text"
@@ -74,12 +73,12 @@ export default function Login() {
                   placeholder="Enter your username"
                   required
                   autoComplete="username"
-                  className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-amber-500"
+                  className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="password" className="text-slate-300">Password</Label>
+                <Label htmlFor="password" className="text-white">Password</Label>
                 <Input
                   id="password"
                   type="password"
@@ -88,14 +87,14 @@ export default function Login() {
                   placeholder="Enter your password"
                   required
                   autoComplete="current-password"
-                  className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-amber-500"
+                  className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
                 />
               </div>
 
               <Button
                 type="submit"
                 disabled={isLoading}
-                className="w-full bg-amber-500 hover:bg-amber-400 text-slate-900 font-semibold"
+                className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold"
               >
                 {isLoading ? (
                   <>
@@ -107,7 +106,7 @@ export default function Login() {
                 )}
               </Button>
               <div className="text-center">
-                <Link href="/forgot-password" className="text-sm text-amber-400 hover:text-amber-300">
+                <Link href="/forgot-password" className="text-sm text-white hover:text-slate-300">
                   Forgot your password?
                 </Link>
               </div>
@@ -115,9 +114,16 @@ export default function Login() {
           </CardContent>
         </Card>
 
-        <div className="flex items-center gap-2 text-slate-500 text-sm justify-center">
+        <div className="flex items-center gap-2 text-white text-sm justify-center">
           <Shield className="w-4 h-4" />
           <span>256-bit encrypted · JWT authenticated · Audit logged</span>
+        </div>
+
+        <div className="text-center">
+          <Link href="/" className="inline-flex items-center gap-2 text-sm text-white hover:text-slate-300">
+            <ArrowLeft className="w-4 h-4" />
+            Back to Home
+          </Link>
         </div>
       </div>
     </div>
