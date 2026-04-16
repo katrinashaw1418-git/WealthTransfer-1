@@ -26,7 +26,7 @@ export default function Signup() {
 
   useEffect(() => {
     if (isAuthenticated) {
-      navigate("/dashboard", { replace: true });
+      navigate("/onboarding", { replace: true });
     }
   }, [isAuthenticated]);
 
@@ -70,7 +70,7 @@ export default function Signup() {
             <span className="text-2xl font-bold text-white">AMAX WEALTH</span>
           </div>
           <h1 className="text-3xl font-bold text-white">Apply for access</h1>
-          <p className="text-white">Create your account to get started</p>
+          <p className="text-white">Create your account to begin the onboarding process</p>
         </div>
 
         <div className="space-y-3">
