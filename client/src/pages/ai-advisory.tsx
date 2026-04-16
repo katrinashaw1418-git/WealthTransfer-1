@@ -1,14 +1,19 @@
 import { useState } from "react";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
-import { useQuery } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/queryClient";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { apiFetch, apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import {
   Phone,
-  MessageSquare,
+  MessageCircle,
   ExternalLink,
+  X,
 } from "lucide-react";
 
 const allocationData = [
@@ -34,6 +39,26 @@ function getRiskLabel(v: number) {
 
 export default function AiAdvisory() {
   const [riskScore, setRiskScore] = useState(60);
+  const [showAdvisorBox, setShowAdvisorBox] = useState(true);
+  const [advisorModalOpen, setAdvisorModalOpen] = useState(false);
+  const [advisorMessage, setAdvisorMessage] = useState('');
+  const { toast } = useToast();
+
+  const advisorMutation = useMutation({
+    mutationFn: async (data: { message: string }) => {
+      const response = await apiRequest("POST", "/api/advisor/contact", data);
+      if (!response.ok) throw new Error('Failed to send message');
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Message Sent", description: "Your adviser will contact you within 24 hours." });
+      setAdvisorModalOpen(false);
+      setAdvisorMessage('');
+    },
+    onError: () => {
+      toast({ title: "Message Failed", description: "Please try again later.", variant: "destructive" });
+    }
+  });
 
   const { data: realMetrics, isLoading: metricsLoading } = useQuery({
     queryKey: ["/api/portfolio/real-metrics"],
@@ -50,24 +75,60 @@ export default function AiAdvisory() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-2xl font-bold text-amber-700">Market Insights</h1>
-          <p className="text-gray-500 text-sm">AI-generated general information — not personal financial product advice</p>
+      {showAdvisorBox && (
+        <div className="fixed top-4 right-4 z-50">
+          <Card className="w-72 shadow-2xl border-0 bg-white/95 backdrop-blur-lg">
+            <CardHeader className="pb-3 relative">
+              <CardTitle className="text-lg">Contact Your Advisor</CardTitle>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowAdvisorBox(false)}
+                className="absolute top-2 right-2 h-6 w-6 p-0 hover:bg-gray-100"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-100">
+                  <div className="flex items-center space-x-3">
+                    <div className="w-10 h-10 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full flex items-center justify-center">
+                      <Phone className="w-4 h-4 text-white" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-blue-600 font-medium">+61 2 8320 1908</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex space-x-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => window.open('tel:+61283201908')}
+                    className="flex-1 text-xs hover:bg-blue-50 border-blue-200"
+                  >
+                    <Phone className="w-3 h-3 mr-1" />
+                    Call
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => setAdvisorModalOpen(true)}
+                    className="flex-1 text-xs bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700"
+                  >
+                    <MessageCircle className="w-3 h-3 mr-1" />
+                    Message
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </div>
-        <Card className="border shadow-sm flex-shrink-0">
-          <CardContent className="p-4 flex items-center gap-4">
-            <div className="w-10 h-10 bg-slate-700 rounded-full flex items-center justify-center text-white text-sm font-semibold">AW</div>
-            <div>
-              <p className="text-sm font-medium">Your adviser</p>
-              <p className="text-xs text-gray-500">+61 2 8320 1908 · Licensed under AFSL arrangements</p>
-            </div>
-            <div className="flex gap-2 ml-2">
-              <Button variant="outline" size="sm"><Phone className="w-3 h-3 mr-1" />Call</Button>
-              <Button variant="outline" size="sm"><MessageSquare className="w-3 h-3 mr-1" />Message</Button>
-            </div>
-          </CardContent>
-        </Card>
+      )}
+
+      <div>
+        <h1 className="text-2xl font-bold text-amber-700">Market Insights</h1>
+        <p className="text-gray-500 text-sm">AI-generated general information — not personal financial product advice</p>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -227,6 +288,44 @@ export default function AiAdvisory() {
           ))}
         </CardContent>
       </Card>
+
+      <Dialog open={advisorModalOpen} onOpenChange={setAdvisorModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Contact Wealth Advisory Team</DialogTitle>
+            <DialogDescription>
+              Send a message to our wealth advisory team. We'll respond within 24 hours.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <p className="text-sm text-blue-700">
+                <strong>Phone:</strong> +61 2 8320 1908
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="advisor-message">Your Message</Label>
+              <Textarea
+                id="advisor-message"
+                placeholder="How can our wealth advisory team help you?"
+                value={advisorMessage}
+                onChange={(e) => setAdvisorMessage(e.target.value)}
+                rows={4}
+                className="resize-none"
+              />
+            </div>
+            <div className="flex justify-end space-x-2">
+              <Button variant="outline" onClick={() => setAdvisorModalOpen(false)}>Cancel</Button>
+              <Button
+                onClick={() => advisorMutation.mutate({ message: advisorMessage })}
+                disabled={advisorMutation.isPending || !advisorMessage.trim()}
+              >
+                {advisorMutation.isPending ? "Sending..." : "Send Message"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
