@@ -2,10 +2,9 @@ import { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { CurrencyConfig } from '@/lib/types';
-import { Briefcase, TrendingUp, TrendingDown, Building, Info, DollarSign, BarChart3, Landmark } from 'lucide-react';
+import { Info, DollarSign, BarChart3, Landmark, ShieldCheck } from 'lucide-react';
 import { useFxRate } from '@/hooks/use-fx-rates';
 import { useWallets } from '@/hooks/use-portfolio';
 
@@ -27,6 +26,30 @@ function HoldingValueDisplay({ wallet, displayCurrency }: { wallet: any, display
   return <span className="font-semibold">{config?.symbol}{formattedValue}</span>;
 }
 
+const currencyInitialColors: Record<string, string> = {
+  USD: 'bg-green-100 text-green-700',
+  AUD: 'bg-yellow-100 text-yellow-700',
+  CAD: 'bg-red-100 text-red-700',
+  EUR: 'bg-blue-100 text-blue-700',
+  GBP: 'bg-purple-100 text-purple-700',
+  HKD: 'bg-rose-100 text-rose-700',
+  SGD: 'bg-teal-100 text-teal-700',
+  BTC: 'bg-orange-100 text-orange-700',
+  ETH: 'bg-indigo-100 text-indigo-700',
+  USDT: 'bg-emerald-100 text-emerald-700',
+  USDC: 'bg-sky-100 text-sky-700',
+};
+
+function CurrencyInitial({ currency }: { currency: string }) {
+  const colorClass = currencyInitialColors[currency] || 'bg-gray-100 text-gray-700';
+  const initial = currency.charAt(0);
+  return (
+    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold ${colorClass}`}>
+      {initial}
+    </div>
+  );
+}
+
 export default function Wallets() {
   const { data: wallets = [], isLoading } = useWallets();
   const [displayCurrency, setDisplayCurrency] = useState('AUD');
@@ -46,8 +69,6 @@ export default function Wallets() {
   const cryptoHoldings = holdingsWithConfig.filter((w: any) => cryptoCurrencies.includes(w.currency));
   const stablecoinHoldings = holdingsWithConfig.filter((w: any) => stablecoins.includes(w.currency));
 
-  const totalHoldings = holdingsWithConfig.length;
-
   if (isLoading) {
     return (
       <div className="p-6 space-y-6">
@@ -64,8 +85,8 @@ export default function Wallets() {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Investment Holdings</h1>
-          <p className="text-sm text-gray-500 mt-1">Asset positions across your portfolio</p>
+          <h1 className="text-2xl font-bold text-gray-900">Portfolio Overview</h1>
+          <p className="text-sm text-gray-500 mt-1">Consolidated exposure across external custodians</p>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-500">Display currency:</span>
@@ -97,10 +118,10 @@ export default function Wallets() {
               <div className="p-2 bg-blue-50 rounded-lg">
                 <Landmark className="w-4 h-4 text-blue-600" />
               </div>
-              <span className="text-sm font-medium text-gray-500">Fiat Currencies</span>
+              <span className="text-sm font-medium text-gray-500">Cash Allocation</span>
             </div>
-            <p className="text-2xl font-bold">{fiatHoldings.length}</p>
-            <p className="text-xs text-gray-400 mt-1">Held with external custodian</p>
+            <p className="text-2xl font-bold">{fiatHoldings.length} <span className="text-sm font-normal text-gray-400">currencies</span></p>
+            <p className="text-xs text-gray-400 mt-1">Via external custodian</p>
           </CardContent>
         </Card>
 
@@ -110,10 +131,10 @@ export default function Wallets() {
               <div className="p-2 bg-amber-50 rounded-lg">
                 <BarChart3 className="w-4 h-4 text-amber-600" />
               </div>
-              <span className="text-sm font-medium text-gray-500">Digital Assets</span>
+              <span className="text-sm font-medium text-gray-500">Digital Asset Exposure</span>
             </div>
-            <p className="text-2xl font-bold">{cryptoHoldings.length}</p>
-            <p className="text-xs text-gray-400 mt-1">Held with licensed custodian</p>
+            <p className="text-2xl font-bold">{cryptoHoldings.length} <span className="text-sm font-normal text-gray-400">assets</span></p>
+            <p className="text-xs text-gray-400 mt-1">Via external provider</p>
           </CardContent>
         </Card>
 
@@ -123,21 +144,21 @@ export default function Wallets() {
               <div className="p-2 bg-green-50 rounded-lg">
                 <DollarSign className="w-4 h-4 text-green-600" />
               </div>
-              <span className="text-sm font-medium text-gray-500">Stablecoins</span>
+              <span className="text-sm font-medium text-gray-500">USD-Denominated Digital Exposure</span>
             </div>
-            <p className="text-2xl font-bold">{stablecoinHoldings.length}</p>
-            <p className="text-xs text-gray-400 mt-1">Held with regulated issuer</p>
+            <p className="text-2xl font-bold">{stablecoinHoldings.length} <span className="text-sm font-normal text-gray-400">positions</span></p>
+            <p className="text-xs text-gray-400 mt-1">Via external provider</p>
           </CardContent>
         </Card>
       </div>
 
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
-        <Info className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
+        <ShieldCheck className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
         <div>
-          <p className="text-sm text-blue-800 font-medium">Custodian Disclosure</p>
+          <p className="text-sm text-blue-800 font-medium">Important Disclosure</p>
           <p className="text-sm text-blue-700 mt-1">
-            All holdings are maintained with external regulated custodians and are not held by AMAX Wealth. 
-            Values shown are indicative and based on current market rates.
+            All positions shown are maintained with external regulated custodians and are <strong>not held by AMAX Wealth</strong>. 
+            This view is for reporting purposes only. Values are indicative, based on current market rates, and do not constitute financial advice.
           </p>
         </div>
       </div>
@@ -147,7 +168,7 @@ export default function Wallets() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-lg">
               <Landmark className="w-5 h-5 text-blue-600" />
-              Fiat Currency Holdings
+              Cash Allocation
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -156,9 +177,9 @@ export default function Wallets() {
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="text-left p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Currency</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Units Held</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Value ({displayCurrency})</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Custodian</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Exposure</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Indicative Value ({displayCurrency})</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Provider</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -166,7 +187,7 @@ export default function Wallets() {
                     <tr key={wallet.id} className="border-t hover:bg-gray-50 transition-colors">
                       <td className="p-4">
                         <div className="flex items-center gap-3">
-                          <span className="text-xl">{wallet.config?.flag}</span>
+                          <CurrencyInitial currency={wallet.currency} />
                           <div>
                             <p className="font-medium text-gray-900">{wallet.currency}</p>
                             <p className="text-sm text-gray-500">{wallet.config?.name}</p>
@@ -198,7 +219,7 @@ export default function Wallets() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-lg">
               <BarChart3 className="w-5 h-5 text-amber-600" />
-              Digital Asset Holdings
+              Digital Asset Exposure
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -207,9 +228,9 @@ export default function Wallets() {
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="text-left p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Asset</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Units Held</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Value ({displayCurrency})</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Custodian</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Units</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Indicative Value ({displayCurrency})</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Provider</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -217,7 +238,7 @@ export default function Wallets() {
                     <tr key={wallet.id} className="border-t hover:bg-gray-50 transition-colors">
                       <td className="p-4">
                         <div className="flex items-center gap-3">
-                          <span className="text-xl">{wallet.config?.flag}</span>
+                          <CurrencyInitial currency={wallet.currency} />
                           <div>
                             <p className="font-medium text-gray-900">{wallet.currency}</p>
                             <p className="text-sm text-gray-500">{wallet.config?.name}</p>
@@ -233,7 +254,7 @@ export default function Wallets() {
                         <HoldingValueDisplay wallet={wallet} displayCurrency={displayCurrency} />
                       </td>
                       <td className="p-4 text-right">
-                        <Badge variant="outline" className="text-xs">Licensed Custodian</Badge>
+                        <Badge variant="outline" className="text-xs">External Provider</Badge>
                       </td>
                     </tr>
                   ))}
@@ -249,7 +270,7 @@ export default function Wallets() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-lg">
               <DollarSign className="w-5 h-5 text-green-600" />
-              Stablecoin Holdings
+              USD-Denominated Digital Exposure
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -258,9 +279,9 @@ export default function Wallets() {
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="text-left p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Asset</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Units Held</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Value ({displayCurrency})</th>
-                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Custodian</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Units</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Indicative Value ({displayCurrency})</th>
+                    <th className="text-right p-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Provider</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -268,7 +289,7 @@ export default function Wallets() {
                     <tr key={wallet.id} className="border-t hover:bg-gray-50 transition-colors">
                       <td className="p-4">
                         <div className="flex items-center gap-3">
-                          <span className="text-xl">{wallet.config?.flag}</span>
+                          <CurrencyInitial currency={wallet.currency} />
                           <div>
                             <p className="font-medium text-gray-900">{wallet.currency}</p>
                             <p className="text-sm text-gray-500">{wallet.config?.name}</p>
@@ -284,7 +305,7 @@ export default function Wallets() {
                         <HoldingValueDisplay wallet={wallet} displayCurrency={displayCurrency} />
                       </td>
                       <td className="p-4 text-right">
-                        <Badge variant="outline" className="text-xs">Regulated Issuer</Badge>
+                        <Badge variant="outline" className="text-xs">External Provider</Badge>
                       </td>
                     </tr>
                   ))}
@@ -295,9 +316,10 @@ export default function Wallets() {
         </Card>
       )}
 
-      <div className="text-center text-xs text-gray-400 py-4">
-        <p>Portfolio values are indicative only. Holdings are maintained with external regulated custodians.</p>
-        <p className="mt-1">AMAX Wealth operates under Australian Financial Services Licence arrangements.</p>
+      <div className="text-center text-xs text-gray-400 py-4 space-y-1">
+        <p>All positions are maintained with external regulated custodians and are not held by AMAX Wealth.</p>
+        <p>Values are indicative only and based on current market rates. This does not constitute financial advice.</p>
+        <p>AMAX Wealth operates as an Authorised Representative under Australian Financial Services Licence arrangements.</p>
       </div>
     </div>
   );
