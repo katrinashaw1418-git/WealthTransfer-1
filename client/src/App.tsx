@@ -19,6 +19,7 @@ import Signup from "@/pages/signup";
 import ForgotPassword from "@/pages/forgot-password";
 import ResetPassword from "@/pages/reset-password";
 import Onboarding from "@/pages/onboarding";
+import Legal from "@/pages/legal";
 import NotFound from "@/pages/not-found";
 import { Loader2 } from "lucide-react";
 
@@ -58,6 +59,7 @@ function ProtectedApp() {
         <Route path="/transactions" component={Transactions} />
         <Route path="/compliance" component={Compliance} />
         <Route path="/investments" component={Investments} />
+        <Route path="/legal" component={Legal} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

@@ -10,6 +10,7 @@ import {
   History, 
   Shield,
   Building2,
+  Scale,
   User,
   ChevronRight
 } from "lucide-react";
@@ -28,6 +29,7 @@ const navigation = [
   { name: "Market Insights", href: "/ai-advisory", icon: Bot },
   { name: "Activity", href: "/transactions", icon: History },
   { name: "Compliance", href: "/compliance", icon: Shield },
+  { name: "Legal", href: "/legal", icon: Scale },
 ];
 
 function SidebarContent() {

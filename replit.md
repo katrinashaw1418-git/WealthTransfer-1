@@ -3,6 +3,18 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Legal Hub Page
+
+### Legal hub page built (5 tabs)
+- Route: `/legal` (protected, in sidebar with Scale icon)
+- Tab 1: Financial Services Guide — 7 content sections (AFSL AR intro, financial product advice, investment product access, FX exchange entity separation, fees, conflicts of interest, right to information) + compliance contact callout
+- Tab 2: Complaints & AFCA — 3-step complaint process cards, AFCA green callout with contact details (1800 931 678, info@afca.org.au, GPO Box 3 Melbourne VIC 3001), internal complaint contact card, timeframes card
+- Tab 3: Privacy policy — 6 sections (collection, use/disclosure, storage, cross-border, rights, complaints) referencing Privacy Act 1988 (Cth) and APPs
+- Tab 4: Terms of service — 8 numbered clauses (nature of services, no advice without SOA, wholesale status, investment risk, custody, AI content, FX separation, governing law) + "Terms accepted 2 Aug 2025"
+- Tab 5: Documents — 6 downloadable documents (FSG, risk disclosure, privacy, terms, complaints policy, wholesale certificate template) + IM request callout
+- Footer: AMAX Wealth (AFSL AR) / AMAX Global (AUSTRAC) entity separation, legal links, contact details
+- File: `client/src/pages/legal.tsx`
+
 ## Recent Changes (April 2026) — Compliance Page Overhaul
 
 ### Critical fix: FCA COBS → Australian law
