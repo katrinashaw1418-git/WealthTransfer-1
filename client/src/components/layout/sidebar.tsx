@@ -10,10 +10,10 @@ import {
   History, 
   Shield,
   Building2,
-  Coins,
   User,
   ChevronRight
 } from "lucide-react";
+import amaxLogo from "@assets/AMAX_LOGO_BLUE_1776303944567.jpg";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -38,12 +38,10 @@ function SidebarContent() {
       {/* Logo Section */}
       <div className="p-6 border-b border-gray-200">
         <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
-            <Coins className="w-4 h-4 text-white" />
-          </div>
+          <img src={amaxLogo} alt="AMAX Wealth" className="w-9 h-9 rounded-lg" />
           <div>
-            <h1 className="text-xl font-bold text-gray-900">AMAX</h1>
-            <p className="text-xs text-gray-500">Wealth Platform</p>
+            <h1 className="text-lg font-bold text-gray-900">AMAX WEALTH</h1>
+            <p className="text-xs text-gray-500">Investments / Advice</p>
           </div>
         </div>
       </div>
