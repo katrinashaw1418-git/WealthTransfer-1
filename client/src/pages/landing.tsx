@@ -48,7 +48,7 @@ export default function Landing() {
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
-            <Button variant="outline" className="border-slate-500 text-white hover:bg-slate-800" onClick={() => navigate("/login")}>
+            <Button className="bg-slate-700 text-white hover:bg-slate-600 font-semibold" onClick={() => navigate("/login")}>
               Sign In
             </Button>
             <Button className="bg-amber-500 hover:bg-amber-400 text-white font-semibold" onClick={() => navigate("/login")}>
@@ -82,8 +82,7 @@ export default function Landing() {
               </Button>
               <Button 
                 size="lg" 
-                variant="outline" 
-                className="border-slate-500 text-white hover:bg-slate-800"
+                className="bg-slate-700 text-white hover:bg-slate-600 font-semibold"
                 onClick={() => {
                   const el = document.getElementById('how-it-works');
                   el?.scrollIntoView({ behavior: 'smooth' });
@@ -286,8 +285,7 @@ export default function Landing() {
             </Button>
             <Button 
               size="lg" 
-              variant="outline" 
-              className="border-slate-500 text-white hover:bg-slate-800"
+              className="bg-slate-700 text-white hover:bg-slate-600 font-semibold"
               onClick={() => window.open('tel:+61283201908')}
             >
               <Phone className="w-4 h-4 mr-2" />
