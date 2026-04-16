@@ -3,6 +3,48 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Compliance Page Overhaul
+
+### Critical fix: FCA COBS → Australian law
+- All FCA/COBS references removed — replaced with Corporations Act 2001 (Cth), ASIC, and applicable Australian law
+- Risk disclosure date updated to January 2025
+
+### Compliance page redesigned to match mockups
+- Header: "Welcome back, Wise" with adviser card (Call/Message buttons, +61 2 8320 1908)
+- Tier 2 verified banner with wholesale investor classification under s761G
+- 4 metric cards: KYC 65%, AML 100%, Document 50%, Risk 0%
+- 7 tabs: KYC status, Documents, Risk profile, Regulatory, Terms & conditions, Privacy policy, Risk disclosure
+
+### KYC Status tab
+- Wholesale client classification box with s761G reference
+- 4 numbered steps (identity, AML, source of funds, risk assessment) with status
+
+### Documents tab
+- 5 documents: Gov ID (verified), Proof of address (verified), Source of funds (under review), Wholesale certificate (required + upload), Risk disclosure (signed)
+
+### Risk Profile tab
+- Summary view (tolerance, horizon, goal) — not a form
+- Formal risk assessment pending with "Complete" button
+- Disclaimer: self-assessed profile is general information only
+
+### Regulatory tab
+- Clean row layout: AFSL AR, AUSTRAC, client classification, AFCA, record keeping (s912A), Privacy Act
+
+### Terms & Conditions
+- 5 clauses including custody of assets (AMAX does not hold client funds)
+- "Terms accepted 2 Aug 2025"
+
+### Privacy Policy
+- 4 sections: collection, use/disclosure, storage/security, contact
+- "Privacy policy acknowledged 2 Aug 2025"
+
+### Risk Disclosure
+- 8 numbered risks with updated language (technology/digital asset risk, AI content limitations)
+- "Disclosure acknowledged · Last updated January 2025 · Australian law applies · Signed 2 Aug 2025"
+
+### Footer
+- AFSL obligations and ASIC requirements reference (no FCA/COBS)
+
 ## Recent Changes (April 2026) — Onboarding Wizard (Page 1)
 
 ### 6-step onboarding fact-find wizard built

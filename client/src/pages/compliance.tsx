@@ -1,135 +1,93 @@
 import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { 
-  Shield, 
-  CheckCircle, 
-  Clock, 
-  AlertTriangle, 
-  Upload, 
-  Download, 
-  Eye,
-  FileText,
-  Camera,
-  User,
-  MapPin,
-  CreditCard,
-  Building
+import {
+  Shield,
+  CheckCircle,
+  Clock,
+  AlertTriangle,
+  Upload,
+  Phone,
+  MessageSquare,
+  ExternalLink,
 } from "lucide-react";
 
+const complianceMetrics = [
+  { label: "KYC COMPLETION", value: 65, status: "In progress", color: "bg-orange-500" },
+  { label: "AML SCREENING", value: 100, status: "Completed", color: "bg-green-500" },
+  { label: "DOCUMENT VERIFICATION", value: 50, status: "In progress", color: "bg-orange-500" },
+  { label: "RISK ASSESSMENT", value: 0, status: "Pending", color: "bg-gray-300" },
+];
+
+const kycSteps = [
+  { num: 1, title: "Identity verification", desc: "Government-issued ID verified — completed 2 Aug 2025", status: "completed" },
+  { num: 2, title: "AML screening", desc: "PEP and sanctions screening passed — completed 2 Aug 2025", status: "completed" },
+  { num: 3, title: "Source of funds declaration", desc: "Declaration submitted — pending review by compliance team", status: "pending" },
+  { num: 4, title: "Risk assessment questionnaire", desc: "Not yet commenced — required before investment limit increases", status: "not_started" },
+];
+
+const documents = [
+  { name: "Government-issued ID", desc: "Passport or driver licence — verified", status: "Verified", statusColor: "bg-green-100 text-green-700" },
+  { name: "Proof of address", desc: "Utility bill or bank statement (within 3 months)", status: "Verified", statusColor: "bg-green-100 text-green-700" },
+  { name: "Source of funds declaration", desc: "Signed statutory declaration — under review", status: "Under review", statusColor: "bg-amber-100 text-amber-700" },
+  { name: "Wholesale investor certificate", desc: "Accountant-certified certificate — required under s761GA", status: "Required", statusColor: "bg-amber-100 text-amber-700", hasUpload: true },
+  { name: "Signed risk disclosure", desc: "Acknowledgement of investment risks", status: "Signed", statusColor: "bg-green-100 text-green-700" },
+];
+
+const regulatoryRows = [
+  { label: "AMAX Wealth Pty Ltd", value: "Authorised Representative under Australian Financial Services Licence" },
+  { label: "AUSTRAC registration", value: "AMAX Global Pty Ltd — Digital currency exchange and remittance provider" },
+  { label: "Client classification", value: "Wholesale client — Corporations Act 2001 (Cth) s761G" },
+  { label: "Dispute resolution", value: "AFCA member — Australian Financial Complaints Authority" },
+  { label: "Record keeping", value: "s912A Corporations Act 2001 (Cth) — 7-year minimum retention" },
+  { label: "Privacy", value: "Privacy Act 1988 (Cth) — Australian Privacy Principles apply" },
+];
+
 export default function Compliance() {
-  const [kycStep, setKycStep] = useState(2);
-  const [selectedDocument, setSelectedDocument] = useState<File | null>(null);
-
-  // Mock KYC data
-  const kycStatus = {
-    overall: "in_progress",
-    steps: [
-      { id: 1, title: "Identity Verification", status: "completed", icon: User, description: "Government ID verified" },
-      { id: 2, title: "Address Verification", status: "in_progress", icon: MapPin, description: "Proof of address pending" },
-      { id: 3, title: "Source of Funds", status: "pending", icon: CreditCard, description: "Income verification required" },
-      { id: 4, title: "Risk Assessment", status: "pending", icon: Shield, description: "Questionnaire completion" },
-    ]
-  };
-
-  const documents = [
-    { id: 1, type: "passport", name: "Passport Copy", status: "approved", uploadDate: "2024-01-10", size: "2.4 MB" },
-    { id: 2, type: "address", name: "Utility Bill", status: "under_review", uploadDate: "2024-01-12", size: "1.8 MB" },
-    { id: 3, type: "bank_statement", name: "Bank Statement", status: "pending", uploadDate: "", size: "" },
-    { id: 4, type: "income", name: "Income Statement", status: "pending", uploadDate: "", size: "" },
-    { id: 5, type: "wholesale_certificate", name: "Wholesale Investor Certificate (s761G/s761GA)", status: "pending", uploadDate: "", size: "" },
-  ];
-
-  const complianceMetrics = [
-    { label: "KYC Completion", value: 65, status: "in_progress" },
-    { label: "AML Screening", value: 100, status: "completed" },
-    { label: "Document Verification", value: 50, status: "in_progress" },
-    { label: "Risk Assessment", value: 0, status: "pending" },
-  ];
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "completed":
-      case "approved":
-        return "bg-green-100 text-green-800";
-      case "in_progress":
-      case "under_review":
-        return "bg-yellow-100 text-yellow-800";
-      case "pending":
-        return "bg-gray-100 text-gray-800";
-      case "rejected":
-        return "bg-red-100 text-red-800";
-      default:
-        return "bg-gray-100 text-gray-800";
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case "completed":
-      case "approved":
-        return CheckCircle;
-      case "in_progress":
-      case "under_review":
-        return Clock;
-      case "pending":
-        return Clock;
-      case "rejected":
-        return AlertTriangle;
-      default:
-        return Clock;
-    }
-  };
-
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      setSelectedDocument(file);
-      // Handle file upload logic here
-    }
-  };
-
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Compliance Center</h1>
-          <p className="text-gray-600">Manage your verification status and regulatory compliance</p>
+          <h1 className="text-2xl font-bold text-amber-700">Welcome back, Wise</h1>
+          <p className="text-gray-500 text-sm">Compliance centre — AMAX Wealth · 5 accounts · Global</p>
         </div>
-        <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
-            <Shield className="w-4 h-4 text-white" />
-          </div>
-          <div>
-            <p className="text-sm font-medium">Tier 2 Verified</p>
-            <p className="text-xs text-gray-500">Premium access enabled</p>
-          </div>
+        <Card className="border shadow-sm">
+          <CardContent className="p-4 flex items-center gap-4">
+            <div className="w-10 h-10 bg-slate-700 rounded-full flex items-center justify-center text-white text-sm font-semibold">AW</div>
+            <div>
+              <p className="text-sm font-medium">Your adviser</p>
+              <p className="text-xs text-gray-500">+61 2 8320 1908</p>
+            </div>
+            <div className="flex gap-2 ml-2">
+              <Button variant="outline" size="sm"><Phone className="w-3 h-3 mr-1" />Call</Button>
+              <Button variant="outline" size="sm"><MessageSquare className="w-3 h-3 mr-1" />Message</Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-4">
+        <Badge className="bg-green-600 text-white px-3 py-1 text-sm">Tier 2 verified</Badge>
+        <div>
+          <p className="font-semibold text-gray-900">Wholesale investor — premium access enabled</p>
+          <p className="text-sm text-gray-600">Verified under the Corporations Act 2001 (Cth) s761G — wholesale client classification</p>
         </div>
       </div>
 
-      {/* Compliance Overview Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        {complianceMetrics.map((metric, index) => (
-          <Card key={index}>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-medium text-gray-500">{metric.label}</h3>
-                <Badge className={getStatusColor(metric.status)}>
-                  {metric.status.replace('_', ' ')}
-                </Badge>
-              </div>
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-2xl font-bold">{metric.value}%</span>
-                </div>
-                <Progress value={metric.value} className="h-2" />
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {complianceMetrics.map((m, i) => (
+          <Card key={i}>
+            <CardContent className="p-5">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">{m.label}</p>
+              <p className="text-3xl font-bold text-gray-900 mb-1">{m.value}%</p>
+              <p className={`text-sm mb-2 ${m.status === "Completed" ? "text-green-600" : m.status === "Pending" ? "text-gray-400" : "text-orange-600"}`}>
+                {m.status}
+              </p>
+              <div className="w-full bg-gray-200 rounded-full h-1.5">
+                <div className={`${m.color} h-1.5 rounded-full`} style={{ width: `${m.value}%` }} />
               </div>
             </CardContent>
           </Card>
@@ -137,440 +95,278 @@ export default function Compliance() {
       </div>
 
       <Tabs defaultValue="kyc" className="space-y-6">
-        <TabsList className="flex flex-wrap h-auto gap-1 bg-slate-100 p-1 rounded-lg">
-          <TabsTrigger value="kyc" className="flex-1 min-w-[120px]">KYC Status</TabsTrigger>
-          <TabsTrigger value="documents" className="flex-1 min-w-[120px]">Documents</TabsTrigger>
-          <TabsTrigger value="risk" className="flex-1 min-w-[120px]">Risk Profile</TabsTrigger>
-          <TabsTrigger value="regulatory" className="flex-1 min-w-[120px]">Regulatory</TabsTrigger>
-          <TabsTrigger value="terms" className="flex-1 min-w-[120px]">Terms &amp; Conditions</TabsTrigger>
-          <TabsTrigger value="privacy" className="flex-1 min-w-[120px]">Privacy Policy</TabsTrigger>
-          <TabsTrigger value="risk-disclosure" className="flex-1 min-w-[120px]">Risk Disclosure</TabsTrigger>
-        </TabsList>
+        <div className="overflow-x-auto">
+          <TabsList className="inline-flex h-auto gap-1 bg-slate-100 p-1 rounded-lg min-w-max">
+            <TabsTrigger value="kyc" className="min-w-[120px]">KYC status</TabsTrigger>
+            <TabsTrigger value="documents" className="min-w-[120px]">Documents</TabsTrigger>
+            <TabsTrigger value="risk" className="min-w-[120px]">Risk profile</TabsTrigger>
+            <TabsTrigger value="regulatory" className="min-w-[120px]">Regulatory</TabsTrigger>
+            <TabsTrigger value="terms" className="min-w-[140px]">Terms &amp; conditions</TabsTrigger>
+            <TabsTrigger value="privacy" className="min-w-[120px]">Privacy policy</TabsTrigger>
+            <TabsTrigger value="risk-disclosure" className="min-w-[120px]">Risk disclosure</TabsTrigger>
+          </TabsList>
+        </div>
 
-        {/* KYC Status Tab */}
-        <TabsContent value="kyc" className="space-y-6">
+        <TabsContent value="kyc">
           <Card>
-            <CardHeader>
-              <CardTitle>Know Your Customer (KYC) Verification</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-6">
-                {kycStatus.steps.map((step) => {
-                  const Icon = step.icon;
-                  const StatusIcon = getStatusIcon(step.status);
-                  
-                  return (
-                    <div key={step.id} className="flex items-center space-x-4 p-4 border rounded-lg">
-                      <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
-                        <Icon className="w-6 h-6 text-gray-600" />
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex items-center space-x-3 mb-1">
-                          <h3 className="font-medium">{step.title}</h3>
-                          <Badge className={getStatusColor(step.status)}>
-                            {step.status.replace('_', ' ')}
-                          </Badge>
-                        </div>
-                        <p className="text-sm text-gray-600">{step.description}</p>
-                      </div>
-                      <StatusIcon className={`w-5 h-5 ${
-                        step.status === 'completed' ? 'text-green-600' : 
-                        step.status === 'in_progress' ? 'text-yellow-600' : 
-                        'text-gray-400'
-                      }`} />
-                    </div>
-                  );
-                })}
+            <CardContent className="p-6 space-y-6">
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                <p className="font-semibold text-gray-900 mb-1">Wholesale client classification</p>
+                <p className="text-sm text-gray-700">
+                  You are classified as a wholesale client under s761G of the Corporations Act 2001 (Cth). This classification is based on your verified net assets or income. Wholesale classification must be re-verified periodically. If your circumstances change, notify AMAX Wealth immediately.
+                </p>
               </div>
-              
-              <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-                <div className="flex items-start space-x-3">
-                  <Shield className="w-5 h-5 text-blue-600 mt-0.5" />
-                  <div>
-                    <h4 className="font-medium text-blue-900 mb-1">Next Steps</h4>
-                    <p className="text-sm text-blue-700 mb-3">
-                      Complete your address verification by uploading a recent utility bill or bank statement.
-                    </p>
-                    <Button size="sm">
-                      Continue Verification
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
 
-        {/* Documents Tab */}
-        <TabsContent value="documents" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Document Management</CardTitle>
-            </CardHeader>
-            <CardContent>
               <div className="space-y-4">
-                {documents.map((doc) => {
-                  const StatusIcon = getStatusIcon(doc.status);
-                  
-                  return (
-                    <div key={doc.id} className="flex items-center justify-between p-4 border rounded-lg">
-                      <div className="flex items-center space-x-4">
-                        <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
-                          <FileText className="w-5 h-5 text-gray-600" />
-                        </div>
-                        <div>
-                          <h3 className="font-medium">{doc.name}</h3>
-                          <div className="flex items-center space-x-4 text-sm text-gray-600">
-                            {doc.uploadDate && (
-                              <span>Uploaded: {new Date(doc.uploadDate).toLocaleDateString()}</span>
-                            )}
-                            {doc.size && <span>Size: {doc.size}</span>}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center space-x-3">
-                        <Badge className={getStatusColor(doc.status)}>
-                          {doc.status.replace('_', ' ')}
-                        </Badge>
-                        {doc.status === "pending" ? (
-                          <Button size="sm">
-                            <Upload className="w-3 h-3 mr-1" />
-                            Upload
-                          </Button>
-                        ) : (
-                          <div className="flex space-x-2">
-                            <Button size="sm" variant="outline">
-                              <Eye className="w-3 h-3 mr-1" />
-                              View
-                            </Button>
-                            <Button size="sm" variant="outline">
-                              <Download className="w-3 h-3 mr-1" />
-                              Download
-                            </Button>
-                          </div>
-                        )}
-                      </div>
+                {kycSteps.map((step) => (
+                  <div key={step.num} className="flex items-start gap-4 py-4 border-b border-gray-100 last:border-0">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold flex-shrink-0 mt-0.5 ${
+                      step.status === "completed" ? "bg-green-100 text-green-700" : step.status === "pending" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                    }`}>
+                      {step.num}
                     </div>
-                  );
-                })}
-              </div>
-              
-              <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-                <p className="text-xs text-amber-800">
-                  <strong>Wholesale Investor Certificate required:</strong> Under s761G/s761GA of the Corporations Act 2001 (Cth), your wholesale investor classification must be supported by a qualified accountant certificate confirming net assets of at least $2.5M or gross income of at least $250,000 p.a. for each of the last two financial years. This certificate must be uploaded before investment instructions can be processed.
-                </p>
+                    <div>
+                      <p className="font-medium text-gray-900">{step.title}</p>
+                      <p className="text-sm text-gray-500">{step.desc}</p>
+                    </div>
+                  </div>
+                ))}
               </div>
 
-              <div className="mt-6 p-4 border-2 border-dashed border-gray-300 rounded-lg text-center">
-                <Upload className="w-8 h-8 text-gray-400 mx-auto mb-3" />
-                <h3 className="font-medium text-gray-900 mb-1">Upload New Document</h3>
-                <p className="text-sm text-gray-600 mb-4">
-                  Drag and drop files here, or click to browse
-                </p>
-                <input
-                  type="file"
-                  onChange={handleFileUpload}
-                  accept=".pdf,.jpg,.jpeg,.png"
-                  className="hidden"
-                  id="file-upload"
-                />
-                <label htmlFor="file-upload">
-                  <Button asChild>
-                    <span>Choose Files</span>
+              <Button variant="outline" size="sm">
+                Continue KYC <ExternalLink className="w-3 h-3 ml-1" />
+              </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="documents">
+          <Card>
+            <CardContent className="p-6 space-y-4">
+              <p className="text-sm text-gray-600">Upload and manage your compliance documents. All documents are stored securely and used for regulatory verification only.</p>
+
+              {documents.map((doc, i) => (
+                <div key={i} className="flex items-center justify-between py-4 border-b border-gray-100 last:border-0">
+                  <div>
+                    <p className="font-medium text-gray-900">{doc.name}</p>
+                    <p className="text-sm text-gray-500">{doc.desc}</p>
+                  </div>
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    <Badge className={doc.statusColor}>{doc.status}</Badge>
+                    {doc.hasUpload && (
+                      <Button variant="outline" size="sm">
+                        Upload <ExternalLink className="w-3 h-3 ml-1" />
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="risk">
+          <Card>
+            <CardContent className="p-6 space-y-6">
+              <p className="text-sm text-gray-600">Your self-assessed risk profile. This is used for general context only — not a substitute for a formal risk assessment by a licensed adviser.</p>
+
+              <div className="space-y-1">
+                <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                  <span className="text-gray-700">Risk tolerance</span>
+                  <span className="font-medium text-gray-900">Moderate (60/100)</span>
+                </div>
+                <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                  <span className="text-gray-700">Investment horizon</span>
+                  <span className="font-medium text-gray-900">5–10 years</span>
+                </div>
+                <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                  <span className="text-gray-700">Primary goal</span>
+                  <span className="font-medium text-gray-900">Growth</span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between py-3 border-b border-gray-100">
+                <span className="font-medium text-gray-900">Formal risk assessment</span>
+                <div className="flex items-center gap-3">
+                  <Badge className="bg-amber-100 text-amber-700">Pending</Badge>
+                  <Button variant="outline" size="sm">
+                    Complete <ExternalLink className="w-3 h-3 ml-1" />
                   </Button>
-                </label>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Risk Profile Tab */}
-        <TabsContent value="risk" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Risk Assessment Questionnaire</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-6">
-                <div>
-                  <Label htmlFor="investment-experience">Investment Experience</Label>
-                  <Select>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select your experience level" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="novice">Novice (0-2 years)</SelectItem>
-                      <SelectItem value="intermediate">Intermediate (3-7 years)</SelectItem>
-                      <SelectItem value="experienced">Experienced (8+ years)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div>
-                  <Label htmlFor="annual-income">Annual Income (USD)</Label>
-                  <Select>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select income range" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="under-50k">Under $50,000</SelectItem>
-                      <SelectItem value="50k-100k">$50,000 - $100,000</SelectItem>
-                      <SelectItem value="100k-250k">$100,000 - $250,000</SelectItem>
-                      <SelectItem value="250k-500k">$250,000 - $500,000</SelectItem>
-                      <SelectItem value="over-500k">Over $500,000</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div>
-                  <Label htmlFor="investment-goals">Primary Investment Goals</Label>
-                  <Textarea 
-                    id="investment-goals"
-                    placeholder="Describe your investment objectives, time horizon, and risk tolerance..."
-                    className="min-h-[100px]"
-                  />
-                </div>
-
-                <div>
-                  <Label htmlFor="source-of-funds">Source of Funds</Label>
-                  <Select>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select primary source" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="employment">Employment Income</SelectItem>
-                      <SelectItem value="business">Business Income</SelectItem>
-                      <SelectItem value="investments">Investment Returns</SelectItem>
-                      <SelectItem value="inheritance">Inheritance</SelectItem>
-                      <SelectItem value="other">Other</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <Button className="w-full">
-                  Complete Risk Assessment
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Regulatory Tab */}
-        <TabsContent value="regulatory" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Regulatory Compliance</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="p-4 border rounded-lg">
-                    <div className="flex items-center space-x-3 mb-3">
-                      <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">AFSL — Authorised Representative</h3>
-                    </div>
-                    <Badge className="bg-green-100 text-green-800 mb-2">Active</Badge>
-                    <p className="text-sm text-gray-600">
-                      AMAX Wealth operates as an Authorised Representative under an Australian Financial Services Licence. AR Number: [AR Number].
-                    </p>
-                  </div>
-
-                  <div className="p-4 border rounded-lg">
-                    <div className="flex items-center space-x-3 mb-3">
-                      <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">AUSTRAC — AMAX Global</h3>
-                    </div>
-                    <Badge className="bg-green-100 text-green-800 mb-2">Registered</Badge>
-                    <p className="text-sm text-gray-600">
-                      AMAX Global is registered with AUSTRAC as a Digital Currency Exchange and Remittance provider. FX and payment services are executed via AMAX Global, a separate entity.
-                    </p>
-                  </div>
-
-                  <div className="p-4 border rounded-lg">
-                    <div className="flex items-center space-x-3 mb-3">
-                      <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">AFCA Membership</h3>
-                    </div>
-                    <Badge className="bg-green-100 text-green-800 mb-2">Member</Badge>
-                    <p className="text-sm text-gray-600">
-                      AMAX Wealth is a member of the Australian Financial Complaints Authority for external dispute resolution. AFCA has discretion regarding complaints from wholesale clients.
-                    </p>
-                  </div>
-
-                  <div className="p-4 border rounded-lg">
-                    <div className="flex items-center space-x-3 mb-3">
-                      <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">Privacy Act 1988 (Cth)</h3>
-                    </div>
-                    <Badge className="bg-green-100 text-green-800 mb-2">Compliant</Badge>
-                    <p className="text-sm text-gray-600">
-                      Data handling complies with the Australian Privacy Principles under the Privacy Act 1988 (Cth).
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-4 bg-blue-50 rounded-lg">
-                  <h4 className="font-medium text-blue-900 mb-2">Record-Keeping Obligations</h4>
-                  <p className="text-sm text-blue-700">
-                    AMAX Wealth maintains records in accordance with s912A of the Corporations Act 2001 (Cth). 
-                    All transaction records, advice documents, and compliance records are retained for a minimum of 7 years.
-                  </p>
-                </div>
-
-                <div className="p-4 bg-gray-50 rounded-lg border">
-                  <h4 className="font-medium text-gray-900 mb-2">Entity Separation</h4>
-                  <p className="text-sm text-gray-600">
-                    <strong>AMAX Wealth</strong> provides advisory and reporting services under AFSL arrangements. 
-                    <strong> AMAX Global</strong> provides FX, remittance, and digital currency exchange services under AUSTRAC registration. 
-                    These are separate entities with distinct regulatory obligations. Client funds are not held by AMAX Wealth.
-                  </p>
                 </div>
               </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
 
-        {/* Terms & Conditions Tab */}
-        <TabsContent value="terms" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <FileText className="w-5 h-5 text-blue-600" />
-                Terms & Conditions
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="prose prose-sm max-w-none text-gray-700 space-y-4">
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">1. Acceptance of Terms</h3>
-                <p>By accessing or using AMAX Wealth Management platform, you agree to be bound by these Terms and Conditions. If you do not agree, please do not use our services. These terms constitute a legally binding agreement between you and AMAX Financial Services Ltd.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">2. Eligibility</h3>
-                <p>You must be at least 18 years of age and legally capable of entering into binding contracts to use our services. Use of AMAX services is restricted in jurisdictions where such services are prohibited by law.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">3. Account Responsibilities</h3>
-                <p>You are responsible for maintaining the confidentiality of your account credentials and for all activity that occurs under your account. You must notify AMAX immediately of any unauthorized use or suspected breach of security.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">4. Services</h3>
-                <p>AMAX Wealth provides portfolio reporting, advisory services, and investment product access under AFSL arrangements. FX and payment services are provided separately by AMAX Global under AUSTRAC registration. Client funds and assets are maintained with external regulated custodians and are not held by AMAX Wealth. All investment services are subject to applicable financial regulations and require completed KYC verification.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">5. Fees and Charges</h3>
-                <p>AMAX charges fees for certain services including FX conversion (0.5% of converted amount), fund transfers (flat $25 fee), and investment management (per product schedule). All fees are disclosed prior to transaction confirmation.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">6. Limitation of Liability</h3>
-                <p>AMAX is not liable for losses arising from market fluctuations, system outages, third-party failures, or events beyond our reasonable control. Our total liability to you shall not exceed fees paid in the preceding 12 months.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">7. Custody Disclaimer</h3>
-                <p>AMAX Wealth does not hold client funds or assets. All positions are maintained with external regulated custodians. AMAX Wealth acts solely as an advisory and reporting platform under its Authorised Representative arrangement.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">8. Governing Law</h3>
-                <p>These Terms are governed by the laws of the Commonwealth of Australia. Disputes shall be subject to the jurisdiction of the courts of New South Wales, Australia.</p>
-              </div>
-              <p className="text-xs text-gray-400 pt-2">Last updated: January 2025 | Version 4.0 | Australian law applies</p>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Privacy Policy Tab */}
-        <TabsContent value="privacy" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Shield className="w-5 h-5 text-green-600" />
-                Privacy Policy
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="prose prose-sm max-w-none text-gray-700 space-y-4">
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">1. Data We Collect</h3>
-                <p>We collect information you provide directly (name, email, government ID, financial data), usage data (transaction history, platform interactions), and technical data (IP address, device type, browser). All collection is governed by the Australian Privacy Principles under the Privacy Act 1988 (Cth).</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">2. How We Use Your Data</h3>
-                <p>Your data is used to: provide and improve our services, comply with KYC/AML obligations, process transactions, generate AI-powered investment insights, detect and prevent fraud, and communicate account updates. We do not sell your personal data to third parties.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">3. Data Sharing</h3>
-                <p>We share data with: regulatory bodies (as required by law), payment processors and banking partners (for transaction processing), identity verification providers (for KYC), and cloud service providers (under strict data processing agreements).</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">4. Data Retention</h3>
-                <p>Financial records are retained for a minimum of 7 years as required by financial regulations. Account data is retained for the duration of your relationship with AMAX and 5 years thereafter. You may request deletion of non-regulatory data at any time.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">5. Your Rights</h3>
-                <p>Under the Australian Privacy Principles you have the right to: access your personal information, request correction of inaccuracies, and make complaints about privacy breaches. Submit requests to privacy@amaxwealth.com.au. Financial records subject to s912A retention requirements cannot be deleted during the 7-year retention period.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">6. Cookies</h3>
-                <p>AMAX uses strictly necessary cookies for session management and authentication. We use analytics cookies (with your consent) to improve platform performance. You can manage cookie preferences in your browser settings.</p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">7. Security</h3>
-                <p>We employ industry-standard security measures including AES-256 encryption at rest, TLS 1.3 in transit, multi-factor authentication, and regular penetration testing. In the event of a notifiable data breach, we will notify the Office of the Australian Information Commissioner and affected individuals as required under the Notifiable Data Breaches scheme.</p>
-              </div>
-              <p className="text-xs text-gray-400 pt-2">Last updated: January 2025 | Compliant with Australian Privacy Principles (Privacy Act 1988)</p>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Risk Disclosure Tab */}
-        <TabsContent value="risk-disclosure" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
-                Risk Disclosure Statement
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="prose prose-sm max-w-none text-gray-700 space-y-4">
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                <p className="font-semibold text-amber-800">Important Notice</p>
-                <p className="text-amber-700 text-sm mt-1">All investments carry risk. The value of your investments can go down as well as up. You may receive back less than you invest. Past performance is not a reliable indicator of future results.</p>
+                <p className="text-sm text-amber-800">
+                  A formal risk assessment must be completed by your licensed adviser before personal advice can be provided. Your self-assessed profile is used for general information purposes only.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="regulatory">
+          <Card>
+            <CardContent className="p-6 space-y-1">
+              <p className="text-sm text-gray-600 mb-4">Regulatory status and licence information applicable to AMAX Wealth services.</p>
+
+              {regulatoryRows.map((row, i) => (
+                <div key={i} className="flex justify-between items-start py-4 border-b border-gray-100 last:border-0 gap-8">
+                  <span className="font-medium text-gray-900 flex-shrink-0">{row.label}</span>
+                  <span className="text-sm text-gray-600 text-right">{row.value}</span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="terms">
+          <Card>
+            <CardContent className="p-6 space-y-6">
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">1. Nature of services</h3>
+                <p className="text-sm text-gray-700">
+                  AMAX Wealth Pty Ltd provides financial product information and, where authorised, financial product advice as an Authorised Representative under an Australian Financial Services Licence. Services are provided to wholesale clients only as defined under the Corporations Act 2001 (Cth).
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">1. Market Risk</h3>
-                <p>Investment values fluctuate with market conditions including interest rate changes, economic developments, geopolitical events, and investor sentiment. Equity investments are subject to higher volatility than fixed-income products.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">2. No personal advice without SOA</h3>
+                <p className="text-sm text-gray-700">
+                  General information provided on this platform does not constitute personal financial product advice. Personal advice will only be provided following completion of a fact-find and delivery of a Statement of Advice (SOA) by a licensed financial adviser.
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">2. Currency Risk</h3>
-                <p>Multi-currency investments are exposed to foreign exchange fluctuations. Changes in exchange rates can materially affect the value of your holdings when converted back to your base currency. FX hedging is available for select products.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">3. Investment risk acknowledgement</h3>
+                <p className="text-sm text-gray-700">
+                  By using this platform you acknowledge that all investments carry risk, including possible loss of capital. Past performance is not a reliable indicator of future performance. Target returns are indicative only and are not guaranteed.
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">3. Liquidity Risk</h3>
-                <p>Some investment products have lock-up periods or limited redemption windows. You may be unable to access your funds on short notice. Always ensure you have sufficient liquid reserves outside your AMAX investments.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">4. AI-generated content</h3>
+                <p className="text-sm text-gray-700">
+                  AI-generated insights on this platform are general information only. They do not take into account your personal circumstances and are not regulated investment advice.
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">4. Credit Risk</h3>
-                <p>Fixed-income products are subject to the credit risk of the issuer. A downgrade or default may result in partial or total loss of the invested capital. Credit ratings are provided as guidance only and are not guarantees of performance.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">5. Custody of assets</h3>
+                <p className="text-sm text-gray-700">
+                  AMAX Wealth does not hold client funds or assets. All investments are held with external regulated custodians or fund managers. AMAX Wealth provides instruction, reporting, and advisory services only.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
+                <span>Terms accepted</span>
+                <span>2 Aug 2025</span>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="privacy">
+          <Card>
+            <CardContent className="p-6 space-y-6">
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">Collection of personal information</h3>
+                <p className="text-sm text-gray-700">
+                  AMAX Wealth collects personal information including identity documents, financial information, and transaction records for the purpose of providing financial services, meeting KYC/AML obligations, and complying with regulatory requirements under Australian law.
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">5. Concentration Risk</h3>
-                <p>Concentrating investments in a single asset class, sector, or geography increases vulnerability to specific adverse events. AMAX recommends diversified portfolios aligned with your risk tolerance and investment horizon.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">Use and disclosure</h3>
+                <p className="text-sm text-gray-700">
+                  Your information is used to provide services, conduct AML/CTF screening, verify wholesale investor status, and comply with ASIC and AUSTRAC reporting obligations. Information is not sold to third parties.
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">6. Technology Risk</h3>
-                <p>Digital assets and crypto investments are subject to additional risks including regulatory uncertainty, technological failures, smart contract vulnerabilities, and extreme price volatility. These are suitable only for experienced investors who can afford total loss.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">Storage and security</h3>
+                <p className="text-sm text-gray-700">
+                  Personal information is stored securely in Australia. AMAX Wealth applies the Australian Privacy Principles under the Privacy Act 1988 (Cth). You may request access to or correction of your personal information at any time.
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">7. Portfolio Insights Limitations</h3>
-                <p>AMAX portfolio insight tools provide general information and educational content only. They do not constitute personal financial product advice under the Corporations Act 2001 (Cth). Always consult a qualified financial adviser before making significant investment decisions.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">Contact</h3>
+                <p className="text-sm text-gray-700">
+                  For privacy enquiries contact AMAX Wealth compliance via the adviser contact details on this platform or submit a written request to our registered office.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
+                <span>Privacy policy acknowledged</span>
+                <span>2 Aug 2025</span>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="risk-disclosure">
+          <Card>
+            <CardContent className="p-6 space-y-6">
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                <p className="text-sm text-amber-800 italic">
+                  All investments carry risk. The value of your investments can go down as well as up. You may receive back less than you invest. Past performance is not a reliable indicator of future results.
+                </p>
+              </div>
+
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">1 &nbsp; Market risk</h3>
+                <p className="text-sm text-gray-700">
+                  Investment values fluctuate with market conditions including interest rate changes, economic developments, geopolitical events, and investor sentiment. Equity and digital asset investments are subject to higher volatility than fixed-income products.
+                </p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">8. Regulatory Risk</h3>
-                <p>Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX monitors regulatory developments and will notify clients of material changes that affect their holdings.</p>
+                <h3 className="font-semibold text-gray-900 mb-2">2 &nbsp; Currency risk</h3>
+                <p className="text-sm text-gray-700">
+                  Multi-currency investments are exposed to foreign exchange fluctuations. Changes in exchange rates can materially affect the value of your holdings when converted to your base currency. FX hedging is available for select products — confirm availability with your adviser.
+                </p>
               </div>
-              <p className="text-xs text-gray-400 pt-2">This disclosure is provided in accordance with the Corporations Act 2001 (Cth) and ASIC regulatory guidance | Last updated: January 2025</p>
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">3 &nbsp; Liquidity risk</h3>
+                <p className="text-sm text-gray-700">
+                  Some investment products have lock-up periods or limited redemption windows. You may be unable to access your funds on short notice. Always ensure you maintain sufficient liquid reserves outside your AMAX Wealth investments.
+                </p>
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">4 &nbsp; Credit risk</h3>
+                <p className="text-sm text-gray-700">
+                  Fixed-income products are subject to the credit risk of the issuer. A downgrade or default may result in partial or total loss of invested capital. Credit ratings are provided as guidance only and are not guarantees of performance.
+                </p>
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">5 &nbsp; Concentration risk</h3>
+                <p className="text-sm text-gray-700">
+                  Concentrating investments in a single asset class, sector, or geography increases vulnerability to adverse events. A diversified portfolio aligned to your risk tolerance may reduce concentration exposure — discuss with your adviser.
+                </p>
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">6 &nbsp; Technology and digital asset risk</h3>
+                <p className="text-sm text-gray-700">
+                  Digital assets and crypto investments are subject to additional risks including regulatory uncertainty, technological failures, smart contract vulnerabilities, and extreme price volatility. These products are available to wholesale investors only and carry the possibility of total loss of capital.
+                </p>
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">7 &nbsp; AI-generated content limitations</h3>
+                <p className="text-sm text-gray-700">
+                  AI tools on this platform provide general information only. They do not constitute regulated financial product advice under the Corporations Act 2001 (Cth). Always consult a licensed financial adviser before making investment decisions based on AI-generated content.
+                </p>
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-2">8 &nbsp; Regulatory risk</h3>
+                <p className="text-sm text-gray-700">
+                  Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX Wealth monitors regulatory developments and will notify clients of material changes affecting their holdings.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
+                <span>Disclosure acknowledged · Last updated January 2025 · Australian law applies</span>
+                <span>Signed 2 Aug 2025</span>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
       </Tabs>
+
+      <div className="text-xs text-gray-400 leading-relaxed pt-4 border-t border-gray-100">
+        Compliance documentation is maintained in accordance with AFSL obligations and ASIC requirements. AMAX Wealth Pty Ltd operates as an Authorised Representative under an Australian Financial Services Licence arrangement. All client data is handled in accordance with the Privacy Act 1988 (Cth).
+      </div>
     </div>
   );
 }
