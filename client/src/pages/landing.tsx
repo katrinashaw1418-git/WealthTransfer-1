@@ -294,7 +294,7 @@ export default function Landing() {
         </div>
       </section>
 
-      <footer className="bg-slate-950 text-slate-400 py-16">
+      <footer className="bg-slate-950 text-white py-16">
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
             <div>
@@ -302,31 +302,31 @@ export default function Landing() {
                 <img src={darkBlueLogo} alt="AMAX Wealth" className="w-8 h-8 rounded-lg" />
                 <span className="text-lg font-bold text-white">AMAX WEALTH</span>
               </div>
-              <p className="text-sm">
+              <p className="text-sm text-white">
                 Institutional-grade wealth management for wholesale investors under Australian Financial Services Licence arrangements.
               </p>
             </div>
             <div>
               <h4 className="text-white font-semibold mb-4">Platform</h4>
-              <ul className="space-y-2 text-sm">
-                <li><span className="hover:text-white cursor-pointer">Portfolio Reporting</span></li>
-                <li><span className="hover:text-white cursor-pointer">Investment Products</span></li>
-                <li><span className="hover:text-white cursor-pointer">Market Insights</span></li>
-                <li><span className="hover:text-white cursor-pointer">Compliance Centre</span></li>
+              <ul className="space-y-2 text-sm text-white">
+                <li><span className="cursor-pointer">Portfolio Reporting</span></li>
+                <li><span className="cursor-pointer">Investment Products</span></li>
+                <li><span className="cursor-pointer">Market Insights</span></li>
+                <li><span className="cursor-pointer">Compliance Centre</span></li>
               </ul>
             </div>
             <div>
               <h4 className="text-white font-semibold mb-4">Legal</h4>
-              <ul className="space-y-2 text-sm">
-                <li><span className="hover:text-white cursor-pointer">Financial Services Guide</span></li>
-                <li><span className="hover:text-white cursor-pointer">Privacy Policy</span></li>
-                <li><span className="hover:text-white cursor-pointer">Terms of Service</span></li>
-                <li><span className="hover:text-white cursor-pointer">Risk Disclosure</span></li>
+              <ul className="space-y-2 text-sm text-white">
+                <li><span className="cursor-pointer">Financial Services Guide</span></li>
+                <li><span className="cursor-pointer">Privacy Policy</span></li>
+                <li><span className="cursor-pointer">Terms of Service</span></li>
+                <li><span className="cursor-pointer">Risk Disclosure</span></li>
               </ul>
             </div>
             <div>
               <h4 className="text-white font-semibold mb-4">Contact</h4>
-              <ul className="space-y-2 text-sm">
+              <ul className="space-y-2 text-sm text-white">
                 <li>+61 2 8320 1908</li>
                 <li>info@amaxwealth.com.au</li>
                 <li className="pt-2">
@@ -337,22 +337,22 @@ export default function Landing() {
           </div>
 
           <div className="border-t border-slate-800 pt-8 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-white">
               <div>
-                <p className="font-medium text-slate-300 mb-1">AMAX Wealth</p>
+                <p className="font-medium text-white mb-1">AMAX Wealth</p>
                 <p>Authorised Representative No. [AR Number] of [AFSL Holder] (AFSL No. [AFSL Number]). ABN: [ABN].</p>
               </div>
               <div>
-                <p className="font-medium text-slate-300 mb-1">AMAX Global</p>
+                <p className="font-medium text-white mb-1">AMAX Global</p>
                 <p>Registered with AUSTRAC as a Digital Currency Exchange and Remittance provider. AUSTRAC Reg: [Registration Number].</p>
               </div>
             </div>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-white">
               AMAX Wealth does not hold client funds or assets. All positions are maintained with external regulated custodians. 
               This website does not constitute financial advice. Information provided is general in nature and does not take into 
               account your personal circumstances. Before making investment decisions, obtain advice from a qualified financial adviser.
             </p>
-            <p className="text-xs text-slate-600">
+            <p className="text-xs text-white">
               © {new Date().getFullYear()} AMAX Wealth. All rights reserved. Australian law applies.
             </p>
           </div>
