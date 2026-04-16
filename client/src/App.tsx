@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/auth";
 import Layout from "@/components/layout/layout";
+import Landing from "@/pages/landing";
 import Dashboard from "@/pages/dashboard";
 import WalletsNew from "@/pages/wallets-new";
 import Portfolio from "@/pages/portfolio";
@@ -25,7 +26,7 @@ function ProtectedApp() {
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated && !token) {
-      navigate("/login", { replace: true });
+      navigate("/", { replace: true });
     }
   }, [isLoading, isAuthenticated, token]);
 
@@ -48,7 +49,7 @@ function ProtectedApp() {
   return (
     <Layout>
       <Switch>
-        <Route path="/" component={Dashboard} />
+        <Route path="/dashboard" component={Dashboard} />
         <Route path="/wallets" component={WalletsNew} />
         <Route path="/portfolio" component={Portfolio} />
         <Route path="/ai-advisory" component={AiAdvisory} />
@@ -64,6 +65,7 @@ function ProtectedApp() {
 function Router() {
   return (
     <Switch>
+      <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
       <Route path="/forgot-password" component={ForgotPassword} />
       <Route path="/reset-password" component={ResetPassword} />

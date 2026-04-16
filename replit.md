@@ -3,6 +3,16 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Landing Page + Route Restructure
+
+### Public landing page added (`/`)
+- New public landing page at root `/` — visible without authentication
+- AFSL-compliant hero, investment products, wholesale eligibility criteria (s761G/s761GA)
+- Risk warning banner, entity separation in footer (AMAX Wealth AR vs AMAX Global AUSTRAC)
+- "How It Works" 4-step onboarding flow, CTA to Apply for Access / Sign In
+- Dashboard moved from `/` to `/dashboard`; sidebar and login redirect updated accordingly
+- Unauthenticated users redirect to landing page instead of login
+
 ## Recent Changes (April 2026) — AFSL-Compliant UI Redesign
 
 ### Removed FX Exchange page
