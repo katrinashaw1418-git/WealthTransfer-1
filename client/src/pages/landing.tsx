@@ -26,8 +26,7 @@ export default function Landing() {
   return (
     <div className="min-h-screen bg-white">
       <div className="bg-slate-900 px-4 py-2">
-        <div className="max-w-7xl mx-auto flex items-center justify-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+        <div className="max-w-7xl mx-auto flex items-center justify-center">
           <p className="text-xs text-slate-300">
             <strong>Notice:</strong> This website is currently under development. Features and content are subject to change.
           </p>
