@@ -243,3 +243,26 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
 });
 
 export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
+
+export const applications = pgTable("applications", {
+  id: serial("id").primaryKey(),
+  fullName: text("full_name").notNull(),
+  email: text("email").notNull().unique(),
+  phone: text("phone").notNull(),
+  country: text("country").notNull(),
+  accountType: text("account_type").notNull(),
+  entityName: text("entity_name"),
+  abn: text("abn"),
+  intendedUse: text("intended_use").notNull(),
+  consentOwnBehalf: boolean("consent_own_behalf").notNull().default(false),
+  consentAmlCtf: boolean("consent_aml_ctf").notNull().default(false),
+  consentContact: boolean("consent_contact").notNull().default(false),
+  status: text("status").notNull().default("submitted"),
+  reviewNote: text("review_note"),
+  createdAt: timestamp("created_at").defaultNow(),
+  reviewedAt: timestamp("reviewed_at"),
+});
+
+export const insertApplicationSchema = createInsertSchema(applications).omit({ id: true, createdAt: true, reviewedAt: true });
+export type Application = typeof applications.$inferSelect;
+export type InsertApplication = z.infer<typeof insertApplicationSchema>;

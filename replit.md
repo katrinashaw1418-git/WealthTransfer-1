@@ -3,6 +3,17 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Regulated Application Flow (April 2026)
+
+### Application → Approval → Account Creation
+- `/apply` — public page where prospective users submit details, select account type, intended use, and acknowledge compliance consents (own-behalf, AML/CTF, contact)
+- `/application-status` — public page to check application status by email; includes demo-only "Approve" button for testing
+- `/signup` — gated behind approved application; verifies approval server-side before allowing account creation; pre-fills email from query param
+- Server-side enforcement: `/api/auth/register` checks for approved application before allowing registration
+- Consent fields (`consentOwnBehalf`, `consentAmlCtf`, `consentContact`) persisted in `applications` table for audit trail
+- Landing page and login page "Apply for Access" links point to `/apply`
+- Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
+
 ## Recent Changes (April 2026) — Compliance / Legal Merge
 
 ### Legal & Compliance page (merged)

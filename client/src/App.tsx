@@ -16,6 +16,8 @@ import Compliance from "@/pages/compliance";
 import Investments from "@/pages/investments";
 import Login from "@/pages/login";
 import Signup from "@/pages/signup";
+import Apply from "@/pages/apply";
+import ApplicationStatus from "@/pages/application-status";
 import ForgotPassword from "@/pages/forgot-password";
 import ResetPassword from "@/pages/reset-password";
 import Onboarding from "@/pages/onboarding";
@@ -71,6 +73,8 @@ function Router() {
     <Switch>
       <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
+      <Route path="/apply" component={Apply} />
+      <Route path="/application-status" component={ApplicationStatus} />
       <Route path="/signup" component={Signup} />
       <Route path="/forgot-password" component={ForgotPassword} />
       <Route path="/reset-password" component={ResetPassword} />

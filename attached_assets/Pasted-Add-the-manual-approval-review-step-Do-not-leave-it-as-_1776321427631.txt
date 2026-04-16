@@ -1,0 +1,120 @@
+Add the **manual approval / review step**. Do **not** leave it as:
+
+**Apply for Access → create account → onboarding wizard → dashboard**
+
+For AMAX, the better flow is:
+
+**Apply for Access → review / approval → create account credentials → onboarding wizard → dashboard**
+
+Why:
+
+* it matches the “apply first, access later” positioning
+* it gives you a compliance gate before full account activation
+* it feels more credible for a regulated financial platform
+* it avoids looking like an instant retail sign-up flow
+
+A cleaner version is:
+
+**1. Apply for Access**
+Basic details, account type, intended use, consent to review.
+
+**2. Application Review**
+Show status: submitted / under review / approved / declined / more info required.
+
+**3. Invitation to Continue**
+Approved applicants receive email or SMS link.
+
+**4. Create Account**
+Set password, verify email, activate login credentials.
+
+**5. Onboarding Wizard**
+KYC, source of funds, agreements, verification.
+
+**6. Dashboard**
+Only after onboarding is complete.
+
+That is stronger than creating the account before review.
+
+For the two extra features:
+
+## 1. What-if scenario planner
+
+Yes — good feature, but this should come **after** the core compliance and onboarding flow is stable.
+
+Best use case:
+
+* simulate lump sum plus monthly contributions
+* compare base / optimistic / stressed market scenarios
+* show projected balance, return range, and contribution impact
+* include disclaimer that projections are illustrative only and not guaranteed
+
+Recommended inputs:
+
+* starting balance
+* monthly contribution
+* time horizon
+* expected annual return
+* volatility / scenario type
+* inflation assumption
+* one-off deposit or withdrawal
+
+Recommended outputs:
+
+* projected portfolio value
+* total contributions
+* estimated gains
+* best / base / worst case range
+* chart over time
+
+Important:
+Do not make it look like personal financial advice unless your licensing position supports that.
+
+## 2. Notification system
+
+Also good, and probably more immediately useful than the scenario planner if focused on operations and compliance.
+
+Best notification categories:
+
+* onboarding incomplete
+* identity verification required
+* document request
+* deposit received
+* withdrawal submitted
+* withdrawal pending review
+* transaction completed
+* unusual activity / security alert
+* regulatory or terms update
+* market price alert only if you really want trading-style functionality
+
+My recommendation:
+Prioritise notifications in this order:
+
+1. compliance and account notifications
+2. transaction status notifications
+3. optional market/event alerts later
+
+So the practical priority should be:
+
+**First**
+
+* add manual review step
+* finalise onboarding status logic
+* dashboard access gating
+
+**Second**
+
+* build notification system for compliance and transaction states
+
+**Third**
+
+* add what-if scenario planner as a value-add tool
+
+The sentence you were given should be corrected to this:
+
+> The preferred flow is: Apply for Access → application review → approved users create account credentials → onboarding wizard → dashboard.
+
+And for product planning:
+
+> Next priority features should be a compliance-aware notification system, followed by a what-if scenario planner for illustrative investment modelling.
+
+I can turn this into a polished product-spec block you can paste directly into your developer brief.

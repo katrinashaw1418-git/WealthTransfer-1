@@ -1,10 +1,11 @@
 import { 
-  users, wallets, portfolios, transactions, fxRates, aiRecommendations, investmentProducts, userInvestments, portfolioSnapshots,
+  users, wallets, portfolios, transactions, fxRates, aiRecommendations, investmentProducts, userInvestments, portfolioSnapshots, applications,
   type User, type InsertUser, type Wallet, type InsertWallet, 
   type Portfolio, type InsertPortfolio, type Transaction, type InsertTransaction,
   type FxRate, type InsertFxRate, type AiRecommendation, type InsertAiRecommendation,
   type InvestmentProduct, type InsertInvestmentProduct, type UserInvestment, type InsertUserInvestment,
-  type PortfolioSnapshot, type InsertPortfolioSnapshot
+  type PortfolioSnapshot, type InsertPortfolioSnapshot,
+  type Application, type InsertApplication
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, sql, and } from "drizzle-orm";
@@ -56,6 +57,11 @@ export interface IStorage {
   getPortfolioSnapshots(userId: number, startDate?: Date, endDate?: Date): Promise<PortfolioSnapshot[]>;
   createPortfolioSnapshot(snapshot: InsertPortfolioSnapshot): Promise<PortfolioSnapshot>;
   deletePortfolioSnapshotsForDay(userId: number, day: string): Promise<void>; // day = "YYYY-MM-DD"
+
+  // Applications
+  createApplication(application: InsertApplication): Promise<Application>;
+  getApplicationByEmail(email: string): Promise<Application | undefined>;
+  updateApplicationStatus(id: number, status: string, reviewNote?: string): Promise<Application | undefined>;
 }
 
 export class MemStorage implements IStorage {
@@ -3232,6 +3238,29 @@ export class MemStorage implements IStorage {
     );
     this.portfolioSnapshotsStore.set(userId, filtered);
   }
+
+  private applicationsStore: Map<number, Application> = new Map();
+  private applicationIdCounter = 1;
+
+  async createApplication(application: InsertApplication): Promise<Application> {
+    const id = this.applicationIdCounter++;
+    const app: Application = { ...application, id, status: application.status || "submitted", entityName: application.entityName || null, abn: application.abn || null, consentOwnBehalf: application.consentOwnBehalf ?? false, consentAmlCtf: application.consentAmlCtf ?? false, consentContact: application.consentContact ?? false, reviewNote: null, createdAt: new Date(), reviewedAt: null };
+    this.applicationsStore.set(id, app);
+    return app;
+  }
+
+  async getApplicationByEmail(email: string): Promise<Application | undefined> {
+    return Array.from(this.applicationsStore.values()).find(a => a.email.toLowerCase() === email.toLowerCase());
+  }
+
+  async updateApplicationStatus(id: number, status: string, reviewNote?: string): Promise<Application | undefined> {
+    const app = this.applicationsStore.get(id);
+    if (!app) return undefined;
+    app.status = status;
+    if (reviewNote) app.reviewNote = reviewNote;
+    app.reviewedAt = new Date();
+    return app;
+  }
 }
 
 // Database Storage Implementation - prevents data loss on server restart
@@ -3409,11 +3438,27 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deletePortfolioSnapshotsForDay(userId: number, day: string): Promise<void> {
-    // Delete all snapshots for this user whose date (truncated to day) matches
     await db.delete(portfolioSnapshots).where(
       sql`${portfolioSnapshots.userId} = ${userId}
           AND DATE(${portfolioSnapshots.snapshotDate}) = ${day}::date`
     );
+  }
+
+  async createApplication(application: InsertApplication): Promise<Application> {
+    const [app] = await db.insert(applications).values(application).returning();
+    return app;
+  }
+
+  async getApplicationByEmail(email: string): Promise<Application | undefined> {
+    const [app] = await db.select().from(applications).where(sql`LOWER(${applications.email}) = LOWER(${email})`);
+    return app || undefined;
+  }
+
+  async updateApplicationStatus(id: number, status: string, reviewNote?: string): Promise<Application | undefined> {
+    const values: any = { status, reviewedAt: new Date() };
+    if (reviewNote) values.reviewNote = reviewNote;
+    const [app] = await db.update(applications).set(values).where(eq(applications.id, id)).returning();
+    return app || undefined;
   }
 }
 

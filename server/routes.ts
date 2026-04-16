@@ -691,6 +691,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (existingEmail) {
         return res.status(409).json({ error: "An account with this email already exists" });
       }
+      const application = await storage.getApplicationByEmail(email);
+      if (!application || application.status !== "approved") {
+        return res.status(403).json({ error: "Account creation requires an approved application. Please apply first." });
+      }
       const username = email.split("@")[0] + "_" + Date.now().toString(36);
       const existingUsername = await storage.getUserByUsername(username);
       if (existingUsername) {
@@ -736,6 +740,86 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(409).json({ error: "An account with this email already exists" });
       }
       res.status(500).json({ error: "Registration failed. Please try again." });
+    }
+  });
+
+  app.post("/api/applications", async (req, res) => {
+    try {
+      const { fullName, email, phone, country, accountType, entityName, abn, intendedUse } = req.body;
+      if (!fullName || !email || !phone || !country || !accountType || !intendedUse) {
+        return res.status(400).json({ error: "All required fields must be completed" });
+      }
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ error: "Invalid email address" });
+      }
+      const existing = await storage.getApplicationByEmail(email);
+      if (existing) {
+        return res.status(409).json({ error: "An application with this email already exists", status: existing.status });
+      }
+      const existingUser = await storage.getUserByEmail(email);
+      if (existingUser) {
+        return res.status(409).json({ error: "An account with this email already exists. Please sign in." });
+      }
+      const { consentOwnBehalf, consentAmlCtf, consentContact: consentContactFlag } = req.body;
+      if (!consentOwnBehalf || !consentAmlCtf || !consentContactFlag) {
+        return res.status(400).json({ error: "All compliance acknowledgements are required" });
+      }
+      const application = await storage.createApplication({
+        fullName,
+        email: email.toLowerCase(),
+        phone,
+        country,
+        accountType,
+        entityName: entityName || null,
+        abn: abn || null,
+        intendedUse,
+        consentOwnBehalf: true,
+        consentAmlCtf: true,
+        consentContact: true,
+        status: "submitted",
+        reviewNote: null,
+      });
+      res.status(201).json({ id: application.id, status: application.status });
+    } catch (error: any) {
+      if (error.code === "23505") {
+        return res.status(409).json({ error: "An application with this email already exists" });
+      }
+      console.error("Application error:", error);
+      res.status(500).json({ error: "Failed to submit application" });
+    }
+  });
+
+  app.get("/api/applications/status/:email", async (req, res) => {
+    try {
+      const email = decodeURIComponent(req.params.email);
+      const application = await storage.getApplicationByEmail(email);
+      if (!application) {
+        return res.status(404).json({ error: "No application found for this email" });
+      }
+      res.json({
+        status: application.status,
+        fullName: application.fullName,
+        email: application.email,
+        createdAt: application.createdAt,
+        reviewedAt: application.reviewedAt,
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to check application status" });
+    }
+  });
+
+  app.post("/api/applications/approve/:email", async (req, res) => {
+    try {
+      const email = decodeURIComponent(req.params.email);
+      const application = await storage.getApplicationByEmail(email);
+      if (!application) {
+        return res.status(404).json({ error: "No application found" });
+      }
+      const updated = await storage.updateApplicationStatus(application.id, "approved");
+      res.json({ status: updated?.status });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to approve application" });
     }
   });
 
