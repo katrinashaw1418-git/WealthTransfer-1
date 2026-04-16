@@ -26,11 +26,10 @@ export default function Landing() {
   return (
     <div className="min-h-screen bg-white">
       <div className="bg-slate-900 px-4 py-2">
-        <div className="max-w-7xl mx-auto flex items-center gap-2">
+        <div className="max-w-7xl mx-auto flex items-center justify-center gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
           <p className="text-xs text-slate-300">
-            <strong>Important:</strong> All investments carry risk. The value of investments can go down as well as up. 
-            Past performance is not a reliable indicator of future results. This platform is for wholesale investors only.
+            <strong>Notice:</strong> This website is currently under development. Features and content are subject to change.
           </p>
         </div>
       </div>
@@ -49,10 +48,10 @@ export default function Landing() {
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
-            <Button variant="outline" className="border-slate-600 text-slate-300 hover:bg-slate-800 hover:text-white" onClick={() => navigate("/login")}>
+            <Button variant="outline" className="border-slate-500 text-white hover:bg-slate-800" onClick={() => navigate("/login")}>
               Sign In
             </Button>
-            <Button className="bg-amber-500 hover:bg-amber-400 text-slate-900" onClick={() => navigate("/login")}>
+            <Button className="bg-amber-500 hover:bg-amber-400 text-white font-semibold" onClick={() => navigate("/login")}>
               Apply for Access
             </Button>
           </div>
@@ -75,7 +74,7 @@ export default function Landing() {
             <div className="flex flex-col sm:flex-row gap-4">
               <Button 
                 size="lg" 
-                className="bg-amber-500 hover:bg-amber-400 text-slate-900 font-semibold"
+                className="bg-amber-500 hover:bg-amber-400 text-white font-semibold"
                 onClick={() => navigate("/login")}
               >
                 Apply for Access
@@ -84,7 +83,7 @@ export default function Landing() {
               <Button 
                 size="lg" 
                 variant="outline" 
-                className="border-slate-600 text-slate-300 hover:bg-slate-800"
+                className="border-slate-500 text-white hover:bg-slate-800"
                 onClick={() => {
                   const el = document.getElementById('how-it-works');
                   el?.scrollIntoView({ behavior: 'smooth' });
@@ -279,7 +278,7 @@ export default function Landing() {
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Button 
               size="lg" 
-              className="bg-amber-500 hover:bg-amber-400 text-slate-900 font-semibold"
+              className="bg-amber-500 hover:bg-amber-400 text-white font-semibold"
               onClick={() => navigate("/login")}
             >
               Apply for Access
@@ -288,7 +287,7 @@ export default function Landing() {
             <Button 
               size="lg" 
               variant="outline" 
-              className="border-slate-600 text-slate-300 hover:bg-slate-800"
+              className="border-slate-500 text-white hover:bg-slate-800"
               onClick={() => window.open('tel:+61283201908')}
             >
               <Phone className="w-4 h-4 mr-2" />
