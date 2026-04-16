@@ -21,16 +21,16 @@ import NotFound from "@/pages/not-found";
 import { Loader2 } from "lucide-react";
 
 function ProtectedApp() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, token } = useAuth();
   const [, navigate] = useLocation();
 
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      navigate("/login");
+    if (!isLoading && !isAuthenticated && !token) {
+      navigate("/login", { replace: true });
     }
-  }, [isLoading, isAuthenticated]);
+  }, [isLoading, isAuthenticated, token]);
 
-  if (isLoading) {
+  if (isLoading || (!isAuthenticated && token)) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
         <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
