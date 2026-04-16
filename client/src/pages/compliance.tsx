@@ -44,6 +44,7 @@ export default function Compliance() {
     { id: 2, type: "address", name: "Utility Bill", status: "under_review", uploadDate: "2024-01-12", size: "1.8 MB" },
     { id: 3, type: "bank_statement", name: "Bank Statement", status: "pending", uploadDate: "", size: "" },
     { id: 4, type: "income", name: "Income Statement", status: "pending", uploadDate: "", size: "" },
+    { id: 5, type: "wholesale_certificate", name: "Wholesale Investor Certificate (s761G/s761GA)", status: "pending", uploadDate: "", size: "" },
   ];
 
   const complianceMetrics = [
@@ -254,6 +255,12 @@ export default function Compliance() {
                 })}
               </div>
               
+              <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                <p className="text-xs text-amber-800">
+                  <strong>Wholesale Investor Certificate required:</strong> Under s761G/s761GA of the Corporations Act 2001 (Cth), your wholesale investor classification must be supported by a qualified accountant certificate confirming net assets of at least $2.5M or gross income of at least $250,000 p.a. for each of the last two financial years. This certificate must be uploaded before investment instructions can be processed.
+                </p>
+              </div>
+
               <div className="mt-6 p-4 border-2 border-dashed border-gray-300 rounded-lg text-center">
                 <Upload className="w-8 h-8 text-gray-400 mx-auto mb-3" />
                 <h3 className="font-medium text-gray-900 mb-1">Upload New Document</h3>
