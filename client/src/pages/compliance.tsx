@@ -61,10 +61,10 @@ export default function Compliance() {
 
       <Tabs defaultValue="kyc" className="space-y-6">
         <div className="overflow-x-auto">
-          <TabsList className="inline-flex h-auto gap-1 bg-slate-100 p-1 rounded-lg min-w-max">
-            <TabsTrigger value="kyc" className="min-w-[120px]">KYC status</TabsTrigger>
-            <TabsTrigger value="documents" className="min-w-[120px]">Documents</TabsTrigger>
-            <TabsTrigger value="risk" className="min-w-[120px]">Risk profile</TabsTrigger>
+          <TabsList className="inline-flex h-auto gap-1 bg-blue-50 border border-blue-200 p-1 rounded-lg min-w-max">
+            <TabsTrigger value="kyc" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[120px]">KYC status</TabsTrigger>
+            <TabsTrigger value="documents" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[120px]">Documents</TabsTrigger>
+            <TabsTrigger value="risk" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[120px]">Risk profile</TabsTrigger>
           </TabsList>
         </div>
 
