@@ -61,7 +61,7 @@ export default function Landing() {
       <section className="bg-slate-900 text-white">
         <div className="max-w-7xl mx-auto px-6 py-24 md:py-32">
           <div className="max-w-3xl">
-            <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 mb-6">
+            <Badge className="bg-white/10 text-white border-white/20 mb-6">
               Authorised Representative under AFSL
             </Badge>
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold leading-tight mb-6">
