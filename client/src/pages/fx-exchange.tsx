@@ -10,7 +10,7 @@ import { useWallets } from "@/hooks/use-portfolio";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowRightLeft, TrendingUp, TrendingDown, Wallet, Phone, MessageSquare, X } from "lucide-react";
+import { ArrowRightLeft, TrendingUp, TrendingDown, Wallet } from "lucide-react";
 
 const currencies = [
   { code: "USD", name: "US Dollar", flag: "🇺🇸" },
@@ -29,7 +29,6 @@ export default function FxExchange() {
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("CAD");
   const [amount, setAmount] = useState("10000");
-  const [showAdvisorBox, setShowAdvisorBox] = useState(true);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   
@@ -256,62 +255,6 @@ export default function FxExchange() {
         </div>
       </div>
 
-      {/* Floating Contact Your Advisor Box */}
-      {showAdvisorBox && (
-        <div className="fixed top-4 right-4 z-50 w-80">
-          <Card className="backdrop-blur-sm bg-white/95 border-purple-200 shadow-lg">
-            <CardContent className="p-4">
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center space-x-2">
-                  <div className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center">
-                    <MessageSquare className="w-4 h-4 text-white" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold text-sm">Wealth Planner</h3>
-                    <p className="text-xs text-gray-600">Advisory Team</p>
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowAdvisorBox(false)}
-                  className="h-6 w-6 p-0 hover:bg-gray-100"
-                >
-                  <X className="h-3 w-3" />
-                </Button>
-              </div>
-              
-              <p className="text-xs text-gray-700 mb-3">
-                Need help with currency exchange? Our wealth planners are here to assist.
-              </p>
-              
-              <div className="flex items-center space-x-2 text-purple-600 mb-3">
-                <Phone className="w-3 h-3" />
-                <span className="font-medium text-xs">+61 2 8320 1908</span>
-              </div>
-              
-              <div className="flex space-x-2">
-                <Button 
-                  variant="outline" 
-                  size="sm"
-                  onClick={() => window.open('tel:+61283201908', '_self')}
-                  className="flex-1 text-xs h-8"
-                >
-                  <Phone className="w-3 h-3 mr-1" />
-                  Call
-                </Button>
-                <Button 
-                  size="sm"
-                  className="flex-1 bg-purple-600 hover:bg-purple-700 text-xs h-8"
-                >
-                  <MessageSquare className="w-3 h-3 mr-1" />
-                  Message
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
     </div>
   );
 }

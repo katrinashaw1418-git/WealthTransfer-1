@@ -11,9 +11,16 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Absorbs Regulatory, Terms, Privacy, Risk Disclosure from old compliance page (no duplication)
 - File: `client/src/pages/legal.tsx`
 
+### Global Floating Adviser Box
+- Lives in `client/src/components/layout/layout.tsx` — appears on all authenticated pages
+- Fixed top-right, dismissible (X button), Call/Message buttons
+- Message dialog sends to `/api/advisor/contact`
+- Phone: +61 2 8320 1908
+- Per-page adviser boxes removed from: portfolio.tsx, investments.tsx, fx-exchange.tsx, ai-advisory.tsx, compliance.tsx
+
 ### KYC page (slimmed compliance)
 - Route: `/compliance` (sidebar: "KYC", Shield icon)
-- Header: "Welcome back, Wise" with adviser card
+- Header: "Welcome back, Wise" (adviser card removed — handled by global floating box)
 - Tier 2 verified banner, 4 metric cards
 - 3 tabs only: KYC status, Documents, Risk profile
 - Footer links to Legal & Compliance for regulatory/legal content
