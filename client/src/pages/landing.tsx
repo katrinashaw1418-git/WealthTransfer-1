@@ -51,7 +51,7 @@ export default function Landing() {
             <Button className="bg-slate-700 text-white hover:bg-slate-600 font-semibold" onClick={() => navigate("/login")}>
               Sign In
             </Button>
-            <Button className="bg-amber-500 hover:bg-amber-400 text-white font-semibold" onClick={() => navigate("/login")}>
+            <Button className="bg-white hover:bg-slate-100 text-slate-900 font-semibold" onClick={() => navigate("/login")}>
               Apply for Access
             </Button>
           </div>
@@ -74,7 +74,7 @@ export default function Landing() {
             <div className="flex flex-col sm:flex-row gap-4">
               <Button 
                 size="lg" 
-                className="bg-amber-500 hover:bg-amber-400 text-white font-semibold"
+                className="bg-white hover:bg-slate-100 text-slate-900 font-semibold"
                 onClick={() => navigate("/login")}
               >
                 Apply for Access
@@ -277,7 +277,7 @@ export default function Landing() {
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Button 
               size="lg" 
-              className="bg-amber-500 hover:bg-amber-400 text-white font-semibold"
+              className="bg-white hover:bg-slate-100 text-slate-900 font-semibold"
               onClick={() => navigate("/login")}
             >
               Apply for Access
