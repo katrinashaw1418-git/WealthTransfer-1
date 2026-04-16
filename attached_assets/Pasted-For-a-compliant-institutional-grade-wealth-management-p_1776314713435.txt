@@ -1,0 +1,29 @@
+For a compliant, institutional-grade wealth management platform, here are the pages you still need beyond what we've built:
+
+**Pages you definitely need (regulatory/legal requirement)**
+
+1. **Statement of Advice (SOA) viewer** — a dedicated page where clients receive, read, and formally acknowledge their SOA before any personal advice is acted on. Without this workflow the platform has no compliant pathway from general information to investment action.
+
+2. **Onboarding / fact-find flow** — the multi-step wizard that collects goals, financial situation, dependants, income, assets, liabilities, and investment experience before a client can access advice. This is the legal basis for every SOA issued.
+
+3. **Wholesale investor verification** — a standalone flow where the client uploads their accountant certificate, confirms net assets or income, and receives their classification. Currently your compliance centre references this but there's no page to complete it.
+
+4. **AFCA complaints page** — AFSL holders must display a clear pathway to lodge complaints both internally and via AFCA. ASIC can and does check this during surveillance.
+
+**Pages that complete the product experience**
+
+5. **Individual product detail page** — each fund needs its own page with the Information Memorandum, risk summary, fees, liquidity terms, and a subscription flow. The "Invest Now" buttons on your products page currently go nowhere.
+
+6. **Subscription / investment instruction flow** — the step-by-step process: confirm amount → review product terms → acknowledge risks → sign instruction → payment routing to AMAX Global or external custodian. This is what sits between browsing and transacting.
+
+7. **Adviser portal / messaging** — a secure channel between client and adviser where SOAs can be delivered and signed, and discussions are logged for the audit trail.
+
+**Public-facing pages (landing page set)**
+
+8. **Landing / marketing homepage** — your main public page. This needs very careful wording (no "personalised advice", no return promises) and must clearly state the AR/AFSL status in the footer.
+
+9. **About / team page** — who the responsible managers are, the AFSL licence number, and the Authorised Representative number. ASIC requires this to be publicly accessible.
+
+10. **Legal & disclosures hub** — a single public URL containing FSG (Financial Services Guide), privacy policy, terms of service, and the risk disclosure. The FSG is a legal requirement before advice is provided.
+
+Shall I build any of these? The most impactful next ones to do in order would be:
