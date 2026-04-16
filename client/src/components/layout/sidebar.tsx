@@ -25,7 +25,7 @@ const navigation = [
   { name: "Portfolio Overview", href: "/wallets", icon: Briefcase },
   { name: "Portfolio", href: "/portfolio", icon: PieChart },
   { name: "Investments", href: "/investments", icon: Building2 },
-  { name: "AI Advisory", href: "/ai-advisory", icon: Bot },
+  { name: "Market Insights", href: "/ai-advisory", icon: Bot },
   { name: "Activity", href: "/transactions", icon: History },
   { name: "Compliance", href: "/compliance", icon: Shield },
 ];

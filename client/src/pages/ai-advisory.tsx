@@ -353,28 +353,28 @@ export default function AiAdvisory() {
     level: riskTolerance[0] <= 2 ? "Conservative" : riskTolerance[0] <= 4 ? "Moderate" : "Aggressive",
     description: (() => {
       const baseRisk = riskTolerance[0] <= 2 
-        ? "You prefer stable returns with minimal risk of loss"
+        ? "Conservative investors typically prefer stable returns with minimal risk of loss"
         : riskTolerance[0] <= 4 
-        ? "You're comfortable with some volatility for potentially higher returns"
-        : "You're willing to accept high volatility for maximum growth potential";
+        ? "Moderate investors may accept some volatility for potentially higher returns"
+        : "Aggressive investors may accept high volatility for maximum growth potential";
       
       const goalText = investmentGoal === "preservation" 
-        ? ", focusing on capital preservation"
+        ? ", with a focus on capital preservation"
         : investmentGoal === "income" 
-        ? ", prioritizing income generation"
+        ? ", prioritising income generation"
         : investmentGoal === "growth" 
         ? ", targeting long-term growth"
         : ", pursuing aggressive growth";
       
       const horizonText = investmentHorizon === "1-3" 
-        ? " over 1-3 years"
+        ? " over 1-3 year horizons"
         : investmentHorizon === "3-5" 
-        ? " over 3-5 years"
+        ? " over 3-5 year horizons"
         : investmentHorizon === "5-10" 
-        ? " over 5-10 years"
-        : " over 10+ years";
+        ? " over 5-10 year horizons"
+        : " over 10+ year horizons";
       
-      return baseRisk + goalText + horizonText + ".";
+      return baseRisk + goalText + horizonText + ". This is general information only.";
     })(),
   };
 
@@ -417,7 +417,7 @@ export default function AiAdvisory() {
             <div className="space-y-2">
               <div className="flex items-center space-x-3">
                 <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                  AI Advisory Dashboard
+                  General Market Insights
                 </h1>
                 <div className="flex items-center space-x-1 px-2 py-1 bg-green-100 rounded-full">
                   <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
@@ -426,7 +426,7 @@ export default function AiAdvisory() {
               </div>
               
               <p className="text-gray-600 text-lg max-w-md">
-                Get personalized investment insights and recommendations powered by artificial intelligence
+                General market commentary and educational information — not personal advice
               </p>
               
               <div className="flex items-center space-x-4 pt-2">
@@ -638,7 +638,7 @@ export default function AiAdvisory() {
                 className="w-full"
               >
                 <Bot className="w-4 h-4 mr-2" />
-                {generateRecommendationsMutation.isPending ? "Updating..." : "Update AI Recommendations"}
+                {generateRecommendationsMutation.isPending ? "Updating..." : "Refresh Market Commentary"}
               </Button>
             </CardContent>
           </Card>
@@ -648,7 +648,7 @@ export default function AiAdvisory() {
         <div className="lg:col-span-2 space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>AI Recommendations</CardTitle>
+              <CardTitle>Market Commentary</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -670,7 +670,7 @@ export default function AiAdvisory() {
                               </h4>
                               <div className="flex items-center space-x-2">
                                 {!recommendation.isRead && (
-                                  <Badge variant="secondary" className="text-xs">New</Badge>
+                                  <Badge variant="secondary" className="text-xs">General</Badge>
                                 )}
                                 <Button
                                   size="sm"
@@ -702,10 +702,9 @@ export default function AiAdvisory() {
                               <Button 
                                 size="sm" 
                                 variant="outline"
-                                onClick={() => applyRecommendationMutation.mutate(recommendation.id)}
-                                disabled={applyRecommendationMutation.isPending}
+                                onClick={() => setAdvisorModalOpen(true)}
                               >
-                                {applyRecommendationMutation.isPending ? "Applying..." : "Apply Suggestion"}
+                                Discuss with Adviser
                               </Button>
                             </div>
                           </div>
@@ -721,7 +720,7 @@ export default function AiAdvisory() {
           {/* Suggested Portfolio Allocation */}
           <Card>
             <CardHeader>
-              <CardTitle>Suggested Portfolio Rebalancing</CardTitle>
+              <CardTitle>Illustrative Benchmark Comparison</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -778,22 +777,18 @@ export default function AiAdvisory() {
                   </div>
                 </div>
               </div>
+              <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                <p className="text-xs text-amber-800">
+                  This comparison is illustrative only and does not constitute a recommendation to rebalance. 
+                  Contact your adviser to discuss whether changes to your portfolio allocation are appropriate for your circumstances.
+                </p>
+              </div>
               <Button 
                 className="w-full mt-4"
-                onClick={() => {
-                  // Create a rebalancing recommendation and apply it
-                  const rebalancingRecommendation = {
-                    id: Date.now(), // temporary ID
-                    type: "rebalancing",
-                    title: "Portfolio Rebalancing Strategy",
-                    description: "Implement the suggested asset allocation to optimize risk-adjusted returns",
-                    severity: "info" as const
-                  };
-                  applyRecommendationMutation.mutate(rebalancingRecommendation.id);
-                }}
-                disabled={applyRecommendationMutation.isPending}
+                variant="outline"
+                onClick={() => setAdvisorModalOpen(true)}
               >
-                {applyRecommendationMutation.isPending ? "Implementing..." : "Implement Rebalancing Strategy"}
+                Discuss with Adviser
               </Button>
             </CardContent>
           </Card>

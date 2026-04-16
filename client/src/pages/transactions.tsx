@@ -262,9 +262,10 @@ export default function Transactions() {
         </CardContent>
       </Card>
 
-      <p className="text-center text-xs text-gray-400">
-        All records are maintained for regulatory compliance and audit purposes.
-      </p>
+      <div className="text-center text-xs text-gray-400 space-y-1">
+        <p>All records are maintained in accordance with s912A of the Corporations Act 2001 (Cth) and retained for a minimum of 7 years.</p>
+        <p>Transaction instructions are executed via external custodians and fund managers. AMAX Wealth does not hold client funds.</p>
+      </div>
     </div>
   );
 }

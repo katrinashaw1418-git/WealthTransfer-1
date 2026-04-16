@@ -90,7 +90,7 @@ export default function WealthOverview() {
       <Card>
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-medium text-gray-500">Crypto Holdings</h3>
+            <h3 className="text-sm font-medium text-gray-500">Digital Asset Exposure</h3>
             <Bitcoin className="w-4 h-4 text-yellow-500" />
           </div>
           <div className="space-y-2">
@@ -107,7 +107,7 @@ export default function WealthOverview() {
       <Card>
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-medium text-gray-500">Available Cash</h3>
+            <h3 className="text-sm font-medium text-gray-500">Cash Allocation</h3>
             <DollarSign className="w-4 h-4 text-primary" />
           </div>
           <div className="space-y-2">
@@ -115,7 +115,7 @@ export default function WealthOverview() {
               ${fiatValue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
             </p>
             <div className="flex items-center space-x-2">
-              <span className="text-sm text-gray-600">Multi-currency</span>
+              <span className="text-sm text-gray-600">Via external custodian</span>
             </div>
           </div>
         </CardContent>
@@ -124,7 +124,7 @@ export default function WealthOverview() {
       <Card>
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-medium text-gray-500">Monthly P&L</h3>
+            <h3 className="text-sm font-medium text-gray-500">Monthly P&L (indicative)</h3>
             {!monthlyPnlKnown ? (
               <TrendingUp className="w-4 h-4 text-gray-400" />
             ) : monthlyPnl! >= 0 ? (

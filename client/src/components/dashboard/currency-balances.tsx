@@ -3,17 +3,20 @@ import { useWallets } from "@/hooks/use-portfolio";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const currencyConfig = {
-  USD: { name: "US Dollar", symbol: "$", color: "bg-blue-500" },
+  USD: { name: "US Dollar", symbol: "$", color: "bg-green-500" },
   CAD: { name: "Canadian Dollar", symbol: "$", color: "bg-red-500" },
   EUR: { name: "Euro", symbol: "€", color: "bg-blue-600" },
-  GBP: { name: "British Pound", symbol: "£", color: "bg-green-600" },
+  GBP: { name: "British Pound", symbol: "£", color: "bg-purple-500" },
   AUD: { name: "Australian Dollar", symbol: "$", color: "bg-orange-500" },
   HKD: { name: "Hong Kong Dollar", symbol: "$", color: "bg-pink-500" },
+  SGD: { name: "Singapore Dollar", symbol: "$", color: "bg-teal-500" },
   BTC: { name: "Bitcoin", symbol: "₿", color: "bg-yellow-500" },
-  ETH: { name: "Ethereum", symbol: "Ξ", color: "bg-purple-500" },
-  USDT: { name: "Tether", symbol: "₮", color: "bg-green-500" },
-  USDC: { name: "USD Coin", symbol: "◎", color: "bg-blue-400" },
+  ETH: { name: "Ethereum", symbol: "Ξ", color: "bg-indigo-500" },
+  USDT: { name: "Tether", symbol: "₮", color: "bg-emerald-500" },
+  USDC: { name: "USD Coin", symbol: "◎", color: "bg-sky-400" },
 };
+
+const fiatCurrencies = ['USD', 'AUD', 'CAD', 'EUR', 'GBP', 'HKD', 'SGD'];
 
 export default function CurrencyBalances() {
   const { data: wallets, isLoading, error } = useWallets();
@@ -22,7 +25,7 @@ export default function CurrencyBalances() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Currency Balances</CardTitle>
+          <CardTitle>Asset Allocation</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           {[1, 2, 3].map((i) => (
@@ -46,10 +49,10 @@ export default function CurrencyBalances() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Currency Balances</CardTitle>
+          <CardTitle>Asset Allocation</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-destructive">Failed to load wallet balances</p>
+          <p className="text-sm text-destructive">Failed to load allocation data</p>
         </CardContent>
       </Card>
     );
@@ -59,10 +62,10 @@ export default function CurrencyBalances() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Currency Balances</CardTitle>
+          <CardTitle>Asset Allocation</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground">No wallet balances available</p>
+          <p className="text-sm text-muted-foreground">No allocation data available</p>
         </CardContent>
       </Card>
     );
@@ -71,20 +74,21 @@ export default function CurrencyBalances() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Currency Balances</CardTitle>
+        <CardTitle>Asset Allocation</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
           {wallets.map((wallet: any) => {
             const config = currencyConfig[wallet.currency as keyof typeof currencyConfig];
             const balance = parseFloat(wallet.balance);
+            const isFiat = fiatCurrencies.includes(wallet.currency);
             
             return (
               <div key={wallet.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                 <div className="flex items-center space-x-3">
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center ${config?.color || 'bg-gray-500'}`}>
                     <span className="text-white font-bold text-xs">
-                      {config?.symbol || wallet.currency.slice(0, 2)}
+                      {wallet.currency.charAt(0)}
                     </span>
                   </div>
                   <div>
@@ -92,7 +96,7 @@ export default function CurrencyBalances() {
                       {config?.name || wallet.currency}
                     </p>
                     <p className="text-sm text-gray-500">
-                      {wallet.walletType === 'crypto' ? 'Crypto' : 'Available'}
+                      {isFiat ? 'Via external custodian' : 'Digital exposure'}
                     </p>
                   </div>
                 </div>

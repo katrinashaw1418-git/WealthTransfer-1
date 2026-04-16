@@ -1,7 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Bot, Lightbulb, TrendingUp, AlertTriangle } from "lucide-react";
+import { Bot, Lightbulb, TrendingUp, AlertTriangle, Info } from "lucide-react";
 import { useAiRecommendations } from "@/hooks/use-portfolio";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -92,8 +92,8 @@ export default function AiAdvisoryPanel() {
               <Bot className="w-4 h-4 text-white" />
             </div>
             <div>
-              <CardTitle>AI Advisory</CardTitle>
-              <p className="text-sm text-gray-500">Personalized recommendations</p>
+              <CardTitle>Market Insights</CardTitle>
+              <p className="text-sm text-gray-500">General information only</p>
             </div>
           </div>
         </CardHeader>
@@ -118,8 +118,8 @@ export default function AiAdvisoryPanel() {
             <Bot className="w-4 h-4 text-white" />
           </div>
           <div>
-            <CardTitle>AI Advisory</CardTitle>
-            <p className="text-sm text-gray-500">Personalized recommendations</p>
+            <CardTitle>Market Insights</CardTitle>
+            <p className="text-sm text-gray-500">General information only — not personal advice</p>
           </div>
         </div>
       </CardHeader>
@@ -141,7 +141,7 @@ export default function AiAdvisoryPanel() {
                         {recommendation.title}
                       </h4>
                       {!recommendation.isRead && (
-                        <Badge variant="secondary" className="text-xs">New</Badge>
+                        <Badge variant="secondary" className="text-xs">General</Badge>
                       )}
                     </div>
                     <p className={`text-sm ${getDescriptionColor(recommendation.severity)}`}>
@@ -153,15 +153,24 @@ export default function AiAdvisoryPanel() {
             );
           })}
         </div>
+
+        <div className="mt-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <div className="flex items-start space-x-2">
+            <Info className="w-3.5 h-3.5 text-gray-400 mt-0.5 flex-shrink-0" />
+            <p className="text-xs text-gray-500">
+              These insights are general in nature and do not constitute personal financial advice. 
+              Contact your adviser before acting on any market commentary.
+            </p>
+          </div>
+        </div>
         
         <Button
-          className="w-full mt-6 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
+          className="w-full mt-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600"
           onClick={() => {
-            // Navigate to AI Advisory page using proper routing
             window.location.pathname = "/ai-advisory";
           }}
         >
-          Get Detailed Analysis
+          View Market Insights
         </Button>
       </CardContent>
     </Card>

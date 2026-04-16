@@ -360,55 +360,63 @@ export default function Compliance() {
                   <div className="p-4 border rounded-lg">
                     <div className="flex items-center space-x-3 mb-3">
                       <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">FINTRAC (Canada)</h3>
+                      <h3 className="font-medium">AFSL — Authorised Representative</h3>
                     </div>
-                    <Badge className="bg-green-100 text-green-800 mb-2">Compliant</Badge>
+                    <Badge className="bg-green-100 text-green-800 mb-2">Active</Badge>
                     <p className="text-sm text-gray-600">
-                      Money Services Business registration and AML compliance verified.
+                      AMAX Wealth operates as an Authorised Representative under an Australian Financial Services Licence. AR Number: [AR Number].
                     </p>
                   </div>
 
                   <div className="p-4 border rounded-lg">
                     <div className="flex items-center space-x-3 mb-3">
                       <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">GDPR (EU)</h3>
+                      <h3 className="font-medium">AUSTRAC — AMAX Global</h3>
                     </div>
-                    <Badge className="bg-green-100 text-green-800 mb-2">Compliant</Badge>
+                    <Badge className="bg-green-100 text-green-800 mb-2">Registered</Badge>
                     <p className="text-sm text-gray-600">
-                      Data protection and privacy regulations compliance confirmed.
+                      AMAX Global is registered with AUSTRAC as a Digital Currency Exchange and Remittance provider. FX and payment services are executed via AMAX Global, a separate entity.
                     </p>
                   </div>
 
                   <div className="p-4 border rounded-lg">
                     <div className="flex items-center space-x-3 mb-3">
                       <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">PIPEDA (Canada)</h3>
+                      <h3 className="font-medium">AFCA Membership</h3>
                     </div>
-                    <Badge className="bg-green-100 text-green-800 mb-2">Compliant</Badge>
+                    <Badge className="bg-green-100 text-green-800 mb-2">Member</Badge>
                     <p className="text-sm text-gray-600">
-                      Personal Information Protection and Electronic Documents Act compliance.
+                      AMAX Wealth is a member of the Australian Financial Complaints Authority for external dispute resolution. AFCA has discretion regarding complaints from wholesale clients.
                     </p>
                   </div>
 
                   <div className="p-4 border rounded-lg">
                     <div className="flex items-center space-x-3 mb-3">
                       <Building className="w-5 h-5 text-primary" />
-                      <h3 className="font-medium">FinCEN (US)</h3>
+                      <h3 className="font-medium">Privacy Act 1988 (Cth)</h3>
                     </div>
-                    <Badge className="bg-yellow-100 text-yellow-800 mb-2">Pending</Badge>
+                    <Badge className="bg-green-100 text-green-800 mb-2">Compliant</Badge>
                     <p className="text-sm text-gray-600">
-                      Financial Crimes Enforcement Network registration in progress.
+                      Data handling complies with the Australian Privacy Principles under the Privacy Act 1988 (Cth).
                     </p>
                   </div>
                 </div>
 
                 <div className="p-4 bg-blue-50 rounded-lg">
-                  <h4 className="font-medium text-blue-900 mb-2">Regulatory Updates</h4>
-                  <ul className="text-sm text-blue-700 space-y-1">
-                    <li>• New AML guidelines effective Q2 2024</li>
-                    <li>• Enhanced due diligence requirements for high-value transactions</li>
-                    <li>• Updated privacy policy in compliance with latest regulations</li>
-                  </ul>
+                  <h4 className="font-medium text-blue-900 mb-2">Record-Keeping Obligations</h4>
+                  <p className="text-sm text-blue-700">
+                    AMAX Wealth maintains records in accordance with s912A of the Corporations Act 2001 (Cth). 
+                    All transaction records, advice documents, and compliance records are retained for a minimum of 7 years.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-gray-50 rounded-lg border">
+                  <h4 className="font-medium text-gray-900 mb-2">Entity Separation</h4>
+                  <p className="text-sm text-gray-600">
+                    <strong>AMAX Wealth</strong> provides advisory and reporting services under AFSL arrangements. 
+                    <strong> AMAX Global</strong> provides FX, remittance, and digital currency exchange services under AUSTRAC registration. 
+                    These are separate entities with distinct regulatory obligations. Client funds are not held by AMAX Wealth.
+                  </p>
                 </div>
               </div>
             </CardContent>
@@ -439,7 +447,7 @@ export default function Compliance() {
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">4. Services</h3>
-                <p>AMAX provides multi-currency wallet management, foreign exchange services, investment products, and AI-assisted financial advisory tools. All investment services are subject to applicable financial regulations and require completed KYC verification.</p>
+                <p>AMAX Wealth provides portfolio reporting, advisory services, and investment product access under AFSL arrangements. FX and payment services are provided separately by AMAX Global under AUSTRAC registration. Client funds and assets are maintained with external regulated custodians and are not held by AMAX Wealth. All investment services are subject to applicable financial regulations and require completed KYC verification.</p>
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">5. Fees and Charges</h3>
@@ -450,10 +458,14 @@ export default function Compliance() {
                 <p>AMAX is not liable for losses arising from market fluctuations, system outages, third-party failures, or events beyond our reasonable control. Our total liability to you shall not exceed fees paid in the preceding 12 months.</p>
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900 text-base mb-2">7. Governing Law</h3>
-                <p>These Terms are governed by the laws of England and Wales. Disputes shall be subject to the exclusive jurisdiction of the courts of England and Wales.</p>
+                <h3 className="font-semibold text-gray-900 text-base mb-2">7. Custody Disclaimer</h3>
+                <p>AMAX Wealth does not hold client funds or assets. All positions are maintained with external regulated custodians. AMAX Wealth acts solely as an advisory and reporting platform under its Authorised Representative arrangement.</p>
               </div>
-              <p className="text-xs text-gray-400 pt-2">Last updated: January 2024 | Version 3.2</p>
+              <div>
+                <h3 className="font-semibold text-gray-900 text-base mb-2">8. Governing Law</h3>
+                <p>These Terms are governed by the laws of the Commonwealth of Australia. Disputes shall be subject to the jurisdiction of the courts of New South Wales, Australia.</p>
+              </div>
+              <p className="text-xs text-gray-400 pt-2">Last updated: January 2025 | Version 4.0 | Australian law applies</p>
             </CardContent>
           </Card>
         </TabsContent>
@@ -470,7 +482,7 @@ export default function Compliance() {
             <CardContent className="prose prose-sm max-w-none text-gray-700 space-y-4">
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">1. Data We Collect</h3>
-                <p>We collect information you provide directly (name, email, government ID, financial data), usage data (transaction history, platform interactions), and technical data (IP address, device type, browser). All collection is governed by GDPR and applicable data protection laws.</p>
+                <p>We collect information you provide directly (name, email, government ID, financial data), usage data (transaction history, platform interactions), and technical data (IP address, device type, browser). All collection is governed by the Australian Privacy Principles under the Privacy Act 1988 (Cth).</p>
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">2. How We Use Your Data</h3>
@@ -486,7 +498,7 @@ export default function Compliance() {
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">5. Your Rights</h3>
-                <p>Under GDPR you have the right to: access your data, correct inaccuracies, request deletion (where not legally required to retain), object to processing, data portability, and withdraw consent. Submit requests to privacy@amax.finance.</p>
+                <p>Under the Australian Privacy Principles you have the right to: access your personal information, request correction of inaccuracies, and make complaints about privacy breaches. Submit requests to privacy@amaxwealth.com.au. Financial records subject to s912A retention requirements cannot be deleted during the 7-year retention period.</p>
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">6. Cookies</h3>
@@ -494,9 +506,9 @@ export default function Compliance() {
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 text-base mb-2">7. Security</h3>
-                <p>We employ industry-standard security measures including AES-256 encryption at rest, TLS 1.3 in transit, multi-factor authentication, and regular penetration testing. In the event of a data breach, we will notify affected users within 72 hours as required by GDPR.</p>
+                <p>We employ industry-standard security measures including AES-256 encryption at rest, TLS 1.3 in transit, multi-factor authentication, and regular penetration testing. In the event of a notifiable data breach, we will notify the Office of the Australian Information Commissioner and affected individuals as required under the Notifiable Data Breaches scheme.</p>
               </div>
-              <p className="text-xs text-gray-400 pt-2">Last updated: January 2024 | Compliant with GDPR, CCPA, and FCA requirements</p>
+              <p className="text-xs text-gray-400 pt-2">Last updated: January 2025 | Compliant with Australian Privacy Principles (Privacy Act 1988)</p>
             </CardContent>
           </Card>
         </TabsContent>
@@ -547,7 +559,7 @@ export default function Compliance() {
                 <h3 className="font-semibold text-gray-900 text-base mb-2">8. Regulatory Risk</h3>
                 <p>Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX monitors regulatory developments and will notify clients of material changes that affect their holdings.</p>
               </div>
-              <p className="text-xs text-gray-400 pt-2">This disclosure is provided in accordance with FCA COBS 4.2 requirements | Last updated: January 2024</p>
+              <p className="text-xs text-gray-400 pt-2">This disclosure is provided in accordance with the Corporations Act 2001 (Cth) and ASIC regulatory guidance | Last updated: January 2025</p>
             </CardContent>
           </Card>
         </TabsContent>

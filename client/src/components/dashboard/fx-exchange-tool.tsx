@@ -78,7 +78,8 @@ export default function FxExchangeTool() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>FX Exchange</CardTitle>
+        <CardTitle>FX Calculator</CardTitle>
+        <p className="text-xs text-gray-500 mt-1">Executed via AMAX Global (AUSTRAC-registered)</p>
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -152,7 +153,7 @@ export default function FxExchangeTool() {
           onClick={handleExchange}
           disabled={exchangeMutation.isPending || rateLoading}
         >
-          {exchangeMutation.isPending ? "Processing..." : "Exchange Now"}
+          {exchangeMutation.isPending ? "Processing..." : "Proceed to AMAX Global"}
         </Button>
       </CardContent>
     </Card>
