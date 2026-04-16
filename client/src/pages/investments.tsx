@@ -302,7 +302,7 @@ export default function Investments() {
                     <Phone className="w-4 h-4 text-white" />
                   </div>
                   <div>
-                    <p className="text-xs text-blue-600 font-medium">+61 2 7257 9750</p>
+                    <p className="text-xs text-blue-600 font-medium">+2 8320 1908</p>
                   </div>
                 </div>
               </div>
@@ -311,7 +311,7 @@ export default function Investments() {
                 <Button 
                   variant="outline" 
                   size="sm"
-                  onClick={() => window.open('tel:+61272579750')}
+                  onClick={() => window.open('tel:+283201908')}
                   className="flex-1 text-xs hover:bg-blue-50 border-blue-200"
                 >
                   <Phone className="w-3 h-3 mr-1" />
@@ -756,7 +756,7 @@ export default function Investments() {
           <div className="space-y-4">
             <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
               <p className="text-sm text-blue-700">
-                <strong>Phone:</strong> +61 2 7257 9750
+                <strong>Phone:</strong> +2 8320 1908
               </p>
             </div>
             
