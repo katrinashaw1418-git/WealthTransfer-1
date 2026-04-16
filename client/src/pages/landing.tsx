@@ -43,7 +43,7 @@ export default function Landing() {
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-slate-300 hover:text-white">
+            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-white">
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
