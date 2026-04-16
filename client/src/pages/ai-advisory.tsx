@@ -3,17 +3,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/queryClient";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
-  Shield,
   Phone,
   MessageSquare,
   ExternalLink,
-  Download,
-  Upload,
 } from "lucide-react";
 
 const allocationData = [
@@ -23,51 +18,10 @@ const allocationData = [
   { asset: "Investment products", current: 50, benchmark: 30, diff: -20 },
 ];
 
-const activityData = [
-  { date: "4 Aug 2025", ref: "TXN-003", name: "Corporate Credit Fund", desc: "Instruction via external fund manager", amount: "USD 25,000", status: "Settled" },
-  { date: "4 Aug 2025", ref: "TXN-002", name: "Bitcoin Tracker Fund", desc: "Instruction via external fund manager", amount: "USD 25,000", status: "Settled" },
-  { date: "2 Aug 2025", ref: "TXN-001", name: "Bitcoin Tracker Fund", desc: "Instruction via external fund manager", amount: "USD 500,000", status: "Settled" },
-];
-
-const kycSteps = [
-  { num: 1, title: "Identity verification", desc: "Completed 2 Aug 2025", status: "completed" },
-  { num: 2, title: "AML screening", desc: "Passed 2 Aug 2025", status: "completed" },
-  { num: 3, title: "Source of funds declaration", desc: "Submitted — pending compliance review", status: "pending" },
-  { num: 4, title: "Risk assessment", desc: "Not yet commenced", status: "not_started" },
-];
-
-const documents = [
-  { name: "Government-issued ID", desc: "Verified", status: "Verified", color: "bg-green-100 text-green-700" },
-  { name: "Proof of address", desc: "Utility bill or bank statement", status: "Verified", color: "bg-green-100 text-green-700" },
-  { name: "Source of funds declaration", desc: "Under review", status: "Under review", color: "bg-amber-100 text-amber-700" },
-  { name: "Wholesale investor certificate", desc: "Required — s761GA accountant-certified", status: "Required", color: "bg-amber-100 text-amber-700", hasUpload: true },
-  { name: "Signed risk disclosure", desc: "Acknowledged 2 Aug 2025", status: "Signed", color: "bg-green-100 text-green-700" },
-];
-
-const regulatoryRows = [
-  { label: "AMAX Wealth Pty Ltd", value: "Authorised Representative — AFSL" },
-  { label: "AMAX Global Pty Ltd", value: "AUSTRAC — DCE & Remittance" },
-  { label: "Client classification", value: "Wholesale — s761G" },
-  { label: "Dispute resolution", value: "AFCA member — 1800 931 678" },
-  { label: "Record keeping", value: "s912A — 7-year minimum" },
-  { label: "Privacy", value: "Privacy Act 1988 (Cth)" },
-];
-
 const soaItems = [
   { title: "Initial SOA — portfolio strategy", desc: "Requested 2 Aug 2025 · Pending adviser review", status: "Pending", color: "bg-amber-100 text-amber-700" },
   { title: "Risk questionnaire acknowledgement", desc: "Completed 2 Aug 2025", status: "Complete", color: "bg-green-100 text-green-700" },
   { title: "Fact-find submission", desc: "Submitted 2 Aug 2025", status: "Complete", color: "bg-green-100 text-green-700" },
-];
-
-const riskItems = [
-  { num: 1, title: "Market risk", text: "Investment values fluctuate with market conditions including interest rate changes, economic developments, geopolitical events, and investor sentiment." },
-  { num: 2, title: "Currency risk", text: "Multi-currency investments are exposed to foreign exchange fluctuations. Changes in exchange rates can materially affect the value of your holdings when converted to your base currency." },
-  { num: 3, title: "Liquidity risk", text: "Some products have lock-up periods or limited redemption windows. Always maintain sufficient liquid reserves outside your AMAX Wealth investments." },
-  { num: 4, title: "Credit risk", text: "Fixed-income products are subject to the credit risk of the issuer. A downgrade or default may result in partial or total loss of invested capital." },
-  { num: 5, title: "Concentration risk", text: "Concentrating investments in a single asset class, sector, or geography increases vulnerability to adverse events. A diversified portfolio aligned to your risk tolerance is generally encouraged." },
-  { num: 6, title: "Technology and digital asset risk", text: "Digital assets carry additional risks including regulatory uncertainty, technological failures, and extreme price volatility. These products are for wholesale investors only and carry the possibility of total loss." },
-  { num: 7, title: "AI-generated content limitations", text: "AI tools on this platform provide general information only. They do not constitute regulated financial product advice under the Corporations Act 2001 (Cth)." },
-  { num: 8, title: "Regulatory risk", text: "Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX Wealth will notify clients of material changes." },
 ];
 
 function getRiskLabel(v: number) {
@@ -96,65 +50,26 @@ export default function AiAdvisory() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="overflow-x-auto">
-        <Tabs defaultValue="insights" className="space-y-6">
-          <TabsList className="inline-flex h-auto gap-1 bg-slate-700 p-1 rounded-lg min-w-max">
-            <TabsTrigger value="insights" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Market Insights</TabsTrigger>
-            <TabsTrigger value="adviser" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Adviser &amp; SOA</TabsTrigger>
-            <TabsTrigger value="activity" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[100px]">Activity</TabsTrigger>
-            <TabsTrigger value="compliance" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Compliance</TabsTrigger>
-            <TabsTrigger value="risk-disclosure" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[130px]">Risk disclosure</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="insights">
-            <MarketInsightsTab
-              riskScore={riskScore}
-              setRiskScore={setRiskScore}
-              portfolioHealth={portfolioHealth}
-              cagr={cagr}
-              insightCount={insightCount}
-              metricsLoading={metricsLoading}
-            />
-          </TabsContent>
-
-          <TabsContent value="adviser">
-            <AdviserTab />
-          </TabsContent>
-
-          <TabsContent value="activity">
-            <ActivityTab />
-          </TabsContent>
-
-          <TabsContent value="compliance">
-            <ComplianceMiniTab />
-          </TabsContent>
-
-          <TabsContent value="risk-disclosure">
-            <RiskDisclosureTab />
-          </TabsContent>
-        </Tabs>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-amber-700">Market Insights</h1>
+          <p className="text-gray-500 text-sm">AI-generated general information — not personal financial product advice</p>
+        </div>
+        <Card className="border shadow-sm flex-shrink-0">
+          <CardContent className="p-4 flex items-center gap-4">
+            <div className="w-10 h-10 bg-slate-700 rounded-full flex items-center justify-center text-white text-sm font-semibold">AW</div>
+            <div>
+              <p className="text-sm font-medium">Your adviser</p>
+              <p className="text-xs text-gray-500">+61 2 8320 1908 · Licensed under AFSL arrangements</p>
+            </div>
+            <div className="flex gap-2 ml-2">
+              <Button variant="outline" size="sm"><Phone className="w-3 h-3 mr-1" />Call</Button>
+              <Button variant="outline" size="sm"><MessageSquare className="w-3 h-3 mr-1" />Message</Button>
+            </div>
+          </CardContent>
+        </Card>
       </div>
-    </div>
-  );
-}
 
-function MarketInsightsTab({
-  riskScore,
-  setRiskScore,
-  portfolioHealth,
-  cagr,
-  insightCount,
-  metricsLoading,
-}: {
-  riskScore: number;
-  setRiskScore: (v: number) => void;
-  portfolioHealth: number;
-  cagr: number;
-  insightCount: number;
-  metricsLoading: boolean;
-}) {
-  return (
-    <div className="space-y-6">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card>
           <CardContent className="p-5">
@@ -194,8 +109,6 @@ function MarketInsightsTab({
           AI-generated insights below are general market commentary. They do not take into account your personal financial situation. To receive personal advice, request a Statement of Advice from your adviser.
         </p>
       </div>
-
-      <Button variant="outline">Request a Statement of Advice <ExternalLink className="w-3 h-3 ml-1" /></Button>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
@@ -289,46 +202,6 @@ function MarketInsightsTab({
           </Button>
         </CardContent>
       </Card>
-    </div>
-  );
-}
-
-function InsightCard({ title, text }: { title: string; text: string }) {
-  return (
-    <div className="border rounded-lg p-4 space-y-2">
-      <div className="flex items-center justify-between">
-        <p className="font-medium text-gray-900 text-sm">{title}</p>
-        <Badge variant="outline" className="text-xs">General</Badge>
-      </div>
-      <p className="text-sm text-gray-600">{text}</p>
-      <div className="flex gap-2 pt-1">
-        <Button variant="outline" size="sm" className="text-xs">Learn more <ExternalLink className="w-3 h-3 ml-1" /></Button>
-        <Button variant="outline" size="sm" className="text-xs">Discuss with adviser <ExternalLink className="w-3 h-3 ml-1" /></Button>
-      </div>
-    </div>
-  );
-}
-
-function AdviserTab() {
-  return (
-    <div className="space-y-6">
-      <Card>
-        <CardContent className="p-6">
-          <p className="font-semibold text-gray-900 mb-1">Your adviser</p>
-          <p className="text-sm text-gray-500 mb-4">Licensed financial adviser — AMAX Wealth</p>
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 bg-slate-200 rounded-full flex items-center justify-center text-slate-600 font-semibold">AW</div>
-            <div>
-              <p className="font-semibold">AMAX Wealth Adviser</p>
-              <p className="text-sm text-gray-500">+61 2 8320 1908 · Licensed under AFSL arrangements</p>
-            </div>
-          </div>
-          <div className="flex gap-2 mt-4">
-            <Button variant="outline" size="sm"><Phone className="w-3 h-3 mr-1" />Call</Button>
-            <Button variant="outline" size="sm"><MessageSquare className="w-3 h-3 mr-1" />Message</Button>
-          </div>
-        </CardContent>
-      </Card>
 
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-5 space-y-3">
         <p className="font-semibold text-blue-900">Want personalised advice?</p>
@@ -358,161 +231,18 @@ function AdviserTab() {
   );
 }
 
-function ActivityTab() {
+function InsightCard({ title, text }: { title: string; text: string }) {
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardContent className="p-6 space-y-4">
-          <div className="flex items-start justify-between">
-            <div>
-              <p className="font-semibold text-gray-900">Account activity</p>
-              <p className="text-sm text-gray-500">All investment instructions — AMAX Wealth does not hold client funds</p>
-            </div>
-            <Button variant="outline" size="sm">Export <ExternalLink className="w-3 h-3 ml-1" /></Button>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-gray-500">
-                  <th className="text-left py-2 font-medium">Date</th>
-                  <th className="text-left py-2 font-medium">Ref</th>
-                  <th className="text-left py-2 font-medium">Description</th>
-                  <th className="text-right py-2 font-medium">Amount</th>
-                  <th className="text-right py-2 font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activityData.map((row, i) => (
-                  <tr key={i} className="border-b border-gray-100">
-                    <td className="py-4 text-gray-600">{row.date}</td>
-                    <td className="py-4 text-gray-400 text-xs">{row.ref}</td>
-                    <td className="py-4">
-                      <p className="font-medium text-gray-900">{row.name}</p>
-                      <p className="text-xs text-gray-500">{row.desc}</p>
-                    </td>
-                    <td className="py-4 text-right font-medium">{row.amount}</td>
-                    <td className="py-4 text-right">
-                      <Badge className="bg-green-100 text-green-700">{row.status}</Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="bg-gray-50 border rounded-lg p-3 text-xs text-gray-500">
-            All transactions are logged for regulatory compliance. Records maintained under s912A Corporations Act 2001 (Cth) — 7-year minimum retention. AMAX Wealth does not hold client funds.
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function ComplianceMiniTab() {
-  return (
-    <div className="space-y-6">
-      <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-4">
-        <Badge className="bg-green-600 text-white px-3 py-1">Tier 2 verified — wholesale investor</Badge>
-        <div>
-          <p className="font-semibold text-gray-900">Wholesale client classification</p>
-          <p className="text-sm text-gray-600">Verified under Corporations Act 2001 (Cth) s761G — must be re-verified periodically</p>
-        </div>
+    <div className="border rounded-lg p-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="font-medium text-gray-900 text-sm">{title}</p>
+        <Badge variant="outline" className="text-xs">General</Badge>
       </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardContent className="p-6 space-y-4">
-            <div>
-              <p className="font-semibold text-gray-900">KYC status</p>
-              <p className="text-sm text-gray-500">Verification progress</p>
-            </div>
-            {kycSteps.map((step) => (
-              <div key={step.num} className="flex items-start gap-3">
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0 ${
-                  step.status === "completed" ? "bg-green-100 text-green-700" : step.status === "pending" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
-                }`}>{step.num}</div>
-                <div>
-                  <p className="font-medium text-gray-900 text-sm">{step.title}</p>
-                  <p className="text-xs text-gray-500">{step.desc}</p>
-                </div>
-              </div>
-            ))}
-            <Button variant="outline" size="sm" className="w-full">Continue KYC <ExternalLink className="w-3 h-3 ml-1" /></Button>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6 space-y-3">
-            <div>
-              <p className="font-semibold text-gray-900">Documents</p>
-              <p className="text-sm text-gray-500">Upload and manage compliance documents</p>
-            </div>
-            {documents.map((doc, i) => (
-              <div key={i} className="flex items-center justify-between py-2">
-                <div>
-                  <p className="font-medium text-gray-900 text-sm">{doc.name}</p>
-                  <p className="text-xs text-gray-500">{doc.desc}</p>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <Badge className={doc.color + " text-xs"}>{doc.status}</Badge>
-                  {doc.hasUpload && (
-                    <Button variant="outline" size="sm" className="text-xs">
-                      Upload <ExternalLink className="w-3 h-3 ml-1" />
-                    </Button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
+      <p className="text-sm text-gray-600">{text}</p>
+      <div className="flex gap-2 pt-1">
+        <Button variant="outline" size="sm" className="text-xs">Learn more <ExternalLink className="w-3 h-3 ml-1" /></Button>
+        <Button variant="outline" size="sm" className="text-xs">Discuss with adviser <ExternalLink className="w-3 h-3 ml-1" /></Button>
       </div>
-
-      <Card>
-        <CardContent className="p-6 space-y-1">
-          <p className="font-semibold text-gray-900 mb-3">Regulatory status</p>
-          {regulatoryRows.map((row, i) => (
-            <div key={i} className="flex justify-between items-center py-3 border-b border-gray-100 last:border-0">
-              <span className="font-medium text-gray-900 text-sm">{row.label}</span>
-              <span className="text-sm text-gray-600 text-right">{row.value}</span>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function RiskDisclosureTab() {
-  return (
-    <div className="space-y-6">
-      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-        <p className="text-sm text-amber-800 italic">
-          All investments carry risk. The value of your investments can go down as well as up. You may receive back less than you invest. Past performance is not a reliable indicator of future results.
-        </p>
-      </div>
-
-      <Card>
-        <CardContent className="p-6 space-y-6">
-          {riskItems.map((item) => (
-            <div key={item.num} className="pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-              <div className="flex items-start gap-3">
-                <span className="text-blue-600 font-semibold text-sm mt-0.5">{item.num}</span>
-                <div>
-                  <p className="font-semibold text-gray-900 mb-1">{item.title}</p>
-                  <p className="text-sm text-gray-700">{item.text}</p>
-                </div>
-              </div>
-            </div>
-          ))}
-
-          <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
-            <span>Disclosure acknowledged · Last updated January 2025 · Australian law applies</span>
-            <span>Signed 2 Aug 2025</span>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }
