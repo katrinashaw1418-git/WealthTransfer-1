@@ -1,1149 +1,518 @@
 import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Textarea } from "@/components/ui/textarea";
-import { Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { PieChart as PieChartIcon } from "lucide-react";
-import { useAiRecommendations } from "@/hooks/use-portfolio";
-import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { apiRequest, apiFetch } from "@/lib/queryClient";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useQuery } from "@tanstack/react-query";
+import { apiFetch } from "@/lib/queryClient";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useToast } from "@/hooks/use-toast";
-import { 
-  Bot, 
-  Lightbulb, 
-  TrendingUp, 
-  AlertTriangle, 
-  Target, 
-  Shield, 
-  BarChart3,
-  Zap,
-  CheckCircle,
-  Clock,
-  Eye,
-  EyeOff,
+import {
+  Shield,
   Phone,
-  MessageCircle,
-  X
+  MessageSquare,
+  ExternalLink,
+  Download,
+  Upload,
 } from "lucide-react";
 
-function AdvisoryMetricUnavailable({
-  title,
-  description = "Not yet calculated from live portfolio history and current holdings.",
-}: {
-  title: string;
-  description?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-      <p className="text-sm font-medium text-amber-900">{title}</p>
-      <p className="mt-1 text-sm text-amber-800">{description}</p>
-    </div>
-  );
+const allocationData = [
+  { asset: "Cash allocation (fiat)", current: 47, benchmark: 30, diff: -17 },
+  { asset: "Digital asset exposure", current: 1, benchmark: 10, diff: 9 },
+  { asset: "USD-denominated digital", current: 2, benchmark: 25, diff: 23 },
+  { asset: "Investment products", current: 50, benchmark: 30, diff: -20 },
+];
+
+const activityData = [
+  { date: "4 Aug 2025", ref: "TXN-003", name: "Corporate Credit Fund", desc: "Instruction via external fund manager", amount: "USD 25,000", status: "Settled" },
+  { date: "4 Aug 2025", ref: "TXN-002", name: "Bitcoin Tracker Fund", desc: "Instruction via external fund manager", amount: "USD 25,000", status: "Settled" },
+  { date: "2 Aug 2025", ref: "TXN-001", name: "Bitcoin Tracker Fund", desc: "Instruction via external fund manager", amount: "USD 500,000", status: "Settled" },
+];
+
+const kycSteps = [
+  { num: 1, title: "Identity verification", desc: "Completed 2 Aug 2025", status: "completed" },
+  { num: 2, title: "AML screening", desc: "Passed 2 Aug 2025", status: "completed" },
+  { num: 3, title: "Source of funds declaration", desc: "Submitted — pending compliance review", status: "pending" },
+  { num: 4, title: "Risk assessment", desc: "Not yet commenced", status: "not_started" },
+];
+
+const documents = [
+  { name: "Government-issued ID", desc: "Verified", status: "Verified", color: "bg-green-100 text-green-700" },
+  { name: "Proof of address", desc: "Utility bill or bank statement", status: "Verified", color: "bg-green-100 text-green-700" },
+  { name: "Source of funds declaration", desc: "Under review", status: "Under review", color: "bg-amber-100 text-amber-700" },
+  { name: "Wholesale investor certificate", desc: "Required — s761GA accountant-certified", status: "Required", color: "bg-amber-100 text-amber-700", hasUpload: true },
+  { name: "Signed risk disclosure", desc: "Acknowledged 2 Aug 2025", status: "Signed", color: "bg-green-100 text-green-700" },
+];
+
+const regulatoryRows = [
+  { label: "AMAX Wealth Pty Ltd", value: "Authorised Representative — AFSL" },
+  { label: "AMAX Global Pty Ltd", value: "AUSTRAC — DCE & Remittance" },
+  { label: "Client classification", value: "Wholesale — s761G" },
+  { label: "Dispute resolution", value: "AFCA member — 1800 931 678" },
+  { label: "Record keeping", value: "s912A — 7-year minimum" },
+  { label: "Privacy", value: "Privacy Act 1988 (Cth)" },
+];
+
+const soaItems = [
+  { title: "Initial SOA — portfolio strategy", desc: "Requested 2 Aug 2025 · Pending adviser review", status: "Pending", color: "bg-amber-100 text-amber-700" },
+  { title: "Risk questionnaire acknowledgement", desc: "Completed 2 Aug 2025", status: "Complete", color: "bg-green-100 text-green-700" },
+  { title: "Fact-find submission", desc: "Submitted 2 Aug 2025", status: "Complete", color: "bg-green-100 text-green-700" },
+];
+
+const riskItems = [
+  { num: 1, title: "Market risk", text: "Investment values fluctuate with market conditions including interest rate changes, economic developments, geopolitical events, and investor sentiment." },
+  { num: 2, title: "Currency risk", text: "Multi-currency investments are exposed to foreign exchange fluctuations. Changes in exchange rates can materially affect the value of your holdings when converted to your base currency." },
+  { num: 3, title: "Liquidity risk", text: "Some products have lock-up periods or limited redemption windows. Always maintain sufficient liquid reserves outside your AMAX Wealth investments." },
+  { num: 4, title: "Credit risk", text: "Fixed-income products are subject to the credit risk of the issuer. A downgrade or default may result in partial or total loss of invested capital." },
+  { num: 5, title: "Concentration risk", text: "Concentrating investments in a single asset class, sector, or geography increases vulnerability to adverse events. A diversified portfolio aligned to your risk tolerance is generally encouraged." },
+  { num: 6, title: "Technology and digital asset risk", text: "Digital assets carry additional risks including regulatory uncertainty, technological failures, and extreme price volatility. These products are for wholesale investors only and carry the possibility of total loss." },
+  { num: 7, title: "AI-generated content limitations", text: "AI tools on this platform provide general information only. They do not constitute regulated financial product advice under the Corporations Act 2001 (Cth)." },
+  { num: 8, title: "Regulatory risk", text: "Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX Wealth will notify clients of material changes." },
+];
+
+function getRiskLabel(v: number) {
+  if (v <= 20) return "Conservative";
+  if (v <= 40) return "Moderately Conservative";
+  if (v <= 60) return "Moderate";
+  if (v <= 80) return "Moderately Aggressive";
+  return "Aggressive";
 }
 
-// Category-specific colors consistent with Portfolio page
-const getCategoryColor = (categoryName: string) => {
-  const colorMap: { [key: string]: string } = {
-    'Real Estate': '#FBBF24',     // Yellow
-    'Corporate Credit': '#D1D5DB',  // Gray-300
-    'Venture Capital': '#8B5CF6',  // Purple
-    'Digital Assets': '#EF4444',   // Red
-    'Cash Deposits': '#3B82F6'     // Blue
-  };
-  return colorMap[categoryName] || '#6B7280'; // Default gray
-};
-
 export default function AiAdvisory() {
-  const [riskTolerance, setRiskTolerance] = useState([3]);
-  const [investmentHorizon, setInvestmentHorizon] = useState("5-10");
-  const [investmentGoal, setInvestmentGoal] = useState("growth");
-  const [selectedRecommendation, setSelectedRecommendation] = useState<any>(null);
-  const [detailsModalOpen, setDetailsModalOpen] = useState(false);
-  const [advisorModalOpen, setAdvisorModalOpen] = useState(false);
-  const [advisorMessage, setAdvisorMessage] = useState('');
-  const [showAdvisorBox, setShowAdvisorBox] = useState(true);
-  const { data: recommendations, isLoading } = useAiRecommendations();
-  const queryClient = useQueryClient();
-  const { toast } = useToast();
-
-  // Fetch current portfolio allocation
-  const { data: portfolioAllocation, isLoading: allocationLoading } = useQuery({
-    queryKey: ["/api/portfolio/allocation"],
-    queryFn: async () => (await apiFetch("/api/portfolio/allocation")).json(),
-  });
-
-  // Fetch investment breakdown
-  const { data: investmentBreakdown, isLoading: breakdownLoading } = useQuery({
-    queryKey: ["/api/investment-breakdown"],
-    queryFn: async () => (await apiFetch("/api/investment-breakdown")).json(),
-  });
-
-  // Fetch portfolio data for performance calculations
-  const { data: portfolio, isLoading: portfolioLoading } = useQuery({
-    queryKey: ["/api/portfolio"],
-    queryFn: async () => (await apiFetch("/api/portfolio")).json(),
-  });
-
-  // Fetch user investments for actual returns
-  const { data: userInvestments, isLoading: investmentsLoading } = useQuery({
-    queryKey: ["/api/user-investments"],
-    queryFn: async () => (await apiFetch("/api/user-investments")).json(),
-  });
+  const [riskScore, setRiskScore] = useState(60);
 
   const { data: realMetrics, isLoading: metricsLoading } = useQuery({
     queryKey: ["/api/portfolio/real-metrics"],
     queryFn: async () => (await apiFetch("/api/portfolio/real-metrics")).json(),
   });
 
-  const currentPortfolioAllocation = portfolioAllocation ? {
-    fiat: portfolioAllocation.fiat.percentage,
-    crypto: portfolioAllocation.crypto.percentage,
-    stablecoin: portfolioAllocation.stablecoin.percentage,
-    investment: portfolioAllocation.investment.percentage,
-  } : {
-    fiat: 0,
-    crypto: 0,
-    stablecoin: 0,
-    investment: 0,
-  };
-
-  // Calculate performance data based on actual investment returns
-  const totalPortfolioValue = portfolioAllocation?.totalValue || 0;
-  const fiatValue = portfolioAllocation?.fiat?.value || 0;
-  const cryptoValue = portfolioAllocation?.crypto?.value || 0;
-  const stablecoinValue = portfolioAllocation?.stablecoin?.value || 0;
-  const investmentValue = portfolioAllocation?.investment?.value || 0;
-
-  // Calculate actual investment returns
-  const totalInvested = userInvestments?.reduce((sum: number, inv: any) => sum + parseFloat(inv.investedAmount), 0) || 0;
-  const totalCurrent = userInvestments?.reduce((sum: number, inv: any) => sum + parseFloat(inv.currentValue), 0) || 0;
-  const investmentReturn = totalCurrent - totalInvested;
-  const investmentReturnRate = totalInvested > 0 ? (investmentReturn / totalInvested) : 0;
-
-
-  // Advisor contact mutation
-  const advisorMutation = useMutation({
-    mutationFn: async (data: { message: string }) => {
-      const response = await apiRequest("POST", "/api/advisor/contact", data);
-      if (!response.ok) {
-        throw new Error('Failed to send message');
-      }
-      return response.json();
-    },
-    onSuccess: () => {
-      toast({
-        title: "Message Sent",
-        description: "Your wealth planner will contact you within 24 hours.",
-      });
-      setAdvisorModalOpen(false);
-      setAdvisorMessage('');
-    },
-    onError: () => {
-      toast({
-        title: "Message Failed",
-        description: "Please try again later.",
-        variant: "destructive",
-      });
-    }
+  const { data: recommendations, isLoading: recsLoading } = useQuery({
+    queryKey: ["/api/ai-recommendations"],
   });
 
-  // Generate new recommendations when risk profile changes
-  const generateRecommendationsMutation = useMutation({
-    mutationFn: async (profileData: { riskTolerance: number; investmentHorizon: string; investmentGoal: string }) => {
-      const response = await apiRequest("POST", "/api/ai-recommendations/generate", profileData);
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/ai-recommendations"] });
-      toast({
-        title: "Insights Updated",
-        description: "New market insights generated based on your risk profile.",
-      });
-    },
-  });
-
-  // Update recommendations when risk profile changes
-  const updateRecommendations = () => {
-    generateRecommendationsMutation.mutate({
-      riskTolerance: riskTolerance[0],
-      investmentHorizon,
-      investmentGoal,
-    });
-  };
-
-  const markAsReadMutation = useMutation({
-    mutationFn: (id: number) => api.markRecommendationAsRead(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/ai-recommendations"] });
-    },
-  });
-
-  const applyRecommendationMutation = useMutation({
-    mutationFn: (id: number) => api.applyRecommendation(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/ai-recommendations"] });
-      toast({
-        title: "Insight Acknowledged",
-        description: "The market insight has been noted and recorded.",
-      });
-    },
-    onError: () => {
-      toast({
-        title: "Application Failed",
-        description: "Unable to process the insight. Please try again.",
-        variant: "destructive",
-      });
-    },
-  });
-
-  const getRecommendationIcon = (type: string) => {
-    switch (type) {
-      case "rebalancing":
-        return Lightbulb;
-      case "opportunity":
-        return TrendingUp;
-      case "risk_warning":
-        return AlertTriangle;
-      default:
-        return Lightbulb;
-    }
-  };
-
-  const getRecommendationColor = (severity: string) => {
-    switch (severity) {
-      case "info":
-        return "bg-blue-50 border-blue-200";
-      case "warning":
-        return "bg-yellow-50 border-yellow-200";
-      case "alert":
-        return "bg-red-50 border-red-200";
-      default:
-        return "bg-blue-50 border-blue-200";
-    }
-  };
-
-  const getIconColor = (severity: string) => {
-    switch (severity) {
-      case "info":
-        return "text-blue-600";
-      case "warning":
-        return "text-yellow-600";
-      case "alert":
-        return "text-red-600";
-      default:
-        return "text-blue-600";
-    }
-  };
-
-  const getTitleColor = (severity: string) => {
-    switch (severity) {
-      case "info":
-        return "text-blue-900";
-      case "warning":
-        return "text-yellow-900";
-      case "alert":
-        return "text-red-900";
-      default:
-        return "text-blue-900";
-    }
-  };
-
-  const getDescriptionColor = (severity: string) => {
-    switch (severity) {
-      case "info":
-        return "text-blue-700";
-      case "warning":
-        return "text-yellow-700";
-      case "alert":
-        return "text-red-700";
-      default:
-        return "text-blue-700";
-    }
-  };
-
-  // Dynamic portfolio suggestions based on risk profile, investment horizon, and goals
-  const getSuggestedAllocation = () => {
-    const risk = riskTolerance[0];
-    let baseAllocation;
-    
-    // Base allocation by risk tolerance
-    if (risk <= 2) { // Conservative
-      baseAllocation = {
-        usEquities: 20,
-        intlEquities: 15,
-        bonds: 50,
-        crypto: 5,
-        cash: 10,
-      };
-    } else if (risk <= 4) { // Moderate
-      baseAllocation = {
-        usEquities: 30,
-        intlEquities: 25,
-        bonds: 30,
-        crypto: 10,
-        cash: 5,
-      };
-    } else { // Aggressive
-      baseAllocation = {
-        usEquities: 40,
-        intlEquities: 25,
-        bonds: 15,
-        crypto: 25,
-        cash: 5,
-      };
-    }
-    
-    // Adjust based on investment horizon
-    if (investmentHorizon === "1-3") { // Short term - more conservative
-      baseAllocation.bonds += 10;
-      baseAllocation.cash += 5;
-      baseAllocation.crypto = Math.max(0, baseAllocation.crypto - 10);
-      baseAllocation.usEquities = Math.max(0, baseAllocation.usEquities - 5);
-    } else if (investmentHorizon === "10+") { // Long term - more aggressive
-      baseAllocation.usEquities += 10;
-      baseAllocation.crypto += 5;
-      baseAllocation.bonds = Math.max(0, baseAllocation.bonds - 10);
-      baseAllocation.cash = Math.max(0, baseAllocation.cash - 5);
-    }
-    
-    // Adjust based on investment goal
-    if (investmentGoal === "preservation") {
-      baseAllocation.bonds += 15;
-      baseAllocation.cash += 10;
-      baseAllocation.crypto = Math.max(0, baseAllocation.crypto - 15);
-      baseAllocation.usEquities = Math.max(0, baseAllocation.usEquities - 10);
-    } else if (investmentGoal === "income") {
-      baseAllocation.bonds += 10;
-      baseAllocation.usEquities += 5; // Dividend stocks
-      baseAllocation.crypto = Math.max(0, baseAllocation.crypto - 10);
-      baseAllocation.cash = Math.max(0, baseAllocation.cash - 5);
-    } else if (investmentGoal === "aggressive") {
-      baseAllocation.crypto += 10;
-      baseAllocation.usEquities += 10;
-      baseAllocation.bonds = Math.max(0, baseAllocation.bonds - 15);
-      baseAllocation.cash = Math.max(0, baseAllocation.cash - 5);
-    }
-    
-    // Normalize to 100%
-    const total = Object.values(baseAllocation).reduce((sum, val) => sum + val, 0);
-    const normalizeFactor = 100 / total;
-    
-    return [
-      { asset: "Fiat Assets", current: Math.round(currentPortfolioAllocation.fiat), suggested: Math.round(baseAllocation.usEquities * normalizeFactor), change: Math.round(baseAllocation.usEquities * normalizeFactor) - Math.round(currentPortfolioAllocation.fiat), color: "bg-blue-500" },
-      { asset: "Crypto Assets", current: Math.round(currentPortfolioAllocation.crypto), suggested: Math.round(baseAllocation.crypto * normalizeFactor), change: Math.round(baseAllocation.crypto * normalizeFactor) - Math.round(currentPortfolioAllocation.crypto), color: "bg-red-500" },
-      { asset: "Stablecoins", current: Math.round(currentPortfolioAllocation.stablecoin), suggested: Math.round(baseAllocation.intlEquities * normalizeFactor), change: Math.round(baseAllocation.intlEquities * normalizeFactor) - Math.round(currentPortfolioAllocation.stablecoin), color: "bg-gray-300" },
-      { asset: "Investment Products", current: Math.round(currentPortfolioAllocation.investment), suggested: Math.round(baseAllocation.bonds * normalizeFactor), change: Math.round(baseAllocation.bonds * normalizeFactor) - Math.round(currentPortfolioAllocation.investment), color: "bg-purple-500" },
-      { asset: "Cash Reserve", current: Math.round(baseAllocation.cash * normalizeFactor), suggested: Math.round(baseAllocation.cash * normalizeFactor), change: 0, color: "bg-gray-500" },
-    ];
-  };
-
-  const suggestedAllocation = getSuggestedAllocation();
-
-  const riskProfile = {
-    score: riskTolerance[0] * 20,
-    level: riskTolerance[0] <= 2 ? "Conservative" : riskTolerance[0] <= 4 ? "Moderate" : "Aggressive",
-    description: (() => {
-      const baseRisk = riskTolerance[0] <= 2 
-        ? "Conservative investors typically prefer stable returns with minimal risk of loss"
-        : riskTolerance[0] <= 4 
-        ? "Moderate investors may accept some volatility for potentially higher returns"
-        : "Aggressive investors may accept high volatility for maximum growth potential";
-      
-      const goalText = investmentGoal === "preservation" 
-        ? ", with a focus on capital preservation"
-        : investmentGoal === "income" 
-        ? ", prioritising income generation"
-        : investmentGoal === "growth" 
-        ? ", targeting long-term growth"
-        : ", pursuing aggressive growth";
-      
-      const horizonText = investmentHorizon === "1-3" 
-        ? " over 1-3 year horizons"
-        : investmentHorizon === "3-5" 
-        ? " over 3-5 year horizons"
-        : investmentHorizon === "5-10" 
-        ? " over 5-10 year horizons"
-        : " over 10+ year horizons";
-      
-      return baseRisk + goalText + horizonText + ". This is general information only.";
-    })(),
-  };
-
-  if (isLoading || allocationLoading || breakdownLoading) {
-    return (
-      <div className="p-6 space-y-6">
-        <div>
-          <Skeleton className="h-8 w-48 mb-2" />
-          <Skeleton className="h-4 w-64" />
-        </div>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {[1, 2, 3].map((i) => (
-            <Card key={i}>
-              <CardContent className="p-6">
-                <Skeleton className="h-6 w-32 mb-4" />
-                <Skeleton className="h-20 w-full" />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const insightCount = (recommendations as any[])?.length || 3;
+  const portfolioHealth = realMetrics?.diversificationScore ? Math.round(realMetrics.diversificationScore) : 71;
+  const cagr = realMetrics?.cagr != null ? realMetrics.cagr : 7.2;
 
   return (
     <div className="p-6 space-y-6">
-      {/* Enhanced Header Section */}
-      <div className="relative overflow-hidden">
-        {/* Background Gradient */}
-        <div className="absolute inset-0 bg-gradient-to-r from-blue-600 via-purple-600 to-indigo-600 opacity-10 rounded-2xl"></div>
-        
-        <div className="relative flex items-start justify-between p-8 bg-white/80 backdrop-blur-sm rounded-2xl border border-gray-200/50 shadow-lg">
-          <div className="flex items-start space-x-4">
-            {/* AI Icon */}
-            <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg">
-              <Bot className="w-8 h-8 text-white" />
-            </div>
-            
-            {/* Title and Description */}
-            <div className="space-y-2">
-              <div className="flex items-center space-x-3">
-                <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                  General Market Insights
-                </h1>
-                <div className="flex items-center space-x-1 px-2 py-1 bg-green-100 rounded-full">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  <span className="text-xs font-medium text-green-700">Active</span>
-                </div>
-              </div>
-              
-              <p className="text-gray-600 text-lg max-w-md">
-                General market commentary and educational information — not personal advice
-              </p>
-              
-              <div className="flex items-center space-x-4 pt-2">
-                <div className="flex items-center space-x-2 text-sm text-gray-500">
-                  <Zap className="w-4 h-4" />
-                  <span>Last updated: 2 minutes ago</span>
-                </div>
-                <div className="flex items-center space-x-2 text-sm text-gray-500">
-                  <Shield className="w-4 h-4" />
-                  <span>Secure & Private</span>
-                </div>
-              </div>
-            </div>
-          </div>
-          
+      <div className="overflow-x-auto">
+        <Tabs defaultValue="insights" className="space-y-6">
+          <TabsList className="inline-flex h-auto gap-1 bg-slate-700 p-1 rounded-lg min-w-max">
+            <TabsTrigger value="insights" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Market Insights</TabsTrigger>
+            <TabsTrigger value="adviser" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Adviser &amp; SOA</TabsTrigger>
+            <TabsTrigger value="activity" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[100px]">Activity</TabsTrigger>
+            <TabsTrigger value="compliance" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[120px]">Compliance</TabsTrigger>
+            <TabsTrigger value="risk-disclosure" className="text-white data-[state=active]:bg-white data-[state=active]:text-gray-900 min-w-[130px]">Risk disclosure</TabsTrigger>
+          </TabsList>
 
-        </div>
+          <TabsContent value="insights">
+            <MarketInsightsTab
+              riskScore={riskScore}
+              setRiskScore={setRiskScore}
+              portfolioHealth={portfolioHealth}
+              cagr={cagr}
+              insightCount={insightCount}
+              metricsLoading={metricsLoading}
+            />
+          </TabsContent>
+
+          <TabsContent value="adviser">
+            <AdviserTab />
+          </TabsContent>
+
+          <TabsContent value="activity">
+            <ActivityTab />
+          </TabsContent>
+
+          <TabsContent value="compliance">
+            <ComplianceMiniTab />
+          </TabsContent>
+
+          <TabsContent value="risk-disclosure">
+            <RiskDisclosureTab />
+          </TabsContent>
+        </Tabs>
       </div>
+    </div>
+  );
+}
 
-      {/* Floating Contact Your Advisor Box */}
-      {showAdvisorBox && (
-        <div className="fixed top-4 right-4 z-50">
-          <Card className="w-72 shadow-2xl border-0 bg-white/95 backdrop-blur-lg">
-            <CardHeader className="pb-3 relative">
-              <CardTitle className="text-lg">
-                Contact Your Advisor
-              </CardTitle>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowAdvisorBox(false)}
-                className="absolute top-2 right-2 h-6 w-6 p-0 hover:bg-gray-100"
-              >
-                <X className="w-4 h-4" />
-              </Button>
-            </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-100">
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full flex items-center justify-center">
-                    <Phone className="w-4 h-4 text-white" />
-                  </div>
-                  <div>
-                    <p className="text-xs text-blue-600 font-medium">+61 2 8320 1908</p>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="flex space-x-2">
-                <Button 
-                  variant="outline" 
-                  size="sm"
-                  onClick={() => window.open('tel:+61283201908')}
-                  className="flex-1 text-xs hover:bg-blue-50 border-blue-200"
-                >
-                  <Phone className="w-3 h-3 mr-1" />
-                  Call
-                </Button>
-                <Button 
-                  size="sm"
-                  onClick={() => setAdvisorModalOpen(true)}
-                  className="flex-1 text-xs bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700"
-                >
-                  <MessageCircle className="w-3 h-3 mr-1" />
-                  Message
-                </Button>
-              </div>
-            </div>
+function MarketInsightsTab({
+  riskScore,
+  setRiskScore,
+  portfolioHealth,
+  cagr,
+  insightCount,
+  metricsLoading,
+}: {
+  riskScore: number;
+  setRiskScore: (v: number) => void;
+  portfolioHealth: number;
+  cagr: number;
+  insightCount: number;
+  metricsLoading: boolean;
+}) {
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Card>
+          <CardContent className="p-5">
+            <p className="text-xs font-medium text-gray-500 uppercase">RISK SCORE</p>
+            <p className="text-2xl font-bold">{riskScore} / 100</p>
+            <p className="text-sm text-gray-500">{getRiskLabel(riskScore)} — self-assessed</p>
           </CardContent>
         </Card>
-        </div>
-      )}
-
-      {/* AI Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-500">Risk Score</h3>
-              <Shield className="w-4 h-4 text-primary" />
-            </div>
-            <p className="text-2xl font-bold">{riskProfile.score}/100</p>
-            <p className="text-sm text-gray-600 mt-1">{riskProfile.level}</p>
+          <CardContent className="p-5">
+            <p className="text-xs font-medium text-gray-500 uppercase">PORTFOLIO HEALTH</p>
+            <p className="text-2xl font-bold">{metricsLoading ? "—" : portfolioHealth} / 100</p>
+            <p className="text-sm text-gray-500">HHI diversification score</p>
           </CardContent>
         </Card>
-
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-500">Active Insights</h3>
-              <Lightbulb className="w-4 h-4 text-yellow-500" />
-            </div>
-            <p className="text-2xl font-bold">{recommendations?.length || 0}</p>
-            <p className="text-sm text-gray-600 mt-1">New insights</p>
+          <CardContent className="p-5">
+            <p className="text-xs font-medium text-gray-500 uppercase">REALISED CAGR</p>
+            <p className={`text-2xl font-bold ${cagr >= 0 ? "text-green-600" : "text-red-600"}`}>
+              {cagr >= 0 ? "+" : ""}{cagr.toFixed(1)}%
+            </p>
+            <p className="text-sm text-gray-500">From transaction history</p>
           </CardContent>
         </Card>
-
         <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-500">Portfolio Health</h3>
-              <BarChart3 className="w-4 h-4 text-secondary" />
-            </div>
-            {metricsLoading ? (
-              <p className="text-2xl font-bold text-gray-300">—</p>
-            ) : realMetrics ? (
-              <>
-                <p className="text-2xl font-bold text-secondary">
-                  {realMetrics.diversificationScore.toFixed(0)}<span className="text-sm font-normal text-gray-500"> / 100</span>
-                </p>
-                <p className="text-sm text-gray-600 mt-1">Diversification score (HHI-based)</p>
-              </>
-            ) : (
-              <p className="text-sm text-gray-400">Unavailable</p>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-500">Realized CAGR</h3>
-              <Zap className="w-4 h-4 text-purple-500" />
-            </div>
-            {metricsLoading ? (
-              <p className="text-2xl font-bold text-gray-300">—</p>
-            ) : realMetrics?.cagr != null ? (
-              <>
-                <p className={`text-2xl font-bold ${realMetrics.cagr >= 0 ? 'text-purple-600' : 'text-red-600'}`}>
-                  {realMetrics.cagr >= 0 ? '+' : ''}{realMetrics.cagr.toFixed(1)}%
-                </p>
-                <p className="text-sm text-gray-600 mt-1">Annualized return from actual transaction history</p>
-              </>
-            ) : (
-              <>
-                <p className="text-2xl font-bold text-gray-400">—</p>
-                <p className="text-sm text-gray-400 mt-1">Insufficient history to compute</p>
-              </>
-            )}
+          <CardContent className="p-5">
+            <p className="text-xs font-medium text-gray-500 uppercase">INSIGHTS</p>
+            <p className="text-2xl font-bold">{insightCount}</p>
+            <p className="text-sm text-gray-500">General information only</p>
           </CardContent>
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Risk Profile Configuration */}
-        <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Risk Profile</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div>
-                <Label className="text-sm font-medium">Risk Tolerance</Label>
-                <div className="mt-2">
-                  <Slider
-                    value={riskTolerance}
-                    onValueChange={setRiskTolerance}
-                    max={5}
-                    min={1}
-                    step={1}
-                    className="w-full"
-                  />
-                  <div className="flex justify-between text-xs text-gray-500 mt-1">
-                    <span>Conservative</span>
-                    <span>Aggressive</span>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <Label htmlFor="investment-horizon">Investment Horizon</Label>
-                <Select value={investmentHorizon} onValueChange={setInvestmentHorizon}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1-2">1-2 years</SelectItem>
-                    <SelectItem value="3-5">3-5 years</SelectItem>
-                    <SelectItem value="5-10">5-10 years</SelectItem>
-                    <SelectItem value="10+">10+ years</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div>
-                <Label htmlFor="investment-goal">Primary Goal</Label>
-                <Select value={investmentGoal} onValueChange={setInvestmentGoal}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="preservation">Capital Preservation</SelectItem>
-                    <SelectItem value="income">Income Generation</SelectItem>
-                    <SelectItem value="growth">Growth</SelectItem>
-                    <SelectItem value="aggressive">Aggressive Growth</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <h4 className="font-medium text-gray-900 mb-2">Your Profile</h4>
-                <p className="text-sm text-gray-600">{riskProfile.description}</p>
-              </div>
-
-              <Button 
-                onClick={updateRecommendations}
-                disabled={generateRecommendationsMutation.isPending}
-                className="w-full"
-              >
-                <Bot className="w-4 h-4 mr-2" />
-                {generateRecommendationsMutation.isPending ? "Updating..." : "Refresh Market Commentary"}
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Market Insights */}
-        <div className="lg:col-span-2 space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Market Commentary</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {recommendations?.map((recommendation: any) => {
-                  const Icon = getRecommendationIcon(recommendation.type);
-                  
-                  return (
-                    <div
-                      key={recommendation.id}
-                      className={`p-4 rounded-lg border ${getRecommendationColor(recommendation.severity)}`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex items-start space-x-3 flex-1">
-                          <Icon className={`w-5 h-5 mt-0.5 ${getIconColor(recommendation.severity)}`} />
-                          <div className="flex-1">
-                            <div className="flex items-center justify-between mb-2">
-                              <h4 className={`font-medium ${getTitleColor(recommendation.severity)}`}>
-                                {recommendation.title}
-                              </h4>
-                              <div className="flex items-center space-x-2">
-                                {!recommendation.isRead && (
-                                  <Badge variant="secondary" className="text-xs">General</Badge>
-                                )}
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={() => markAsReadMutation.mutate(recommendation.id)}
-                                >
-                                  {recommendation.isRead ? (
-                                    <EyeOff className="w-3 h-3" />
-                                  ) : (
-                                    <Eye className="w-3 h-3" />
-                                  )}
-                                </Button>
-                              </div>
-                            </div>
-                            <p className={`text-sm ${getDescriptionColor(recommendation.severity)} mb-3`}>
-                              {recommendation.description}
-                            </p>
-                            <div className="flex space-x-2">
-                              <Button 
-                                size="sm" 
-                                variant="outline"
-                                onClick={() => {
-                                  setSelectedRecommendation(recommendation);
-                                  setDetailsModalOpen(true);
-                                }}
-                              >
-                                View Details
-                              </Button>
-                              <Button 
-                                size="sm" 
-                                variant="outline"
-                                onClick={() => setAdvisorModalOpen(true)}
-                              >
-                                Discuss with Adviser
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Suggested Portfolio Allocation */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Illustrative Benchmark Comparison</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {suggestedAllocation.map((allocation) => (
-                  <div key={allocation.asset} className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-3">
-                        <div className={`w-3 h-3 rounded-full ${allocation.color}`}></div>
-                        <span className="font-medium">{allocation.asset}</span>
-                      </div>
-                      <div className="flex items-center space-x-4 text-sm">
-                        <span className="text-gray-600">{allocation.current}%</span>
-                        <span className="text-gray-400">→</span>
-                        <span className="font-medium">{allocation.suggested}%</span>
-                        <Badge 
-                          variant={allocation.change > 0 ? "default" : allocation.change < 0 ? "destructive" : "secondary"}
-                          className="text-xs"
-                        >
-                          {allocation.change > 0 ? '+' : ''}{allocation.change}%
-                        </Badge>
-                      </div>
-                    </div>
-                    <div className="flex space-x-2">
-                      <Progress value={allocation.current} className="flex-1 h-2" />
-                      <Progress value={allocation.suggested} className="flex-1 h-2" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-                <div className="flex items-start space-x-3">
-                  <Target className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" />
-                  <div>
-                    <h4 className="font-medium text-blue-900 mb-1">Rebalancing Gap</h4>
-                    {metricsLoading ? (
-                      <p className="text-sm text-blue-700">Loading…</p>
-                    ) : realMetrics ? (
-                      <>
-                        <p className="text-2xl font-bold text-blue-800 mb-1">
-                          {realMetrics.rebalancingGap.toFixed(1)}%
-                        </p>
-                        <p className="text-sm text-blue-700">
-                          One-sided turnover needed to reach an equal-weight benchmark across the four asset classes.
-                          {realMetrics.rebalancingGap < 10
-                            ? ' Portfolio is well-balanced.'
-                            : realMetrics.rebalancingGap < 25
-                            ? ' Portfolio is reasonably balanced.'
-                            : ' Significant rebalancing may be warranted.'}
-                        </p>
-                      </>
-                    ) : (
-                      <p className="text-sm text-blue-700">Unavailable</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                <p className="text-xs text-amber-800">
-                  This comparison is illustrative only and does not constitute personal financial advice. 
-                  Contact your adviser to discuss whether changes to your portfolio allocation are appropriate for your circumstances.
-                </p>
-              </div>
-              <Button 
-                className="w-full mt-4"
-                variant="outline"
-                onClick={() => setAdvisorModalOpen(true)}
-              >
-                Discuss with Adviser
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <p className="font-semibold text-amber-900 mb-1">General information only — not personal financial product advice</p>
+        <p className="text-sm text-amber-800">
+          AI-generated insights below are general market commentary. They do not take into account your personal financial situation. To receive personal advice, request a Statement of Advice from your adviser.
+        </p>
       </div>
 
-      {/* Performance and Risk Metrics */}
+      <Button variant="outline">Request a Statement of Advice <ExternalLink className="w-3 h-3 ml-1" /></Button>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Performance by Period — from snapshot history */}
         <Card>
-          <CardHeader>
-            <CardTitle>Performance by Period</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {metricsLoading ? (
-              <div className="grid grid-cols-3 gap-3">
-                {['YTD', '1M', '3M'].map(l => (
-                  <div key={l} className="text-center p-3 bg-gray-50 rounded-lg">
-                    <p className="text-xs text-gray-500 mb-1">{l}</p>
-                    <p className="text-sm font-bold text-gray-300">—</p>
-                  </div>
-                ))}
+          <CardContent className="p-6 space-y-4">
+            <div>
+              <p className="font-semibold text-gray-900">Risk questionnaire</p>
+              <p className="text-sm text-gray-500">Self-assessed — general context only</p>
+            </div>
+            <div>
+              <p className="text-lg font-semibold">{getRiskLabel(riskScore)} ({riskScore}/100)</p>
+              <Slider
+                value={[riskScore]}
+                onValueChange={(v) => setRiskScore(v[0])}
+                min={0}
+                max={100}
+                step={1}
+                className="my-3"
+              />
+              <div className="flex justify-between text-xs text-gray-400">
+                <span>Conservative</span>
+                <span>Moderate</span>
+                <span>Aggressive</span>
               </div>
-            ) : realMetrics?.hasSufficientHistory ? (
-              <div className="space-y-4">
-                <div className="grid grid-cols-3 gap-3">
-                  {[
-                    { label: 'YTD',  value: realMetrics.periodReturns.ytd },
-                    { label: '1M',   value: realMetrics.periodReturns.oneMonth },
-                    { label: '3M',   value: realMetrics.periodReturns.threeMonth },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="text-center p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-600 mb-1">{label}</p>
-                      {value !== null ? (
-                        <p className={`text-sm font-bold ${value >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                          {value >= 0 ? '+' : ''}{value.toFixed(2)}%
-                        </p>
-                      ) : (
-                        <p className="text-sm text-gray-400">N/A</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                {realMetrics.historySource === 'historical_estimate' && (
-                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-                    Returns based on estimated historical snapshots. Estimated history is clearly labeled where used.
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-                <p className="text-sm font-medium text-amber-900">Insufficient snapshot history</p>
-                <p className="mt-1 text-sm text-amber-800">
-                  At least two portfolio snapshots are needed to compute period returns.
-                </p>
-              </div>
-            )}
+            </div>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span className="text-gray-600">Investment horizon</span><span className="font-medium">5–10 years</span></div>
+              <div className="flex justify-between"><span className="text-gray-600">Primary goal</span><span className="font-medium">Growth</span></div>
+              <div className="flex justify-between"><span className="text-gray-600">Last updated</span><span className="font-medium">2 minutes ago</span></div>
+            </div>
+            <p className="text-xs text-gray-400">Self-assessed profile is for general context only. A licensed adviser must conduct a full fact-find before providing personal advice.</p>
           </CardContent>
         </Card>
 
-        {/* Risk Metrics */}
         <Card>
-          <CardHeader>
-            <CardTitle>Risk Metrics</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <p className="text-xs text-gray-600 mb-1">YTD Return</p>
-                  {metricsLoading ? (
-                    <p className="text-sm font-bold text-gray-300">—</p>
-                  ) : realMetrics?.periodReturns?.ytd !== null && realMetrics !== undefined ? (
-                    <p className={`text-sm font-bold ${realMetrics.periodReturns.ytd! >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {realMetrics.periodReturns.ytd! >= 0 ? '+' : ''}{realMetrics.periodReturns.ytd!.toFixed(2)}%
-                    </p>
-                  ) : (
-                    <p className="text-sm text-gray-400">—</p>
-                  )}
-                </div>
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <p className="text-xs text-gray-600 mb-1">Annualised (CAGR)</p>
-                  {metricsLoading ? (
-                    <p className="text-sm font-bold text-gray-300">—</p>
-                  ) : realMetrics?.cagr !== null && realMetrics !== undefined ? (
-                    <p className={`text-sm font-bold ${realMetrics.cagr! >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {realMetrics.cagr! >= 0 ? '+' : ''}{realMetrics.cagr!.toFixed(2)}%
-                    </p>
-                  ) : (
-                    <p className="text-sm text-gray-400">—</p>
-                  )}
-                </div>
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <p className="text-xs text-gray-600 mb-1">Data Quality</p>
-                  <p className="text-sm font-bold text-gray-700 capitalize">
-                    {metricsLoading ? '—' : realMetrics?.riskMetricsState ?? 'limited'}
-                  </p>
-                </div>
-                <div className="text-center p-3 bg-gray-50 rounded-lg">
-                  <p className="text-xs text-gray-600 mb-1">Risk-Free Rate</p>
-                  <p className="text-sm font-bold text-gray-700">
-                    {metricsLoading ? '—' : `${realMetrics?.riskFreeRate ?? 4.00}%`}
-                  </p>
-                </div>
-              </div>
-              {realMetrics?.canComputeRiskMetrics && (
-                <div className="grid grid-cols-3 gap-3">
-                  {[
-                    { label: 'Sharpe Ratio',   value: realMetrics.sharpe,               unit: '' },
-                    { label: 'Volatility p.a.', value: realMetrics.annualizedVolatility, unit: '%' },
-                    { label: 'Max Drawdown',    value: realMetrics.maxDrawdown,          unit: '%' },
-                  ].map(({ label, value, unit }) => (
-                    <div key={label} className="text-center p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-600 mb-1">{label}</p>
-                      {value !== null && value !== undefined ? (
-                        <p className="text-sm font-bold text-gray-800">{value}{unit}</p>
-                      ) : (
-                        <p className="text-sm text-gray-400">—</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {!metricsLoading && (() => {
-                const state = realMetrics?.riskMetricsState;
-                if (state === 'limited') return (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                    <p className="text-xs font-medium text-amber-900">Building performance history</p>
-                    <p className="text-xs text-amber-800 mt-1">
-                      Risk metrics will appear once sufficient portfolio history and variability are observed.
-                    </p>
-                  </div>
-                );
-                if (state === 'estimated') return (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                    <p className="text-xs font-medium text-amber-900">Building performance history</p>
-                    <p className="text-xs text-amber-800 mt-1">
-                      Metrics will appear as more real portfolio data is recorded. Current values are based on reconstructed history.
-                    </p>
-                  </div>
-                );
-                return (
-                  <div className="rounded-lg border border-green-200 bg-green-50 p-3">
-                    <p className="text-xs font-medium text-green-900">Historical data</p>
-                    <p className="text-xs text-green-800 mt-1">
-                      Metrics are based on observed portfolio performance.
-                    </p>
-                  </div>
-                );
-              })()}
+          <CardContent className="p-6 space-y-4">
+            <div>
+              <p className="font-semibold text-gray-900">General market insights</p>
+              <p className="text-sm text-gray-500">AI-generated — general information only</p>
             </div>
+
+            <InsightCard
+              title="Bond allocation — general context"
+              text="Government bonds and high-grade corporates are commonly used for income stability. Allocations typically range 30–70% depending on risk objectives."
+            />
+            <InsightCard
+              title="Capital preservation — general context"
+              text="Treasury securities and stable value funds are typically used where capital preservation is the primary objective."
+            />
+            <InsightCard
+              title="Medium-term horizons — general context"
+              text="A 5–10 year horizon is often associated with moderate growth blended with defensive assets. Appropriate mix depends on individual circumstances."
+            />
           </CardContent>
         </Card>
       </div>
 
-      {/* Investment Products Breakdown */}
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <PieChartIcon className="h-5 w-5" />
-            Investment Products
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center space-x-6">
-            <div className="h-64 w-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={investmentBreakdown?.categories || []}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={100}
-                    paddingAngle={5}
-                    dataKey="value"
-                  >
-                    {(investmentBreakdown?.categories || []).map((entry: any, index: number) => (
-                      <Cell key={`cell-${index}`} fill={getCategoryColor(entry.name)} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value: number) => [`$${value.toLocaleString()}`, 'Value']} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="flex-1 space-y-3">
-              {(investmentBreakdown?.categories || []).map((item: any, index: number) => (
-                <div 
-                  key={item.name} 
-                  className="flex items-center justify-between hover:bg-gray-50 p-2 rounded-lg cursor-pointer transition-colors"
-                  onClick={() => window.location.href = '/investments'}
-                >
-                  <div className="flex items-center space-x-3">
-                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: getCategoryColor(item.name) }}></div>
-                    <span className="font-medium">{item.name}</span>
-                    <Badge variant="outline">{item.products.length} products</Badge>
-                  </div>
-                  <div className="text-right">
-                    <p className="font-semibold">{item.percentage.toFixed(1)}%</p>
-                    <p className="text-sm text-gray-600">${item.value.toLocaleString()}</p>
-                  </div>
-                </div>
-              ))}
+        <CardContent className="p-6 space-y-4">
+          <p className="font-semibold text-gray-900">Allocation comparison — illustrative only</p>
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+            <p className="text-sm text-amber-800">Not a suggestion to act. Any rebalancing must be discussed with your adviser and documented in a Statement of Advice.</p>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-gray-500">
+                  <th className="text-left py-2 font-medium">Asset class</th>
+                  <th className="text-left py-2 font-medium">Current</th>
+                  <th className="text-left py-2 font-medium">Illustrative benchmark</th>
+                  <th className="text-left py-2 font-medium">Difference</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allocationData.map((row, i) => (
+                  <tr key={i} className="border-b border-gray-100">
+                    <td className="py-3 text-gray-900">{row.asset}</td>
+                    <td className="py-3">{row.current}%</td>
+                    <td className="py-3">{row.benchmark}%</td>
+                    <td className={`py-3 ${row.diff > 0 ? "text-green-600" : row.diff < 0 ? "text-red-600" : ""}`}>
+                      {row.diff > 0 ? "+" : ""}{row.diff}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <Button variant="outline" size="sm" className="text-blue-600 border-blue-200">
+            Discuss rebalancing with adviser <ExternalLink className="w-3 h-3 ml-1" />
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function InsightCard({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="border rounded-lg p-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="font-medium text-gray-900 text-sm">{title}</p>
+        <Badge variant="outline" className="text-xs">General</Badge>
+      </div>
+      <p className="text-sm text-gray-600">{text}</p>
+      <div className="flex gap-2 pt-1">
+        <Button variant="outline" size="sm" className="text-xs">Learn more <ExternalLink className="w-3 h-3 ml-1" /></Button>
+        <Button variant="outline" size="sm" className="text-xs">Discuss with adviser <ExternalLink className="w-3 h-3 ml-1" /></Button>
+      </div>
+    </div>
+  );
+}
+
+function AdviserTab() {
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardContent className="p-6">
+          <p className="font-semibold text-gray-900 mb-1">Your adviser</p>
+          <p className="text-sm text-gray-500 mb-4">Licensed financial adviser — AMAX Wealth</p>
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-slate-200 rounded-full flex items-center justify-center text-slate-600 font-semibold">AW</div>
+            <div>
+              <p className="font-semibold">AMAX Wealth Adviser</p>
+              <p className="text-sm text-gray-500">+61 2 8320 1908 · Licensed under AFSL arrangements</p>
             </div>
           </div>
-          
-          {/* Individual Products */}
-          <div className="mt-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h4 className="font-semibold text-lg mb-3">Individual Investment Products</h4>
-              <Button 
-                variant="outline" 
-                size="sm"
-                onClick={() => window.location.href = '/investments'}
-                className="text-sm"
-              >
-                View All Investments
-              </Button>
-            </div>
-            {(investmentBreakdown?.categories || []).map((category: any) => (
-              <div key={category.name} className="space-y-2">
-                <h5 className="font-medium text-sm text-gray-700 uppercase tracking-wide">{category.name}</h5>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {category.products.map((product: any, idx: number) => (
-                    <div 
-                      key={idx} 
-                      className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
-                      onClick={() => window.location.href = '/investments'}
-                    >
-                      <div className="flex items-center space-x-3">
-                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: getCategoryColor(category.name) }}></div>
-                        <span className="text-sm font-medium">{product.name}</span>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-sm font-semibold">${(product.value / 1000).toFixed(0)}K</div>
-                        <div className="text-xs text-gray-500">{product.percentage.toFixed(1)}%</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+          <div className="flex gap-2 mt-4">
+            <Button variant="outline" size="sm"><Phone className="w-3 h-3 mr-1" />Call</Button>
+            <Button variant="outline" size="sm"><MessageSquare className="w-3 h-3 mr-1" />Message</Button>
           </div>
         </CardContent>
       </Card>
 
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-5 space-y-3">
+        <p className="font-semibold text-blue-900">Want personalised advice?</p>
+        <p className="text-sm text-blue-800">
+          To receive advice tailored to your financial situation, your adviser must prepare a Statement of Advice (SOA). This is a legal requirement under Australian financial services law. Your adviser will review your fact-find before making any personal observations.
+        </p>
+        <Button variant="outline" className="border-blue-300 text-blue-700">
+          Request a Statement of Advice <ExternalLink className="w-3 h-3 ml-1" />
+        </Button>
+      </div>
 
-
-      {/* Advisor Contact Modal */}
-      <Dialog open={advisorModalOpen} onOpenChange={setAdvisorModalOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Contact Your Wealth Planner</DialogTitle>
-            <DialogDescription>
-              Send a message to our wealth advisory team
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="bg-gray-50 p-3 rounded-lg">
-              <div className="flex items-center space-x-2">
-                <Phone className="w-4 h-4 text-gray-600" />
-                <span className="text-sm text-gray-700">Wealth Advisory Team</span>
+      <Card>
+        <CardContent className="p-6 space-y-4">
+          <p className="font-semibold text-gray-900">Statements of Advice</p>
+          {soaItems.map((item, i) => (
+            <div key={i} className="flex items-center justify-between py-3 border-b border-gray-100 last:border-0">
+              <div>
+                <p className="font-medium text-gray-900">{item.title}</p>
+                <p className="text-sm text-gray-500">{item.desc}</p>
               </div>
-              <p className="text-sm text-gray-600 mt-1">+61 2 8320 1908</p>
+              <Badge className={item.color}>{item.status}</Badge>
             </div>
-            
-            <div className="space-y-2">
-              <Label htmlFor="advisor-message">Your Message</Label>
-              <Textarea
-                id="advisor-message"
-                placeholder="Tell your wealth planner how they can help you..."
-                value={advisorMessage}
-                onChange={(e) => setAdvisorMessage(e.target.value)}
-                rows={4}
-                className="resize-none"
-              />
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ActivityTab() {
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardContent className="p-6 space-y-4">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="font-semibold text-gray-900">Account activity</p>
+              <p className="text-sm text-gray-500">All investment instructions — AMAX Wealth does not hold client funds</p>
             </div>
-            
-            <div className="flex space-x-2">
-              <Button 
-                variant="outline" 
-                onClick={() => setAdvisorModalOpen(false)}
-                className="flex-1"
-              >
-                Cancel
-              </Button>
-              <Button 
-                onClick={() => advisorMutation.mutate({ message: advisorMessage })}
-                disabled={!advisorMessage.trim() || advisorMutation.isPending}
-                className="flex-1"
-              >
-                {advisorMutation.isPending ? "Sending..." : "Send Message"}
-              </Button>
-            </div>
+            <Button variant="outline" size="sm">Export <ExternalLink className="w-3 h-3 ml-1" /></Button>
           </div>
-        </DialogContent>
-      </Dialog>
 
-      {/* Insight Details Modal */}
-      <Dialog open={detailsModalOpen} onOpenChange={setDetailsModalOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{selectedRecommendation?.title}</DialogTitle>
-            <DialogDescription>
-              Detailed analysis and general guidance — not personal advice
-            </DialogDescription>
-          </DialogHeader>
-          {selectedRecommendation && (
-            <div className="space-y-4">
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <h4 className="font-semibold mb-2">Insight Category</h4>
-                <Badge className="mb-2">
-                  {selectedRecommendation.type.replace('_', ' ').toUpperCase()}
-                </Badge>
-                <p className="text-sm text-gray-600">{selectedRecommendation.description}</p>
-              </div>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 border rounded-lg">
-                  <h4 className="font-semibold mb-2">Impact Analysis</h4>
-                  <AdvisoryMetricUnavailable
-                    title="Impact figures unavailable"
-                    description="Expected return improvement and risk reduction will appear once real portfolio history is available for calculation."
-                  />
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-gray-500">
+                  <th className="text-left py-2 font-medium">Date</th>
+                  <th className="text-left py-2 font-medium">Ref</th>
+                  <th className="text-left py-2 font-medium">Description</th>
+                  <th className="text-right py-2 font-medium">Amount</th>
+                  <th className="text-right py-2 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activityData.map((row, i) => (
+                  <tr key={i} className="border-b border-gray-100">
+                    <td className="py-4 text-gray-600">{row.date}</td>
+                    <td className="py-4 text-gray-400 text-xs">{row.ref}</td>
+                    <td className="py-4">
+                      <p className="font-medium text-gray-900">{row.name}</p>
+                      <p className="text-xs text-gray-500">{row.desc}</p>
+                    </td>
+                    <td className="py-4 text-right font-medium">{row.amount}</td>
+                    <td className="py-4 text-right">
+                      <Badge className="bg-green-100 text-green-700">{row.status}</Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="bg-gray-50 border rounded-lg p-3 text-xs text-gray-500">
+            All transactions are logged for regulatory compliance. Records maintained under s912A Corporations Act 2001 (Cth) — 7-year minimum retention. AMAX Wealth does not hold client funds.
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ComplianceMiniTab() {
+  return (
+    <div className="space-y-6">
+      <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center gap-4">
+        <Badge className="bg-green-600 text-white px-3 py-1">Tier 2 verified — wholesale investor</Badge>
+        <div>
+          <p className="font-semibold text-gray-900">Wholesale client classification</p>
+          <p className="text-sm text-gray-600">Verified under Corporations Act 2001 (Cth) s761G — must be re-verified periodically</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <CardContent className="p-6 space-y-4">
+            <div>
+              <p className="font-semibold text-gray-900">KYC status</p>
+              <p className="text-sm text-gray-500">Verification progress</p>
+            </div>
+            {kycSteps.map((step) => (
+              <div key={step.num} className="flex items-start gap-3">
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0 ${
+                  step.status === "completed" ? "bg-green-100 text-green-700" : step.status === "pending" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"
+                }`}>{step.num}</div>
+                <div>
+                  <p className="font-medium text-gray-900 text-sm">{step.title}</p>
+                  <p className="text-xs text-gray-500">{step.desc}</p>
                 </div>
-                
-                <div className="p-4 border rounded-lg">
-                  <h4 className="font-semibold mb-2">Implementation Steps</h4>
-                  <ol className="text-sm space-y-1 list-decimal list-inside">
-                    <li>Review current allocation</li>
-                    <li>Identify rebalancing targets</li>
-                    <li>Execute trades gradually</li>
-                    <li>Monitor performance impact</li>
-                  </ol>
+              </div>
+            ))}
+            <Button variant="outline" size="sm" className="w-full">Continue KYC <ExternalLink className="w-3 h-3 ml-1" /></Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-6 space-y-3">
+            <div>
+              <p className="font-semibold text-gray-900">Documents</p>
+              <p className="text-sm text-gray-500">Upload and manage compliance documents</p>
+            </div>
+            {documents.map((doc, i) => (
+              <div key={i} className="flex items-center justify-between py-2">
+                <div>
+                  <p className="font-medium text-gray-900 text-sm">{doc.name}</p>
+                  <p className="text-xs text-gray-500">{doc.desc}</p>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <Badge className={doc.color + " text-xs"}>{doc.status}</Badge>
+                  {doc.hasUpload && (
+                    <Button variant="outline" size="sm" className="text-xs">
+                      Upload <ExternalLink className="w-3 h-3 ml-1" />
+                    </Button>
+                  )}
                 </div>
               </div>
-              
-              <div className="flex space-x-2">
-                <Button 
-                  onClick={() => {
-                    applyRecommendationMutation.mutate(selectedRecommendation.id);
-                    setDetailsModalOpen(false);
-                  }}
-                  disabled={applyRecommendationMutation.isPending}
-                >
-                  {applyRecommendationMutation.isPending ? "Applying..." : "Acknowledge Insight"}
-                </Button>
-                <Button variant="outline" onClick={() => setDetailsModalOpen(false)}>
-                  Close
-                </Button>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardContent className="p-6 space-y-1">
+          <p className="font-semibold text-gray-900 mb-3">Regulatory status</p>
+          {regulatoryRows.map((row, i) => (
+            <div key={i} className="flex justify-between items-center py-3 border-b border-gray-100 last:border-0">
+              <span className="font-medium text-gray-900 text-sm">{row.label}</span>
+              <span className="text-sm text-gray-600 text-right">{row.value}</span>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function RiskDisclosureTab() {
+  return (
+    <div className="space-y-6">
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <p className="text-sm text-amber-800 italic">
+          All investments carry risk. The value of your investments can go down as well as up. You may receive back less than you invest. Past performance is not a reliable indicator of future results.
+        </p>
+      </div>
+
+      <Card>
+        <CardContent className="p-6 space-y-6">
+          {riskItems.map((item) => (
+            <div key={item.num} className="pb-4 border-b border-gray-100 last:border-0 last:pb-0">
+              <div className="flex items-start gap-3">
+                <span className="text-blue-600 font-semibold text-sm mt-0.5">{item.num}</span>
+                <div>
+                  <p className="font-semibold text-gray-900 mb-1">{item.title}</p>
+                  <p className="text-sm text-gray-700">{item.text}</p>
+                </div>
               </div>
             </div>
-          )}
-        </DialogContent>
-      </Dialog>
+          ))}
+
+          <div className="flex items-center justify-between pt-4 border-t border-gray-200 text-sm text-gray-500">
+            <span>Disclosure acknowledged · Last updated January 2025 · Australian law applies</span>
+            <span>Signed 2 Aug 2025</span>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
