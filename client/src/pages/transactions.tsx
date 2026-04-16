@@ -75,6 +75,7 @@ export default function Transactions() {
   const pendingCount = transactions?.filter((t: any) => t.status === "pending").length || 0;
 
   const filteredTransactions = transactions?.filter((transaction: any) => {
+    if (transaction.type === "exchange") return false;
     const matchesSearch = transaction.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
                          transaction.fromCurrency?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                          transaction.toCurrency?.toLowerCase().includes(searchTerm.toLowerCase());
@@ -177,7 +178,6 @@ export default function Transactions() {
                   <SelectItem value="all">All Types</SelectItem>
                   <SelectItem value="deposit">Inflow</SelectItem>
                   <SelectItem value="withdrawal">Outflow</SelectItem>
-                  <SelectItem value="exchange">Conversion</SelectItem>
                   <SelectItem value="transfer">Transfer</SelectItem>
                   <SelectItem value="crypto_buy">Acquisition</SelectItem>
                   <SelectItem value="crypto_sell">Disposal</SelectItem>
