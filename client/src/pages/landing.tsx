@@ -25,9 +25,9 @@ export default function Landing() {
 
   return (
     <div className="min-h-screen bg-white">
-      <div className="bg-sky-50 px-4 py-2">
+      <div className="bg-sky-500 px-4 py-2">
         <div className="max-w-7xl mx-auto flex items-center justify-center">
-          <p className="text-xs text-sky-700">
+          <p className="text-xs text-white">
             <strong>Notice:</strong> This website is currently under development. Features and content are subject to change.
           </p>
         </div>
