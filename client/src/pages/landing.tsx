@@ -33,24 +33,24 @@ export default function Landing() {
         </div>
       </div>
 
-      <header className="bg-sky-500 border-b border-sky-600">
+      <header className="bg-white border-b border-sky-100">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src={darkBlueLogo} alt="AMAX Wealth" className="h-16 w-auto object-contain drop-shadow-md" />
+            <img src={darkBlueLogo} alt="AMAX Wealth" className="h-16 w-auto object-contain" />
             <div>
-              <span className="text-xl font-bold text-white">AMAX WEALTH</span>
-              <p className="text-xs text-white/90">Investments / Advice</p>
+              <span className="text-xl font-bold text-sky-900">AMAX WEALTH</span>
+              <p className="text-xs text-sky-700">Investments / Advice</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-white">
+            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-sky-700">
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
-            <Button className="bg-white/15 text-white hover:bg-white/25 border border-white/30 font-semibold" onClick={() => navigate("/login")}>
+            <Button variant="outline" className="border-sky-200 text-sky-700 hover:bg-sky-50 font-semibold" onClick={() => navigate("/login")}>
               Sign In
             </Button>
-            <Button className="bg-white text-sky-700 hover:bg-sky-50 font-semibold" onClick={() => navigate("/apply")}>
+            <Button className="bg-sky-500 text-white hover:bg-sky-600 font-semibold" onClick={() => navigate("/apply")}>
               Apply for Access
             </Button>
           </div>
