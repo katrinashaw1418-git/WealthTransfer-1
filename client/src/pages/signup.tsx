@@ -10,7 +10,7 @@ import { Loader2, ArrowLeft, ShieldCheck } from "lucide-react";
 import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 export default function Signup() {
-  const { register, isAuthenticated, user } = useAuth();
+  const { register, isAuthenticated, user, logout } = useAuth();
   const [, navigate] = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -21,10 +21,18 @@ export default function Signup() {
   const [verified, setVerified] = useState(false);
   const [verifying, setVerifying] = useState(false);
 
-  // Only auto-skip signup if the user is fully authenticated AND email-verified.
-  // An unverified session must NOT bypass signup → it gets bounced to /verify-email.
+  // Cross-account guard: if a stale session belongs to a *different* email than the
+  // one the new applicant is trying to sign up with, log out the stale session so
+  // this signup can proceed cleanly. Otherwise the auto-redirect below would route
+  // the wrong user to /onboarding.
   useEffect(() => {
     if (!isAuthenticated || !user) return;
+    const params = new URLSearchParams(window.location.search);
+    const emailParam = (params.get("email") || "").toLowerCase().trim();
+    if (emailParam && emailParam !== user.email.toLowerCase()) {
+      logout();
+      return;
+    }
     if (user.emailVerified) {
       navigate("/onboarding", { replace: true });
     } else {
