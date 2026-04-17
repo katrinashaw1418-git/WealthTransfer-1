@@ -50,15 +50,15 @@ export default function ResetPassword() {
             <div className="w-10 h-10 bg-amber-500 rounded-lg flex items-center justify-center">
               <TrendingUp className="w-6 h-6 text-slate-900" />
             </div>
-            <span className="text-2xl font-bold text-white">AMAX</span>
+            <span className="text-2xl font-bold text-blue-900">AMAX</span>
           </div>
-          <h1 className="text-2xl font-bold text-white">Set new password</h1>
+          <h1 className="text-2xl font-bold text-blue-900">Set new password</h1>
         </div>
 
-        <Card className="bg-slate-800 border-slate-700">
+        <Card className="bg-white border-blue-100 shadow-sm">
           <CardHeader>
-            <CardTitle className="text-white">Reset Password</CardTitle>
-            <CardDescription className="text-slate-400">
+            <CardTitle className="text-blue-900">Reset Password</CardTitle>
+            <CardDescription className="text-gray-500">
               Enter your reset token and choose a new password
             </CardDescription>
           </CardHeader>
@@ -85,7 +85,7 @@ export default function ResetPassword() {
                   </Alert>
                 )}
                 <div className="space-y-2">
-                  <Label htmlFor="token" className="text-slate-300">Reset Token</Label>
+                  <Label htmlFor="token" className="text-blue-700">Reset Token</Label>
                   <Input
                     id="token"
                     type="text"
@@ -93,11 +93,11 @@ export default function ResetPassword() {
                     onChange={(e) => setToken(e.target.value)}
                     placeholder="Paste your reset token"
                     required
-                    className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-amber-500 font-mono text-sm"
+                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-amber-500 font-mono text-sm"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="newPassword" className="text-slate-300">New Password</Label>
+                  <Label htmlFor="newPassword" className="text-blue-700">New Password</Label>
                   <Input
                     id="newPassword"
                     type="password"
@@ -105,11 +105,11 @@ export default function ResetPassword() {
                     onChange={(e) => setNewPassword(e.target.value)}
                     placeholder="At least 8 characters"
                     required
-                    className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-amber-500"
+                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-amber-500"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="confirmPassword" className="text-slate-300">Confirm New Password</Label>
+                  <Label htmlFor="confirmPassword" className="text-blue-700">Confirm New Password</Label>
                   <Input
                     id="confirmPassword"
                     type="password"
@@ -117,7 +117,7 @@ export default function ResetPassword() {
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Repeat your new password"
                     required
-                    className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-amber-500"
+                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-amber-500"
                   />
                 </div>
                 <Button
@@ -135,7 +135,7 @@ export default function ResetPassword() {
         </Card>
 
         <div className="text-center">
-          <Link href="/login" className="text-slate-400 hover:text-amber-400 text-sm flex items-center justify-center gap-1">
+          <Link href="/login" className="text-gray-500 hover:text-amber-400 text-sm flex items-center justify-center gap-1">
             <ArrowLeft className="w-3 h-3" />
             Back to sign in
           </Link>

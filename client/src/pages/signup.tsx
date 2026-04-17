@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2, ArrowLeft, ShieldCheck } from "lucide-react";
-import darkBlueLogo from "@assets/DARK_BLUE_LOGO_1776310673148.jpg";
+import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 export default function Signup() {
   const { register, isAuthenticated } = useAuth();
@@ -96,19 +96,19 @@ export default function Signup() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-blue-50 flex items-center justify-center p-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
           <div className="flex items-center justify-center gap-3 mb-4">
             <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
-            <span className="text-2xl font-bold text-white">AMAX WEALTH</span>
+            <span className="text-2xl font-bold text-blue-900">AMAX WEALTH</span>
           </div>
-          <h1 className="text-3xl font-bold text-white">Create Account</h1>
-          <p className="text-slate-300">Set up your login credentials to continue onboarding</p>
+          <h1 className="text-3xl font-bold text-blue-900">Create Account</h1>
+          <p className="text-blue-700">Set up your login credentials to continue onboarding</p>
         </div>
 
         {!verified && !verifying && (
-          <Card className="bg-slate-800 border-slate-700">
+          <Card className="bg-white border-blue-100 shadow-sm">
             <CardContent className="pt-6">
               <form onSubmit={handleCheckEmail} className="space-y-4">
                 {error && (
@@ -116,11 +116,11 @@ export default function Signup() {
                     <AlertDescription>{error}</AlertDescription>
                   </Alert>
                 )}
-                <p className="text-sm text-slate-300">
+                <p className="text-sm text-blue-700">
                   Enter the email address you used in your application to verify your approval status.
                 </p>
                 <div className="space-y-2">
-                  <Label htmlFor="verifyEmail" className="text-white">Email address</Label>
+                  <Label htmlFor="verifyEmail" className="text-blue-900">Email address</Label>
                   <Input
                     id="verifyEmail"
                     type="email"
@@ -128,12 +128,12 @@ export default function Signup() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="john@example.com"
                     required
-                    className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
+                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500"
                   />
                 </div>
                 <Button
                   type="submit"
-                  className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold"
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold"
                 >
                   Verify Application
                 </Button>
@@ -143,10 +143,10 @@ export default function Signup() {
         )}
 
         {verifying && (
-          <Card className="bg-slate-800 border-slate-700">
+          <Card className="bg-white border-blue-100 shadow-sm">
             <CardContent className="pt-6 text-center py-10">
-              <Loader2 className="w-8 h-8 animate-spin text-white mx-auto mb-3" />
-              <p className="text-slate-300">Verifying your application...</p>
+              <Loader2 className="w-8 h-8 animate-spin text-blue-900 mx-auto mb-3" />
+              <p className="text-blue-700">Verifying your application...</p>
             </CardContent>
           </Card>
         )}
@@ -161,7 +161,7 @@ export default function Signup() {
               </div>
             </div>
 
-            <Card className="bg-slate-800 border-slate-700">
+            <Card className="bg-white border-blue-100 shadow-sm">
               <CardContent className="pt-6">
                 <form onSubmit={handleSubmit} className="space-y-4">
                   {error && (
@@ -171,7 +171,7 @@ export default function Signup() {
                   )}
 
                   <div className="space-y-2">
-                    <Label htmlFor="password" className="text-white">Password</Label>
+                    <Label htmlFor="password" className="text-blue-900">Password</Label>
                     <Input
                       id="password"
                       type="password"
@@ -180,12 +180,12 @@ export default function Signup() {
                       placeholder="Minimum 8 characters"
                       required
                       autoComplete="new-password"
-                      className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
+                      className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500"
                     />
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="confirmPassword" className="text-white">Confirm password</Label>
+                    <Label htmlFor="confirmPassword" className="text-blue-900">Confirm password</Label>
                     <Input
                       id="confirmPassword"
                       type="password"
@@ -194,14 +194,14 @@ export default function Signup() {
                       placeholder="Re-enter password"
                       required
                       autoComplete="new-password"
-                      className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
+                      className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500"
                     />
                   </div>
 
                   <Button
                     type="submit"
                     disabled={isLoading}
-                    className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold h-11"
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold h-11"
                   >
                     {isLoading ? (
                       <>
@@ -219,19 +219,19 @@ export default function Signup() {
         )}
 
         <div className="text-center space-y-3">
-          <p className="text-sm text-white">
+          <p className="text-sm text-blue-900">
             Haven't applied yet?{" "}
-            <Link href="/apply" className="underline hover:text-slate-300">
+            <Link href="/apply" className="underline hover:text-blue-700">
               Apply for Access
             </Link>
           </p>
-          <p className="text-sm text-white">
+          <p className="text-sm text-blue-900">
             Already have an account?{" "}
-            <Link href="/login" className="underline hover:text-slate-300">
+            <Link href="/login" className="underline hover:text-blue-700">
               Sign in
             </Link>
           </p>
-          <Link href="/" className="inline-flex items-center gap-2 text-sm text-white hover:text-slate-300">
+          <Link href="/" className="inline-flex items-center gap-2 text-sm text-blue-900 hover:text-blue-700">
             <ArrowLeft className="w-4 h-4" />
             Back to Home
           </Link>

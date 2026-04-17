@@ -42,16 +42,16 @@ export default function ForgotPassword() {
             <div className="w-10 h-10 bg-amber-500 rounded-lg flex items-center justify-center">
               <TrendingUp className="w-6 h-6 text-slate-900" />
             </div>
-            <span className="text-2xl font-bold text-white">AMAX</span>
+            <span className="text-2xl font-bold text-blue-900">AMAX</span>
           </div>
-          <h1 className="text-2xl font-bold text-white">Reset your password</h1>
-          <p className="text-slate-400">Enter your username to request a password reset</p>
+          <h1 className="text-2xl font-bold text-blue-900">Reset your password</h1>
+          <p className="text-gray-500">Enter your username to request a password reset</p>
         </div>
 
-        <Card className="bg-slate-800 border-slate-700">
+        <Card className="bg-white border-blue-100 shadow-sm">
           <CardHeader>
-            <CardTitle className="text-white">Account Recovery</CardTitle>
-            <CardDescription className="text-slate-400">
+            <CardTitle className="text-blue-900">Account Recovery</CardTitle>
+            <CardDescription className="text-gray-500">
               Enter your username to begin the password reset process
             </CardDescription>
           </CardHeader>
@@ -64,7 +64,7 @@ export default function ForgotPassword() {
                   </Alert>
                 )}
                 <div className="space-y-2">
-                  <Label htmlFor="username" className="text-slate-300">Username</Label>
+                  <Label htmlFor="username" className="text-blue-700">Username</Label>
                   <Input
                     id="username"
                     type="text"
@@ -72,7 +72,7 @@ export default function ForgotPassword() {
                     onChange={(e) => setUsername(e.target.value)}
                     placeholder="Enter your username"
                     required
-                    className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-amber-500"
+                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-amber-500"
                   />
                 </div>
                 <Button
@@ -99,10 +99,10 @@ export default function ForgotPassword() {
                     <KeyRound className="h-4 w-4 text-amber-500" />
                     <AlertDescription className="text-amber-200">
                       <span className="text-xs font-semibold uppercase tracking-wide text-amber-400 block mb-1">Development mode — token visible for testing</span>
-                      <strong className="block font-mono text-sm break-all text-amber-100 bg-slate-900 p-2 rounded">
+                      <strong className="block font-mono text-sm break-all text-amber-100 bg-blue-50 p-2 rounded">
                         {devToken}
                       </strong>
-                      <span className="text-xs text-slate-400 mt-1 block">Expires in 1 hour. Single use only.</span>
+                      <span className="text-xs text-gray-500 mt-1 block">Expires in 1 hour. Single use only.</span>
                     </AlertDescription>
                   </Alert>
                 )}
@@ -118,7 +118,7 @@ export default function ForgotPassword() {
         </Card>
 
         <div className="text-center">
-          <Link href="/login" className="text-slate-400 hover:text-amber-400 text-sm flex items-center justify-center gap-1">
+          <Link href="/login" className="text-gray-500 hover:text-amber-400 text-sm flex items-center justify-center gap-1">
             <ArrowLeft className="w-3 h-3" />
             Back to sign in
           </Link>

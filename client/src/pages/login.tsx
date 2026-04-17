@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2, Shield, ArrowLeft } from "lucide-react";
-import darkBlueLogo from "@assets/DARK_BLUE_LOGO_1776310673148.jpg";
+import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 export default function Login() {
   const { login, isAuthenticated } = useAuth();
@@ -37,21 +37,21 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-blue-50 flex items-center justify-center p-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
           <div className="flex items-center justify-center gap-3 mb-4">
             <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
-            <span className="text-2xl font-bold text-white">AMAX WEALTH</span>
+            <span className="text-2xl font-bold text-blue-900">AMAX WEALTH</span>
           </div>
-          <h1 className="text-3xl font-bold text-white">Welcome back</h1>
-          <p className="text-white">Sign in to your wealth management platform</p>
+          <h1 className="text-3xl font-bold text-blue-900">Welcome back</h1>
+          <p className="text-blue-900">Sign in to your wealth management platform</p>
         </div>
 
-        <Card className="bg-slate-800 border-slate-700">
+        <Card className="bg-white border-blue-100 shadow-sm">
           <CardHeader>
-            <CardTitle className="text-white">Sign In</CardTitle>
-            <CardDescription className="text-white">
+            <CardTitle className="text-blue-900">Sign In</CardTitle>
+            <CardDescription className="text-blue-900">
               Enter your credentials to access your portfolio
             </CardDescription>
           </CardHeader>
@@ -64,7 +64,7 @@ export default function Login() {
               )}
 
               <div className="space-y-2">
-                <Label htmlFor="username" className="text-white">Username</Label>
+                <Label htmlFor="username" className="text-blue-900">Username</Label>
                 <Input
                   id="username"
                   type="text"
@@ -73,12 +73,12 @@ export default function Login() {
                   placeholder="Enter your username"
                   required
                   autoComplete="username"
-                  className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
+                  className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500"
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="password" className="text-white">Password</Label>
+                <Label htmlFor="password" className="text-blue-900">Password</Label>
                 <Input
                   id="password"
                   type="password"
@@ -87,14 +87,14 @@ export default function Login() {
                   placeholder="Enter your password"
                   required
                   autoComplete="current-password"
-                  className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
+                  className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500"
                 />
               </div>
 
               <Button
                 type="submit"
                 disabled={isLoading}
-                className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold"
               >
                 {isLoading ? (
                   <>
@@ -106,7 +106,7 @@ export default function Login() {
                 )}
               </Button>
               <div className="text-center">
-                <Link href="/forgot-password" className="text-sm text-white hover:text-slate-300">
+                <Link href="/forgot-password" className="text-sm text-blue-900 hover:text-blue-700">
                   Forgot your password?
                 </Link>
               </div>
@@ -114,19 +114,19 @@ export default function Login() {
           </CardContent>
         </Card>
 
-        <div className="flex items-center gap-2 text-white text-sm justify-center">
+        <div className="flex items-center gap-2 text-blue-900 text-sm justify-center">
           <Shield className="w-4 h-4" />
           <span>256-bit encrypted · JWT authenticated · Audit logged</span>
         </div>
 
         <div className="text-center space-y-3">
-          <p className="text-sm text-white">
+          <p className="text-sm text-blue-900">
             Don't have an account?{" "}
-            <Link href="/apply" className="underline hover:text-slate-300">
+            <Link href="/apply" className="underline hover:text-blue-700">
               Apply for access
             </Link>
           </p>
-          <Link href="/" className="inline-flex items-center gap-2 text-sm text-white hover:text-slate-300">
+          <Link href="/" className="inline-flex items-center gap-2 text-sm text-blue-900 hover:text-blue-700">
             <ArrowLeft className="w-4 h-4" />
             Back to Home
           </Link>

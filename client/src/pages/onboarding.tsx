@@ -17,7 +17,7 @@ import {
   CheckCircle2,
   FileText,
 } from "lucide-react";
-import darkBlueLogo from "@assets/DARK_BLUE_LOGO_1776310673148.jpg";
+import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 const STEPS = [
   { label: "Identity", short: "Identity" },
@@ -133,11 +133,11 @@ export default function Onboarding() {
   if (submitted) {
     return (
       <div className="min-h-screen bg-gray-50">
-        <header className="bg-slate-900 px-6 py-4">
+        <header className="bg-blue-50 px-6 py-4">
           <div className="max-w-4xl mx-auto flex items-center justify-between">
             <div className="flex items-center gap-3">
               <img src={darkBlueLogo} alt="AMAX Wealth" className="w-8 h-8 rounded-lg" />
-              <span className="text-white font-semibold">AMAX Wealth — onboarding</span>
+              <span className="text-blue-900 font-semibold">AMAX Wealth — onboarding</span>
             </div>
           </div>
         </header>
@@ -166,13 +166,13 @@ export default function Onboarding() {
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
-      <header className="bg-slate-900 px-6 py-4">
+      <header className="bg-blue-50 px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <img src={darkBlueLogo} alt="AMAX Wealth" className="w-8 h-8 rounded-lg" />
-            <span className="text-white font-semibold">AMAX Wealth — onboarding</span>
+            <span className="text-blue-900 font-semibold">AMAX Wealth — onboarding</span>
           </div>
-          <span className="text-sm text-slate-300">Progress saved automatically</span>
+          <span className="text-sm text-blue-700">Progress saved automatically</span>
         </div>
       </header>
 
@@ -187,7 +187,7 @@ export default function Onboarding() {
                       i < currentStep
                         ? "bg-green-100 border-green-500 text-green-700"
                         : i === currentStep
-                        ? "bg-blue-600 border-blue-600 text-white"
+                        ? "bg-blue-600 border-blue-600 text-blue-900"
                         : "bg-white border-gray-300 text-gray-400"
                     }`}
                   >

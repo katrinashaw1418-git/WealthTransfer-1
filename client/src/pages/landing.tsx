@@ -18,62 +18,62 @@ import {
   FileText,
   Scale,
 } from "lucide-react";
-import darkBlueLogo from "@assets/DARK_BLUE_LOGO_1776310673148.jpg";
+import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 export default function Landing() {
   const [, navigate] = useLocation();
 
   return (
     <div className="min-h-screen bg-white">
-      <div className="bg-slate-900 px-4 py-2">
+      <div className="bg-blue-50 px-4 py-2">
         <div className="max-w-7xl mx-auto flex items-center justify-center">
-          <p className="text-xs text-slate-300">
+          <p className="text-xs text-blue-700">
             <strong>Notice:</strong> This website is currently under development. Features and content are subject to change.
           </p>
         </div>
       </div>
 
-      <header className="bg-slate-900">
+      <header className="bg-blue-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
             <div>
-              <span className="text-xl font-bold text-white">AMAX WEALTH</span>
-              <p className="text-xs text-white">Investments / Advice</p>
+              <span className="text-xl font-bold text-blue-900">AMAX WEALTH</span>
+              <p className="text-xs text-blue-900">Investments / Advice</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-white">
+            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-blue-900">
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
-            <Button className="bg-slate-700 text-white hover:bg-slate-600 font-semibold" onClick={() => navigate("/login")}>
+            <Button className="bg-blue-100 text-blue-900 hover:bg-blue-200 font-semibold" onClick={() => navigate("/login")}>
               Sign In
             </Button>
-            <Button className="bg-white hover:bg-slate-100 text-slate-900 font-semibold" onClick={() => navigate("/apply")}>
+            <Button className="bg-blue-600 hover:bg-blue-700 text-white font-semibold" onClick={() => navigate("/apply")}>
               Apply for Access
             </Button>
           </div>
         </div>
       </header>
 
-      <section className="bg-slate-900 text-white">
+      <section className="bg-blue-50 text-blue-900">
         <div className="max-w-7xl mx-auto px-6 py-24 md:py-32">
           <div className="max-w-3xl">
-            <Badge className="bg-white/10 text-white border-white/20 mb-6">
+            <Badge className="bg-white/10 text-blue-900 border-white/20 mb-6">
               Authorised Representative under AFSL
             </Badge>
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold leading-tight mb-6">
               Institutional-grade wealth management for wholesale investors
             </h1>
-            <p className="text-lg md:text-xl text-slate-300 mb-8 max-w-2xl">
+            <p className="text-lg md:text-xl text-blue-700 mb-8 max-w-2xl">
               Consolidated portfolio reporting, structured investment access, and advisory services — 
               delivered through a secure, compliance-first platform.
             </p>
             <div className="flex flex-col sm:flex-row gap-4">
               <Button 
                 size="lg" 
-                className="bg-white hover:bg-slate-100 text-slate-900 font-semibold"
+                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold"
                 onClick={() => navigate("/apply")}
               >
                 Apply for Access
@@ -81,7 +81,7 @@ export default function Landing() {
               </Button>
               <Button 
                 size="lg" 
-                className="bg-slate-700 text-white hover:bg-slate-600 font-semibold"
+                className="bg-blue-100 text-blue-900 hover:bg-blue-200 font-semibold"
                 onClick={() => {
                   const el = document.getElementById('how-it-works');
                   el?.scrollIntoView({ behavior: 'smooth' });
@@ -290,17 +290,17 @@ export default function Landing() {
         </div>
       </section>
 
-      <section className="py-20 bg-slate-900 text-white">
+      <section className="py-20 bg-blue-50 text-blue-900">
         <div className="max-w-3xl mx-auto px-6 text-center">
           <h2 className="text-3xl font-bold mb-4">Ready to apply?</h2>
-          <p className="text-slate-300 mb-8">
+          <p className="text-blue-700 mb-8">
             If you meet the wholesale investor criteria, apply for access today. Our compliance team will review your 
             application and a licensed adviser will be in touch.
           </p>
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Button 
               size="lg" 
-              className="bg-white hover:bg-slate-100 text-slate-900 font-semibold"
+              className="bg-blue-600 hover:bg-blue-700 text-white font-semibold"
               onClick={() => navigate("/apply")}
             >
               Apply for Access
@@ -308,21 +308,21 @@ export default function Landing() {
             </Button>
             <Button 
               size="lg" 
-              className="bg-slate-700 text-white hover:bg-slate-600 font-semibold"
+              className="bg-blue-100 text-blue-900 hover:bg-blue-200 font-semibold"
               onClick={() => window.open('tel:+61283201908')}
             >
               <Phone className="w-4 h-4 mr-2" />
               Speak to an adviser
             </Button>
           </div>
-          <p className="text-xs text-slate-400 mt-8 max-w-2xl mx-auto">
+          <p className="text-xs text-gray-500 mt-8 max-w-2xl mx-auto">
             By applying you confirm you are an eligible wholesale investor under the Corporations Act 2001 (Cth). Application does not guarantee 
             access. A verification process including KYC, AML screening, and wholesale investor certification is required.
           </p>
         </div>
       </section>
 
-      <footer className="bg-slate-950 text-white py-16">
+      <footer className="bg-blue-900 text-white py-16">
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
             <div>
@@ -367,7 +367,7 @@ export default function Landing() {
             </div>
           </div>
 
-          <div className="border-t border-slate-800 pt-8 space-y-4">
+          <div className="border-t border-blue-800 pt-8 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-white">
               <div>
                 <p className="font-medium text-white mb-1">AMAX Wealth</p>

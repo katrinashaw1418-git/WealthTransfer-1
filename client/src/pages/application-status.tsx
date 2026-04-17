@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ArrowLeft, Clock, CheckCircle2, XCircle, Loader2, FileSearch } from "lucide-react";
-import darkBlueLogo from "@assets/DARK_BLUE_LOGO_1776310673148.jpg";
+import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 interface ApplicationData {
   status: string;
@@ -75,23 +75,23 @@ export default function ApplicationStatus() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-blue-50 flex items-center justify-center p-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
           <div className="flex items-center justify-center gap-3 mb-4">
             <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
-            <span className="text-2xl font-bold text-white">AMAX WEALTH</span>
+            <span className="text-2xl font-bold text-blue-900">AMAX WEALTH</span>
           </div>
-          <h1 className="text-3xl font-bold text-white">Application Status</h1>
-          <p className="text-slate-300">Check the status of your access application</p>
+          <h1 className="text-3xl font-bold text-blue-900">Application Status</h1>
+          <p className="text-blue-700">Check the status of your access application</p>
         </div>
 
         {!checked && (
-          <Card className="bg-slate-800 border-slate-700">
+          <Card className="bg-white border-blue-100 shadow-sm">
             <CardContent className="pt-6">
               <form onSubmit={(e) => { e.preventDefault(); checkStatus(); }} className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="statusEmail" className="text-white">Email address</Label>
+                  <Label htmlFor="statusEmail" className="text-blue-900">Email address</Label>
                   <Input
                     id="statusEmail"
                     type="email"
@@ -99,13 +99,13 @@ export default function ApplicationStatus() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="Enter the email you used to apply"
                     required
-                    className="bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 focus:border-white"
+                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500"
                   />
                 </div>
                 <Button
                   type="submit"
                   disabled={isLoading || !email}
-                  className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold"
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold"
                 >
                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Check Status"}
                 </Button>
@@ -115,7 +115,7 @@ export default function ApplicationStatus() {
         )}
 
         {error && checked && (
-          <Card className="bg-slate-800 border-slate-700">
+          <Card className="bg-white border-blue-100 shadow-sm">
             <CardContent className="pt-6 text-center space-y-4">
               <Alert variant="destructive">
                 <AlertDescription>{error}</AlertDescription>
@@ -123,7 +123,7 @@ export default function ApplicationStatus() {
               <Button
                 variant="outline"
                 onClick={() => { setChecked(false); setError(null); }}
-                className="text-white border-slate-600 hover:bg-slate-700"
+                className="text-blue-900 border-blue-200 hover:bg-blue-50"
               >
                 Try another email
               </Button>
@@ -132,7 +132,7 @@ export default function ApplicationStatus() {
         )}
 
         {application && !error && (
-          <Card className="bg-slate-800 border-slate-700">
+          <Card className="bg-white border-blue-100 shadow-sm">
             <CardContent className="pt-6 space-y-5">
               {(() => {
                 const config = statusConfig[application.status] || statusConfig.submitted;
@@ -147,23 +147,23 @@ export default function ApplicationStatus() {
                 );
               })()}
 
-              <div className="bg-slate-700/50 rounded-lg p-4 space-y-2 text-sm">
+              <div className="bg-blue-50 rounded-lg p-4 space-y-2 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Name</span>
-                  <span className="text-white">{application.fullName}</span>
+                  <span className="text-gray-500">Name</span>
+                  <span className="text-blue-900">{application.fullName}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Email</span>
-                  <span className="text-white">{application.email}</span>
+                  <span className="text-gray-500">Email</span>
+                  <span className="text-blue-900">{application.email}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Submitted</span>
-                  <span className="text-white">{new Date(application.createdAt).toLocaleDateString()}</span>
+                  <span className="text-gray-500">Submitted</span>
+                  <span className="text-blue-900">{new Date(application.createdAt).toLocaleDateString()}</span>
                 </div>
                 {application.reviewedAt && (
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Reviewed</span>
-                    <span className="text-white">{new Date(application.reviewedAt).toLocaleDateString()}</span>
+                    <span className="text-gray-500">Reviewed</span>
+                    <span className="text-blue-900">{new Date(application.reviewedAt).toLocaleDateString()}</span>
                   </div>
                 )}
               </div>
@@ -174,7 +174,7 @@ export default function ApplicationStatus() {
                     Your application has been approved. Please create your account credentials to continue.
                   </p>
                   <Button
-                    className="w-full bg-white hover:bg-slate-100 text-slate-900 font-semibold"
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold"
                     onClick={() => navigate("/signup?email=" + encodeURIComponent(application.email))}
                   >
                     Create Account
@@ -184,17 +184,17 @@ export default function ApplicationStatus() {
 
               {(application.status === "submitted" || application.status === "under_review") && (
                 <div className="space-y-3">
-                  <p className="text-sm text-slate-400 text-center">
+                  <p className="text-sm text-gray-500 text-center">
                     Your application is being reviewed. You will be contacted when a decision is made.
                   </p>
-                  <div className="border border-dashed border-slate-600 rounded-lg p-3 text-center">
-                    <p className="text-xs text-slate-500 mb-2">Demo only — simulate approval</p>
+                  <div className="border border-dashed border-blue-200 rounded-lg p-3 text-center">
+                    <p className="text-xs text-gray-400 mb-2">Demo only — simulate approval</p>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={handleDemoApprove}
                       disabled={isLoading}
-                      className="text-white border-slate-600 hover:bg-slate-700"
+                      className="text-blue-900 border-blue-200 hover:bg-blue-50"
                     >
                       {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : "Approve Application"}
                     </Button>
@@ -212,13 +212,13 @@ export default function ApplicationStatus() {
         )}
 
         <div className="text-center space-y-3">
-          <p className="text-sm text-white">
+          <p className="text-sm text-blue-900">
             Haven't applied yet?{" "}
-            <Link href="/apply" className="underline hover:text-slate-300">
+            <Link href="/apply" className="underline hover:text-blue-700">
               Apply for Access
             </Link>
           </p>
-          <Link href="/" className="inline-flex items-center gap-2 text-sm text-white hover:text-slate-300">
+          <Link href="/" className="inline-flex items-center gap-2 text-sm text-blue-900 hover:text-blue-700">
             <ArrowLeft className="w-4 h-4" />
             Back to Home
           </Link>
