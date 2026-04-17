@@ -12,6 +12,11 @@ export const users = pgTable("users", {
   lastName: text("last_name").notNull(),
   kycStatus: text("kyc_status").notNull().default("pending"), // pending, verified, rejected
   userTier: text("user_tier").notNull().default("standard"), // standard, premium, hnwi
+  // Email verification — set on signup; required before login is allowed
+  emailVerified: boolean("email_verified").notNull().default(false),
+  emailVerificationToken: text("email_verification_token"),
+  emailVerificationTokenExpiry: timestamp("email_verification_token_expiry"),
+  emailOtp: text("email_otp"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
