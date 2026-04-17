@@ -1,0 +1,21 @@
+That document is excellent product thinking and I agree with almost all of it. Let me give you my honest take point by point.
+
+**What it gets exactly right:**
+
+The framing of "collect → interpret → respond" versus "collect → submit → wait" is the sharpest insight in the whole document. That is not just a UX observation — it is the entire product positioning argument. Most wealth platforms are forms with a brand on top. The dynamic recommendation makes this a service. That distinction is worth protecting above everything else.
+
+The three-layer read on what the five fixes actually accomplish — drop-off reduction, regulatory defensibility, and HNW conversion trigger — is senior thinking. Most product teams would call these "UX improvements" and deprioritise them. Framing them as compliance posture and conversion triggers gets them into the sprint.
+
+The private access callout point is pushed further than I did and it is correct. "You've unlocked something" is exactly the emotional signal that converts a $500k+ applicant. It should feel like a velvet rope moment, not a checkbox.
+
+**Where I would push back slightly:**
+
+The save and continue later suggestion is right in principle but the document says "don't overbuild" and then describes a full magic link session restore system with per-step data persistence. That is actually a meaningful backend build. For a first release targeting a small cohort of HNWI applicants, a simpler solution — "email yourself a link to resume" with just the email captured at step 1 — gets 80% of the value at 10% of the cost.
+
+The recommended range "2–4 goals" on the counter is a nice touch but I would validate it first. Some family office investors will select one goal deliberately. Telling them their selection count is below a recommendation range could feel presumptuous for that audience.
+
+**The overall verdict:**
+
+The document is correct that you are past early-stage UX and into institutional product territory. The priority order it gives — recommendation screen first, private access second, AFSL placement third — is the right sequence. Those three alone move the product from "impressive demo" to "credible institutional onboarding."
+
+Want me to rebuild the wizard now with all five upgrades applied — the selection counter, private access callout as a standalone gold-bordered block, application reference number on screen, AFSL disclaimer in three places, and the recommendation card fully enhanced?

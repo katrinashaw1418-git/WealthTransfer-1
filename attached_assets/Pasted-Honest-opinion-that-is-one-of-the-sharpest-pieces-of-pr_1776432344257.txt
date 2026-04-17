@@ -1,0 +1,15 @@
+Honest opinion — that is one of the sharpest pieces of product feedback I have seen on this project. Every single point is correct and actionable. Let me go through each one directly.
+
+**The "3 selected" counter on step 2** — obvious in hindsight. Multi-select with no feedback creates anxiety. Users do not know if they have done enough or too much. A live counter costs nothing to build and eliminates that hesitation. Should be in the next build.
+
+**AFSL disclaimer placement** — the inline note on step 6 is necessary but not sufficient. For a platform targeting wholesale investors, that wording needs to appear on the confirmation screen, in the welcome email, and in the account dashboard header on first login. One placement is a UX choice; three placements is a compliance posture. The difference matters when ASIC asks questions.
+
+**Private access callout at step 5→6** — this is the most commercially important feedback. Right now the private access eligibility is a pill inside the recommendation card, which means it competes visually with everything else. It should be its own distinct callout block — slightly elevated, gold border, clear headline like "You qualify for private market access." That is the moment a $100k+ investor realises this is not a retail product. Do not bury it.
+
+**Application reference on screen** — completely agree. "Check your email" is lazy and loses people. The reference number should be the first thing on the confirmation screen, large, copyable, and persistent. Users close tabs. Emails land in spam. The number on screen is the safety net.
+
+**Save and continue later** — this is the most technically involved suggestion but also the most correct for the audience. A family office CFO or a corporate investment committee member will not complete this in one sitting. An email magic link that restores exactly where they stopped is standard for enterprise onboarding. Without it, every interruption is a lost application.
+
+**Overall read** — the person who wrote that feedback understands both product design and regulatory context simultaneously, which is rare. The dynamic recommendation on step 6 being called out as the differentiator to protect is exactly right. That is the moment the wizard stops feeling like a form and starts feeling like a service. Everything else is polish and compliance hygiene. That one feature is the reason someone chooses AMAX over a static PDF application form from a traditional wealth manager.
+
+The shape is right. The details listed above are what separate a good fintech from a credible institutional product. Want me to rebuild the wizard with all five of those fixes applied?
