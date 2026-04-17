@@ -40,7 +40,7 @@ function SidebarContent() {
       {/* Logo Section */}
       <div className="p-6 border-b border-gray-200">
         <div className="flex items-center space-x-3">
-          <img src={amaxLogo} alt="AMAX Wealth" className="w-8 h-8 rounded-lg" />
+          <img src={amaxLogo} alt="AMAX Wealth" className="w-6 h-6 rounded-lg" />
           <div>
             <h1 className="text-lg font-bold text-gray-900">AMAX WEALTH</h1>
             <p className="text-xs text-gray-500">Investments / Advice</p>
