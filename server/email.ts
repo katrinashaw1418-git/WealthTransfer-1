@@ -29,7 +29,8 @@ export async function sendVerificationEmail(
   }
 
   const transport = createTransport()!;
-  await transport.sendMail({
+  try {
+    await transport.sendMail({
     from: '"AMAX Wealth" <info@amaxglobal.com.au>',
     replyTo: "info@amaxglobal.com.au",
     to,
@@ -75,7 +76,13 @@ export async function sendVerificationEmail(
 </body>
 </html>`,
     text: `Hi ${firstName},\n\nYour AMAX Wealth verification code is: ${otp}\n\nOr verify via link:\n${verifyUrl}\n\nThis code expires in 24 hours.\n\nAMAX GLOBAL Pty Ltd`,
-  });
-
-  return { sent: true };
+    });
+    return { sent: true };
+  } catch (err: any) {
+    // SMTP credentials/connection failed. Surface the OTP to server logs as a dev
+    // fallback and re-throw so the caller can report the real status to the client.
+    console.error(`[email] SMTP send FAILED for ${to}:`, err?.message || err);
+    console.log(`[email] DEV FALLBACK — OTP for ${to}: ${otp}`);
+    throw err;
+  }
 }

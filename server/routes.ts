@@ -1093,17 +1093,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const baseUrl = `${req.protocol}://${req.get("host")}`;
       const firstName = fullName.split(" ")[0] || "there";
-      // No link-token here — application verification is OTP-only (the link flow is for user accounts)
-      await sendVerificationEmail(normalizedEmail, firstName, "", otp, baseUrl).catch((err) => {
-        console.error("[applications] sendVerificationEmail failed:", err?.message);
-      });
+      // No link-token here — application verification is OTP-only.
+      let emailSent = false;
+      let emailError: string | null = null;
+      try {
+        const result = await sendVerificationEmail(normalizedEmail, firstName, "", otp, baseUrl);
+        emailSent = result.sent;
+      } catch (err: any) {
+        emailError = err?.message || "Email delivery failed";
+        console.error("[applications] sendVerificationEmail failed:", emailError);
+      }
 
       res.status(201).json({
         id: application.id,
         status: application.status,
         requiresEmailVerification: true,
-        emailSent: emailConfigured,
-        ...(!emailConfigured ? { devOtp: otp } : {}),
+        emailSent,
+        ...(emailError ? { emailError } : {}),
+        // In dev, expose the OTP so the user can complete the flow when SMTP is misconfigured.
+        ...(isLocalDev && !emailSent ? { devOtp: otp } : {}),
       });
     } catch (error: any) {
       if (error.code === "23505") {
@@ -1181,13 +1189,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .where(eq(applicationsTable.id, application.id));
       const baseUrl = `${req.protocol}://${req.get("host")}`;
       const firstName = (application.fullName || "").split(" ")[0] || "there";
-      await sendVerificationEmail(normalized, firstName, "", newOtp, baseUrl).catch((err) => {
-        console.error("[applications resend] sendVerificationEmail failed:", err?.message);
-      });
+      let emailSent = false;
+      let emailError: string | null = null;
+      try {
+        const result = await sendVerificationEmail(normalized, firstName, "", newOtp, baseUrl);
+        emailSent = result.sent;
+      } catch (err: any) {
+        emailError = err?.message || "Email delivery failed";
+        console.error("[applications resend] sendVerificationEmail failed:", emailError);
+      }
       res.json({
         ok: true,
-        emailSent: emailConfigured,
-        ...(!emailConfigured ? { devOtp: newOtp } : {}),
+        emailSent,
+        ...(emailError ? { emailError } : {}),
+        ...(isLocalDev && !emailSent ? { devOtp: newOtp } : {}),
       });
     } catch (error: any) {
       console.error("application resend-otp error:", error);
