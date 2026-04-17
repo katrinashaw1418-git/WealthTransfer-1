@@ -36,7 +36,7 @@ export default function Landing() {
       <header className="bg-sky-500 border-b border-sky-600">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-14 h-14 rounded-xl flex items-center justify-center p-1" style={{ backgroundColor: "rgba(255,255,255,0.15)" }}>
+            <div className="w-14 h-14 rounded-xl flex items-center justify-center p-1 bg-sky-300">
               <img src={darkBlueLogo} alt="AMAX Wealth" className="w-full h-full object-contain" />
             </div>
             <div>
