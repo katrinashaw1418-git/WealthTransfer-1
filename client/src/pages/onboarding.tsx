@@ -222,7 +222,7 @@ export default function Onboarding() {
                       i < currentStep
                         ? "bg-green-100 border-green-500 text-green-700"
                         : i === currentStep
-                        ? "bg-blue-600 border-blue-600 text-blue-900"
+                        ? "bg-sky-500 border-sky-500 text-white"
                         : "bg-white border-gray-300 text-gray-400"
                     }`}
                   >

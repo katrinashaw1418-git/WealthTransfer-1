@@ -101,7 +101,7 @@ export default function Apply() {
                 Access is subject to eligibility, compliance, and verification checks.
               </p>
               <Button
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold"
+                className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold"
                 onClick={() => navigate("/application-status?email=" + encodeURIComponent(email))}
               >
                 Check Application Status
@@ -273,7 +273,7 @@ export default function Apply() {
                       id="consentOwn"
                       checked={consentOwn}
                       onCheckedChange={(checked) => setConsentOwn(checked === true)}
-                      className="mt-0.5 border-blue-300 data-[state=checked]:bg-blue-600 data-[state=checked]:text-blue-900"
+                      className="mt-0.5 border-sky-300 data-[state=checked]:bg-sky-500 data-[state=checked]:text-white"
                     />
                     <Label htmlFor="consentOwn" className="text-sm text-blue-700 leading-snug cursor-pointer">
                       I confirm I am acting on my own behalf or as an authorised representative
@@ -284,7 +284,7 @@ export default function Apply() {
                       id="consentAml"
                       checked={consentAml}
                       onCheckedChange={(checked) => setConsentAml(checked === true)}
-                      className="mt-0.5 border-blue-300 data-[state=checked]:bg-blue-600 data-[state=checked]:text-blue-900"
+                      className="mt-0.5 border-sky-300 data-[state=checked]:bg-sky-500 data-[state=checked]:text-white"
                     />
                     <Label htmlFor="consentAml" className="text-sm text-blue-700 leading-snug cursor-pointer">
                       I understand access is subject to AML/CTF and regulatory checks
@@ -295,7 +295,7 @@ export default function Apply() {
                       id="consentContact"
                       checked={consentContact}
                       onCheckedChange={(checked) => setConsentContact(checked === true)}
-                      className="mt-0.5 border-blue-300 data-[state=checked]:bg-blue-600 data-[state=checked]:text-blue-900"
+                      className="mt-0.5 border-sky-300 data-[state=checked]:bg-sky-500 data-[state=checked]:text-white"
                     />
                     <Label htmlFor="consentContact" className="text-sm text-blue-700 leading-snug cursor-pointer">
                       I agree to be contacted for onboarding if approved
@@ -307,7 +307,7 @@ export default function Apply() {
               <Button
                 type="submit"
                 disabled={isLoading || !accountType || !intendedUse}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold h-11"
+                className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold h-11"
               >
                 {isLoading ? (
                   <>

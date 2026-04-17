@@ -174,7 +174,7 @@ export default function ApplicationStatus() {
                     Your application has been approved. Please create your account credentials to continue.
                   </p>
                   <Button
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold"
+                    className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold"
                     onClick={() => navigate("/signup?email=" + encodeURIComponent(application.email))}
                   >
                     Create Account

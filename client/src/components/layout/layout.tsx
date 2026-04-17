@@ -66,7 +66,7 @@ export default function Layout({ children }: LayoutProps) {
               <div className="space-y-3">
                 <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-100">
                   <div className="flex items-center space-x-3">
-                    <div className="w-10 h-10 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full flex items-center justify-center">
+                    <div className="w-10 h-10 bg-sky-500 rounded-full flex items-center justify-center">
                       <Phone className="w-4 h-4 text-white" />
                     </div>
                     <div>
@@ -87,7 +87,7 @@ export default function Layout({ children }: LayoutProps) {
                   <Button
                     size="sm"
                     onClick={() => setAdvisorModalOpen(true)}
-                    className="flex-1 text-xs bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700"
+                    className="flex-1 text-xs bg-sky-500 hover:bg-sky-600 text-white"
                   >
                     <MessageCircle className="w-3 h-3 mr-1" />
                     Message

@@ -61,7 +61,7 @@ function SidebarContent() {
                 className={cn(
                   "w-full justify-start text-left font-medium",
                   isActive
-                    ? "bg-[#3333FF] text-white hover:bg-[#3333FF]/90"
+                    ? "bg-sky-500 text-white hover:bg-sky-600"
                     : "text-gray-700 hover:bg-gray-100"
                 )}
               >
@@ -76,7 +76,7 @@ function SidebarContent() {
       {/* User Profile Section */}
       <div className="p-4 border-t border-gray-200">
         <div className="flex items-center space-x-3 p-4 bg-gray-50 rounded-lg">
-          <div className="w-8 h-8 bg-[#3333FF] rounded-full flex items-center justify-center">
+          <div className="w-8 h-8 bg-sky-500 rounded-full flex items-center justify-center">
             <User className="w-4 h-4 text-white" />
           </div>
           <div className="flex-1">

@@ -133,7 +133,7 @@ export default function Signup() {
                 </div>
                 <Button
                   type="submit"
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold"
+                  className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold"
                 >
                   Verify Application
                 </Button>
@@ -201,7 +201,7 @@ export default function Signup() {
                   <Button
                     type="submit"
                     disabled={isLoading}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold h-11"
+                    className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold h-11"
                   >
                     {isLoading ? (
                       <>
