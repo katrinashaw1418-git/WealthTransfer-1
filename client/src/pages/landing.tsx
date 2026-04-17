@@ -367,7 +367,7 @@ export default function Landing() {
             </div>
           </div>
 
-          <div className="border-t border-sky-200 pt-8 space-y-4">
+          <div className="bg-sky-50 border border-sky-100 rounded-lg p-6 mt-8 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-sky-900">
               <div>
                 <p className="font-medium text-sky-900 mb-1">AMAX Wealth</p>
