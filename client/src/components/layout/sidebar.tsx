@@ -36,14 +36,14 @@ function SidebarContent() {
   const [location] = useLocation();
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full bg-gradient-to-b from-blue-500 to-indigo-600 text-white">
       {/* Logo Section */}
-      <div className="p-6 border-b border-gray-200">
+      <div className="p-6 border-b border-white/15">
         <div className="flex items-center space-x-3">
-          <img src={amaxLogo} alt="AMAX Wealth" className="w-6 h-6 rounded-lg" />
+          <img src={amaxLogo} alt="AMAX Wealth" className="w-12 h-12 rounded-lg" />
           <div>
-            <h1 className="text-lg font-bold text-gray-900">AMAX WEALTH</h1>
-            <p className="text-xs text-gray-500">Investments / Advice</p>
+            <h1 className="text-lg font-bold text-white">AMAX WEALTH</h1>
+            <p className="text-xs text-blue-100">Investments / Advice</p>
           </div>
         </div>
       </div>
@@ -53,16 +53,16 @@ function SidebarContent() {
         {navigation.map((item) => {
           const Icon = item.icon;
           const isActive = location === item.href;
-          
+
           return (
             <Link key={item.name} href={item.href}>
               <Button
-                variant={isActive ? "default" : "ghost"}
+                variant="ghost"
                 className={cn(
                   "w-full justify-start text-left font-medium",
-                  isActive 
-                    ? "bg-primary text-white hover:bg-primary/90" 
-                    : "text-gray-700 hover:bg-gray-100"
+                  isActive
+                    ? "bg-white text-blue-700 hover:bg-white hover:text-blue-700"
+                    : "text-blue-50 hover:bg-white/15 hover:text-white"
                 )}
               >
                 <Icon className="w-4 h-4 mr-3" />
@@ -74,16 +74,16 @@ function SidebarContent() {
       </nav>
 
       {/* User Profile Section */}
-      <div className="p-4 border-t border-gray-200">
-        <div className="flex items-center space-x-3 p-4 bg-gray-50 rounded-lg">
-          <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center">
+      <div className="p-4 border-t border-white/15">
+        <div className="flex items-center space-x-3 p-4 bg-white/10 rounded-lg">
+          <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center">
             <User className="w-4 h-4 text-white" />
           </div>
           <div className="flex-1">
-            <p className="text-sm font-medium text-gray-900">Wise Investor</p>
-            <p className="text-xs text-gray-500">Premium Client</p>
+            <p className="text-sm font-medium text-white">Wise Investor</p>
+            <p className="text-xs text-blue-100">Premium Client</p>
           </div>
-          <ChevronRight className="w-4 h-4 text-gray-400" />
+          <ChevronRight className="w-4 h-4 text-blue-100" />
         </div>
       </div>
     </div>
