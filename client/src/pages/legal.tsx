@@ -95,14 +95,14 @@ export default function Legal() {
     <div className="p-6 space-y-6">
       <Tabs defaultValue="fsg" className="space-y-6">
         <div className="overflow-x-auto">
-          <TabsList className="inline-flex h-auto gap-1 bg-blue-50 border border-blue-200 p-1 rounded-lg min-w-max">
-            <TabsTrigger value="fsg" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[160px]">Financial Services Guide</TabsTrigger>
-            <TabsTrigger value="regulatory" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[120px]">Regulatory</TabsTrigger>
-            <TabsTrigger value="terms" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[140px]">Terms of service</TabsTrigger>
-            <TabsTrigger value="privacy" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[120px]">Privacy policy</TabsTrigger>
-            <TabsTrigger value="risk-disclosure" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[130px]">Risk disclosure</TabsTrigger>
-            <TabsTrigger value="complaints" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[150px]">Complaints &amp; AFCA</TabsTrigger>
-            <TabsTrigger value="documents" className="text-blue-700 data-[state=active]:bg-gradient-to-r data-[state=active]:from-blue-500 data-[state=active]:to-indigo-600 data-[state=active]:text-white min-w-[120px]">Documents</TabsTrigger>
+          <TabsList className="inline-flex h-auto gap-1 bg-sky-50 border border-sky-200 p-1 rounded-lg min-w-max">
+            <TabsTrigger value="fsg" className="text-sky-700 data-[state=active]:bg-sky-500 data-[state=active]:text-white min-w-[160px]">Financial Services Guide</TabsTrigger>
+            <TabsTrigger value="regulatory" className="text-sky-700 data-[state=active]:bg-sky-500 data-[state=active]:text-white min-w-[120px]">Regulatory</TabsTrigger>
+            <TabsTrigger value="terms" className="text-sky-700 data-[state=active]:bg-sky-500 data-[state=active]:text-white min-w-[140px]">Terms of service</TabsTrigger>
+            <TabsTrigger value="privacy" className="text-sky-700 data-[state=active]:bg-sky-500 data-[state=active]:text-white min-w-[120px]">Privacy policy</TabsTrigger>
+            <TabsTrigger value="risk-disclosure" className="text-sky-700 data-[state=active]:bg-sky-500 data-[state=active]:text-white min-w-[130px]">Risk disclosure</TabsTrigger>
+            <TabsTrigger value="complaints" className="text-sky-700 data-[state=active]:bg-sky-500 data-[state=active]:text-white min-w-[150px]">Complaints &amp; AFCA</TabsTrigger>
+            <TabsTrigger value="documents" className="text-sky-700 data-[state=active]:bg-sky-500 data-[state=active]:text-white min-w-[120px]">Documents</TabsTrigger>
           </TabsList>
         </div>
 
