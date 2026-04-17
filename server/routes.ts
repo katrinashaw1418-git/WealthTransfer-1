@@ -773,11 +773,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // SMTP-cost protection on resend endpoints
   const otpResendLimiter = rateLimit({
     windowMs: 10 * 60 * 1000,
-    max: 5,
+    max: 3,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many resend requests. Please wait a few minutes before requesting another code." },
   });
+
+  // OTP helpers — short expiry, hashed at rest, capped attempts.
+  const OTP_EXPIRY_MS = 15 * 60 * 1000;
+  const OTP_MAX_ATTEMPTS = 5;
+  const hashOtp = (code: string) => createHash("sha256").update(code).digest("hex");
+  const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
   // Verify by 6-digit OTP code (public — used right after register)
   app.post("/api/auth/verify-otp", otpVerifyLimiter, async (req, res) => {
@@ -1060,9 +1066,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Generate OTP for email verification — application stays in `email_unverified`
-      // until the applicant proves they own the email address.
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const otpExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      // until the applicant proves they own the email address. We store only the hash
+      // of the code (not the plaintext) and enforce a short 15-minute expiry.
+      const otp = generateOtp();
+      const otpExpiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
       const application = await storage.createApplication({
         fullName,
@@ -1079,8 +1086,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         status: "email_unverified",
         reviewNote: null,
         emailVerified: false,
-        emailOtp: otp,
+        emailOtp: hashOtp(otp),
         emailOtpExpiry: otpExpiry,
+        emailOtpAttempts: 0,
       });
 
       const baseUrl = `${req.protocol}://${req.get("host")}`;
@@ -1117,17 +1125,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (application.emailVerified) {
         return res.json({ ok: true, alreadyVerified: true, status: application.status });
       }
-      if (!application.emailOtp || application.emailOtp !== String(otp).trim()) {
-        return res.status(400).json({ error: "Invalid verification code" });
+      // Lock after too many failed attempts — applicant must request a fresh code.
+      if ((application.emailOtpAttempts ?? 0) >= OTP_MAX_ATTEMPTS) {
+        return res.status(429).json({ error: "Too many incorrect attempts. Please request a new verification code." });
       }
+      // Expiry first — fail loudly so the user knows to resend instead of guessing.
       if (!application.emailOtpExpiry || new Date(application.emailOtpExpiry) < new Date()) {
         return res.status(400).json({ error: "Verification code expired. Please request a new one." });
       }
-      // Move into the review queue
+      const submittedHash = hashOtp(String(otp).trim());
+      if (!application.emailOtp || application.emailOtp !== submittedHash) {
+        // Increment attempts on every failure; expose remaining attempts so the UI can warn.
+        const newAttempts = (application.emailOtpAttempts ?? 0) + 1;
+        await db.update(applicationsTable)
+          .set({ emailOtpAttempts: newAttempts })
+          .where(eq(applicationsTable.id, application.id));
+        const remaining = Math.max(0, OTP_MAX_ATTEMPTS - newAttempts);
+        return res.status(400).json({
+          error: remaining > 0
+            ? `Invalid verification code. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`
+            : "Too many incorrect attempts. Please request a new verification code.",
+          attemptsRemaining: remaining,
+        });
+      }
+      // Move into the review queue + clear the secret material.
       await db.update(applicationsTable).set({
         emailVerified: true,
         emailOtp: null,
         emailOtpExpiry: null,
+        emailOtpAttempts: 0,
         status: "submitted",
       }).where(eq(applicationsTable.id, application.id));
       res.json({ ok: true, status: "submitted" });
@@ -1147,9 +1173,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!application || application.emailVerified) {
         return res.json({ ok: true, ...(application?.emailVerified ? { alreadyVerified: true } : {}) });
       }
-      const newOtp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      await db.update(applicationsTable).set({ emailOtp: newOtp, emailOtpExpiry: expiry }).where(eq(applicationsTable.id, application.id));
+      const newOtp = generateOtp();
+      const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
+      // Resending also resets the attempt counter so the user gets a clean 5 attempts.
+      await db.update(applicationsTable)
+        .set({ emailOtp: hashOtp(newOtp), emailOtpExpiry: expiry, emailOtpAttempts: 0 })
+        .where(eq(applicationsTable.id, application.id));
       const baseUrl = `${req.protocol}://${req.get("host")}`;
       const firstName = (application.fullName || "").split(" ")[0] || "there";
       await sendVerificationEmail(normalized, firstName, "", newOtp, baseUrl).catch((err) => {

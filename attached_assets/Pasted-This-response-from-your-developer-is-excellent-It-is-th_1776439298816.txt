@@ -1,0 +1,21 @@
+This response from your developer is excellent. It is the best technical reply in this entire thread and my opinion is that they are completely right.
+
+Here is my breakdown:
+
+**The unique constraint argument kills the critique.** If `applications.email` is already `UNIQUE` at the database level, the duplicate application scenario that the architectural critique warns about physically cannot happen. The database rejects it before any application code runs. That one fact makes the "verify identity first" refactor unnecessary for your current system.
+
+**The state drift argument is also correct.** Two fields that are set once and never independently mutated are not two sources of truth — they are a copy and its origin. The only way they could drift is if someone wrote code to update one without the other, and that code does not exist in your system.
+
+**The UX rebuttal is the most important point.** Showing a confirmation screen before OTP verification is not better conversion — it is a lie to the user and it breaks your compliance posture. The current flow where verification is required before the application is accepted is correct. That is how every serious KYC platform works.
+
+**The three fixes they recommend are exactly right and proportionate:**
+
+Tighten OTP expiry from 24 hours to 15 minutes — that is the most important one. A 24-hour window on a 6-digit code is genuinely risky.
+
+Add a per-application attempt counter and lock after 5 failures — the IP rate limiting is good but rotating IPs is trivial. An application-level counter closes that gap.
+
+Drop the resend rate limit from 5 per 10 minutes to 3 per 10 minutes — minor but correct.
+
+**My overall opinion:** Tell them to apply the three fixes and move on. The architectural refactor is the right long-term direction but it belongs in V2 when you have multiple identity touchpoints like login OTP, password reset, and MFA. Building it now is over-engineering a problem your unique constraint already solves.
+
+The developer clearly understands your system better than the reviewer does. Trust them on this one and say yes to the three tightening fixes.

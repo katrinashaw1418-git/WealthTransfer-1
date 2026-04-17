@@ -267,8 +267,11 @@ export const applications = pgTable("applications", {
   reviewNote: text("review_note"),
   // Email verification at the application step (before review/approval)
   emailVerified: boolean("email_verified").notNull().default(false),
+  // Stores SHA-256 hash of the 6-digit OTP, never the plaintext code.
   emailOtp: text("email_otp"),
   emailOtpExpiry: timestamp("email_otp_expiry"),
+  // Per-application failed-attempt counter. Locked at 5; user must request a new code.
+  emailOtpAttempts: integer("email_otp_attempts").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow(),
   reviewedAt: timestamp("reviewed_at"),
 });
