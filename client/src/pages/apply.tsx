@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLocation, Link } from "wouter";
+import { trackEvent } from "@/lib/funnel";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +27,13 @@ export default function Apply() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+
+  const applyStartedFired = useRef(false);
+  useEffect(() => {
+    if (applyStartedFired.current) return;
+    applyStartedFired.current = true;
+    trackEvent("apply_started");
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -59,6 +67,7 @@ export default function Apply() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to submit application");
       }
+      trackEvent("apply_submitted", { accountType, country });
       setSubmitted(true);
     } catch (err: any) {
       setError(err.message || "Failed to submit application. Please try again.");

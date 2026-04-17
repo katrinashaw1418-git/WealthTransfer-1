@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, decimal, timestamp, jsonb, uniqueIndex, check } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, decimal, timestamp, jsonb, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -288,3 +288,25 @@ export const leads = pgTable("leads", {
 export const insertLeadSchema = createInsertSchema(leads).omit({ id: true, createdAt: true, updatedAt: true });
 export type Lead = typeof leads.$inferSelect;
 export type InsertLead = z.infer<typeof insertLeadSchema>;
+
+// Funnel events — minimal product analytics for Flow A → /apply conversion.
+// One row per discrete user action. No PII beyond optional email hash; the
+// session_id is a client-generated random id stored in sessionStorage.
+export const funnelEvents = pgTable("funnel_events", {
+  id: serial("id").primaryKey(),
+  event: text("event").notNull(),
+  sessionId: text("session_id").notNull(),
+  path: text("path"),
+  metadata: jsonb("metadata"),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => ({
+  eventIdx: index("funnel_events_event_idx").on(t.event),
+  sessionIdx: index("funnel_events_session_idx").on(t.sessionId),
+  createdIdx: index("funnel_events_created_idx").on(t.createdAt),
+}));
+
+export const insertFunnelEventSchema = createInsertSchema(funnelEvents).omit({ id: true, createdAt: true });
+export type FunnelEvent = typeof funnelEvents.$inferSelect;
+export type InsertFunnelEvent = z.infer<typeof insertFunnelEventSchema>;

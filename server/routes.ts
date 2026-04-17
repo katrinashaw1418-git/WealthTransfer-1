@@ -16,6 +16,7 @@ import {
   passwordResetTokens,
   users,
   leads,
+  funnelEvents,
 } from "@shared/schema";
 import { getRecommendation } from "@shared/recommendation-engine";
 import {
@@ -821,6 +822,61 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Lead capture error:", error);
       res.status(500).json({ error: "Failed to save profile" });
+    }
+  });
+
+  // Funnel events — best-effort analytics for Flow A. High write volume so a
+  // separate, more permissive limiter. Validation is strict on event name to
+  // keep the table queryable.
+  const funnelLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many events" },
+  });
+
+  const funnelEventSchema = z.object({
+    event: z.enum([
+      "flow_a_step_view",
+      "flow_a_step_complete",
+      "flow_a_recommendation_view",
+      "lead_captured",
+      "apply_started",
+      "apply_submitted",
+    ]),
+    sessionId: z.string().min(4).max(64),
+    path: z.string().max(120).nullable().optional(),
+    // Cap metadata to prevent table bloat — small key/value bag only.
+    metadata: z
+      .record(z.union([z.string().max(200), z.number(), z.boolean(), z.null()]))
+      .refine((m) => Object.keys(m).length <= 10, "Too many keys")
+      .nullable()
+      .optional(),
+  });
+
+  app.post("/api/funnel", funnelLimiter, async (req, res) => {
+    try {
+      const parsed = funnelEventSchema.safeParse(req.body);
+      if (!parsed.success) {
+        // Don't 4xx loudly — analytics should never look like a bug to the client.
+        return res.status(204).end();
+      }
+      const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null;
+      const ua = (req.headers["user-agent"] as string | undefined) ?? null;
+      // Fire-and-forget on the server too — don't await before responding.
+      db.insert(funnelEvents).values({
+        event: parsed.data.event,
+        sessionId: parsed.data.sessionId,
+        path: parsed.data.path ?? null,
+        metadata: (parsed.data.metadata ?? null) as any,
+        ipAddress: ip,
+        userAgent: ua ? ua.slice(0, 500) : null,
+      }).catch((err) => console.error("Funnel insert failed:", err));
+      res.status(204).end();
+    } catch (error) {
+      console.error("Funnel event error:", error);
+      res.status(204).end();
     }
   });
 

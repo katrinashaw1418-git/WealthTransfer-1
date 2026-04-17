@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { trackEvent } from "@/lib/funnel";
 import { useLocation } from "wouter";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -145,6 +146,14 @@ export default function Invest() {
   const { toast } = useToast();
 
   const [step, setStep] = useState(1);
+  // Guard against React 18 StrictMode double-invoke firing duplicate events.
+  const lastViewedStep = useRef<number | null>(null);
+  useEffect(() => {
+    if (lastViewedStep.current === step) return;
+    lastViewedStep.current = step;
+    trackEvent("flow_a_step_view", { step });
+    if (step === 5) trackEvent("flow_a_recommendation_view");
+  }, [step]);
   const [profileType, setProfileType] = useState<ProfileType | null>(null);
   const [goals, setGoals] = useState<string[]>([]);
   const [riskTolerance, setRiskTolerance] = useState<RiskTolerance | null>(null);
@@ -187,6 +196,13 @@ export default function Invest() {
     },
     onSuccess: () => {
       setEmailSaved(true);
+      trackEvent("lead_captured", {
+        profileType,
+        riskTolerance,
+        timeHorizon,
+        capitalRange,
+        privateAccess: recommendation?.privateAccess,
+      });
       toast({
         title: "Profile saved",
         description: "We've saved your profile. You'll receive your summary shortly.",
@@ -230,7 +246,7 @@ export default function Invest() {
           step={1}
           title="Tell us who you're investing as"
           subtitle="This helps us match you to the right structures and eligibility."
-          onNext={() => setStep(2)}
+          onNext={() => { trackEvent("flow_a_step_complete", { step: 1 }); setStep(2); }}
           nextDisabled={!profileType}
         >
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -261,7 +277,7 @@ export default function Invest() {
           title="What are you trying to achieve?"
           subtitle="Pick all that apply. We'll weight the recommendation accordingly."
           onBack={() => setStep(1)}
-          onNext={() => setStep(3)}
+          onNext={() => { trackEvent("flow_a_step_complete", { step: 2 }); setStep(3); }}
           nextDisabled={goals.length === 0}
         >
           <div className="flex flex-wrap gap-2">
@@ -308,7 +324,7 @@ export default function Invest() {
           title="Risk and time horizon"
           subtitle="Both matter — short horizons should generally avoid high-risk allocations."
           onBack={() => setStep(2)}
-          onNext={() => setStep(4)}
+          onNext={() => { trackEvent("flow_a_step_complete", { step: 3 }); setStep(4); }}
           nextDisabled={!riskTolerance || !timeHorizon}
         >
           <div className="space-y-8">
@@ -359,7 +375,7 @@ export default function Invest() {
           title="How much are you looking to invest?"
           subtitle="At $100,000+ our private-deal pipeline typically becomes relevant, subject to wholesale-investor verification."
           onBack={() => setStep(3)}
-          onNext={() => setStep(5)}
+          onNext={() => { trackEvent("flow_a_step_complete", { step: 4 }); setStep(5); }}
           nextDisabled={!capitalRange}
           nextLabel="See my recommendation"
         >
