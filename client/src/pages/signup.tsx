@@ -143,7 +143,8 @@ export default function Signup() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="john@example.com"
                     required
-                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500"
+                    readOnly={!!new URLSearchParams(window.location.search).get("email")}
+                    className="bg-white border-blue-200 text-blue-900 placeholder:text-gray-400 focus:border-blue-500 read-only:bg-gray-50 read-only:cursor-not-allowed"
                   />
                 </div>
                 <Button

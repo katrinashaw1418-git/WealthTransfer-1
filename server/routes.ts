@@ -708,6 +708,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!application || application.status !== "approved") {
         return res.status(403).json({ error: "Account creation requires an approved application. Please apply first." });
       }
+      // Defensive cross-check: an approved application MUST have email_verified=true.
+      // The approval gate enforces this, but verifying here protects against any future
+      // path that might mark an application "approved" without the verification step.
+      if (!application.emailVerified) {
+        return res.status(403).json({ error: "Application email is not verified. Please verify your email first." });
+      }
       // Email was already verified during the application step — approval cannot occur otherwise.
       // The user inherits emailVerified=true and skips a second OTP round-trip.
       const username = email.split("@")[0] + "_" + Date.now().toString(36);
