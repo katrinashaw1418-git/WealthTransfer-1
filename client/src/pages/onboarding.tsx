@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
+import { useAuth } from "@/contexts/auth";
+import { Loader2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,7 +40,35 @@ function getRiskLabel(value: number) {
   return "Aggressive";
 }
 
+// Hard guard: must be signed in AND email-verified to access onboarding.
+// Defence-in-depth — even if someone navigates here directly with a stale or
+// unverified session, they get bounced to the right place.
 export default function Onboarding() {
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const [, navigateAuth] = useLocation();
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isAuthenticated || !user) {
+      navigateAuth("/login", { replace: true });
+      return;
+    }
+    if (!user.emailVerified) {
+      navigateAuth(`/verify-email?pending=1&email=${encodeURIComponent(user.email)}`, { replace: true });
+    }
+  }, [authLoading, isAuthenticated, user]);
+
+  if (authLoading || !isAuthenticated || !user || !user.emailVerified) {
+    return (
+      <div className="min-h-screen bg-blue-50 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-900" />
+      </div>
+    );
+  }
+  return <OnboardingInner />;
+}
+
+function OnboardingInner() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
   const [currentStep, setCurrentStep] = useState(0);

@@ -10,7 +10,7 @@ import { Loader2, ArrowLeft, ShieldCheck } from "lucide-react";
 import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 export default function Signup() {
-  const { register, isAuthenticated } = useAuth();
+  const { register, isAuthenticated, user } = useAuth();
   const [, navigate] = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -21,11 +21,16 @@ export default function Signup() {
   const [verified, setVerified] = useState(false);
   const [verifying, setVerifying] = useState(false);
 
+  // Only auto-skip signup if the user is fully authenticated AND email-verified.
+  // An unverified session must NOT bypass signup → it gets bounced to /verify-email.
   useEffect(() => {
-    if (isAuthenticated) {
+    if (!isAuthenticated || !user) return;
+    if (user.emailVerified) {
       navigate("/onboarding", { replace: true });
+    } else {
+      navigate(`/verify-email?pending=1&email=${encodeURIComponent(user.email)}`, { replace: true });
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, user]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
