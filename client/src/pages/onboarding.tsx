@@ -16,7 +16,9 @@ import {
   ChevronRight,
   CheckCircle2,
   FileText,
+  Copy,
 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 const STEPS = [
@@ -38,8 +40,10 @@ function getRiskLabel(value: number) {
 
 export default function Onboarding() {
   const [, navigate] = useLocation();
+  const { toast } = useToast();
   const [currentStep, setCurrentStep] = useState(0);
   const [submitted, setSubmitted] = useState(false);
+  const [referenceId, setReferenceId] = useState("");
 
   const [identity, setIdentity] = useState({
     firstName: "",
@@ -127,7 +131,23 @@ export default function Onboarding() {
   };
 
   const handleSubmit = () => {
+    const year = new Date().getFullYear();
+    const num = Math.floor(Math.random() * 90000 + 10000);
+    const ref = `AMX-${year}-${num}`;
+    setReferenceId(ref);
+    try {
+      localStorage.setItem(
+        "amax_application",
+        JSON.stringify({ referenceId: ref, submittedAt: new Date().toISOString(), bannerDismissed: false })
+      );
+    } catch {}
     setSubmitted(true);
+  };
+
+  const copyReference = () => {
+    navigator.clipboard.writeText(referenceId).then(() => {
+      toast({ title: "Reference copied", description: referenceId });
+    });
   };
 
   if (submitted) {
@@ -141,22 +161,37 @@ export default function Onboarding() {
             </div>
           </div>
         </header>
-        <div className="max-w-2xl mx-auto px-6 py-20 text-center">
-          <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-8">
+        <div className="max-w-2xl mx-auto px-6 py-16 text-center">
+          <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
             <CheckCircle2 className="w-10 h-10 text-green-600" />
           </div>
-          <h1 className="text-3xl font-bold text-gray-900 mb-4">Fact-find submitted</h1>
-          <p className="text-gray-600 mb-2">Your onboarding information has been submitted to your adviser.</p>
-          <p className="text-gray-600 mb-8">
-            Your adviser will review your fact-find and prepare a Statement of Advice (SOA) tailored to your circumstances.
-            You can expect to receive your SOA within <strong>3–5 business days</strong>.
-          </p>
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-8 text-sm text-blue-800">
-            <strong>What happens next:</strong> Once your SOA is ready, you will be notified to review and accept it.
-            After acceptance, you can proceed with investment instructions through the platform.
+          <h1 className="text-3xl font-bold text-gray-900 mb-3">Fact-find submitted</h1>
+          <p className="text-gray-600 mb-8">Your onboarding information has been received by your adviser.</p>
+
+          <div className="bg-white border-2 border-blue-200 rounded-xl p-6 mb-8 text-left">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Application reference</p>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-2xl font-mono font-bold text-blue-900" data-testid="text-reference-id">{referenceId}</span>
+              <Button variant="outline" size="sm" onClick={copyReference} data-testid="button-copy-reference">
+                <Copy className="w-4 h-4 mr-1.5" />
+                Copy
+              </Button>
+            </div>
+            <p className="text-xs text-gray-500 mt-3">
+              Save this number. Quote it in any correspondence with your adviser. It will also remain visible at the top of your dashboard.
+            </p>
           </div>
+
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 text-sm text-blue-800 text-left">
+            <strong>What happens next:</strong> Your adviser will review your fact-find and prepare a Statement of Advice (SOA) tailored to your circumstances within <strong>3–5 business days</strong>. Once ready, you will be notified to review and accept it before proceeding with investment instructions.
+          </div>
+
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-8 text-xs text-gray-600 text-left">
+            <strong className="text-gray-700">Important:</strong> AMAX Wealth provides general advice only, prepared without taking into account your personal objectives, financial situation, or needs beyond the information disclosed in this fact-find. Any Statement of Advice issued is personal advice based solely on the information you have provided. AMAX Wealth operates under AFSL obligations and the Corporations Act 2001 (Cth).
+          </div>
+
           <div className="flex gap-4 justify-center">
-            <Button onClick={() => navigate("/dashboard")}>Go to Dashboard</Button>
+            <Button onClick={() => navigate("/dashboard")} data-testid="button-go-dashboard">Go to Dashboard</Button>
             <Button variant="outline" onClick={() => navigate("/compliance")}>View Compliance Centre</Button>
           </div>
         </div>
