@@ -322,21 +322,21 @@ export default function Landing() {
         </div>
       </section>
 
-      <footer className="bg-sky-900 text-white py-16">
+      <footer className="bg-white border-t border-sky-100 text-sky-900 py-16">
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
             <div>
               <div className="flex items-center gap-3 mb-4">
                 <img src={darkBlueLogo} alt="AMAX Wealth" className="w-8 h-8 rounded-lg" />
-                <span className="text-lg font-bold text-white">AMAX WEALTH</span>
+                <span className="text-lg font-bold text-sky-900">AMAX WEALTH</span>
               </div>
-              <p className="text-sm text-white">
+              <p className="text-sm text-sky-900">
                 Institutional-grade wealth management for wholesale investors under Australian Financial Services Licence arrangements.
               </p>
             </div>
             <div>
-              <h4 className="text-white font-semibold mb-4">Platform</h4>
-              <ul className="space-y-2 text-sm text-white">
+              <h4 className="text-sky-900 font-semibold mb-4">Platform</h4>
+              <ul className="space-y-2 text-sm text-sky-900">
                 <li><span className="cursor-pointer">Portfolio Reporting</span></li>
                 <li><span className="cursor-pointer">Investment Products</span></li>
                 <li><span className="cursor-pointer">Market Insights</span></li>
@@ -344,8 +344,8 @@ export default function Landing() {
               </ul>
             </div>
             <div>
-              <h4 className="text-white font-semibold mb-4">Legal</h4>
-              <ul className="space-y-2 text-sm text-white">
+              <h4 className="text-sky-900 font-semibold mb-4">Legal</h4>
+              <ul className="space-y-2 text-sm text-sky-900">
                 <li><span className="cursor-pointer">Financial Services Guide</span></li>
                 <li><span className="cursor-pointer">Privacy Policy</span></li>
                 <li><span className="cursor-pointer">Terms of Service</span></li>
@@ -353,8 +353,8 @@ export default function Landing() {
               </ul>
             </div>
             <div>
-              <h4 className="text-white font-semibold mb-4">Contact</h4>
-              <ul className="space-y-2 text-sm text-white">
+              <h4 className="text-sky-900 font-semibold mb-4">Contact</h4>
+              <ul className="space-y-2 text-sm text-sky-900">
                 <li>+61 2 8320 1908</li>
                 <li>info@amaxwealth.com.au</li>
                 <li className="pt-2">
@@ -367,23 +367,23 @@ export default function Landing() {
             </div>
           </div>
 
-          <div className="border-t border-sky-800 pt-8 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-white">
+          <div className="border-t border-sky-200 pt-8 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-sky-900">
               <div>
-                <p className="font-medium text-white mb-1">AMAX Wealth</p>
+                <p className="font-medium text-sky-900 mb-1">AMAX Wealth</p>
                 <p>Authorised Representative No. [AR Number] of [AFSL Holder] (AFSL No. [AFSL Number]). ABN: [ABN].</p>
               </div>
               <div>
-                <p className="font-medium text-white mb-1">AMAX Global</p>
+                <p className="font-medium text-sky-900 mb-1">AMAX Global</p>
                 <p>Registered with AUSTRAC as a Digital Currency Exchange and Remittance provider. AUSTRAC Reg: [Registration Number].</p>
               </div>
             </div>
-            <p className="text-xs text-white">
+            <p className="text-xs text-sky-900">
               AMAX Wealth does not hold client funds or assets. All positions are maintained with external regulated custodians. 
               This website does not constitute financial advice. Information provided is general in nature and does not take into 
               account your personal circumstances. Before making investment decisions, obtain advice from a qualified financial adviser.
             </p>
-            <p className="text-xs text-white">
+            <p className="text-xs text-sky-900">
               © {new Date().getFullYear()} AMAX Wealth. All rights reserved. Australian law applies.
             </p>
           </div>
