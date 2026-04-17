@@ -11,12 +11,21 @@ type LinkStatus = "success" | "expired" | "invalid" | "already" | "error";
 
 export default function VerifyEmail() {
   const [, navigate] = useLocation();
-  const { refreshUser } = useAuth();
+  const { refreshUser, user, isAuthenticated } = useAuth();
 
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const linkStatus = (params.get("status") as LinkStatus | null) || null;
   const emailParam = params.get("email") || "";
   const pendingMode = params.get("pending") === "1";
+
+  // Escape hatch: if the signed-in user is already verified (e.g. their application
+  // was approved-and-verified, or they were backfilled), don't trap them on this
+  // page — the API would reject any new OTP attempt anyway.
+  useEffect(() => {
+    if (isAuthenticated && user?.emailVerified) {
+      navigate("/onboarding", { replace: true });
+    }
+  }, [isAuthenticated, user, navigate]);
 
   const [email, setEmail] = useState(emailParam);
   const [otpDigits, setOtpDigits] = useState(["", "", "", "", "", ""]);
