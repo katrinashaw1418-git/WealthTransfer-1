@@ -1,0 +1,170 @@
+You’re right. No more analysis.
+
+Let’s **start building with the smallest, highest-value piece**:
+👉 **Email capture on the recommendation screen**
+
+---
+
+# 🔧 1. WHAT TO BUILD (NOW)
+
+## UI (Step 5 – Recommendation screen)
+
+Add this block **under the recommendation + private access section**:
+
+```plaintext
+Want a copy of this profile?
+
+[ Enter your email ]   [ Email me this summary ]
+```
+
+Optional micro-copy (keep it light):
+
+> We’ll send your profile and relevant opportunities. No spam.
+
+---
+
+# ⚙️ 2. FRONTEND (React example)
+
+```jsx
+import { useState } from "react";
+
+export default function EmailCapture({ profileData }) {
+  const [email, setEmail] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | loading | success | error
+
+  const handleSubmit = async () => {
+    if (!email) return;
+
+    setStatus("loading");
+
+    try {
+      await fetch("/api/email-capture", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email,
+          profile: profileData, // include recommendation output
+        }),
+      });
+
+      setStatus("success");
+    } catch (e) {
+      setStatus("error");
+    }
+  };
+
+  return (
+    <div className="email-capture">
+      <h3>Want a copy of this profile?</h3>
+
+      <div style={{ display: "flex", gap: "8px" }}>
+        <input
+          type="email"
+          placeholder="Enter your email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+
+        <button onClick={handleSubmit} disabled={status === "loading"}>
+          Email me this summary
+        </button>
+      </div>
+
+      {status === "success" && <p>✓ Sent. Check your inbox.</p>}
+      {status === "error" && <p>Something went wrong. Try again.</p>}
+    </div>
+  );
+}
+```
+
+---
+
+# 🧱 3. BACKEND (Node / Express example)
+
+```js
+app.post("/api/email-capture", async (req, res) => {
+  const { email, profile } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: "Email required" });
+  }
+
+  // 1. Store lead
+  await db.collection("leads").insertOne({
+    email,
+    profile,
+    createdAt: new Date(),
+  });
+
+  // 2. Send email (example with nodemailer)
+  await sendEmail({
+    to: email,
+    subject: "Your AMAX Wealth Profile",
+    html: `
+      <h2>Your Investment Profile</h2>
+      <p><strong>Profile:</strong> ${profile.name}</p>
+      <p><strong>Strategy:</strong> ${profile.strategy}</p>
+      <p>${profile.notes}</p>
+
+      <hr/>
+
+      <p>Create your account to access opportunities:</p>
+      <a href="https://yourapp.com/signup">Continue</a>
+
+      <p style="font-size:12px;color:gray;">
+        This is a general indication and does not constitute financial advice.
+      </p>
+    `,
+  });
+
+  res.json({ success: true });
+});
+```
+
+---
+
+# 📧 4. EMAIL CONTENT (KEEP SIMPLE)
+
+**Subject:**
+
+> Your AMAX Wealth profile
+
+**Body:**
+
+* Profile name
+* Strategy
+* Short explanation
+* CTA → “Complete your account”
+
+---
+
+# 🎯 5. DONE = SHIPPED
+
+That’s it.
+
+No:
+
+* CRM integration
+* automation flows
+* scoring
+* segmentation
+
+---
+
+# 🚀 NEXT (only after this is live)
+
+1. Build lookup table
+2. Render recommendation
+3. Add private access block
+
+---
+
+# 🧠 Final
+
+You don’t need another opinion.
+You just shipped your **first conversion capture**.
+
+If you want the next piece coded, say:
+👉 “build lookup table code”
