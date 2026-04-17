@@ -262,8 +262,13 @@ export const applications = pgTable("applications", {
   consentOwnBehalf: boolean("consent_own_behalf").notNull().default(false),
   consentAmlCtf: boolean("consent_aml_ctf").notNull().default(false),
   consentContact: boolean("consent_contact").notNull().default(false),
-  status: text("status").notNull().default("submitted"),
+  // status: email_unverified → submitted → under_review → approved | rejected
+  status: text("status").notNull().default("email_unverified"),
   reviewNote: text("review_note"),
+  // Email verification at the application step (before review/approval)
+  emailVerified: boolean("email_verified").notNull().default(false),
+  emailOtp: text("email_otp"),
+  emailOtpExpiry: timestamp("email_otp_expiry"),
   createdAt: timestamp("created_at").defaultNow(),
   reviewedAt: timestamp("reviewed_at"),
 });

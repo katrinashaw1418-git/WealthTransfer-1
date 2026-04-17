@@ -16,6 +16,7 @@ export interface RegisterResult {
   emailSent?: boolean;
   devOtp?: string;
   email: string;
+  token?: string;
 }
 
 interface AuthContextValue {
@@ -95,13 +96,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error(body.error || "Registration failed");
     }
     const body = await res.json();
-    // Do NOT log the user in here — they must verify email first.
-    // Token is intentionally discarded; verify-otp will mint a fresh one.
+    // Email is verified at the application step now, so register issues a session token directly.
+    if (body.token && body.user) {
+      localStorage.setItem(TOKEN_KEY, body.token);
+      setToken(body.token);
+      setUser(body.user);
+    }
     return {
       requiresEmailVerification: body.requiresEmailVerification === true,
       emailSent: body.emailSent === true,
       devOtp: body.devOtp,
       email: data.email,
+      token: body.token,
     };
   }
 

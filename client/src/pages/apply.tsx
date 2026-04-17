@@ -27,6 +27,13 @@ export default function Apply() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  // Email verification step that runs *after* application submit, *before* approval
+  const [verifyStep, setVerifyStep] = useState(false);
+  const [otp, setOtp] = useState("");
+  const [otpError, setOtpError] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resendNotice, setResendNotice] = useState<string | null>(null);
 
   const applyStartedFired = useRef(false);
   useEffect(() => {
@@ -68,12 +75,128 @@ export default function Apply() {
         throw new Error(data.error || "Failed to submit application");
       }
       trackEvent("apply_submitted", { accountType, country });
-      setSubmitted(true);
+      setVerifyStep(true);
     } catch (err: any) {
       setError(err.message || "Failed to submit application. Please try again.");
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function handleVerifyOtp(e: React.FormEvent) {
+    e.preventDefault();
+    setOtpError(null);
+    if (otp.trim().length !== 6) {
+      setOtpError("Please enter the 6-digit code from your email.");
+      return;
+    }
+    setVerifying(true);
+    try {
+      const res = await fetch("/api/applications/verify-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, otp: otp.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Verification failed");
+      trackEvent("apply_email_verified", { accountType });
+      setSubmitted(true);
+    } catch (err: any) {
+      setOtpError(err.message || "Verification failed. Please try again.");
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  async function handleResendOtp() {
+    setResendNotice(null);
+    setOtpError(null);
+    setResending(true);
+    try {
+      const res = await fetch("/api/applications/resend-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Could not resend code");
+      setResendNotice("A new code has been sent to your email.");
+    } catch (err: any) {
+      setOtpError(err.message || "Could not resend code.");
+    } finally {
+      setResending(false);
+    }
+  }
+
+  if (verifyStep && !submitted) {
+    return (
+      <div className="min-h-screen bg-blue-50 flex items-center justify-center p-4">
+        <div className="w-full max-w-md space-y-6">
+          <div className="flex items-center justify-center gap-3 mb-2">
+            <img src={darkBlueLogo} alt="AMAX Wealth" className="w-10 h-10 rounded-lg" />
+            <span className="text-2xl font-bold text-blue-900">AMAX WEALTH</span>
+          </div>
+
+          <div className="text-center space-y-2">
+            <h1 className="text-2xl font-bold text-blue-900">Verify your email</h1>
+            <p className="text-sm text-blue-700">
+              We've sent a 6-digit code to <span className="font-semibold">{email}</span>.
+              Enter it below to complete your application. Your application is not submitted for review until your email is verified.
+            </p>
+          </div>
+
+          <Card className="bg-white border-blue-100 shadow-sm">
+            <CardContent className="pt-6">
+              <form onSubmit={handleVerifyOtp} className="space-y-4">
+                {otpError && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{otpError}</AlertDescription>
+                  </Alert>
+                )}
+                {resendNotice && (
+                  <Alert>
+                    <AlertDescription>{resendNotice}</AlertDescription>
+                  </Alert>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="otp">Verification code</Label>
+                  <Input
+                    id="otp"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="123456"
+                    className="text-center text-xl tracking-[0.4em] font-semibold"
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  disabled={verifying || otp.length !== 6}
+                  className="w-full bg-sky-500 hover:bg-sky-600 text-white font-semibold"
+                >
+                  {verifying ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Verifying...</> : "Verify & Submit Application"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={resending}
+                  onClick={handleResendOtp}
+                  className="w-full text-sky-600 hover:text-sky-700"
+                >
+                  {resending ? "Sending..." : "Didn't get the code? Resend"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+
+          <p className="text-xs text-center text-gray-500">
+            The code expires in 24 hours. Check your spam folder if you don't see the email.
+          </p>
+        </div>
+      </div>
+    );
   }
 
   if (submitted) {

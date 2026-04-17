@@ -17,6 +17,7 @@ import {
   users,
   leads,
   funnelEvents,
+  applications as applicationsTable,
 } from "@shared/schema";
 import { getRecommendation } from "@shared/recommendation-engine";
 import { sendVerificationEmail, emailConfigured } from "./email";
@@ -707,6 +708,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!application || application.status !== "approved") {
         return res.status(403).json({ error: "Account creation requires an approved application. Please apply first." });
       }
+      // Email was already verified during the application step — approval cannot occur otherwise.
+      // The user inherits emailVerified=true and skips a second OTP round-trip.
       const username = email.split("@")[0] + "_" + Date.now().toString(36);
       const existingUsername = await storage.getUserByUsername(username);
       if (existingUsername) {
@@ -732,25 +735,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         monthlyPnl: "0.00",
         monthlyPnlPercent: "0.00",
       });
-      // Generate email verification token + 6-digit OTP (24-hour expiry)
-      const verifyToken = randomBytes(32).toString("hex");
-      const emailOtp = Math.floor(100000 + Math.random() * 900000).toString();
-      const verifyExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      await db.update(users).set({
-        emailVerificationToken: verifyToken,
-        emailVerificationTokenExpiry: verifyExpiry,
-        emailOtp,
-        emailVerified: false,
-      }).where(eq(users.id, user.id));
-
-      // Send verification email (no-op fallback if GMAIL not configured — devOtp returned instead)
-      const baseUrl = `${req.protocol}://${req.get("host")}`;
-      await sendVerificationEmail(user.email, user.firstName, verifyToken, emailOtp, baseUrl).catch((err) => {
-        console.error("[register] sendVerificationEmail failed:", err?.message);
-      });
-
-      // Note: do NOT issue a JWT here — user must verify email first.
-      // verify-otp / verify-email link click are the only paths that mint a session token.
+      // Inherit verified status from the application — issue session token immediately.
+      await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
+      const token = signToken({ userId: user.id, username: user.username, email: user.email });
       await writeAuditLog(user.id, "account_created", "user", String(user.id), { email, authProvider: "email" }, req.ip || null);
       res.status(201).json({
         user: {
@@ -758,11 +745,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           email: user.email,
           firstName: user.firstName,
           lastName: user.lastName,
-          emailVerified: false,
+          emailVerified: true,
         },
-        requiresEmailVerification: true,
-        emailSent: emailConfigured,
-        ...(!emailConfigured ? { devOtp: emailOtp } : {}),
+        token,
       });
     } catch (error: any) {
       console.error("Registration error:", error);
@@ -802,9 +787,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const normalized = String(email).trim().toLowerCase();
       const [user] = await db.select().from(users).where(eq(users.email, normalized));
       if (!user) return res.status(404).json({ error: "No account found for this email" });
+      // Already-verified accounts must not receive a token from an unauthenticated
+      // OTP submit (would be account-takeover-by-email). Force them through /login.
       if (user.emailVerified) {
-        const token = signToken({ userId: user.id, username: user.username, email: user.email });
-        return res.json({ token, alreadyVerified: true, user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier, emailVerified: true } });
+        return res.status(400).json({ error: "This email is already verified. Please sign in." });
       }
       if (!user.emailOtp || user.emailOtp !== String(otp).trim()) {
         return res.status(400).json({ error: "Invalid verification code" });
@@ -1059,11 +1045,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!emailRegex.test(email)) {
         return res.status(400).json({ error: "Invalid email address" });
       }
-      const existing = await storage.getApplicationByEmail(email);
+      const normalizedEmail = email.toLowerCase().trim();
+      const existing = await storage.getApplicationByEmail(normalizedEmail);
       if (existing) {
         return res.status(409).json({ error: "An application with this email already exists", status: existing.status });
       }
-      const existingUser = await storage.getUserByEmail(email);
+      const existingUser = await storage.getUserByEmail(normalizedEmail);
       if (existingUser) {
         return res.status(409).json({ error: "An account with this email already exists. Please sign in." });
       }
@@ -1071,9 +1058,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!consentOwnBehalf || !consentAmlCtf || !consentContactFlag) {
         return res.status(400).json({ error: "All compliance acknowledgements are required" });
       }
+
+      // Generate OTP for email verification — application stays in `email_unverified`
+      // until the applicant proves they own the email address.
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
       const application = await storage.createApplication({
         fullName,
-        email: email.toLowerCase(),
+        email: normalizedEmail,
         phone,
         country,
         accountType,
@@ -1083,16 +1076,93 @@ export async function registerRoutes(app: Express): Promise<Server> {
         consentOwnBehalf: true,
         consentAmlCtf: true,
         consentContact: true,
-        status: "submitted",
+        status: "email_unverified",
         reviewNote: null,
+        emailVerified: false,
+        emailOtp: otp,
+        emailOtpExpiry: otpExpiry,
       });
-      res.status(201).json({ id: application.id, status: application.status });
+
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+      const firstName = fullName.split(" ")[0] || "there";
+      // No link-token here — application verification is OTP-only (the link flow is for user accounts)
+      await sendVerificationEmail(normalizedEmail, firstName, "", otp, baseUrl).catch((err) => {
+        console.error("[applications] sendVerificationEmail failed:", err?.message);
+      });
+
+      res.status(201).json({
+        id: application.id,
+        status: application.status,
+        requiresEmailVerification: true,
+        emailSent: emailConfigured,
+        ...(!emailConfigured ? { devOtp: otp } : {}),
+      });
     } catch (error: any) {
       if (error.code === "23505") {
         return res.status(409).json({ error: "An application with this email already exists" });
       }
       console.error("Application error:", error);
       res.status(500).json({ error: "Failed to submit application" });
+    }
+  });
+
+  // Verify the email on a submitted application (moves it from email_unverified → submitted)
+  app.post("/api/applications/verify-otp", otpVerifyLimiter, async (req, res) => {
+    try {
+      const { email, otp } = req.body ?? {};
+      if (!email || !otp) return res.status(400).json({ error: "Email and code are required" });
+      const normalized = String(email).trim().toLowerCase();
+      const application = await storage.getApplicationByEmail(normalized);
+      if (!application) return res.status(404).json({ error: "No application found for this email" });
+      if (application.emailVerified) {
+        return res.json({ ok: true, alreadyVerified: true, status: application.status });
+      }
+      if (!application.emailOtp || application.emailOtp !== String(otp).trim()) {
+        return res.status(400).json({ error: "Invalid verification code" });
+      }
+      if (!application.emailOtpExpiry || new Date(application.emailOtpExpiry) < new Date()) {
+        return res.status(400).json({ error: "Verification code expired. Please request a new one." });
+      }
+      // Move into the review queue
+      await db.update(applicationsTable).set({
+        emailVerified: true,
+        emailOtp: null,
+        emailOtpExpiry: null,
+        status: "submitted",
+      }).where(eq(applicationsTable.id, application.id));
+      res.json({ ok: true, status: "submitted" });
+    } catch (error: any) {
+      console.error("application verify-otp error:", error);
+      res.status(500).json({ error: "Verification failed" });
+    }
+  });
+
+  // Resend OTP for an unverified application
+  app.post("/api/applications/resend-otp", otpResendLimiter, async (req, res) => {
+    try {
+      const { email } = req.body ?? {};
+      if (!email) return res.status(400).json({ error: "Email is required" });
+      const normalized = String(email).trim().toLowerCase();
+      const application = await storage.getApplicationByEmail(normalized);
+      if (!application || application.emailVerified) {
+        return res.json({ ok: true, ...(application?.emailVerified ? { alreadyVerified: true } : {}) });
+      }
+      const newOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await db.update(applicationsTable).set({ emailOtp: newOtp, emailOtpExpiry: expiry }).where(eq(applicationsTable.id, application.id));
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+      const firstName = (application.fullName || "").split(" ")[0] || "there";
+      await sendVerificationEmail(normalized, firstName, "", newOtp, baseUrl).catch((err) => {
+        console.error("[applications resend] sendVerificationEmail failed:", err?.message);
+      });
+      res.json({
+        ok: true,
+        emailSent: emailConfigured,
+        ...(!emailConfigured ? { devOtp: newOtp } : {}),
+      });
+    } catch (error: any) {
+      console.error("application resend-otp error:", error);
+      res.status(500).json({ error: "Failed to resend code" });
     }
   });
 
@@ -1115,12 +1185,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Demo-only self-approval. In production, this would be an admin-only action
+  // gated behind admin auth + audit logging. Restricted to local dev to prevent
+  // unauthorized approval in deployed environments.
   app.post("/api/applications/approve/:email", async (req, res) => {
+    if (!isLocalDev) {
+      return res.status(403).json({ error: "Application approval is admin-only and not available in this environment." });
+    }
     try {
-      const email = decodeURIComponent(req.params.email);
+      const email = decodeURIComponent(req.params.email).toLowerCase();
       const application = await storage.getApplicationByEmail(email);
       if (!application) {
         return res.status(404).json({ error: "No application found" });
+      }
+      if (!application.emailVerified) {
+        return res.status(409).json({
+          error: "Cannot approve: applicant has not verified their email address yet.",
+          status: application.status,
+        });
       }
       const updated = await storage.updateApplicationStatus(application.id, "approved");
       res.json({ status: updated?.status });

@@ -22,7 +22,8 @@ export type FunnelEventName =
   | "flow_a_recommendation_view"
   | "lead_captured"
   | "apply_started"
-  | "apply_submitted";
+  | "apply_submitted"
+  | "apply_email_verified";
 
 export function trackEvent(event: FunnelEventName, metadata?: Record<string, unknown>): void {
   try {
