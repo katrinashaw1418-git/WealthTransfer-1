@@ -8,6 +8,14 @@ interface AuthUser {
   lastName: string;
   kycStatus: string;
   userTier: string;
+  emailVerified?: boolean;
+}
+
+export interface RegisterResult {
+  requiresEmailVerification?: boolean;
+  emailSent?: boolean;
+  devOtp?: string;
+  email: string;
 }
 
 interface AuthContextValue {
@@ -15,7 +23,8 @@ interface AuthContextValue {
   token: string | null;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
-  register: (data: { email: string; password: string; firstName: string; lastName: string }) => Promise<void>;
+  register: (data: { email: string; password: string; firstName: string; lastName: string }) => Promise<RegisterResult>;
+  refreshUser: () => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
 }
@@ -75,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(newUser);
   }
 
-  async function register(data: { email: string; password: string; firstName: string; lastName: string }): Promise<void> {
+  async function register(data: { email: string; password: string; firstName: string; lastName: string }): Promise<RegisterResult> {
     const res = await fetch("/api/auth/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -85,10 +94,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error || "Registration failed");
     }
-    const { token: newToken, user: newUser } = await res.json();
-    localStorage.setItem(TOKEN_KEY, newToken);
-    setToken(newToken);
-    setUser(newUser);
+    const body = await res.json();
+    // Do NOT log the user in here — they must verify email first.
+    // Token is intentionally discarded; verify-otp will mint a fresh one.
+    return {
+      requiresEmailVerification: body.requiresEmailVerification === true,
+      emailSent: body.emailSent === true,
+      devOtp: body.devOtp,
+      email: data.email,
+    };
+  }
+
+  async function refreshUser(): Promise<void> {
+    const stored = getStoredToken();
+    if (!stored) {
+      setUser(null);
+      setToken(null);
+      return;
+    }
+    try {
+      const res = await fetch("/api/auth/me", { headers: { Authorization: `Bearer ${stored}` } });
+      if (!res.ok) throw new Error("auth refresh failed");
+      const data: AuthUser = await res.json();
+      setUser(data);
+      setToken(stored);
+    } catch {
+      localStorage.removeItem(TOKEN_KEY);
+      setUser(null);
+      setToken(null);
+    }
   }
 
   function logout(): void {
@@ -105,7 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout, isAuthenticated: !!user }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, register, refreshUser, logout, isAuthenticated: !!user }}>
       {children}
     </AuthContext.Provider>
   );

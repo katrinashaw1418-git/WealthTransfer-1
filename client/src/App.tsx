@@ -16,6 +16,7 @@ import Compliance from "@/pages/compliance";
 import Investments from "@/pages/investments";
 import Login from "@/pages/login";
 import Signup from "@/pages/signup";
+import VerifyEmail from "@/pages/verify-email";
 import Apply from "@/pages/apply";
 import Invest from "@/pages/invest";
 import ApplicationStatus from "@/pages/application-status";
@@ -78,6 +79,7 @@ function Router() {
       <Route path="/invest" component={Invest} />
       <Route path="/application-status" component={ApplicationStatus} />
       <Route path="/signup" component={Signup} />
+      <Route path="/verify-email" component={VerifyEmail} />
       <Route path="/forgot-password" component={ForgotPassword} />
       <Route path="/reset-password" component={ResetPassword} />
       <Route path="/onboarding" component={Onboarding} />

@@ -87,7 +87,12 @@ export default function Signup() {
 
     setIsLoading(true);
     try {
-      await register({ email, password, firstName, lastName });
+      const result = await register({ email, password, firstName, lastName });
+      // Stash dev OTP for the verify page to display when email isn't configured
+      if (result.devOtp) {
+        sessionStorage.setItem("amax_dev_otp", result.devOtp);
+      }
+      navigate(`/verify-email?pending=1&email=${encodeURIComponent(email)}`, { replace: true });
     } catch (err: any) {
       setError(err.message || "Account creation failed. Please try again.");
     } finally {

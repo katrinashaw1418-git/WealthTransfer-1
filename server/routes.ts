@@ -19,6 +19,7 @@ import {
   funnelEvents,
 } from "@shared/schema";
 import { getRecommendation } from "@shared/recommendation-engine";
+import { sendVerificationEmail, emailConfigured } from "./email";
 import {
   requireAuth,
   requireKyc,
@@ -668,6 +669,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         await writeAuditLog(user.id, "login_failed", "user", String(user.id), { username }, req.ip || null);
         return res.status(401).json({ error: "Invalid credentials" });
       }
+      // Block login until email is verified
+      if (!user.emailVerified) {
+        return res.status(403).json({
+          code: "email_not_verified",
+          error: "Please verify your email address before signing in.",
+          email: user.email,
+        });
+      }
       const token = signToken({ userId: user.id, username: user.username, email: user.email });
       await writeAuditLog(user.id, "login", "user", String(user.id), { username }, req.ip || null);
       res.json({ token, user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier } });
@@ -723,19 +732,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
         monthlyPnl: "0.00",
         monthlyPnlPercent: "0.00",
       });
-      const token = signToken({ userId: user.id, username: user.username, email: user.email });
+      // Generate email verification token + 6-digit OTP (24-hour expiry)
+      const verifyToken = randomBytes(32).toString("hex");
+      const emailOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const verifyExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await db.update(users).set({
+        emailVerificationToken: verifyToken,
+        emailVerificationTokenExpiry: verifyExpiry,
+        emailOtp,
+        emailVerified: false,
+      }).where(eq(users.id, user.id));
+
+      // Send verification email (no-op fallback if GMAIL not configured — devOtp returned instead)
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+      await sendVerificationEmail(user.email, user.firstName, verifyToken, emailOtp, baseUrl).catch((err) => {
+        console.error("[register] sendVerificationEmail failed:", err?.message);
+      });
+
+      // Note: do NOT issue a JWT here — user must verify email first.
+      // verify-otp / verify-email link click are the only paths that mint a session token.
       await writeAuditLog(user.id, "account_created", "user", String(user.id), { email, authProvider: "email" }, req.ip || null);
       res.status(201).json({
-        token,
         user: {
           id: user.id,
-          username: user.username,
           email: user.email,
           firstName: user.firstName,
           lastName: user.lastName,
-          kycStatus: user.kycStatus,
-          userTier: user.userTier,
+          emailVerified: false,
         },
+        requiresEmailVerification: true,
+        emailSent: emailConfigured,
+        ...(!emailConfigured ? { devOtp: emailOtp } : {}),
       });
     } catch (error: any) {
       console.error("Registration error:", error);
@@ -743,6 +770,148 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(409).json({ error: "An account with this email already exists" });
       }
       res.status(500).json({ error: "Registration failed. Please try again." });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Email verification — OTP entry, link click, resend
+  // ---------------------------------------------------------------------------
+
+  // Brute-force protection: 6-digit OTP has only 1M combinations
+  const otpVerifyLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 8,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many verification attempts. Please request a new code and try again in a few minutes." },
+  });
+  // SMTP-cost protection on resend endpoints
+  const otpResendLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many resend requests. Please wait a few minutes before requesting another code." },
+  });
+
+  // Verify by 6-digit OTP code (public — used right after register)
+  app.post("/api/auth/verify-otp", otpVerifyLimiter, async (req, res) => {
+    try {
+      const { email, otp } = req.body ?? {};
+      if (!email || !otp) return res.status(400).json({ error: "Email and code are required" });
+      const normalized = String(email).trim().toLowerCase();
+      const [user] = await db.select().from(users).where(eq(users.email, normalized));
+      if (!user) return res.status(404).json({ error: "No account found for this email" });
+      if (user.emailVerified) {
+        const token = signToken({ userId: user.id, username: user.username, email: user.email });
+        return res.json({ token, alreadyVerified: true, user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier, emailVerified: true } });
+      }
+      if (!user.emailOtp || user.emailOtp !== String(otp).trim()) {
+        return res.status(400).json({ error: "Invalid verification code" });
+      }
+      if (!user.emailVerificationTokenExpiry || new Date(user.emailVerificationTokenExpiry) < new Date()) {
+        return res.status(400).json({ error: "Verification code expired. Please request a new one." });
+      }
+      await db.update(users).set({
+        emailVerified: true,
+        emailOtp: null,
+        emailVerificationToken: null,
+        emailVerificationTokenExpiry: null,
+      }).where(eq(users.id, user.id));
+      await writeAuditLog(user.id, "email_verified", "user", String(user.id), { method: "otp" }, req.ip || null);
+      const token = signToken({ userId: user.id, username: user.username, email: user.email });
+      res.json({
+        token,
+        user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier, emailVerified: true },
+      });
+    } catch (error: any) {
+      console.error("verify-otp error:", error);
+      res.status(500).json({ error: "Verification failed" });
+    }
+  });
+
+  // Resend OTP / verification email (public — by email address)
+  app.post("/api/auth/resend-otp", otpResendLimiter, async (req, res) => {
+    try {
+      const { email } = req.body ?? {};
+      if (!email) return res.status(400).json({ error: "Email is required" });
+      const normalized = String(email).trim().toLowerCase();
+      const [user] = await db.select().from(users).where(eq(users.email, normalized));
+      // Always return 200 to avoid leaking which emails exist
+      if (!user || user.emailVerified) {
+        return res.json({ ok: true, ...(user?.emailVerified ? { alreadyVerified: true } : {}) });
+      }
+      const verifyToken = randomBytes(32).toString("hex");
+      const newOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await db.update(users).set({
+        emailVerificationToken: verifyToken,
+        emailVerificationTokenExpiry: expiry,
+        emailOtp: newOtp,
+      }).where(eq(users.id, user.id));
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+      await sendVerificationEmail(user.email, user.firstName, verifyToken, newOtp, baseUrl).catch((err) => {
+        console.error("[resend-otp] sendVerificationEmail failed:", err?.message);
+      });
+      res.json({
+        ok: true,
+        emailSent: emailConfigured,
+        ...(!emailConfigured ? { devOtp: newOtp } : {}),
+      });
+    } catch (error: any) {
+      console.error("resend-otp error:", error);
+      res.status(500).json({ error: "Failed to resend code" });
+    }
+  });
+
+  // Resend for already-authenticated user (e.g. user is logged in but unverified)
+  app.post("/api/auth/resend-verification", otpResendLimiter, async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const user = await storage.getUser(auth.userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      if (user.emailVerified) return res.json({ ok: true, alreadyVerified: true });
+      const verifyToken = randomBytes(32).toString("hex");
+      const newOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await db.update(users).set({
+        emailVerificationToken: verifyToken,
+        emailVerificationTokenExpiry: expiry,
+        emailOtp: newOtp,
+      }).where(eq(users.id, user.id));
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+      await sendVerificationEmail(user.email, user.firstName, verifyToken, newOtp, baseUrl).catch((err) => {
+        console.error("[resend-verification] sendVerificationEmail failed:", err?.message);
+      });
+      res.json({ ok: true, emailSent: emailConfigured, ...(!emailConfigured ? { devOtp: newOtp } : {}) });
+    } catch (error: any) {
+      if (error?.status) return res.status(error.status).json({ error: error.message });
+      res.status(500).json({ error: "Failed to resend verification" });
+    }
+  });
+
+  // Verify by clicking the link in the email (GET — redirects to /verify-email page with status)
+  app.get("/api/auth/verify-email", async (req, res) => {
+    const token = String(req.query.token || "");
+    if (!token) return res.redirect("/verify-email?status=invalid");
+    try {
+      const [user] = await db.select().from(users).where(eq(users.emailVerificationToken, token));
+      if (!user) return res.redirect("/verify-email?status=invalid");
+      if (user.emailVerified) return res.redirect("/verify-email?status=already");
+      if (!user.emailVerificationTokenExpiry || new Date(user.emailVerificationTokenExpiry) < new Date()) {
+        return res.redirect(`/verify-email?status=expired&email=${encodeURIComponent(user.email)}`);
+      }
+      await db.update(users).set({
+        emailVerified: true,
+        emailOtp: null,
+        emailVerificationToken: null,
+        emailVerificationTokenExpiry: null,
+      }).where(eq(users.id, user.id));
+      await writeAuditLog(user.id, "email_verified", "user", String(user.id), { method: "link" }, req.ip || null);
+      return res.redirect("/verify-email?status=success");
+    } catch (error: any) {
+      console.error("verify-email link error:", error);
+      return res.redirect("/verify-email?status=error");
     }
   });
 

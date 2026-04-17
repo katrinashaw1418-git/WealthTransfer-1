@@ -28,6 +28,30 @@ export default function Login() {
     setError(null);
     setIsLoading(true);
     try {
+      // Detect unverified-email response and redirect to verification flow.
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (res.status === 403) {
+        const data = await res.json().catch(() => ({}));
+        if (data?.code === "email_not_verified") {
+          // Trigger a fresh code so the user has something current to enter
+          await fetch("/api/auth/resend-otp", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: data.email }),
+          }).catch(() => {});
+          navigate(`/verify-email?pending=1&email=${encodeURIComponent(data.email || username)}`);
+          return;
+        }
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Login failed");
+      }
+      // Successful login — defer to context login() for state setup
       await login(username, password);
     } catch (err: any) {
       setError(err.message || "Login failed. Please try again.");

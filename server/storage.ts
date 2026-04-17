@@ -104,6 +104,10 @@ export class MemStorage implements IStorage {
       lastName: "",
       kycStatus: "verified",
       userTier: "premium",
+      emailVerified: true,
+      emailVerificationToken: null,
+      emailVerificationTokenExpiry: null,
+      emailOtp: null,
       createdAt: new Date(),
     };
     this.users.set(1, demoUser);
@@ -2936,6 +2940,10 @@ export class MemStorage implements IStorage {
       lastName: insertUser.lastName,
       kycStatus: insertUser.kycStatus || "pending",
       userTier: insertUser.userTier || "standard",
+      emailVerified: insertUser.emailVerified ?? false,
+      emailVerificationToken: insertUser.emailVerificationToken ?? null,
+      emailVerificationTokenExpiry: insertUser.emailVerificationTokenExpiry ?? null,
+      emailOtp: insertUser.emailOtp ?? null,
       createdAt: new Date(),
     };
     this.users.set(id, user);
