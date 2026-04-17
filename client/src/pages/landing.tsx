@@ -18,14 +18,14 @@ import {
   FileText,
   Scale,
 } from "lucide-react";
-import darkBlueLogo from "@assets/AMAX_COINS_WHITE.png";
+import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 export default function Landing() {
   const [, navigate] = useLocation();
 
   return (
     <div className="min-h-screen bg-white">
-      <div className="bg-white border-b border-sky-100 px-4 py-2">
+      <div className="bg-sky-50 px-4 py-2">
         <div className="max-w-7xl mx-auto flex items-center justify-center">
           <p className="text-xs text-sky-700">
             <strong>Notice:</strong> This website is currently under development. Features and content are subject to change.
@@ -33,36 +33,34 @@ export default function Landing() {
         </div>
       </div>
 
-      <header className="bg-sky-500 border-b border-sky-600 relative">
+      <header className="bg-sky-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="w-16 h-16 flex items-center justify-center bg-sky-500">
-              <img src={darkBlueLogo} alt="AMAX Wealth" className="w-full h-full object-contain" />
-            </div>
+          <div className="flex items-center gap-3">
+            <img src={darkBlueLogo} alt="AMAX Wealth" className="w-20 h-20 rounded-lg" />
             <div>
-              <span className="text-xl font-bold text-white">AMAX WEALTH</span>
-              <p className="text-xs text-white/90">Investments / Advice</p>
+              <span className="text-xl font-bold text-sky-900">AMAX WEALTH</span>
+              <p className="text-xs text-sky-900">Investments / Advice</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-white">
+            <a href="tel:+61283201908" className="hidden md:flex items-center gap-2 text-sm text-sky-900">
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
-            <Button className="bg-white/15 text-white hover:bg-white/25 border border-white/30 font-semibold" onClick={() => navigate("/login")}>
+            <Button className="bg-sky-100 text-sky-900 hover:bg-sky-200 font-semibold" onClick={() => navigate("/login")}>
               Sign In
             </Button>
-            <Button className="bg-white text-sky-700 hover:bg-sky-50 font-semibold" onClick={() => navigate("/apply")}>
+            <Button className="bg-sky-500 hover:bg-sky-600 text-white font-semibold" onClick={() => navigate("/apply")}>
               Apply for Access
             </Button>
           </div>
         </div>
       </header>
 
-      <section className="bg-white text-sky-900">
+      <section className="bg-sky-50 text-sky-900">
         <div className="max-w-7xl mx-auto px-6 py-24 md:py-32">
           <div className="max-w-3xl">
-            <Badge className="bg-sky-50 text-sky-700 border border-sky-100 mb-6">
+            <Badge className="bg-white/10 text-sky-900 border-white/20 mb-6">
               Authorised Representative under AFSL
             </Badge>
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold leading-tight mb-6">
