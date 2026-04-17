@@ -45,3 +45,5 @@ integrations = ["javascript_websocket:1.0.0", "javascript_stripe:1.0.0", "javasc
 
 [userenv.development]
 ALLOW_LOCAL_DEV_AUTH = "true"
+
+[userenv.shared]
