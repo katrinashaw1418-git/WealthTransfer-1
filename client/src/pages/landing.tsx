@@ -208,9 +208,9 @@ export default function Landing() {
             ].map((item) => (
               <div key={item.step} className="text-center">
                 <div className="w-16 h-16 bg-white rounded-2xl shadow-md flex items-center justify-center mx-auto mb-6">
-                  <item.icon className="w-7 h-7 text-amber-600" />
+                  <item.icon className="w-7 h-7 text-sky-500" />
                 </div>
-                <div className="text-xs font-bold text-amber-500 mb-2">STEP {item.step}</div>
+                <div className="text-xs font-bold text-sky-500 mb-2">STEP {item.step}</div>
                 <h3 className="text-lg font-semibold text-gray-900 mb-3">{item.title}</h3>
                 <p className="text-sm text-gray-600">{item.desc}</p>
               </div>
