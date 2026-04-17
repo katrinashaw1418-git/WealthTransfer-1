@@ -266,3 +266,25 @@ export const applications = pgTable("applications", {
 export const insertApplicationSchema = createInsertSchema(applications).omit({ id: true, createdAt: true, reviewedAt: true });
 export type Application = typeof applications.$inferSelect;
 export type InsertApplication = z.infer<typeof insertApplicationSchema>;
+
+// Leads — captured from the public Flow A wizard before account creation.
+// Stores wizard answers + recommendation snapshot + email capture.
+export const leads = pgTable("leads", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  profileType: text("profile_type").notNull(),       // individual | family_office | corporate | international
+  goals: text("goals").array().notNull(),            // multi-select
+  riskTolerance: text("risk_tolerance").notNull(),   // conservative | balanced | growth | high_growth
+  timeHorizon: text("time_horizon").notNull(),       // short | medium | long
+  capitalRange: text("capital_range").notNull(),     // under_10k | 10k_100k | 100k_500k | 500k_plus
+  recommendedStrategy: text("recommended_strategy").notNull(),
+  privateAccess: boolean("private_access").notNull().default(false),
+  source: text("source").notNull().default("flow_a"),
+  ipAddress: text("ip_address"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertLeadSchema = createInsertSchema(leads).omit({ id: true, createdAt: true, updatedAt: true });
+export type Lead = typeof leads.$inferSelect;
+export type InsertLead = z.infer<typeof insertLeadSchema>;

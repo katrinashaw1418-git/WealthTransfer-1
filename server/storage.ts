@@ -1,11 +1,12 @@
 import { 
-  users, wallets, portfolios, transactions, fxRates, aiRecommendations, investmentProducts, userInvestments, portfolioSnapshots, applications,
+  users, wallets, portfolios, transactions, fxRates, aiRecommendations, investmentProducts, userInvestments, portfolioSnapshots, applications, leads,
   type User, type InsertUser, type Wallet, type InsertWallet, 
   type Portfolio, type InsertPortfolio, type Transaction, type InsertTransaction,
   type FxRate, type InsertFxRate, type AiRecommendation, type InsertAiRecommendation,
   type InvestmentProduct, type InsertInvestmentProduct, type UserInvestment, type InsertUserInvestment,
   type PortfolioSnapshot, type InsertPortfolioSnapshot,
-  type Application, type InsertApplication
+  type Application, type InsertApplication,
+  type Lead, type InsertLead
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, sql, and } from "drizzle-orm";
@@ -62,6 +63,10 @@ export interface IStorage {
   createApplication(application: InsertApplication): Promise<Application>;
   getApplicationByEmail(email: string): Promise<Application | undefined>;
   updateApplicationStatus(id: number, status: string, reviewNote?: string): Promise<Application | undefined>;
+
+  // Leads (Flow A wizard captures)
+  createLead(lead: InsertLead): Promise<Lead>;
+  getLeadByEmail(email: string): Promise<Lead | undefined>;
 }
 
 export class MemStorage implements IStorage {
@@ -3261,6 +3266,33 @@ export class MemStorage implements IStorage {
     app.reviewedAt = new Date();
     return app;
   }
+
+  private leadsStore: Map<number, Lead> = new Map();
+  private leadIdCounter = 1;
+
+  async createLead(lead: InsertLead): Promise<Lead> {
+    const id = this.leadIdCounter++;
+    const row: Lead = {
+      id,
+      email: lead.email,
+      profileType: lead.profileType,
+      goals: lead.goals as string[],
+      riskTolerance: lead.riskTolerance,
+      timeHorizon: lead.timeHorizon,
+      capitalRange: lead.capitalRange,
+      recommendedStrategy: lead.recommendedStrategy,
+      privateAccess: lead.privateAccess ?? false,
+      source: lead.source ?? "flow_a",
+      ipAddress: lead.ipAddress ?? null,
+      createdAt: new Date(),
+    };
+    this.leadsStore.set(id, row);
+    return row;
+  }
+
+  async getLeadByEmail(email: string): Promise<Lead | undefined> {
+    return Array.from(this.leadsStore.values()).find(l => l.email.toLowerCase() === email.toLowerCase());
+  }
 }
 
 // Database Storage Implementation - prevents data loss on server restart
@@ -3459,6 +3491,16 @@ export class DatabaseStorage implements IStorage {
     if (reviewNote) values.reviewNote = reviewNote;
     const [app] = await db.update(applications).set(values).where(eq(applications.id, id)).returning();
     return app || undefined;
+  }
+
+  async createLead(lead: InsertLead): Promise<Lead> {
+    const [row] = await db.insert(leads).values(lead).returning();
+    return row;
+  }
+
+  async getLeadByEmail(email: string): Promise<Lead | undefined> {
+    const [row] = await db.select().from(leads).where(sql`LOWER(${leads.email}) = LOWER(${email})`);
+    return row || undefined;
   }
 }
 

@@ -15,7 +15,9 @@ import {
   auditLogs,
   passwordResetTokens,
   users,
+  leads,
 } from "@shared/schema";
+import { getRecommendation } from "@shared/recommendation-engine";
 import {
   requireAuth,
   requireKyc,
@@ -740,6 +742,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(409).json({ error: "An account with this email already exists" });
       }
       res.status(500).json({ error: "Registration failed. Please try again." });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Flow A — public lead capture (wizard email opt-in)
+  // Public, unauthenticated. Zod validated, rate limited per IP, upserts on email.
+  // ---------------------------------------------------------------------------
+  const leadCaptureLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000, // 10 min
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests. Please try again in a few minutes." },
+  });
+
+  // Server is authoritative for recommendation + privateAccess — answers only.
+  const leadSubmitSchema = z.object({
+    email: z.string().email().max(255),
+    profileType: z.enum(["individual", "family_office", "corporate", "international"]),
+    goals: z.array(z.string().max(50)).min(1).max(10),
+    riskTolerance: z.enum(["conservative", "balanced", "growth", "high_growth"]),
+    timeHorizon: z.enum(["short", "medium", "long"]),
+    capitalRange: z.enum(["under_10k", "10k_100k", "100k_500k", "500k_plus"]),
+    // Honeypot — silently drop submissions where this is filled
+    website: z.string().optional(),
+  });
+
+  app.post("/api/leads", leadCaptureLimiter, async (req, res) => {
+    try {
+      const parsed = leadSubmitSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid submission", details: parsed.error.flatten() });
+      }
+      // Honeypot filled — pretend success without persisting
+      if (parsed.data.website && parsed.data.website.length > 0) {
+        return res.status(201).json({ ok: true });
+      }
+      // Recompute recommendation server-side. Never trust client-supplied
+      // strategy or privateAccess values — they gate compliance behaviour.
+      const rec = getRecommendation({
+        profileType: parsed.data.profileType,
+        goals: parsed.data.goals,
+        riskTolerance: parsed.data.riskTolerance,
+        timeHorizon: parsed.data.timeHorizon,
+        capitalRange: parsed.data.capitalRange,
+      });
+      const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || null;
+      const emailLower = parsed.data.email.toLowerCase();
+      // Atomic upsert — last-write-wins for the same email so updated answers persist.
+      await db.insert(leads).values({
+        email: emailLower,
+        profileType: parsed.data.profileType,
+        goals: parsed.data.goals,
+        riskTolerance: parsed.data.riskTolerance,
+        timeHorizon: parsed.data.timeHorizon,
+        capitalRange: parsed.data.capitalRange,
+        recommendedStrategy: rec.strategy,
+        privateAccess: rec.privateAccess,
+        source: "flow_a",
+        ipAddress: ip,
+      }).onConflictDoUpdate({
+        target: leads.email,
+        set: {
+          profileType: parsed.data.profileType,
+          goals: parsed.data.goals,
+          riskTolerance: parsed.data.riskTolerance,
+          timeHorizon: parsed.data.timeHorizon,
+          capitalRange: parsed.data.capitalRange,
+          recommendedStrategy: rec.strategy,
+          privateAccess: rec.privateAccess,
+          ipAddress: ip,
+          updatedAt: new Date(),
+        },
+      });
+      // Don't return id or hint at whether the email was new
+      res.status(201).json({ ok: true });
+    } catch (error) {
+      console.error("Lead capture error:", error);
+      res.status(500).json({ error: "Failed to save profile" });
     }
   });
 
