@@ -64,13 +64,13 @@ export default function Layout({ children }: LayoutProps) {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-100">
+                <div className="bg-sky-50 p-3 rounded-lg border border-sky-100">
                   <div className="flex items-center space-x-3">
                     <div className="w-10 h-10 bg-sky-500 rounded-full flex items-center justify-center">
                       <Phone className="w-4 h-4 text-white" />
                     </div>
                     <div>
-                      <p className="text-xs text-blue-600 font-medium">+61 2 8320 1908</p>
+                      <p className="text-xs text-sky-700 font-medium">+61 2 8320 1908</p>
                     </div>
                   </div>
                 </div>
@@ -79,7 +79,7 @@ export default function Layout({ children }: LayoutProps) {
                     variant="outline"
                     size="sm"
                     onClick={() => window.open('tel:+61283201908')}
-                    className="flex-1 text-xs hover:bg-blue-50 border-blue-200"
+                    className="flex-1 text-xs hover:bg-sky-50 border-sky-200 text-sky-700"
                   >
                     <Phone className="w-3 h-3 mr-1" />
                     Call
