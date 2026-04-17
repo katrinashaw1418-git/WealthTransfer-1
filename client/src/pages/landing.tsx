@@ -18,7 +18,7 @@ import {
   FileText,
   Scale,
 } from "lucide-react";
-import darkBlueLogo from "@assets/AMAX_COINS_WHITE.png";
+import darkBlueLogo from "@assets/AMAX_LOGO_TRANSPARENT.png";
 
 export default function Landing() {
   const [, navigate] = useLocation();
@@ -36,9 +36,7 @@ export default function Landing() {
       <header className="bg-sky-500 border-b border-sky-600">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-14 h-14 rounded-xl flex items-center justify-center p-2 bg-transparent border-[1.5px] border-white/60">
-              <img src={darkBlueLogo} alt="AMAX Wealth" className="w-full h-full object-contain" />
-            </div>
+            <img src={darkBlueLogo} alt="AMAX Wealth" className="h-16 w-auto object-contain drop-shadow-md" />
             <div>
               <span className="text-xl font-bold text-white">AMAX WEALTH</span>
               <p className="text-xs text-white/90">Investments / Advice</p>
