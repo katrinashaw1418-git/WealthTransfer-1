@@ -454,6 +454,13 @@ export default function Apply() {
                 If electronic verification is unsuccessful, you may be asked to provide additional identification documents during onboarding.
               </div>
 
+              <div className="rounded-md border border-blue-200 bg-white p-3 text-[11px] text-blue-700 leading-relaxed">
+                <p className="font-semibold text-blue-900 mb-1">General advice disclaimer</p>
+                This platform provides access to investment opportunities and general information only.
+                Nothing on this platform constitutes personal financial advice, and it does not take into account your objectives, financial situation, or needs.
+                You should consider whether any investment is appropriate for you and seek independent advice if required.
+              </div>
+
               <Button
                 type="submit"
                 disabled={isLoading || !accountType || !intendedUse}

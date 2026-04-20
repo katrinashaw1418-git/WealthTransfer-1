@@ -1,0 +1,33 @@
+Here is my honest verification of the full cross-check sequence and the final summary document against the live AUSTRAC regulatory position confirmed by primary sources.Here is my full honest verification of the final summary document against the primary AUSTRAC and ASIC sources.
+
+---
+
+**What is fully confirmed by primary sources:**
+
+**Sprint 1 — the four blocking items are correct.** The OTP loop bug, wrong email source, OTP security tightening, and intended-use dropdown replacement are all correctly identified and correctly prioritised. Nothing in any source contradicts these. The OTP security targets — 15 minutes, 5 attempts, 3 resends per 10 minutes — are reasonable security baselines.
+
+**The tipping-off rule is confirmed and more important than the summary makes it sound.** The updated tipping-off offence came into force on 31 March 2025, making it a criminal offence to disclose certain types of information where it would or could reasonably be expected to prejudice an investigation. The revised rules mean that even subtle cues — like pausing services or requesting more information without a clear neutral explanation — can raise red flags. This means your user-facing delay messages need to be carefully drafted. The summary's rule — never reference compliance review, flags, discrepancies, or anything that could signal scrutiny — is the right operational standard. The wording "We are still reviewing your application, we will contact you shortly" is acceptably neutral as written. It must stay that way.
+
+**The ASIC general advice disclaimer wording is confirmed correct.** ASIC defines personal advice as where the provider has considered one or more of the client's objectives, financial situation and needs, or a reasonable person might expect them to have done so. All other financial product advice is general advice. The "objectives, financial situation or needs" phrase in the refined disclaimer is the correct statutory formulation and should not be changed. Factual information — objectively ascertainable information whose truth cannot reasonably be questioned — does not require an AFS licence to provide. This is relevant because it means a platform providing purely factual information, not recommendations, sits outside the advice regime. If AMAX is providing factual access to investment opportunities rather than recommending specific products, the disclaimer wording may need to distinguish that clearly. This is exactly why the licensing sign-off requirement is non-negotiable before the disclaimer goes live.
+
+**The licensing sign-off requirement from the last cross-check is confirmed and essential.** To provide financial product advice you must be authorised by an AFS licensee that has the necessary licence authorisations. The disclaimer wording used throughout this conversation — "this platform provides general information only" — is a placeholder. Before deployment it must be reviewed against whether AMAX holds an AFSL, operates as an authorised representative under another licensee, or is providing only factual information that falls outside the advice regime entirely. Each situation requires different wording and potentially different disclosures.
+
+---
+
+**What the summary gets right that I confirm:**
+
+The two-layer architecture, the five governance documents, the three-sprint structure, the soft hold preference over auto-expire for high-risk discrepancies, the field risk matrix, the medium-risk timeout gap — all of these are correctly stated and I have no disputes.
+
+---
+
+**Two remaining gaps the summary still does not address:**
+
+The first is the **medium-risk SLA timeout**. The summary specifies that medium-risk discrepancies must not remain unresolved indefinitely and must escalate, but it does not give a specific threshold number of days after which escalation triggers. The high-risk lifecycle has a 24-hour SLA explicitly stated. Medium-risk has no equivalent number. Before developer handoff, AMAX needs to decide: is medium-risk SLA 48 hours, 7 days, or 14 days? That number determines the system logic. Without it, the developer has no trigger condition to code.
+
+The second is the **AML/CTF program compliance officer requirement.** It is now an explicit requirement from 31 March 2026 to appoint a fit and proper AML/CTF compliance officer responsible for implementing the AML/CTF program. This is not a UI or build item, but it affects whether AMAX can operate the discrepancy review and escalation system it has designed. If there is no appointed compliance officer, the escalation policy has no one to escalate to. This should be confirmed before the escalation policy is finalised.
+
+---
+
+**Final verdict:**
+
+The summary document is the most accurate and complete product-and-compliance brief in this entire conversation. The sprint structure is correct. The governance documents are correctly identified. The tipping-off rule is correctly stated and now confirmed by primary source. The ASIC disclaimer wording is confirmed correct as a placeholder pending licensing sign-off. The two remaining gaps are the medium-risk SLA threshold (needs a specific number) and the AML/CTF compliance officer appointment (operational prerequisite for the escalation system). With those two additions, the system has no unresolved logic gaps and is ready for legal sign-off and developer handoff.
