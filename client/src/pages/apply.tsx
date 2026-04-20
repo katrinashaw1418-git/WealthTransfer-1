@@ -24,6 +24,9 @@ export default function Apply() {
   const [consentOwn, setConsentOwn] = useState(false);
   const [consentAml, setConsentAml] = useState(false);
   const [consentContact, setConsentContact] = useState(false);
+  const [consentAdvice, setConsentAdvice] = useState(false);
+
+  const isEntity = ["company", "trust", "smsf"].includes(accountType);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -46,7 +49,7 @@ export default function Apply() {
     e.preventDefault();
     setError(null);
 
-    if (!consentOwn || !consentAml || !consentContact) {
+    if (!consentOwn || !consentAml || !consentContact || !consentAdvice) {
       setError("Please confirm all compliance acknowledgements before submitting.");
       return;
     }
@@ -62,12 +65,13 @@ export default function Apply() {
           phone,
           country,
           accountType,
-          entityName: accountType === "business" ? entityName : undefined,
-          abn: accountType === "business" ? abn : undefined,
+          entityName: isEntity ? entityName : undefined,
+          abn: isEntity ? abn : undefined,
           intendedUse,
           consentOwnBehalf: consentOwn,
           consentAmlCtf: consentAml,
           consentContact: consentContact,
+          consentGeneralAdvice: consentAdvice,
         }),
       });
       if (!res.ok) {
@@ -342,14 +346,19 @@ export default function Apply() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="personal">Personal</SelectItem>
-                    <SelectItem value="business">Business</SelectItem>
+                    <SelectItem value="joint">Joint</SelectItem>
+                    <SelectItem value="company">Company</SelectItem>
+                    <SelectItem value="trust">Trust</SelectItem>
+                    <SelectItem value="smsf">SMSF (Self-Managed Super Fund)</SelectItem>
                   </SelectContent>
                 </Select>
 
-                {accountType === "business" && (
+                {isEntity && (
                   <div className="grid grid-cols-2 gap-3 mt-3">
                     <div className="space-y-2">
-                      <Label htmlFor="entityName" className="text-blue-900">Entity name</Label>
+                      <Label htmlFor="entityName" className="text-blue-900">
+                        {accountType === "trust" ? "Trust name" : accountType === "smsf" ? "Fund name" : "Entity name"}
+                      </Label>
                       <Input
                         id="entityName"
                         value={entityName}
@@ -379,11 +388,12 @@ export default function Apply() {
                     <SelectValue placeholder="Select intended use" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="personal_transfers">Personal transfers</SelectItem>
-                    <SelectItem value="fx_exchange">FX / currency exchange</SelectItem>
-                    <SelectItem value="digital_assets">Digital asset transactions</SelectItem>
-                    <SelectItem value="investment">Investment / treasury</SelectItem>
-                    <SelectItem value="business_payments">Business payments</SelectItem>
+                    <SelectItem value="wealth_management">Wealth management</SelectItem>
+                    <SelectItem value="long_term_investing">Long-term investing</SelectItem>
+                    <SelectItem value="portfolio_diversification">Portfolio diversification</SelectItem>
+                    <SelectItem value="private_market_access">Private market access</SelectItem>
+                    <SelectItem value="smsf_investing">SMSF investing</SelectItem>
+                    <SelectItem value="trust_entity_investing">Trust / entity investing</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -424,7 +434,24 @@ export default function Apply() {
                       I agree to be contacted for onboarding if approved
                     </Label>
                   </div>
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="consentAdvice"
+                      checked={consentAdvice}
+                      onCheckedChange={(checked) => setConsentAdvice(checked === true)}
+                      className="mt-0.5 border-sky-300 data-[state=checked]:bg-sky-500 data-[state=checked]:text-white"
+                    />
+                    <Label htmlFor="consentAdvice" className="text-sm text-blue-700 leading-snug cursor-pointer">
+                      I acknowledge that this platform provides general information only and does not constitute personal financial advice.
+                    </Label>
+                  </div>
                 </div>
+              </div>
+
+              <div className="rounded-md border border-blue-200 bg-blue-50/60 p-3 text-xs text-blue-800 leading-relaxed">
+                <p className="font-semibold text-blue-900 mb-1">Identity verification</p>
+                We will attempt to verify your identity electronically using your Australian driver licence or passport.
+                If electronic verification is unsuccessful, you may be asked to provide additional identification documents during onboarding.
               </div>
 
               <Button

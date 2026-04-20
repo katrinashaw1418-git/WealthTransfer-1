@@ -262,6 +262,9 @@ export const applications = pgTable("applications", {
   consentOwnBehalf: boolean("consent_own_behalf").notNull().default(false),
   consentAmlCtf: boolean("consent_aml_ctf").notNull().default(false),
   consentContact: boolean("consent_contact").notNull().default(false),
+  // ASIC general-advice disclaimer acknowledgement — collected on the apply page
+  // so we have an attested record that the user understands this is not personal advice.
+  consentGeneralAdvice: boolean("consent_general_advice").notNull().default(false),
   // status: email_unverified → submitted → under_review → approved | rejected
   status: text("status").notNull().default("email_unverified"),
   reviewNote: text("review_note"),

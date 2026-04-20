@@ -1066,8 +1066,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (existingUser) {
         return res.status(409).json({ error: "An account with this email already exists. Please sign in." });
       }
-      const { consentOwnBehalf, consentAmlCtf, consentContact: consentContactFlag } = req.body;
-      if (!consentOwnBehalf || !consentAmlCtf || !consentContactFlag) {
+      const { consentOwnBehalf, consentAmlCtf, consentContact: consentContactFlag, consentGeneralAdvice } = req.body;
+      if (!consentOwnBehalf || !consentAmlCtf || !consentContactFlag || !consentGeneralAdvice) {
         return res.status(400).json({ error: "All compliance acknowledgements are required" });
       }
 
@@ -1089,6 +1089,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         consentOwnBehalf: true,
         consentAmlCtf: true,
         consentContact: true,
+        consentGeneralAdvice: true,
         status: "email_unverified",
         reviewNote: null,
         emailVerified: false,
