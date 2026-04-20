@@ -1,0 +1,354 @@
+Here’s a **clean, executive-level summary** of everything we’ve aligned over the last few hours — structured so you can **hand this directly to your developer + compliance/legal**.
+
+---
+
+# 🔴 **SPRINT 1 — BLOCKING (FIX IMMEDIATELY)**
+
+## 1. OTP LOOP BUG (CRITICAL)
+
+**Problem**
+
+* Second OTP triggered during signup after approval
+
+**Fix**
+
+```text
+Signup must NOT trigger OTP.
+email_verified = true must be inherited from application.
+```
+
+---
+
+## 2. WRONG EMAIL BUG (CRITICAL)
+
+**Problem**
+
+* Wrong email (e.g. xox181023) used in verification
+
+**Fix**
+
+```text
+All auth flows must use application.email as source of truth.
+Remove any fallback / hardcoded / session-based email.
+Search repo for incorrect references.
+```
+
+---
+
+## 3. OTP SECURITY (CRITICAL)
+
+**Current issue**
+
+* 24-hour expiry ❌
+
+**Fix**
+
+* Expiry: **15 minutes**
+* Max attempts: **5**
+* Resend: **3 per 10 minutes**
+
+---
+
+## 4. INTENDED USE DROPDOWN (CRITICAL — POSITIONING + COMPLIANCE)
+
+**Remove**
+
+* Personal transfers
+* FX / currency exchange
+* Digital asset transactions
+
+**Replace with**
+
+* Wealth management
+* Long-term investing
+* Portfolio diversification
+* Private market access
+* SMSF investing
+* Trust / entity investing
+
+👉 This is **not cosmetic** — it directly affects credibility.
+
+---
+
+# 🟠 **SPRINT 2 — CREDIBILITY LAYER (NEXT)**
+
+## 5. ADVICE DISCLAIMER (ASIC-STYLE)
+
+**Final wording**
+
+```text
+This platform provides access to investment opportunities and general information only. 
+Nothing on this platform constitutes personal financial advice, and it does not take into account your objectives, financial situation, or needs. 
+You should consider whether any investment is appropriate for you and seek independent advice if required.
+```
+
+### Placement
+
+* Apply page (footer)
+* Confirmation screen
+* Terms & Agreements step (MANDATORY)
+* (Optional) Dashboard (reinforcement)
+
+---
+
+## 6. DISCLAIMER ACKNOWLEDGEMENT (IMPORTANT)
+
+Add checkbox in Terms step:
+
+```text
+☐ I acknowledge that this platform provides general information only and does not constitute personal financial advice.
+```
+
+👉 This turns disclosure into **attested disclosure**
+
+---
+
+## 7. IDENTITY VERIFICATION NOTICE (AUSTRAC-ALIGNED)
+
+```text
+We will attempt to verify your identity electronically using your Australian driver licence or passport. 
+If electronic verification is unsuccessful, you may be asked to provide additional identification documents during onboarding.
+```
+
+### Placement
+
+* Top of Identity step
+* (Optional) short mention on Apply page
+
+---
+
+## 8. COMPLIANCE WORDING POLISH
+
+* Strengthen AML/CTF language
+* Avoid vague phrases
+* Ensure consistent “regulated platform” tone
+
+---
+
+## ⚠️ LEGAL SIGN-OFF REQUIRED (PARALLEL TO SPRINT 2)
+
+Before release:
+
+* Confirm if AMAX is:
+
+  * AFSL holder
+  * Authorised representative
+  * Pre-licensing
+
+👉 Disclaimer wording must match actual licensing status
+
+---
+
+# 🟢 **SPRINT 3 — UX & CONVERSION**
+
+## 9. SAVE & RESUME (HIGH VALUE)
+
+* Auto-save each step
+* Resume via email link
+
+---
+
+## 10. APPLICATION REFERENCE ID
+
+* Show on submission screen
+* Use in all communications
+
+---
+
+## 11. PRIVATE ACCESS POSITIONING
+
+* Add premium / selective messaging
+* Reinforce wealth positioning
+
+---
+
+# 🔵 **CORE ARCHITECTURE (CONFIRMED)**
+
+## Two-layer model (MANDATORY)
+
+```text
+Application data = screening
+Onboarding data = legal KYC record
+```
+
+Rules:
+
+* Pre-fill onboarding from application
+* User must re-confirm data
+* Onboarding = source of truth
+
+---
+
+## Entity separation (MANDATORY)
+
+Separate flows for:
+
+* Individual
+* Trust
+* Company
+* SMSF
+
+---
+
+# 🔴 **DISCREPANCY SYSTEM (REQUIRED BEFORE BUILD)**
+
+## 12. CORE RULE
+
+```text
+If application data ≠ onboarding data
+→ system must define behaviour
+```
+
+---
+
+## 13. DISCREPANCY HANDLING
+
+### Source of truth
+
+* Onboarding data
+
+### Always:
+
+* Log all differences
+
+---
+
+## 14. RISK CLASSIFICATION
+
+### Low
+
+* log only
+
+### Medium
+
+* allow onboarding
+* flag for review
+
+### High
+
+* block activation
+* require manual approval
+
+---
+
+## 15. FIELD RISK MATRIX (REQUIRED)
+
+Every field must be assigned:
+
+* Low / Medium / High
+
+Examples:
+
+| Field           | Risk   |
+| --------------- | ------ |
+| Name            | High   |
+| DOB             | High   |
+| Country         | High   |
+| Source of funds | High   |
+| Address         | Medium |
+| Email           | Medium |
+| Occupation      | Low    |
+
+👉 Must cover **ALL onboarding fields**
+
+---
+
+# 🔴 **ESCALATION & TIMEOUT SYSTEM (CRITICAL)**
+
+## 16. HIGH-RISK FLOW
+
+1. Flag → block access
+2. SLA window (e.g. 24h)
+3. If breached → escalate
+4. If extended breach → escalate again
+5. Final decision required
+
+---
+
+## 17. HARD RULE
+
+```text
+High-risk discrepancy must NEVER auto-approve
+```
+
+---
+
+## 18. ESCALATION MODEL
+
+* Internal escalation (senior reviewer)
+* User notified (neutral message)
+
+---
+
+## ⚠️ TIPPING-OFF RULE (IMPORTANT)
+
+User messages must:
+
+* be neutral
+* NOT mention:
+
+  * suspicion
+  * flags
+  * discrepancies
+  * investigations
+
+---
+
+## 19. MEDIUM-RISK GAP (NOW RESOLVED)
+
+Must define:
+
+```text
+If medium-risk not reviewed within SLA:
+→ escalate
+→ assign owner
+→ must not remain unresolved indefinitely
+```
+
+---
+
+## 20. TIMEOUT POLICY
+
+For high-risk:
+
+👉 Use **Soft Hold (recommended)**
+
+* Do NOT auto-expire
+* Keep under review
+
+---
+
+# 📄 **REQUIRED GOVERNANCE DOCUMENTS (FINAL)**
+
+You now need **5 documents**:
+
+1. Field Risk Classification Matrix
+2. Discrepancy Handling Policy
+3. Review SLA
+4. High-Risk Definition
+5. Escalation & Timeout Policy
+
+---
+
+# 🧠 **FINAL STATE**
+
+You now have:
+
+* ✔ Production-ready onboarding architecture
+* ✔ Regulator-aligned KYC flow
+* ✔ Fully defined discrepancy system
+* ✔ Clear sprint execution plan
+* ✔ Legal/compliance integration points
+
+---
+
+# 🔥 **ONE-LINE SUMMARY**
+
+👉 You are now **one sprint + one legal sign-off away from institutional-grade onboarding**
+
+---
+
+If you want next step, I can:
+
+* Turn this into a **developer task list (Jira-ready)**
+* Or create your **database schema + API endpoints for this system**
