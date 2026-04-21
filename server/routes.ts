@@ -648,6 +648,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const hashed = await hashPassword(demoUser.password);
       await storage.updateUser(1, { password: hashed });
     }
+
+    // Seed the `wiseinvestor` demo account if it doesn't exist (idempotent on every boot).
+    // Used for live demos; password is intentionally well-known.
+    try {
+      const existing = await storage.getUserByUsername("wiseinvestor");
+      const desiredHash = await hashPassword("wise888");
+      if (!existing) {
+        await storage.createUser({
+          username: "wiseinvestor",
+          email: "wiseinvestor@amaxglobal.com.au",
+          password: desiredHash,
+          firstName: "Wise",
+          lastName: "Investor",
+          kycStatus: "verified",
+          userTier: "professional",
+          emailVerified: true,
+        } as any);
+      } else if (!(await verifyPassword("wise888", existing.password))) {
+        await storage.updateUser(existing.id, { password: desiredHash, emailVerified: true });
+      }
+    } catch (err) {
+      console.warn("[seed] wiseinvestor demo account seed failed:", (err as Error).message);
+    }
   }
 
   // ---------------------------------------------------------------------------
