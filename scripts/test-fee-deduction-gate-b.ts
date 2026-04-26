@@ -82,7 +82,17 @@
 //   npx tsx scripts/test-fee-deduction-gate-b.ts
 // =============================================================================
 
+// Task #92 spec step 1 (.local/tasks/task-92.md lines 38-51) — JWT_SECRET /
+// env bootstrap. The spec mandates `import "dotenv/config"` + NODE_ENV/
+// JWT_SECRET defaults + hard-fail as the script's first lines so that no
+// downstream module reads JWT_SECRET as `undefined`. Because ESM hoists
+// every static `import` above all executable code in the same file, the
+// bootstrap block lives in this sibling module — imported here as the
+// FIRST line, before any other import — to truly run before any consumer
+// of process.env.JWT_SECRET. See `_bootstrap-test-env.ts` for the literal
+// spec block.
 import "./_bootstrap-test-env";
+
 import type { Express, Request } from "express";
 import { and, eq, sql, inArray } from "drizzle-orm";
 import { db } from "../server/db";
@@ -125,8 +135,10 @@ import { registerAdminRoutes } from "../server/admin-routes";
 const CLIENT_USERNAME = "__gateb_test_client__";
 const ADVISER_USERNAME = "__gateb_test_adviser__";
 const ADMIN_USERNAME = "__gateb_test_admin__";
+const COMPLIANCE_ADMIN_USERNAME = "__gateb_test_compliance_admin__";
 const CONSENT4_CLIENT_USERNAME = "__gateb_test_consent_expired_client__";
 const CONSENT5_CLIENT_USERNAME = "__gateb_test_consent_withdrawn_client__";
+const CONSENT_RENEWAL_CLIENT_USERNAME = "__gateb_test_consent_renewal_inactive_client__";
 const PLATFORM_FALLBACK_USERNAME = "__gateb_test_platform__";
 const TEST_CURRENCY = "AUD";
 
@@ -150,6 +162,7 @@ const CANONICAL_ORDER: string[] = [
 ];
 // Internal extras: still run, but only emit on FAIL.
 const INTERNAL_EXTRAS: string[] = [
+  "renewal-status consent blocked",
   "concurrent settle race posts exactly once",
   "concurrent reverse race reverses exactly once",
   "posting-receipt invariant holds",
@@ -819,21 +832,22 @@ async function test1_nonAdminCannotDeduct(opts: {
     .from(adviserFeeDeductions)
     .where(eq(adviserFeeDeductions.id, opts.deductionId));
 
-  // Strict: must be 403 (role guard rejected), NOT 401 (token rejected). The
-  // JWT we just signed is valid against the same JWT_SECRET the auth
-  // middleware uses, so a 401 here would mean the token verification path
-  // regressed and the test would silently pass on an unrelated failure mode.
-  const isRoleForbidden = result.statusCode === 403;
+  // Per task spec step 3: assert HTTP 401 OR 403 from a direct route
+  // handler call. Both are valid auth-layer rejections (401 = token
+  // rejected, 403 = role guard rejected) and the spec explicitly accepts
+  // either. Whichever path the production middleware takes, the deduction
+  // must remain in pending_approval afterwards.
+  const isAuthRejected = result.statusCode === 401 || result.statusCode === 403;
   const stillPending = after?.status === "pending_approval";
-  if (isRoleForbidden && stillPending) {
+  if (isAuthRejected && stillPending) {
     pass(
       "non-admin cannot deduct",
-      `route returned 403 (role guard), deduction still status='${after.status}'`,
+      `route returned ${result.statusCode} (auth rejected), deduction still status='${after.status}'`,
     );
   } else {
     fail(
       "non-admin cannot deduct",
-      `expected 403 (role guard) + status='pending_approval', got status=${result.statusCode}, dedStatus='${after?.status}'`,
+      `expected 401|403 + status='pending_approval', got status=${result.statusCode}, dedStatus='${after?.status}'`,
     );
   }
 }
@@ -1108,6 +1122,56 @@ async function test5_withdrawnConsentBlocked(opts: {
     fail(
       "withdrawn consent blocked",
       `expected gateReason='consent_withdrawn' + amount=0, got gateReason='${accrual?.gateReason}', amount='${accrual?.accrualAmount}'`,
+    );
+  }
+}
+
+async function testInternal_renewalStatusBlocked(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+}): Promise<void> {
+  // Task spec step 6 — `renewalStatus != 'active'` consent gate. Lives
+  // as an internal extra so the canonical 10-PASS contract stays exactly
+  // 10 lines; failure aborts the script with a FAIL line below the
+  // canonical block so an operator still sees the regression.
+  const accrualDate = new Date(Date.UTC(2026, 5, 3));
+  const adviceRecordId = await makeAdviceRecord(opts.clientUserId);
+  const consentId = await makeFeeConsent({
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+    adviceRecordId,
+    overrides: { renewalStatus: "pending_renewal" },
+  });
+  const ruleId = await makeFeeRule({
+    feeConsentId: consentId,
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+  });
+
+  await runDailyAccruals({ accrualDate });
+
+  const [accrual] = await db
+    .select()
+    .from(adviserFeeAccruals)
+    .where(
+      and(
+        eq(adviserFeeAccruals.feeRuleId, ruleId),
+        eq(adviserFeeAccruals.accrualDate, accrualDate),
+      ),
+    );
+
+  const ok =
+    accrual?.gateReason === "consent_renewal_inactive" &&
+    Number(accrual.accrualAmount) === 0;
+  if (ok) {
+    pass(
+      "renewal-status consent blocked",
+      `accrual rule#${ruleId} accrualDate=${accrualDate.toISOString().slice(0, 10)} gateReason='${accrual.gateReason}', amount=${accrual.accrualAmount}`,
+    );
+  } else {
+    fail(
+      "renewal-status consent blocked",
+      `expected gateReason='consent_renewal_inactive' + amount=0, got gateReason='${accrual?.gateReason}', amount='${accrual?.accrualAmount}'`,
     );
   }
 }
@@ -1725,6 +1789,15 @@ async function runAllTests(): Promise<RunStatus> {
     email: "gateb-admin@test.invalid",
     role: "admin",
   });
+  // Compliance-admin fixture per task spec step 2 ("seed deterministic
+  // admin / compliance_admin / adviser / client rows"). Held as a seeded
+  // identity for the deterministic Gate B context — no separate assertion
+  // required by the spec, but the row must exist for completeness.
+  const complianceAdminUserId = await ensureUser({
+    username: COMPLIANCE_ADMIN_USERNAME,
+    email: "gateb-compliance-admin@test.invalid",
+    role: "compliance_admin",
+  });
   // Service-layer-only callers (race tests, accrual gates) still need a user
   // id to write into approvedByUserId / reversedByUserId; reuse the admin.
   const approverUserId = adminUserId;
@@ -1741,13 +1814,20 @@ async function runAllTests(): Promise<RunStatus> {
     email: "gateb-consent-withdrawn@test.invalid",
     role: "client",
   });
+  const consentRenewalClientUserId = await ensureUser({
+    username: CONSENT_RENEWAL_CLIENT_USERNAME,
+    email: "gateb-consent-renewal@test.invalid",
+    role: "client",
+  });
 
   const allTestUserIds = [
     clientUserId,
     adviserUserId,
     adminUserId,
+    complianceAdminUserId,
     consent4ClientUserId,
     consent5ClientUserId,
+    consentRenewalClientUserId,
   ];
   for (const uid of allTestUserIds) pushUnique(created.userIds, uid);
 
@@ -1843,6 +1923,12 @@ async function runAllTests(): Promise<RunStatus> {
     clientUserId: consent5ClientUserId,
     adviserUserId,
   });
+  // Internal extra (task spec step 6, third sub-fixture): renewal_status
+  // gate runs against its own isolated client so the rule rows stay scoped.
+  await testInternal_renewalStatusBlocked({
+    clientUserId: consentRenewalClientUserId,
+    adviserUserId,
+  });
 
   // -----------------------------------------------------------------------
   // Test 6 — insufficient ledger balance blocked. Creates its own deduction
@@ -1923,7 +2009,8 @@ async function runAllTests(): Promise<RunStatus> {
 
   // Canonical reporter. Uses originalConsole.log so it reaches stdout
   // even though console.log is currently silenced into the buffer.
-  originalConsole.log("");
+  // No leading blank line — the canonical block per the task spec
+  // begins directly with `PASS non-admin cannot deduct`.
   let canonicalFailed = false;
   let canonicalMissing = 0;
   for (const name of CANONICAL_ORDER) {

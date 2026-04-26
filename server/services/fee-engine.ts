@@ -90,6 +90,7 @@ export type GateReason =
   | "consent_missing"
   | "consent_withdrawn"
   | "consent_expired"
+  | "consent_renewal_inactive"
   | "link_inactive"
   | "rule_paused"
   | "splits_invalid";
@@ -280,6 +281,11 @@ export async function runDailyAccruals(opts: {
         new Date(consent.consentExpiryDate).getTime() <= accrualDate.getTime()
       ) {
         gate = "consent_expired";
+      } else if (consent.renewalStatus !== "active") {
+        // Task #92 step 6 — renewal_status gate. Mirrors the upstream
+        // guard in adviser-access.ts/execution-gate.ts so accrual cannot
+        // happen against a consent that is mid-renewal or otherwise non-active.
+        gate = "consent_renewal_inactive";
       }
 
       // (b) Adviser-client link still active.
