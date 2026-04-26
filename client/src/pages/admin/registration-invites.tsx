@@ -34,7 +34,32 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Mail, Send, Copy, Check, Info, Clock } from "lucide-react";
+import { Mail, Send, Copy, Check, Info, Clock, AlertTriangle } from "lucide-react";
+
+// apiRequest's throwIfResNotOk wraps responses as `${status}: ${text}`. The
+// body is the JSON error envelope from handleError, e.g.
+//   `409: {"error":"A user with this email already exists"}`
+// Parse it back into a typed shape so we can branch on the status (especially
+// 409 — duplicate user / invite-in-flight — which the spec wants surfaced
+// inline rather than buried in a toast).
+function parseApiError(err: unknown): { status: number | null; message: string } {
+  if (!(err instanceof Error)) {
+    return { status: null, message: String(err ?? "Unknown error") };
+  }
+  const m = err.message.match(/^(\d{3}):\s*([\s\S]*)$/);
+  if (!m) return { status: null, message: err.message };
+  const status = Number(m[1]);
+  const body = m[2];
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed.error === "string") {
+      return { status, message: parsed.error };
+    }
+  } catch {
+    // fall through — body wasn't JSON
+  }
+  return { status, message: body };
+}
 
 // -----------------------------------------------------------------------------
 // /admin/registration-invites
@@ -103,6 +128,7 @@ export default function AdminRegistrationInvites() {
   const { toast } = useToast();
   const [issued, setIssued] = useState<IssuedInvite | null>(null);
   const [copied, setCopied] = useState(false);
+  const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -119,6 +145,16 @@ export default function AdminRegistrationInvites() {
       form.setValue("adviserUserId", "none");
     }
   }, [role, form]);
+
+  // Any edit to email/role should clear the previous inline conflict so the
+  // admin isn't staring at a stale "already exists" while typing a new value.
+  const watchedEmail = form.watch("email");
+  useEffect(() => {
+    if (conflictMessage) setConflictMessage(null);
+    // We intentionally only react to the field changes — not to
+    // conflictMessage itself — to avoid an effect loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchedEmail, role]);
 
   const { data: advisers } = useQuery<AdviserOpt[]>({
     queryKey: ["/api/admin/advisers"],
@@ -143,6 +179,7 @@ export default function AdminRegistrationInvites() {
     onSuccess: (data) => {
       setIssued(data);
       setCopied(false);
+      setConflictMessage(null);
       form.reset({ email: "", role: "client", adviserUserId: "none" });
       // Audit log will reflect the new invite — refresh anywhere it's listed.
       queryClient.invalidateQueries({ queryKey: ["/api/admin/audit-logs"] });
@@ -151,16 +188,28 @@ export default function AdminRegistrationInvites() {
         description: "Copy the link before closing — it is shown only once.",
       });
     },
-    onError: (err: Error) => {
+    onError: (err: unknown) => {
+      const { status, message } = parseApiError(err);
+      // 409 paths from the server are expected, recoverable, admin-actionable
+      // outcomes ("user already exists", "another invite in flight"). Surface
+      // those inline so the admin sees the specific reason without dismissing
+      // a toast. Everything else (400/401/403/500) stays in the toast as a
+      // genuine error popup.
+      if (status === 409) {
+        setConflictMessage(message);
+        return;
+      }
+      setConflictMessage(null);
       toast({
         title: "Could not issue invite",
-        description: err.message,
+        description: message,
         variant: "destructive",
       });
     },
   });
 
   function onSubmit(values: FormValues) {
+    setConflictMessage(null);
     mutation.mutate(values);
   }
 
@@ -284,6 +333,22 @@ export default function AdminRegistrationInvites() {
                     </FormItem>
                   )}
                 />
+              )}
+
+              {conflictMessage && (
+                <Alert
+                  variant="destructive"
+                  className="border-amber-300 bg-amber-50 text-amber-900"
+                  data-testid="alert-conflict"
+                >
+                  <AlertTriangle className="h-4 w-4 text-amber-700" />
+                  <AlertTitle className="text-amber-900">
+                    Can't issue this invite
+                  </AlertTitle>
+                  <AlertDescription className="text-amber-800">
+                    {conflictMessage}
+                  </AlertDescription>
+                </Alert>
               )}
 
               <div className="flex items-center justify-end gap-2 pt-2">
