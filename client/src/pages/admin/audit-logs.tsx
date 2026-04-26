@@ -118,13 +118,28 @@ function renderValue(v: unknown): string {
 
 function DiffSummaryBadges({ summary }: { summary: DiffSummary }) {
   const items: Array<{ label: string; count: number; cls: string; testid: string }> = [
-    { label: "changed", count: summary.changed.length, cls: "bg-amber-100 text-amber-800 border-amber-200", testid: "badge-diff-changed" },
-    { label: "added", count: summary.added.length, cls: "bg-emerald-100 text-emerald-800 border-emerald-200", testid: "badge-diff-added" },
-    { label: "removed", count: summary.removed.length, cls: "bg-rose-100 text-rose-800 border-rose-200", testid: "badge-diff-removed" },
+    {
+      label: "changed",
+      count: summary.changed.length,
+      cls: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/40 dark:text-amber-100 dark:border-amber-800",
+      testid: "badge-diff-changed",
+    },
+    {
+      label: "added",
+      count: summary.added.length,
+      cls: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-100 dark:border-emerald-800",
+      testid: "badge-diff-added",
+    },
+    {
+      label: "removed",
+      count: summary.removed.length,
+      cls: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-900/40 dark:text-rose-100 dark:border-rose-800",
+      testid: "badge-diff-removed",
+    },
   ].filter((x) => x.count > 0);
   if (items.length === 0) {
     return (
-      <Badge variant="outline" className="text-[10px] font-normal text-slate-500">
+      <Badge variant="outline" className="text-[10px] font-normal text-slate-500 dark:text-slate-400">
         no field changes
       </Badge>
     );
@@ -159,31 +174,40 @@ function DiffField({
   const afterText = renderValue(after);
 
   const beforeCellCls = (() => {
-    if (kind === "added") return "bg-slate-50 text-slate-400";
-    if (kind === "removed") return "bg-rose-50 text-rose-900 line-through";
-    if (kind === "changed") return "bg-amber-50 text-amber-900";
-    return "bg-slate-50 text-slate-600";
+    if (kind === "added")
+      return "bg-slate-50 text-slate-400 dark:bg-slate-900/40 dark:text-slate-500";
+    if (kind === "removed")
+      return "bg-rose-50 text-rose-900 line-through dark:bg-rose-950/40 dark:text-rose-200";
+    if (kind === "changed")
+      return "bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-100";
+    return "bg-slate-50 text-slate-600 dark:bg-slate-900/40 dark:text-slate-300";
   })();
 
   const afterCellCls = (() => {
-    if (kind === "added") return "bg-emerald-50 text-emerald-900";
-    if (kind === "removed") return "bg-slate-50 text-slate-400";
-    if (kind === "changed") return "bg-amber-50 text-amber-900";
-    return "bg-slate-50 text-slate-600";
+    if (kind === "added")
+      return "bg-emerald-50 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-100";
+    if (kind === "removed")
+      return "bg-slate-50 text-slate-400 dark:bg-slate-900/40 dark:text-slate-500";
+    if (kind === "changed")
+      return "bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-100";
+    return "bg-slate-50 text-slate-600 dark:bg-slate-900/40 dark:text-slate-300";
   })();
 
   return (
     <div
-      className="grid grid-cols-[140px_1fr_1fr] gap-2 text-xs border-t border-slate-200 first:border-t-0 py-1.5"
+      className="grid grid-cols-[140px_1fr_1fr] gap-2 text-xs border-t border-slate-200 dark:border-slate-700 first:border-t-0 py-1.5"
       data-testid={`diff-field-${fieldKey}`}
     >
-      <div className="font-mono text-slate-700 truncate" title={fieldKey}>
+      <div
+        className="font-mono text-slate-700 dark:text-slate-200 truncate"
+        title={fieldKey}
+      >
         {fieldKey}
       </div>
-      <pre className={`whitespace-pre-wrap break-all rounded px-2 py-1 ${beforeCellCls}`}>
+      <pre className={`font-mono whitespace-pre-wrap break-all rounded px-2 py-1 ${beforeCellCls}`}>
         {kind === "added" ? "—" : beforeText}
       </pre>
-      <pre className={`whitespace-pre-wrap break-all rounded px-2 py-1 ${afterCellCls}`}>
+      <pre className={`font-mono whitespace-pre-wrap break-all rounded px-2 py-1 ${afterCellCls}`}>
         {kind === "removed" ? "—" : afterText}
       </pre>
     </div>
@@ -214,17 +238,17 @@ function MetadataDiff({ metadata }: { metadata: Record<string, unknown> }) {
 
   return (
     <div className="space-y-3" data-testid="metadata-diff-view">
-      <div className="grid grid-cols-[140px_1fr_1fr] gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+      <div className="grid grid-cols-[140px_1fr_1fr] gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
         <div>Field</div>
         <div>Before</div>
         <div>After</div>
       </div>
       {ordered.length === 0 ? (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-slate-500 dark:text-slate-400">
           No before/after fields recorded for this entry.
         </p>
       ) : (
-        <div className="rounded border border-slate-200 bg-white px-2">
+        <div className="rounded border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900 px-2">
           {ordered.map(({ key, kind }) => (
             <DiffField
               key={key}
@@ -240,8 +264,13 @@ function MetadataDiff({ metadata }: { metadata: Record<string, unknown> }) {
         <button
           type="button"
           onClick={() => setShowUnchanged((v) => !v)}
-          className="text-xs text-violet-700 hover:text-violet-900 underline-offset-2 hover:underline"
+          className="text-xs text-violet-700 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-100 underline-offset-2 hover:underline"
           data-testid="button-toggle-unchanged"
+          aria-label={
+            showUnchanged
+              ? `Hide ${summary.unchanged.length} unchanged fields`
+              : `Show ${summary.unchanged.length} unchanged fields`
+          }
         >
           {showUnchanged
             ? `Hide unchanged (${summary.unchanged.length})`
@@ -249,12 +278,12 @@ function MetadataDiff({ metadata }: { metadata: Record<string, unknown> }) {
         </button>
       )}
       {extraKeys.length > 0 && (
-        <div className="border-t border-slate-200 pt-2">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+        <div className="border-t border-slate-200 dark:border-slate-700 pt-2">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">
             Context
           </div>
           <pre
-            className="text-[11px] text-slate-700 whitespace-pre-wrap break-all bg-slate-50 rounded px-2 py-1"
+            className="text-[11px] font-mono text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-all bg-slate-50 dark:bg-slate-900/60 rounded px-2 py-1"
             data-testid="metadata-diff-context"
           >
             {JSON.stringify(
@@ -279,11 +308,11 @@ function MetadataCell({
   onToggle: () => void;
 }) {
   if (!metadata) {
-    return <span className="text-xs text-slate-400">—</span>;
+    return <span className="text-xs text-slate-400 dark:text-slate-500">—</span>;
   }
   if (!hasStandardisedDiff(metadata)) {
     return (
-      <pre className="text-[11px] text-slate-600 whitespace-pre-wrap break-all bg-slate-50 rounded px-2 py-1 max-h-32 overflow-auto">
+      <pre className="text-[11px] font-mono text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-all bg-slate-50 dark:bg-slate-900/60 rounded px-2 py-1 max-h-32 overflow-auto">
         {JSON.stringify(metadata)}
       </pre>
     );
@@ -292,6 +321,11 @@ function MetadataCell({
     (metadata as Record<string, unknown>).before,
     (metadata as Record<string, unknown>).after,
   );
+  const totalChanged =
+    summary.changed.length + summary.added.length + summary.removed.length;
+  const ariaLabel = expanded
+    ? "Hide before and after diff"
+    : `Show before and after diff (${totalChanged} field${totalChanged === 1 ? "" : "s"} changed)`;
   return (
     <div className="flex items-start gap-2">
       <Button
@@ -301,6 +335,7 @@ function MetadataCell({
         onClick={onToggle}
         data-testid="button-toggle-diff"
         aria-expanded={expanded}
+        aria-label={ariaLabel}
       >
         {expanded ? (
           <ChevronUp className="h-3.5 w-3.5" />
@@ -492,7 +527,7 @@ export default function AdminAuditLogs() {
                       {isExpanded && showsDiff && (
                         <TableRow
                           data-testid={`row-audit-${row.id}-diff`}
-                          className="bg-slate-50/50 hover:bg-slate-50/50"
+                          className="bg-slate-50/50 hover:bg-slate-50/50 dark:bg-slate-900/40 dark:hover:bg-slate-900/40"
                         >
                           <TableCell colSpan={6} className="py-3">
                             <MetadataDiff metadata={row.metadata as Record<string, unknown>} />
