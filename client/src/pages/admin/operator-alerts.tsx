@@ -20,6 +20,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Siren, ChevronLeft, ChevronRight, X } from "lucide-react";
 
 type Severity = "info" | "warning" | "alert" | "critical";
@@ -76,12 +84,22 @@ function fmt(d: string | null): string {
   }
 }
 
+function prettyJson(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 export default function AdminOperatorAlerts() {
   const [sourceInput, setSourceInput] = useState("");
   const [severityInput, setSeverityInput] = useState<string>(SEVERITY_ANY);
   const [appliedSource, setAppliedSource] = useState("");
   const [appliedSeverity, setAppliedSeverity] = useState<string>(SEVERITY_ANY);
   const [page, setPage] = useState(1);
+  const [selectedAlert, setSelectedAlert] = useState<OperatorAlertRow | null>(null);
   const limit = 50;
 
   const queryKey = [
@@ -127,6 +145,13 @@ export default function AdminOperatorAlerts() {
     setAppliedSeverity(severityInput);
     setPage(1);
   }
+
+  const selectedSevClass = selectedAlert
+    ? SEVERITY_BADGE[selectedAlert.severity] ??
+      "bg-slate-100 text-slate-700 border-slate-300"
+    : "";
+  const selectedOutcomes = selectedAlert?.channelOutcomes ?? [];
+  const selectedAttempted = selectedAlert?.channelsAttempted ?? [];
 
   return (
     <div className="space-y-4 max-w-7xl">
@@ -236,7 +261,12 @@ export default function AdminOperatorAlerts() {
                     }
                   }
                   return (
-                    <TableRow key={row.id} data-testid={`row-operator-alert-${row.id}`}>
+                    <TableRow
+                      key={row.id}
+                      data-testid={`row-operator-alert-${row.id}`}
+                      className="cursor-pointer hover:bg-slate-50"
+                      onClick={() => setSelectedAlert(row)}
+                    >
                       <TableCell className="text-xs text-slate-600 whitespace-nowrap align-top">
                         {fmt(row.createdAt)}
                       </TableCell>
@@ -301,6 +331,170 @@ export default function AdminOperatorAlerts() {
           )}
         </CardContent>
       </Card>
+
+      <Sheet
+        open={selectedAlert !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedAlert(null);
+        }}
+      >
+        <SheetContent
+          side="right"
+          className="w-full sm:max-w-2xl sm:w-[36rem] flex flex-col p-0"
+          data-testid="sheet-alert-detail"
+        >
+          {selectedAlert && (
+            <>
+              <SheetHeader className="px-6 pt-6 pb-4 border-b">
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={`font-mono text-xs ${selectedSevClass}`}
+                    data-testid="badge-detail-severity"
+                  >
+                    {selectedAlert.severity}
+                  </Badge>
+                  <span
+                    className="text-xs font-mono text-slate-600"
+                    data-testid="text-detail-source"
+                  >
+                    {selectedAlert.source}
+                  </span>
+                </div>
+                <SheetTitle
+                  className="text-left text-base"
+                  data-testid="text-detail-title"
+                >
+                  {selectedAlert.title}
+                </SheetTitle>
+                <SheetDescription
+                  className="text-left text-xs"
+                  data-testid="text-detail-when"
+                >
+                  Alert #{selectedAlert.id} · {fmt(selectedAlert.createdAt)}
+                </SheetDescription>
+              </SheetHeader>
+
+              <ScrollArea className="flex-1">
+                <div className="px-6 py-4 space-y-6">
+                  <section>
+                    <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                      Details
+                    </h3>
+                    {selectedAlert.details === null ||
+                    selectedAlert.details === undefined ? (
+                      <p
+                        className="text-xs text-slate-500"
+                        data-testid="text-detail-empty"
+                      >
+                        No details payload was recorded for this alert.
+                      </p>
+                    ) : (
+                      <pre
+                        className="text-xs font-mono bg-slate-50 border border-slate-200 rounded-md p-3 whitespace-pre-wrap break-words text-slate-800 overflow-x-auto"
+                        data-testid="text-detail-payload"
+                      >
+                        {prettyJson(selectedAlert.details)}
+                      </pre>
+                    )}
+                  </section>
+
+                  <section>
+                    <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                      Channel outcomes
+                    </h3>
+                    {selectedOutcomes.length === 0 ? (
+                      <p
+                        className="text-xs text-slate-500"
+                        data-testid="text-detail-no-outcomes"
+                      >
+                        {selectedAttempted.length === 0
+                          ? "No channels were attempted for this alert."
+                          : "No outcomes were recorded for the attempted channels."}
+                      </p>
+                    ) : (
+                      <div className="space-y-2">
+                        {selectedOutcomes.map((outcome, idx) => {
+                          const status = outcome.status ?? "unknown";
+                          const cls =
+                            OUTCOME_BADGE[status] ??
+                            "bg-slate-100 text-slate-700 border-slate-300";
+                          const channelLabel = outcome.channel || `channel-${idx}`;
+                          return (
+                            <div
+                              key={`${channelLabel}-${idx}`}
+                              className="border border-slate-200 rounded-md p-3 bg-white"
+                              data-testid={`outcome-detail-${channelLabel}`}
+                            >
+                              <div className="flex items-center justify-between gap-2 mb-2">
+                                <span className="text-xs font-mono font-semibold text-slate-800">
+                                  {channelLabel}
+                                </span>
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[11px] ${cls}`}
+                                >
+                                  {status}
+                                </Badge>
+                              </div>
+                              <dl className="grid grid-cols-[6.5rem_1fr] gap-y-1 text-xs">
+                                <dt className="text-slate-500">HTTP status</dt>
+                                <dd
+                                  className="font-mono text-slate-800"
+                                  data-testid={`outcome-http-${channelLabel}`}
+                                >
+                                  {outcome.httpStatus !== undefined
+                                    ? outcome.httpStatus
+                                    : "—"}
+                                </dd>
+                                <dt className="text-slate-500">Duration</dt>
+                                <dd
+                                  className="font-mono text-slate-800"
+                                  data-testid={`outcome-duration-${channelLabel}`}
+                                >
+                                  {outcome.durationMs !== undefined
+                                    ? `${outcome.durationMs} ms`
+                                    : "—"}
+                                </dd>
+                                <dt className="text-slate-500">Error</dt>
+                                <dd
+                                  className="font-mono text-slate-800 break-words whitespace-pre-wrap"
+                                  data-testid={`outcome-error-${channelLabel}`}
+                                >
+                                  {outcome.error ? outcome.error : "—"}
+                                </dd>
+                              </dl>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+
+                  {selectedAttempted.length > 0 && (
+                    <section>
+                      <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                        Channels attempted
+                      </h3>
+                      <div className="flex flex-wrap gap-1.5">
+                        {selectedAttempted.map((channel) => (
+                          <Badge
+                            key={channel}
+                            variant="outline"
+                            className="text-[11px] font-mono bg-slate-100 text-slate-700 border-slate-300"
+                          >
+                            {channel}
+                          </Badge>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                </div>
+              </ScrollArea>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
