@@ -1,0 +1,107 @@
+Verified. The Replit/Claude assessment is **mostly correct** and stronger than the earlier roadmap because it checks your **actual app state**, not just the target vision. 
+
+## Final cross-check verdict
+
+### ✅ Correct conclusions
+
+Your app is currently closer to:
+
+> **B2C wholesale / direct investor wealth app**
+
+Not yet:
+
+> **B2B adviser platform like Netwealth**
+
+The biggest confirmed gap is:
+
+> You do **not yet have adviser-client multi-tenancy**.
+
+So before building Netwealth-style features, you must first add:
+
+```text
+licensees
+advisers
+clients
+adviser_clients
+client_groups
+client_group_members
+roles / permissions
+```
+
+Without that, workflow, adviser dashboard, family fees, reporting, and eSignature will be built on the wrong foundation.
+
+---
+
+## Corrected build recommendation
+
+### Priority 0 — build first
+
+```text
+Multi-tenancy + adviser/client relationship model
+```
+
+This is now the real first step.
+
+Build:
+
+* licensee admin
+* adviser users
+* client users
+* adviser-client links
+* client groups / family groups
+* role-based permissions
+* audit trail by role
+
+---
+
+### Priority 1 — after multi-tenancy
+
+Build:
+
+* multi-client adviser dashboard
+* workflow/task management
+* document vault
+* eSignature
+* fee engine
+* ledger engine
+* client/adviser reporting
+
+---
+
+### Priority 2
+
+Build:
+
+* model portfolios
+* rebalancing
+* tax parcels FIFO/LIFO/manual
+* managed account/SMA logic
+* OMS/order management
+* investment research tools
+
+---
+
+### Priority 3
+
+Build:
+
+* XPLAN/Xero/MYOB integrations
+* mobile app
+* super/SMSF module
+* public API
+* insurance integration
+* corporate actions
+
+---
+
+## Important correction
+
+Earlier roadmap saying **“multi-client adviser dashboard = have it / partial”** is wrong.
+
+You do **not** have it yet because the underlying data model is missing.
+
+So the correct next step is:
+
+> **Refactor from single-user B2C app into multi-tenant adviser platform before adding Netwealth-style modules.**
+
+That is the most important update.
