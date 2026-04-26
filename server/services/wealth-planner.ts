@@ -34,6 +34,7 @@ import {
 } from "@shared/schema";
 import { assertAdviserClientLink } from "./adviser-access";
 import { requireAdviceRecordWritable } from "./advice-write-gate";
+import * as objectStorage from "./object-storage";
 
 // Drizzle's `db` and the tx handle returned by `db.transaction(async tx =>)`
 // share the same query surface; we type the executor loosely to accept either.
@@ -478,6 +479,101 @@ export async function listClientDocumentsForClient(
     .from(clientDocuments)
     .where(eq(clientDocuments.clientId, clientUserId))
     .orderBy(desc(clientDocuments.uploadedAt));
+}
+
+// ---------------------------------------------------------------------------
+// Task #99 — real backend wiring for client documents
+// ---------------------------------------------------------------------------
+// `uploadClientDocument` is the "real" creation path. It:
+//   1. validates the adviser↔client link (assertAdviserClientLink),
+//   2. enforces the review-pending lock when the upload is pinned to an
+//      advice record (Task #96 contract — symmetrical to the JSON POST),
+//   3. validates that the supplied advice record belongs to the supplied
+//      client (defence against an adviser pinning a doc to another adviser's
+//      record they happen to know the id of),
+//   4. writes bytes to object storage and computes the storageKey ITSELF
+//      (the caller does not get to pick a key — that closes the trust gap
+//      called out in Task #99: the legacy POST trusted whatever string the
+//      adviser sent),
+//   5. inserts the row with the computed key + measured byte length.
+//
+// The legacy `createClientDocument` path is preserved for back-compat but
+// any new caller MUST use this function.
+// ---------------------------------------------------------------------------
+export interface UploadClientDocumentInput {
+  clientId: number;
+  adviceRecordId?: number | null;
+  documentType: ClientDocumentType;
+  fileName: string;
+  mimeType?: string | null;
+  description?: string | null;
+}
+
+export async function uploadClientDocument(
+  adviserUserId: number,
+  input: UploadClientDocumentInput,
+  bytes: Buffer,
+): Promise<ClientDocument> {
+  await assertAdviserClientLink(adviserUserId, input.clientId);
+
+  if (input.adviceRecordId != null) {
+    await requireAdviceRecordWritable(input.adviceRecordId);
+    const [advice] = await db
+      .select({ id: adviceRecords.id, clientId: adviceRecords.clientId })
+      .from(adviceRecords)
+      .where(eq(adviceRecords.id, input.adviceRecordId))
+      .limit(1);
+    if (!advice || advice.clientId !== input.clientId) {
+      throw Object.assign(new Error("Advice record not valid for this client"), {
+        status: 400,
+      });
+    }
+  }
+
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+    throw Object.assign(new Error("Empty upload"), { status: 400 });
+  }
+
+  const { storageKey, sizeBytes } = await objectStorage.putObject({
+    prefix: `client-documents/${input.clientId}`,
+    fileName: input.fileName,
+    bytes,
+  });
+
+  const [row] = await db
+    .insert(clientDocuments)
+    .values({
+      clientId: input.clientId,
+      adviceRecordId: input.adviceRecordId ?? null,
+      documentType: input.documentType,
+      fileName: input.fileName,
+      storageKey,
+      mimeType: input.mimeType ?? null,
+      fileSizeBytes: sizeBytes,
+      description: input.description ?? null,
+      uploadedByUserId: adviserUserId,
+    })
+    .returning();
+  return row;
+}
+
+// Owner-scoped fetch used by the client download route. Returns the full
+// row only when the document belongs to the requesting client, otherwise
+// throws 404 (deliberately NOT 403 — leaking "this id exists, you just
+// can't see it" reveals another client's document inventory).
+export async function getClientDocumentForOwner(
+  documentId: number,
+  clientUserId: number,
+): Promise<ClientDocument> {
+  const [row] = await db
+    .select()
+    .from(clientDocuments)
+    .where(eq(clientDocuments.id, documentId))
+    .limit(1);
+  if (!row || row.clientId !== clientUserId) {
+    throw Object.assign(new Error("Document not found"), { status: 404 });
+  }
+  return row;
 }
 
 // ---------------------------------------------------------------------------

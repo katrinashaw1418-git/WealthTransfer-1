@@ -96,6 +96,16 @@ import {
 import { signToken } from "../server/auth";
 import { registerAdviserRoutes } from "../server/adviser-routes";
 import { registerClientRoutes } from "../server/client-routes";
+// Task #99 — round-trip verification of the real upload + download path.
+import {
+  uploadClientDocument,
+  getClientDocumentForOwner,
+} from "../server/services/wealth-planner";
+import {
+  getObjectBytes,
+  statObject,
+  deleteObject,
+} from "../server/services/object-storage";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -122,6 +132,7 @@ const CANONICAL_ORDER: string[] = [
   "9. non-adviser (admin/client) rejected on adviser CRUD AND admin retains audit-log read access",
   "10. risk-profile and adviceType immutable via transition; snapshots written; no ledger drift",
   "11. review_pending blocks objective/document/transition writes; notes still allowed",
+  "12. client-document upload+download round-trip via real object storage with cross-client gate",
 ];
 const results = new Map<string, TestResult>();
 
@@ -307,7 +318,11 @@ async function snapshotMoneyTables(): Promise<MoneySnapshot> {
 // touches notes.
 // ---------------------------------------------------------------------------
 type CapturedHandler = (req: Request, res: MockResponse) => unknown;
-type CaptureFn = (path: string, handler: CapturedHandler) => void;
+// Express accepts (path, ...handlers); we capture the LAST handler in the
+// chain — that is the real route logic. Earlier handlers (multer, body
+// parsers, etc.) are skipped because the verification script supplies the
+// already-parsed shape (req.body / req.file) directly.
+type CaptureFn = (path: string, ...handlers: CapturedHandler[]) => void;
 type CapturingApp = {
   get: CaptureFn;
   post: CaptureFn;
@@ -321,9 +336,10 @@ const capturedKeys = new Set<string>();
 function makeCapturingApp(): CapturingApp {
   const recordRoute =
     (method: string): CaptureFn =>
-    (p, handler) => {
+    (p, ...handlers) => {
       const key = `${method} ${p}`;
-      captured.set(key, handler);
+      const last = handlers[handlers.length - 1];
+      captured.set(key, last);
       capturedKeys.add(key);
     };
   return {
@@ -1395,6 +1411,273 @@ async function test11_reviewPendingLock(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Test 12 — real upload + download round-trip via object storage.
+//   - uploads a tiny file through the SERVICE function uploadClientDocument()
+//     (which the new /upload route delegates to), so storageKey is computed
+//     by the system, NOT trusted from the caller;
+//   - asserts the bytes round-trip out of object storage byte-for-byte;
+//   - asserts the captured GET /api/client/documents/:id/download route can
+//     fetch the file for the owning client AND returns 404 when probed by a
+//     different client (cross-client leakage seal);
+//   - asserts the new POST /api/adviser/client-documents/upload route is
+//     registered (multer is the first handler in the chain, the captured
+//     handler is the real adviserRoute(...) logic at the end);
+//   - cleans up the row + the on-disk object after the assertions.
+// ---------------------------------------------------------------------------
+async function test12_uploadDownloadRoundTrip(opts: {
+  adviserUserId: number;
+  clientUserId: number;
+  otherClientUserId: number;
+}): Promise<void> {
+  const NAME =
+    "12. client-document upload+download round-trip via real object storage with cross-client gate";
+
+  const uploadRouteRegistered = capturedKeys.has(
+    "POST /api/adviser/client-documents/upload",
+  );
+  const downloadRouteRegistered = capturedKeys.has(
+    "GET /api/client/documents/:id/download",
+  );
+
+  const testBytes = Buffer.from(
+    "WPC-T99-ROUND-TRIP-TINY-TEST-FILE-\u00e9\u00f1\u4e2d\u6587", // include non-ASCII to prove byte-faithful storage
+    "utf8",
+  );
+  let uploaded: Awaited<ReturnType<typeof uploadClientDocument>> | null = null;
+  let storageKey = "";
+  try {
+    uploaded = await uploadClientDocument(
+      opts.adviserUserId,
+      {
+        clientId: opts.clientUserId,
+        documentType: "fact_find",
+        fileName: "wpc-round-trip.bin",
+        mimeType: "application/octet-stream",
+      },
+      testBytes,
+    );
+    storageKey = uploaded.storageKey;
+
+    // Service-level owner read — same path the download route uses to
+    // resolve the row before streaming.
+    const ownRow = await getClientDocumentForOwner(uploaded.id, opts.clientUserId);
+
+    // The bytes on disk must equal what we sent in.
+    const fetched = await getObjectBytes(uploaded.storageKey);
+    const bytesMatch = Buffer.compare(fetched, testBytes) === 0;
+
+    const head = await statObject(uploaded.storageKey);
+    const sizeMatch =
+      head?.sizeBytes === testBytes.length &&
+      ownRow.fileSizeBytes === testBytes.length;
+
+    // Cross-client probe — must surface a 404 (NOT a 403, NOT a successful row).
+    let crossBlockedStatus = 0;
+    try {
+      await getClientDocumentForOwner(uploaded.id, opts.otherClientUserId);
+    } catch (err: any) {
+      crossBlockedStatus = typeof err?.status === "number" ? err.status : -1;
+    }
+    const crossBlocked = crossBlockedStatus === 404;
+
+    // Exercise the captured download route end-to-end with the owning
+    // client's token. The captured handler is the real handler (express
+    // chain — last function), so this path is the production code, not a
+    // service-level shortcut.
+    const handler = captured.get("GET /api/client/documents/:id/download");
+    let downloadStatus = -1;
+    let downloadBytes: Buffer | null = null;
+    if (handler) {
+      const token = signToken({
+        userId: opts.clientUserId,
+        username: CLIENT_USERNAME,
+        email: "wpc-client@test.invalid",
+        role: "client",
+      });
+      const captureRes = makeStreamingMockRes();
+      const req = {
+        headers: { authorization: `Bearer ${token}` },
+        params: { id: String(uploaded.id) },
+        body: {},
+        query: {},
+        path: "",
+        method: "GET",
+        ip: "127.0.0.1",
+      } as unknown as Request;
+      await handler(req, captureRes.res);
+      // Streaming responses are async — wait for the pipe to flush before
+      // we read the buffered bytes.
+      await captureRes.done;
+      downloadStatus = captureRes.statusCode;
+      downloadBytes = Buffer.concat(captureRes.chunks);
+    }
+    const downloadRouteOk =
+      downloadStatus === 200 &&
+      downloadBytes != null &&
+      Buffer.compare(downloadBytes, testBytes) === 0;
+
+    // Cross-client probe THROUGH THE ROUTE too — defence-in-depth, since
+    // the service-level seal above is what the route relies on but a future
+    // refactor could route around it.
+    let crossRouteStatus = -1;
+    if (handler) {
+      const otherToken = signToken({
+        userId: opts.otherClientUserId,
+        username: OTHER_CLIENT_USERNAME,
+        email: "wpc-other-client@test.invalid",
+        role: "client",
+      });
+      const captureRes = makeStreamingMockRes();
+      const req = {
+        headers: { authorization: `Bearer ${otherToken}` },
+        params: { id: String(uploaded.id) },
+        body: {},
+        query: {},
+        path: "",
+        method: "GET",
+        ip: "127.0.0.1",
+      } as unknown as Request;
+      await handler(req, captureRes.res);
+      await captureRes.done;
+      crossRouteStatus = captureRes.statusCode;
+    }
+    const crossRouteBlocked = crossRouteStatus === 404;
+
+    if (
+      uploadRouteRegistered &&
+      downloadRouteRegistered &&
+      bytesMatch &&
+      sizeMatch &&
+      crossBlocked &&
+      downloadRouteOk &&
+      crossRouteBlocked
+    ) {
+      pass(
+        NAME,
+        `routes registered; bytes round-tripped (${testBytes.length}B); storageKey='${storageKey}' computed by system; download route 200+exact bytes; cross-client probe 404 at both service and route layers`,
+      );
+    } else {
+      fail(
+        NAME,
+        `uploadRoute=${uploadRouteRegistered}, downloadRoute=${downloadRouteRegistered}, bytesMatch=${bytesMatch}, sizeMatch=${sizeMatch} (rowSize=${ownRow.fileSizeBytes}, headSize=${head?.sizeBytes}), crossBlocked=${crossBlocked} (status=${crossBlockedStatus}), downloadRouteOk=${downloadRouteOk} (status=${downloadStatus}, downloadedBytes=${downloadBytes?.length}), crossRouteBlocked=${crossRouteBlocked} (status=${crossRouteStatus})`,
+      );
+    }
+  } finally {
+    // Cleanup so reruns start clean and we don't orphan disk files.
+    if (uploaded) {
+      await db.delete(clientDocuments).where(eq(clientDocuments.id, uploaded.id));
+    }
+    if (storageKey) {
+      await deleteObject(storageKey);
+    }
+  }
+}
+
+// Streaming mock response — supports the .pipe(res) path used by the
+// download route. Captures status, headers, JSON bodies, and any bytes
+// piped via `write()` / `end()`. Resolves `done` when the response signals
+// completion (either via res.end() or stream pipe finishing).
+function makeStreamingMockRes(): {
+  res: any;
+  statusCode: number;
+  headers: Record<string, string>;
+  chunks: Buffer[];
+  done: Promise<void>;
+} {
+  const state: {
+    statusCode: number;
+    headers: Record<string, string>;
+    chunks: Buffer[];
+    headersSent: boolean;
+    finishResolve: (() => void) | null;
+  } = {
+    statusCode: 200,
+    headers: {},
+    chunks: [],
+    headersSent: false,
+    finishResolve: null,
+  };
+  const done = new Promise<void>((resolve) => {
+    state.finishResolve = resolve;
+  });
+  const finish = () => {
+    if (state.finishResolve) {
+      const r = state.finishResolve;
+      state.finishResolve = null;
+      r();
+    }
+  };
+  const res: any = {
+    status(code: number) {
+      state.statusCode = code;
+      return res;
+    },
+    setHeader(name: string, value: string) {
+      state.headers[name.toLowerCase()] = String(value);
+      return res;
+    },
+    json(body: unknown) {
+      state.headersSent = true;
+      state.chunks.push(Buffer.from(JSON.stringify(body), "utf8"));
+      finish();
+      return res;
+    },
+    send(body: unknown) {
+      state.headersSent = true;
+      if (Buffer.isBuffer(body)) state.chunks.push(body);
+      else if (typeof body === "string") state.chunks.push(Buffer.from(body, "utf8"));
+      else if (body != null) state.chunks.push(Buffer.from(JSON.stringify(body), "utf8"));
+      finish();
+      return res;
+    },
+    write(chunk: any) {
+      state.headersSent = true;
+      if (Buffer.isBuffer(chunk)) state.chunks.push(chunk);
+      else if (typeof chunk === "string") state.chunks.push(Buffer.from(chunk, "utf8"));
+      return true;
+    },
+    end(chunk?: any) {
+      if (chunk != null) {
+        if (Buffer.isBuffer(chunk)) state.chunks.push(chunk);
+        else if (typeof chunk === "string") state.chunks.push(Buffer.from(chunk, "utf8"));
+      }
+      state.headersSent = true;
+      finish();
+      return res;
+    },
+    on(_event: string, _cb: (...args: any[]) => void) {
+      return res;
+    },
+    once(_event: string, _cb: (...args: any[]) => void) {
+      return res;
+    },
+    emit(_event: string) {
+      return true;
+    },
+    destroy(_err?: Error) {
+      finish();
+      return res;
+    },
+    get headersSent() {
+      return state.headersSent;
+    },
+  };
+  return {
+    res,
+    get statusCode() {
+      return state.statusCode;
+    },
+    get headers() {
+      return state.headers;
+    },
+    get chunks() {
+      return state.chunks;
+    },
+    done,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
@@ -1489,6 +1772,15 @@ async function main(): Promise<void> {
     adviserUserId,
     clientUserId,
     adviceRecordId,
+  });
+  // Test 12 (Task #99 upload+download round-trip) runs LAST. It writes one
+  // clientDocuments row and one on-disk object, then deletes both, so it
+  // does not perturb the money-isolation snapshot from test #10 nor the
+  // leakage counts from test #11.
+  await test12_uploadDownloadRoundTrip({
+    adviserUserId,
+    clientUserId,
+    otherClientUserId,
   });
 
   console.log("");

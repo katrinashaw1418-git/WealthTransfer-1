@@ -13,6 +13,7 @@
 
 import fs from "node:fs";
 import type { Express, Request, Response } from "express";
+import multer from "multer";
 import { z } from "zod";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "./db";
@@ -68,6 +69,7 @@ import {
   createClientObjective,
   listClientObjectivesForAdviser,
   createClientDocument,
+  uploadClientDocument,
   listClientDocumentsForAdviser,
   createAdviserNote,
   listAdviserNotes,
@@ -1122,6 +1124,73 @@ export function registerAdviserRoutes(app: Express): void {
         "client_document",
         String(row.id),
         { clientId: row.clientId, documentType: row.documentType },
+        req.ip ?? null,
+      );
+      return row;
+    }),
+  );
+
+  // Task #99 — real upload route. Streams a multipart/form-data file via
+  // multer (in-memory, capped at 25 MiB) and routes it through
+  // uploadClientDocument(), which computes the storageKey itself instead of
+  // trusting the caller. The legacy POST above is kept for back-compat with
+  // the existing test fixtures that supply a synthetic storageKey.
+  const uploadMetadataSchema = z.object({
+    clientId: z.coerce.number().int().positive(),
+    adviceRecordId: z.coerce.number().int().positive().optional().nullable(),
+    documentType: z.enum(CLIENT_DOCUMENT_TYPES),
+    fileName: z.string().min(1).max(500).optional(),
+    mimeType: z.string().max(200).optional().nullable(),
+    description: z.string().max(2000).optional().nullable(),
+  });
+  const uploadMulter = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 25 * 1024 * 1024, files: 1 },
+  });
+  app.post(
+    "/api/adviser/client-documents/upload",
+    uploadMulter.single("file"),
+    adviserRoute(async (req, auth) => {
+      // multer drops the parsed file on req.file and the form fields on
+      // req.body. The verification script bypasses multer and supplies
+      // req.file + req.body directly, so the handler reads from the same
+      // shape either way.
+      const file = (req as unknown as { file?: Express.Multer.File }).file;
+      if (!file || !Buffer.isBuffer(file.buffer) || file.buffer.length === 0) {
+        throw Object.assign(new Error("Missing or empty 'file' upload"), {
+          status: 400,
+        });
+      }
+      const parsed = uploadMetadataSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid upload metadata"), { status: 400 });
+      }
+      const fileName = parsed.data.fileName ?? file.originalname ?? "upload.bin";
+      const mimeType = parsed.data.mimeType ?? file.mimetype ?? null;
+
+      const row = await uploadClientDocument(
+        auth.userId,
+        {
+          clientId: parsed.data.clientId,
+          adviceRecordId: parsed.data.adviceRecordId ?? null,
+          documentType: parsed.data.documentType,
+          fileName,
+          mimeType,
+          description: parsed.data.description ?? null,
+        },
+        file.buffer,
+      );
+      audit(
+        auth.userId,
+        "client_document.create",
+        "client_document",
+        String(row.id),
+        {
+          clientId: row.clientId,
+          documentType: row.documentType,
+          uploaded: true,
+          sizeBytes: row.fileSizeBytes,
+        },
         req.ip ?? null,
       );
       return row;

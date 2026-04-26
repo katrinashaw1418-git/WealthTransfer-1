@@ -43,8 +43,10 @@ import { storage } from "./storage";
 import {
   listClientObjectivesForClient,
   listClientDocumentsForClient,
+  getClientDocumentForOwner,
   requireAcknowledgedAdvice,
 } from "./services/wealth-planner";
+import { getObjectStream, statObject } from "./services/object-storage";
 import { adviceRecords } from "@shared/schema";
 // Task #95 — standardised audit-log writer (before/after snapshots) for the
 // advice + fee-engine surfaces. The local audit() helper below is still
@@ -654,6 +656,67 @@ export function registerClientRoutes(app: Express): void {
       res.json({ items });
     } catch (error: any) {
       handleError(res, error, "Failed to load client documents");
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task #99 — GET /api/client/documents/:id/download
+  //
+  // Streams the document bytes from object storage to the requesting client.
+  // The owner check (clientDocuments.clientId === auth.userId) is enforced
+  // in getClientDocumentForOwner(), which throws 404 (NOT 403) on a
+  // cross-client probe so we don't reveal which document ids exist on other
+  // clients. Every successful download writes an audit row so the regulator
+  // surface knows who pulled what and when.
+  // ---------------------------------------------------------------------------
+  app.get("/api/client/documents/:id/download", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const documentId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(documentId) || documentId <= 0) {
+        return res.status(400).json({ error: "Invalid document id" });
+      }
+      const row = await getClientDocumentForOwner(documentId, auth.userId);
+
+      // Verify the underlying file is still present in object storage. If a
+      // backup/restore left the metadata row but lost the blob we MUST 404
+      // rather than stream an empty body that the UI would silently treat
+      // as a successful zero-byte file.
+      const head = await statObject(row.storageKey);
+      if (!head) {
+        return res.status(404).json({ error: "Document file missing in storage" });
+      }
+
+      audit(
+        auth.userId,
+        "client_document.download",
+        "client_document",
+        String(row.id),
+        { actor: "client", sizeBytes: head.sizeBytes },
+        req.ip ?? null,
+      );
+
+      res.setHeader("Content-Type", row.mimeType ?? "application/octet-stream");
+      res.setHeader("Content-Length", String(head.sizeBytes));
+      // Quote the filename and strip CR/LF so a hostile filename cannot
+      // inject extra response headers.
+      const safeName = (row.fileName ?? "download.bin").replace(/[\r\n"]/g, "_");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${safeName}"`,
+      );
+      const stream = getObjectStream(row.storageKey);
+      stream.on("error", (err) => {
+        console.error("[client-routes] document stream error:", err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Failed to stream document" });
+        } else {
+          res.destroy(err as Error);
+        }
+      });
+      stream.pipe(res);
+    } catch (error: any) {
+      handleError(res, error, "Failed to download client document");
     }
   });
 
