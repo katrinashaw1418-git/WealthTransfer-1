@@ -34,6 +34,7 @@ import {
   normalizeEmail,
 } from "@shared/schema";
 import { requireAuth, requireRole, hashPassword } from "./auth";
+import { sendInviteEmail, type InviteRole } from "./email";
 
 // ---------------------------------------------------------------------------
 // Registration-invite helpers (Session 14)
@@ -92,10 +93,60 @@ async function auditTx(
 
 function handleError(res: any, error: any, fallbackMessage: string) {
   if (error?.status) {
-    return res.status(error.status).json({ error: error.message });
+    const payload: Record<string, unknown> = { error: error.message };
+    // Errors may attach extra fields (e.g. inviteLink for the email-delivery
+    // failure path) so the admin still has a manual fallback even on 5xx.
+    if (error.body && typeof error.body === "object") {
+      Object.assign(payload, error.body);
+    }
+    return res.status(error.status).json(payload);
   }
   console.error(`[admin-routes] ${fallbackMessage}:`, error);
   res.status(500).json({ error: fallbackMessage });
+}
+
+// ---------------------------------------------------------------------------
+// Invite email delivery + audit
+//
+// Runs AFTER the invite-creation transaction has committed: the invite row
+// already exists, so failure here must not roll it back. Instead we:
+//   - audit the email attempt (success or failure) on its own row, and
+//   - on failure, throw a 502 carrying the inviteLink/expiry so the admin can
+//     deliver the link out-of-band as a manual fallback.
+// ---------------------------------------------------------------------------
+async function deliverInviteEmail(opts: {
+  to: string;
+  role: InviteRole;
+  inviteLink: string;
+  expiresAt: Date;
+  source: "application_approved" | "direct_invite";
+  actorUserId: number;
+  ipAddress: string | null;
+  relatedEntityType: string | null;
+  relatedEntityId: number | null;
+}): Promise<{ sent: boolean; error?: string }> {
+  const result = await sendInviteEmail(opts.to, opts.role, opts.inviteLink, opts.expiresAt);
+
+  await db.insert(auditLogs).values({
+    userId: opts.actorUserId,
+    action: result.sent
+      ? "registration_invite_email_sent"
+      : "registration_invite_email_failed",
+    entityType: "registration_invite",
+    entityId: opts.to,
+    metadata: {
+      role: opts.role,
+      source: opts.source,
+      relatedEntityType: opts.relatedEntityType,
+      relatedEntityId: opts.relatedEntityId,
+      expiresAt: opts.expiresAt.toISOString(),
+      sent: result.sent,
+      error: result.error ?? null,
+    } as any,
+    ipAddress: opts.ipAddress,
+  });
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +446,46 @@ export function registerAdminRoutes(app: Express): void {
         throw err;
       }
 
+      const inviteLink = buildInviteLink(req, rawInvite);
+
+      // Deliver the link by email. The invite already exists in the DB; if SMTP
+      // fails we surface a 502 so the admin sees an explicit failure, while
+      // keeping the link in the response body as a manual fallback.
+      const emailResult = await deliverInviteEmail({
+        to: existing.email,
+        role: "client",
+        inviteLink,
+        expiresAt,
+        source: "application_approved",
+        actorUserId: auth.userId,
+        ipAddress: req.ip || null,
+        relatedEntityType: "client_application",
+        relatedEntityId: id,
+      });
+
+      if (!emailResult.sent) {
+        throw Object.assign(
+          new Error(
+            `Application approved but the invitation email could not be sent: ${emailResult.error ?? "unknown error"}. Share the link below manually.`,
+          ),
+          {
+            status: 502,
+            body: {
+              application: result,
+              inviteLink,
+              expiresAt: expiresAt.toISOString(),
+              emailSent: false,
+              emailError: emailResult.error ?? null,
+            },
+          },
+        );
+      }
+
       return {
         application: result,
-        inviteLink: buildInviteLink(req, rawInvite),
+        inviteLink,
         expiresAt: expiresAt.toISOString(),
+        emailSent: true,
       };
     }),
   );
@@ -628,11 +715,48 @@ export function registerAdminRoutes(app: Express): void {
         throw err;
       }
 
+      const inviteLink = buildInviteLink(req, rawInvite);
+
+      // Deliver the link by email. The invite already exists in the DB; if SMTP
+      // fails we surface a 502 so the admin sees an explicit failure, while
+      // keeping the link in the response body as a manual fallback.
+      const emailResult = await deliverInviteEmail({
+        to: normalisedEmail,
+        role,
+        inviteLink,
+        expiresAt,
+        source: "direct_invite",
+        actorUserId: auth.userId,
+        ipAddress: req.ip || null,
+        relatedEntityType: relatedEntityType ?? "invite",
+        relatedEntityId: relatedEntityId ?? null,
+      });
+
+      if (!emailResult.sent) {
+        throw Object.assign(
+          new Error(
+            `Invitation created but the email could not be sent: ${emailResult.error ?? "unknown error"}. Share the link below manually.`,
+          ),
+          {
+            status: 502,
+            body: {
+              email: normalisedEmail,
+              role,
+              inviteLink,
+              expiresAt: expiresAt.toISOString(),
+              emailSent: false,
+              emailError: emailResult.error ?? null,
+            },
+          },
+        );
+      }
+
       return {
         email: normalisedEmail,
         role,
-        inviteLink: buildInviteLink(req, rawInvite),
+        inviteLink,
         expiresAt: expiresAt.toISOString(),
+        emailSent: true,
       };
     }),
   );
