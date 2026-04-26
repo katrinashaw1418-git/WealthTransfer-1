@@ -105,6 +105,7 @@ export class MemStorage implements IStorage {
       lastName: "",
       kycStatus: "verified",
       userTier: "premium",
+      role: "client",
       emailVerified: true,
       emailVerificationToken: null,
       emailVerificationTokenExpiry: null,
@@ -2531,6 +2532,7 @@ export class MemStorage implements IStorage {
         description: "Consider reducing crypto allocation by 5% and increasing fixed income exposure for better risk-adjusted returns.",
         severity: "info",
         isRead: false,
+        isSuperseded: false,
         createdAt: new Date(),
       },
       {
@@ -2541,6 +2543,7 @@ export class MemStorage implements IStorage {
         description: "Canadian bond yields are attractive. Consider 10-15% allocation to CAD government bonds.",
         severity: "info",
         isRead: false,
+        isSuperseded: false,
         createdAt: new Date(),
       },
       {
@@ -2551,6 +2554,7 @@ export class MemStorage implements IStorage {
         description: "High correlation between your tech stocks and crypto holdings. Diversification recommended.",
         severity: "warning",
         isRead: false,
+        isSuperseded: false,
         createdAt: new Date(),
       },
     ].map(r => ({
@@ -2944,6 +2948,7 @@ export class MemStorage implements IStorage {
       lastName: insertUser.lastName,
       kycStatus: insertUser.kycStatus || "pending",
       userTier: insertUser.userTier || "standard",
+      role: insertUser.role || "client",
       emailVerified: insertUser.emailVerified ?? false,
       emailVerificationToken: insertUser.emailVerificationToken ?? null,
       emailVerificationTokenExpiry: insertUser.emailVerificationTokenExpiry ?? null,
@@ -3133,6 +3138,7 @@ export class MemStorage implements IStorage {
       description: insertRecommendation.description,
       severity: insertRecommendation.severity,
       isRead: insertRecommendation.isRead || false,
+      isSuperseded: insertRecommendation.isSuperseded ?? false,
       createdAt: new Date(),
     };
     

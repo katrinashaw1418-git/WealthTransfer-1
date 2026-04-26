@@ -701,7 +701,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           email: user.email,
         });
       }
-      const token = signToken({ userId: user.id, username: user.username, email: user.email });
+      const token = signToken({ userId: user.id, username: user.username, email: user.email, role: user.role });
       await writeAuditLog(user.id, "login", "user", String(user.id), { username }, req.ip || null);
       res.json({ token, user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier } });
     } catch (error: any) {
@@ -766,7 +766,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
       // Inherit verified status from the application — issue session token immediately.
       await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
-      const token = signToken({ userId: user.id, username: user.username, email: user.email });
+      const token = signToken({ userId: user.id, username: user.username, email: user.email, role: user.role });
       await writeAuditLog(user.id, "account_created", "user", String(user.id), { email, authProvider: "email" }, req.ip || null);
       res.status(201).json({
         user: {
@@ -840,7 +840,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         emailVerificationTokenExpiry: null,
       }).where(eq(users.id, user.id));
       await writeAuditLog(user.id, "email_verified", "user", String(user.id), { method: "otp" }, req.ip || null);
-      const token = signToken({ userId: user.id, username: user.username, email: user.email });
+      const token = signToken({ userId: user.id, username: user.username, email: user.email, role: user.role });
       res.json({
         token,
         user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier, emailVerified: true },

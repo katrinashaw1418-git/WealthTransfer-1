@@ -1,0 +1,300 @@
+
+
+Perfect — this is exactly the kind of catch that prevents a hidden compliance failure later.
+
+I’ve reviewed your note and the file context. Here is the final, precise position before Session 3.
+
+🔴 Backend Exposure — Confirmed
+You are correct:
+
+bank: process.env.AMAX_BANK_NAME ?? "Westpac Banking Corporation"
+bsb: process.env.AMAX_BSB ?? "032-000"
+👉 This is hard fallback to AMAX bank details inside a backend route.
+
+Even if unused:
+
+✔ Endpoint still exists
+✔ Returns AMAX account details
+✔ Can be hit directly (API call / curl / Postman)
+✔ Within scope of regulator review
+This is a server-side custodial representation risk, not just UI.
+
+This aligns with what we saw in the original codebase. 
+
+
+✅ Your Analysis — Correct
+You already validated:
+
+✔ No active frontend calls /api/deposit/instructions
+✔ Only used by deleted wallet files
+✔ Endpoint now orphaned
+👉 That means:
+
+Removing it = SAFE
+Leaving it = RISK
+🎯 Correct Decision (Final)
+👉 OPTION 1 — REMOVE THE ENDPOINT
+This is the only institutional-grade outcome.
+
+❌ Why Option 2 is not enough
+// DEPRECATED — no active frontend consumer
+Still leaves:
+
+✔ live API endpoint
+✔ returning AMAX bank details
+✔ callable externally
+👉 A comment does not mitigate regulatory exposure.
+
+🛠 Final Instruction (Give to Replit)
+Use this exactly:
+
+Before Session 3, remove one remaining backend exposure.
+
+In server/routes.ts, locate the GET /api/deposit/instructions endpoint (around line 3712).
+
+This endpoint currently returns AMAX PayID / Westpac bank details as fallback values.
+
+Actions:
+
+1. Search the entire repo for "/api/deposit/instructions"
+2. Confirm there are no active callers (frontend, services, tests)
+3. Remove the endpoint entirely from server/routes.ts
+4. Run the project build and ensure no errors
+5. Confirm server starts cleanly and no routes are broken
+
+Do not replace with new logic.
+Do not leave deprecated comments.
+Remove the endpoint completely.
+
+Stop after this and confirm.
+Do not start Session 3 yet.
+🔒 After this is done
+Then your system becomes:
+
+✔ No frontend custody language
+✔ No dead file custody language
+✔ No backend custody endpoints
+👉 This is the first fully clean non-custodial state
+
+🚦 Final Gate Before Session 3
+After Replit confirms:
+
+Come back with:
+
+✔ confirmation endpoint removed
+✔ build passed
+I will then:
+
+✔ give final green light for Session 3 (schema)
+✔ ensure no hidden FK / Drizzle issues
+👍 Bottom line
+You caught the last real risk.
+
+This is exactly how institutional systems get hardened — not by big features, but by eliminating small hidden exposures.
+
+Proceed with removal.
+
+
+
+Pasted text(91).txt
+Document
+
+Good — this is the final critical cross-check, and there’s no ambiguity here.
+
+🔴 Confirmed Issue (from your uploaded file)
+Your backend still contains:
+
+bank: process.env.AMAX_BANK_NAME ?? "Westpac Banking Corporation"
+bsb: process.env.AMAX_BSB ?? "032-000"
+📍 Located in:
+
+GET /api/deposit/instructions route
+
+Around line ~3719 in routes.ts
+
+👉 This is real and active backend exposure — not theoretical. 
+
+
+❌ Why this is still a problem (even after Session 2)
+Even if:
+
+✔ UI is clean
+✔ Dead files deleted
+✔ No frontend calls
+
+This still means:
+
+✔ Endpoint exists
+✔ Returns AMAX bank details
+✔ Can be called directly (API / curl / Postman)
+✔ Visible in codebase (regulator review risk)
+👉 That = custodial representation risk
+
+🎯 Final Position (No Debate)
+You are operating as:
+
+✔ Non-custodial remittance provider
+✔ DCE (via Independent Reserve)
+❌ NOT a holder of client funds
+This endpoint contradicts that model.
+
+✅ Required Action (Final — must do before Session 3)
+There is only one correct move:
+
+👉 DELETE /api/deposit/instructions completely
+🛠 Exact Instruction (give to Replit)
+Paste this exactly:
+
+Final backend cleanup before Session 3.
+
+In server/routes.ts:
+
+1. Locate the GET /api/deposit/instructions endpoint (around line ~3710–3730)
+2. This endpoint currently returns fallback AMAX bank details (Westpac, BSB)
+
+Actions:
+- Search entire repo for "/api/deposit/instructions"
+- Confirm no active callers (frontend, services, tests)
+- Remove the endpoint completely from routes.ts
+- Do NOT replace it
+- Do NOT leave deprecated comments
+
+After removal:
+- Run full build
+- Confirm server starts cleanly
+- Confirm no broken imports or routes
+
+Stop after this and confirm.
+Do NOT start schema work yet.
+🔒 After This Is Done
+Your system becomes:
+
+✔ No frontend custody language
+✔ No dead file custody exposure
+✔ No backend custody endpoints
+👉 This is your first fully defensible non-custodial state
+
+🚦 Gate Before Session 3
+Come back with:
+
+✔ endpoint removed
+✔ build passed
+Then I’ll:
+
+✔ approve Session 3 (schema)
+✔ check Drizzle + FK alignment before migration
+Bottom line
+You’ve cleaned:
+
+UI ✅
+
+Dead files ✅
+
+👉 This is the last real backend risk
+
+Remove it — then you’re clean to proceed.
+
+
+Replit already confirmed the endpoint does not exist in the current codebase. Zero matches. The live routes.ts is only 3,244 lines — the original zip was a stale April 9 snapshot. The endpoint was already removed in a prior session.
+
+**Session 2 is fully clean. No further action needed.**
+
+The backend is now:
+- No frontend custody language ✅
+- No dead file custody language ✅  
+- No backend custody endpoints ✅
+
+Proceed to Session 3. Paste this to Replit now:
+
+---
+
+> Add the following to shared/schema.ts using Drizzle ORM syntax. Use integer foreign keys to users.id throughout — not UUID. Do not create a separate clients table. Do not touch any existing tables beyond the specific additions listed.
+>
+> **1.** Add role column to the existing users table:
+> 
+ts
+> role: text("role").notNull().default("client"),
+>
+
+>
+> **2.** Add isSuperseded boolean column to the existing aiRecommendations table:
+> 
+ts
+> isSuperseded: boolean("is_superseded").notNull().default(false),
+>
+
+>
+> **3.** Add new wealthApplications table:
+> 
+ts
+> export const wealthApplications = pgTable("wealth_applications", {
+>   id: serial("id").primaryKey(),
+>   userId: integer("user_id").references(() => users.id).notNull(),
+>   entityType: text("entity_type").notNull(),
+>   entityName: text("entity_name"),
+>   abn: text("abn"),
+>   intendedUse: text("intended_use"),
+>   consentGeneralAdvice: boolean("consent_general_advice").notNull().default(false),
+>   status: text("status").notNull().default("pending"),
+>   createdAt: timestamp("created_at").defaultNow(),
+> });
+>
+
+>
+> **4.** Add new adviserProfiles table:
+> 
+ts
+> export const adviserProfiles = pgTable("adviser_profiles", {
+>   id: serial("id").primaryKey(),
+>   userId: integer("user_id").references(() => users.id).notNull().unique(),
+>   adviserCode: text("adviser_code").unique(),
+>   fullName: text("full_name"),
+>   email: text("email"),
+>   afslNumber: text("afsl_number"),
+>   authorisedRepNumber: text("authorised_rep_number"),
+>   status: text("status").notNull().default("active"),
+>   createdAt: timestamp("created_at").defaultNow(),
+> });
+>
+
+>
+> **5.** Add new adviserClients table:
+> 
+ts
+> export const adviserClients = pgTable("adviser_clients", {
+>   id: serial("id").primaryKey(),
+>   adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+>   clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+>   relationshipType: text("relationship_type").notNull().default("servicing"),
+>   isActive: boolean("is_active").notNull().default(true),
+>   linkedAt: timestamp("linked_at").defaultNow(),
+>   unlinkedAt: timestamp("unlinked_at"),
+> }, (table) => ({
+>   adviserClientUniq: uniqueIndex("adviser_clients_uidx").on(table.adviserUserId, table.clientUserId),
+> }));
+>
+
+>
+> **6.** Update server/auth.ts:
+> - Add role: string to the AuthPayload interface
+> - Update signToken to include role in the JWT payload
+> - Update requireAuth to extract and return role from the verified token
+>
+> **7.** Run drizzle-kit generate then drizzle-kit push.
+>
+> **8.** Add insert schemas and TypeScript types for the 3 new tables at the bottom of schema.ts, following the existing pattern.
+>
+> Stop here. Do not build SOA, ROA, fact-find, fee-consents, risk-profiles, or any other advice engine tables. Phase 1 only. Confirm when done and show me the schema additions and auth.ts changes.
+
+---
+
+When Replit responds, paste the output here and I'll verify before Phase 2.
+
+Yes. Session 2 is clean. Proceed with Session 3 only exactly as written.
+
+One small reminder for Replit: ensure uniqueIndex is already imported from drizzle-orm/pg-core; if not, add it.
+
+After Replit finishes, paste the schema/auth output here and I’ll verify before Phase 2.
+
+
+

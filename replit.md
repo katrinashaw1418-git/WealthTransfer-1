@@ -14,6 +14,40 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 3 (Phase 1): Drizzle Schema + Auth Role Propagation
+
+Phase 1 of the B2B adviser overlay. **Scaffolding only** — no advice-engine surface (SOA, ROA, fact-find, fee-consents, risk-profiles) was created. All FKs to `users.id` are `integer`, not UUID, matching the existing repo convention.
+
+Schema changes (`shared/schema.ts`):
+1. **`users.role`** — `text("role").notNull().default("client")`. Values: `"client"` (default) or `"adviser"`.
+2. **`aiRecommendations.isSuperseded`** — `boolean("is_superseded").notNull().default(false)`. Will be set to `true` by `supersedeAiRecommendations()` so the active set is always `(isSuperseded = false)`.
+3. **`wealthApplications`** new table — logged-in user's wealth-platform onboarding intent (distinct from the public `applications` lead table). Columns: `userId` FK, `entityType`, `entityName`, `abn`, `intendedUse`, `consentGeneralAdvice`, `status` (default `pending`), `createdAt`.
+4. **`adviserProfiles`** new table — one row per `role = "adviser"` user. `userId` FK with `.unique()`, plus `adviserCode` (unique), `fullName`, `email`, `afslNumber`, `authorisedRepNumber`, `status` (default `active`), `createdAt`.
+5. **`adviserClients`** new table — adviser↔client link. `adviserUserId` and `clientUserId` both `integer` FKs to `users.id`, plus `relationshipType` (default `servicing`), `isActive`, `linkedAt`, `unlinkedAt`. Composite unique index `adviser_clients_uidx` on `(adviser_user_id, client_user_id)`.
+6. Insert schemas + `Insert*` and select types added for the 3 new tables.
+
+Auth changes (`server/auth.ts`):
+- `AuthPayload` interface gained `role: string`.
+- `verifyToken` now decodes legacy tokens (no `role` claim) as `role: "client"` so existing sessions keep working without forced re-login.
+- `requireAuth` returns the new payload unchanged → role is automatically available downstream.
+
+Caller updates (`server/routes.ts`):
+- Three `signToken({...})` call sites (signup, login, email-verification login) now pass `role: user.role`.
+
+MemStorage updates (`server/storage.ts`):
+- Demo user seed and `createUser()` insert path now set `role` (default `"client"`).
+- Demo AI recommendations seed and `createAiRecommendation()` insert path now set `isSuperseded` (default `false`).
+
+DB migration: `drizzle-kit push --force` succeeded, schema verified via `information_schema`:
+- `users.role` text NOT NULL DEFAULT `'client'` ✓
+- `ai_recommendations.is_superseded` boolean NOT NULL DEFAULT false ✓
+- `wealth_applications`, `adviser_profiles`, `adviser_clients` tables present ✓
+- `adviser_clients_uidx` composite unique index present ✓
+
+Typecheck: clean except for the same 2 pre-existing errors in `server/storage.ts` (now lines 3276/3299 due to insertions, formerly 3270/3293) — `applications.consentGeneralAdvice` Zod-optional drift and `leads.updatedAt` MemStorage seed gap. Both predate Session 1, both out of scope for this session.
+
+Server restart: clean.
+
 ## Recent Changes (April 2026) — Session 2: Non-Custodial Wording + Dead-File Cleanup
 
 Session 2 brief from external reviewer was to remove pre-submit AMAX banking details (info@amaxglobal, Westpac BSB, "Send to AMAX PayID") and tighten non-custodial language. Investigation showed the active `/wallets` route is wired to `wallets-new.tsx` (a clean read-only Portfolio Overview with no deposit/withdraw modals), and the flagged custody language only existed in 11 dead files that App.tsx did not import. User chose Option B (delete dead files + strengthen active page).

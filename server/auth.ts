@@ -22,6 +22,9 @@ export interface AuthPayload {
   userId: number;
   username: string;
   email: string;
+  // Session 3 — Phase 1: role propagation for B2B adviser overlay.
+  // "client" (default for legacy tokens) | "adviser". Other values reserved.
+  role: string;
 }
 
 export function signToken(payload: AuthPayload): string {
@@ -30,7 +33,15 @@ export function signToken(payload: AuthPayload): string {
 
 export function verifyToken(token: string): AuthPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as AuthPayload;
+    const decoded = jwt.verify(token, JWT_SECRET) as Partial<AuthPayload> & { userId: number; username: string; email: string };
+    // Backward-compatible default: tokens issued before Session 3 (no role claim)
+    // are treated as "client". This avoids forcing a global re-login on rollout.
+    return {
+      userId: decoded.userId,
+      username: decoded.username,
+      email: decoded.email,
+      role: decoded.role ?? "client",
+    };
   } catch {
     return null;
   }

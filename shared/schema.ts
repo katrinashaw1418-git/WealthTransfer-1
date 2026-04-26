@@ -12,6 +12,9 @@ export const users = pgTable("users", {
   lastName: text("last_name").notNull(),
   kycStatus: text("kyc_status").notNull().default("pending"), // pending, verified, rejected
   userTier: text("user_tier").notNull().default("standard"), // standard, premium, hnwi
+  // Session 3 — Phase 1: role-based access for B2B adviser overlay.
+  // "client" (default) = retail/wholesale account holder; "adviser" = authorised rep linked to clients via adviserClients.
+  role: text("role").notNull().default("client"),
   // Email verification — set on signup; required before login is allowed
   emailVerified: boolean("email_verified").notNull().default(false),
   emailVerificationToken: text("email_verification_token"),
@@ -97,6 +100,10 @@ export const aiRecommendations = pgTable("ai_recommendations", {
   description: text("description").notNull(),
   severity: text("severity").notNull(), // info, warning, alert
   isRead: boolean("is_read").default(false),
+  // Session 3 — Phase 1: marks a recommendation as replaced by a newer generation.
+  // Set to true by supersedeAiRecommendations() before inserting fresh rows so the
+  // active recommendation set is always (isSuperseded = false).
+  isSuperseded: boolean("is_superseded").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -326,3 +333,68 @@ export const funnelEvents = pgTable("funnel_events", {
 export const insertFunnelEventSchema = createInsertSchema(funnelEvents).omit({ id: true, createdAt: true });
 export type FunnelEvent = typeof funnelEvents.$inferSelect;
 export type InsertFunnelEvent = z.infer<typeof insertFunnelEventSchema>;
+
+// ===========================================================================
+// Session 3 — Phase 1: Wealth onboarding + adviser overlay (B2B foundation)
+// ---------------------------------------------------------------------------
+// These three tables are scaffolding only. The advice-engine surface (SOA, ROA,
+// fact-find, fee-consents, risk-profiles) is intentionally NOT created yet —
+// they belong to a later phase. Integer FKs to users.id throughout.
+// ===========================================================================
+
+// Wealth onboarding application — distinct from the public /apply leads-style
+// application. This captures a logged-in user's intent to onboard onto the
+// wealth platform after their initial account is approved.
+export const wealthApplications = pgTable("wealth_applications", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  entityType: text("entity_type").notNull(), // individual | joint | company | trust | smsf
+  entityName: text("entity_name"),
+  abn: text("abn"),
+  intendedUse: text("intended_use"),
+  // Acknowledgement that AMAX general-advice disclaimer was shown at submit.
+  consentGeneralAdvice: boolean("consent_general_advice").notNull().default(false),
+  status: text("status").notNull().default("pending"), // pending | under_review | approved | rejected
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertWealthApplicationSchema = createInsertSchema(wealthApplications).omit({ id: true, createdAt: true });
+export type WealthApplication = typeof wealthApplications.$inferSelect;
+export type InsertWealthApplication = z.infer<typeof insertWealthApplicationSchema>;
+
+// Adviser profile — extra fields for users with role = "adviser".
+// One row per adviser user (enforced by .unique() on userId).
+export const adviserProfiles = pgTable("adviser_profiles", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id).notNull().unique(),
+  adviserCode: text("adviser_code").unique(),
+  fullName: text("full_name"),
+  email: text("email"),
+  afslNumber: text("afsl_number"),
+  authorisedRepNumber: text("authorised_rep_number"),
+  status: text("status").notNull().default("active"), // active | suspended | terminated
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertAdviserProfileSchema = createInsertSchema(adviserProfiles).omit({ id: true, createdAt: true });
+export type AdviserProfile = typeof adviserProfiles.$inferSelect;
+export type InsertAdviserProfile = z.infer<typeof insertAdviserProfileSchema>;
+
+// Adviser <-> client link table. Both sides reference users.id (integer).
+// Composite unique index prevents duplicate active links between the same
+// adviser and client.
+export const adviserClients = pgTable("adviser_clients", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  relationshipType: text("relationship_type").notNull().default("servicing"), // servicing | introducing | review_only
+  isActive: boolean("is_active").notNull().default(true),
+  linkedAt: timestamp("linked_at").defaultNow(),
+  unlinkedAt: timestamp("unlinked_at"),
+}, (table) => ({
+  adviserClientUniq: uniqueIndex("adviser_clients_uidx").on(table.adviserUserId, table.clientUserId),
+}));
+
+export const insertAdviserClientSchema = createInsertSchema(adviserClients).omit({ id: true, linkedAt: true, unlinkedAt: true });
+export type AdviserClient = typeof adviserClients.$inferSelect;
+export type InsertAdviserClient = z.infer<typeof insertAdviserClientSchema>;
