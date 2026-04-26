@@ -451,6 +451,67 @@ app.use((req, res, next) => {
     setInterval(runInsufficientFundsSweepCron, 24 * 60 * 60 * 1000);
   }, 360 * 1000);
 
+  // ---------------------------------------------------------------------------
+  // Task #63 — Posting-receipt invariant guard
+  // ---------------------------------------------------------------------------
+  // Self-healing replacement for the manual "re-run
+  // scripts/backfill-ledger-postings.ts" runbook step. Compares the count of
+  // distinct transactionIds with ledger entries against the count of
+  // receipt rows in `ledger_postings`. Any divergence pages an operator via
+  // notifyOperator(), naming a sample of the missing transactionIds so ops
+  // know which environment to backfill.
+  //
+  // Runs once shortly after boot (so a deploy that forgot the runbook step
+  // is caught within seconds), then daily. The check is read-only — it
+  // never mutates the ledger or the receipt table; the remediation is to
+  // run the backfill script.
+  //
+  // Staggered 30s after boot (long before the other crons) so a misconfigured
+  // environment is flagged before the first wallet-recon tick papers over it
+  // by writing fresh reconciliation rows.
+  // ---------------------------------------------------------------------------
+  const { runPostingReceiptInvariantCheck } = await import(
+    "./services/posting-receipt-invariant"
+  );
+
+  async function runPostingReceiptInvariantCron() {
+    try {
+      const r = await runPostingReceiptInvariantCheck();
+      // Treat ANY non-zero divergence as such in the log (matches the
+      // alert dispatch logic, which fires in both directions). Negative
+      // missingCount means orphan receipts — entries deleted out-of-band —
+      // and is just as alert-worthy as missing receipts, so the log line
+      // must not call it "ok".
+      if (r.missingCount > 0) {
+        log(
+          `[posting-receipt-invariant] DIVERGENCE (missing receipts): ` +
+            `${r.txWithEntries} tx with entries, ${r.receipts} receipts, ` +
+            `${r.missingCount} missing — alertDispatched=${r.alertDispatched} ` +
+            `(${r.durationMs}ms)`,
+        );
+      } else if (r.missingCount < 0) {
+        log(
+          `[posting-receipt-invariant] DIVERGENCE (orphan receipts): ` +
+            `${r.txWithEntries} tx with entries, ${r.receipts} receipts, ` +
+            `${Math.abs(r.missingCount)} orphan — alertDispatched=${r.alertDispatched} ` +
+            `(${r.durationMs}ms)`,
+        );
+      } else {
+        log(
+          `[posting-receipt-invariant] ok: ${r.txWithEntries} tx with entries == ` +
+            `${r.receipts} receipts (${r.durationMs}ms)`,
+        );
+      }
+    } catch (e) {
+      console.error("[posting-receipt-invariant] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runPostingReceiptInvariantCron();
+    setInterval(runPostingReceiptInvariantCron, 24 * 60 * 60 * 1000);
+  }, 30 * 1000);
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.
