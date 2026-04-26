@@ -3,6 +3,37 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Session 19: Admin Shell Expansion (Products, Instructions, Reports, Compliance)
+
+Fills out the admin shell to match the spec: catalogue management, read-only oversight of in-flight investment instructions, oversight of generated reports, and a compliance overview dashboard. No money movement, no fee-engine activation, no KYC bypass — every admin write emits an audit row in the same transaction.
+
+**Schema (`shared/schema.ts`)**
+- New `adminReviewNotes` table (id, adminUserId, entityType, entityId, note, createdAt) with composite (entityType, entityId) index. Today the entityType Zod enum is restricted to `"investment_instruction"`; future entity types extend the enum without a migration.
+- Standard `insert*Schema`, `Insert*` and `*` types exported.
+- Migrated cleanly via `npm run db:push --force`.
+
+**Backend (`server/admin-routes.ts`)** — 7 new endpoints, all admin-role-gated, all writes wrapped in tx + auditTx in the same transaction:
+- `GET  /api/admin/products` — list including inactive (catalogue management view).
+- `POST /api/admin/products` — create (audit `admin_product_created`). Validated by `adminCreateProductSchema` whose `superRefine` enforces the operational invariant: an active product (isActive=true / default) **must** carry an `annualReturn`, otherwise downstream portfolio valuation is fail-closed and the product would silently surface as "unknown valuation". When supplied, `annualReturn` must be a parseable decimal in [0, 1] (helper `isValidAnnualReturn`).
+- `PATCH /api/admin/products/:id` — update including isActive toggle (audit `admin_product_updated`). The handler computes the post-update view of the row and rejects 400 if the resulting state would be `{isActive:true, annualReturn:null/empty}` — this prevents activation of an unvaluable row through the update path. The PATCH schema also re-applies the [0, 1] bound when `annualReturn` is supplied (shared `isValidAnnualReturn` helper, no drift between create and update).
+- `GET  /api/admin/instructions` — paginated read-only join (adviser/client/product), `?status=&page=&limit=` (PAGE_SIZE=50). Returns `{items, page, limit, total}`.
+- `POST /api/admin/review-notes` — append admin annotation against an existing investment_instruction (audit `admin_review_note_added`); validates the target instruction exists at the API boundary.
+- `GET  /api/admin/instructions/:id/review-notes` — list notes for one instruction.
+- `GET  /api/admin/reports` — paginated `report_requests` with adviser/client joins, `?status=&type=&page=&limit=`.
+- `GET  /api/admin/compliance/overview` — KYC counts, fee-consent renewal-status counts, instruction-status counts, advice acks-vs-records, recent compliance audit events.
+
+**Frontend** — 4 new pages under `/admin/*`, all TanStack Query v5 object-form, shadcn/ui, `useToast` from `@/hooks/use-toast`, mutations via `apiRequest` + cache invalidation by array `queryKey`:
+- `client/src/pages/admin/products.tsx` — table + create dialog + isActive toggle. Create form's Zod schema requires `annualReturn` and only matches values in [0, 1] up to 4dp (server is authoritative; frontend regex matches the same bound).
+- `client/src/pages/admin/instructions.tsx` — list + status filter + side-panel review-notes thread. PAGE_SIZE=50 with prev/next; filter changes reset to page 1.
+- `client/src/pages/admin/reports.tsx` — list + status & type filters; same pagination behaviour.
+- `client/src/pages/admin/compliance.tsx` — KPI cards + small grouped tables.
+- `client/src/App.tsx` — 4 new routes wired under `<AdminLayout>`.
+- `client/src/components/layout/admin-sidebar.tsx` — 4 new items (Package, ListChecks, FileText, ShieldCheck icons).
+
+**Architect verdict**: Round 1 = FAIL (2 Major: pagination usability, annualReturn-on-create). Round 2 = FAIL (Reports page Button import missing, annualReturn range only enforced on create). Round 3 = PASS-equivalent after the PATCH-side bound was added.
+
+**Hard rules unchanged**: 10C fee engine STILL GATED. No money movement here. RG 175 / DBFO / KYC posture untouched. Demo creds unchanged: wise/wise888 (admin), wiseadviser/wise888, wiseinvestor/wise888.
+
 ## Recent Changes (April 2026) — Session 16B: Case-insensitive email guard + create-invite audit
 
 Hardens the duplicate-email defence introduced in Session 16 with a single canonical normaliser and a DB-level case-insensitive safety net. Closes the last gap in Task #4: an admin-side block path that previously rejected silently with no audit row.

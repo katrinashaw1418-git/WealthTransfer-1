@@ -1,0 +1,358 @@
+Next build:
+
+Session 23A — 10C Fee Engine Gate A only
+
+Do not build Gate B yet.
+
+Give Replit:
+
+Proceed with Session 23A — 10C Fee Engine Gate A only.
+
+Build calculation, accrual and admin approval infrastructure only.
+
+Add:
+- adviserFeeRules
+- adviserFeeAccruals
+- adviserFeeDeductions
+- server/services/fee-engine.ts
+- /admin/fees
+- adviser/client fee view updates
+
+APIs:
+- POST /api/admin/fee-rules
+- PATCH /api/admin/fee-rules/:id/pause
+- POST /api/admin/fee-accruals/run
+- GET /api/admin/fee-accruals
+- GET /api/admin/fee-deductions
+- POST /api/admin/fee-deductions/:id/approve
+
+View-only:
+- GET /api/adviser/fee-rules
+- GET /api/adviser/fee-accruals
+- GET /api/adviser/fee-deductions
+- GET /api/client/fees
+
+Rules:
+- fee accrues only from active DBFO fee consent
+- consent must not be expired or withdrawn
+- adviser must be linked to client
+- splits must equal 10000 bps
+- daily accrual unique per feeRuleId + accrualDate
+- all writes audit logged
+- adviser is view-only
+- client is view-only except existing consent withdraw
+- admin approval does not move money
+
+Do NOT build:
+- wallet debit
+- adviser credit
+- fee deduction execution
+- reversal
+- investment execution
+- commission engine
+
+Critical:
+Deduction endpoint must remain disabled or absent. Gate A only.
+
+After Gate A is verified, then decide whether to build Gate B.
+
+design the exact API + DB schema + React flow 10C fee engine last
+
+Use this exact Session 23A — 10C Fee Engine Gate A spec.
+
+1. DB schema
+
+Add:
+
+export const adviserFeeRules = pgTable("adviser_fee_rules", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  feeConsentId: integer("fee_consent_id").references(() => feeConsents.id).notNull(),
+
+  calculationMethod: text("calculation_method").notNull(), // percentage_aum | fixed_amount
+  rateBps: integer("rate_bps"),
+  fixedAmount: decimal("fixed_amount", { precision: 15, scale: 2 }),
+
+  currency: text("currency").notNull().default("AUD"),
+
+  platformSplitBps: integer("platform_split_bps").notNull().default(3000),
+  adviserSplitBps: integer("adviser_split_bps").notNull().default(7000),
+
+  status: text("status").notNull().default("active"), // active | paused | expired | withdrawn
+
+  effectiveFrom: timestamp("effective_from").notNull(),
+  effectiveTo: timestamp("effective_to"),
+
+  createdBy: integer("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const adviserFeeAccruals = pgTable("adviser_fee_accruals", {
+  id: serial("id").primaryKey(),
+
+  feeRuleId: integer("fee_rule_id").references(() => adviserFeeRules.id).notNull(),
+  feeConsentId: integer("fee_consent_id").references(() => feeConsents.id).notNull(),
+
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+
+  accrualDate: timestamp("accrual_date").notNull(),
+
+  baseAmount: decimal("base_amount", { precision: 15, scale: 2 }).notNull(),
+  grossFeeAmount: decimal("gross_fee_amount", { precision: 15, scale: 2 }).notNull(),
+  adviserAmount: decimal("adviser_amount", { precision: 15, scale: 2 }).notNull(),
+  platformAmount: decimal("platform_amount", { precision: 15, scale: 2 }).notNull(),
+
+  currency: text("currency").notNull().default("AUD"),
+
+  status: text("status").notNull().default("accrued"), // accrued | approved | pending_deduction | reversed
+
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  uniqueDailyAccrual: uniqueIndex("adviser_fee_accrual_unique_daily")
+    .on(table.feeRuleId, table.accrualDate),
+}));
+export const adviserFeeDeductions = pgTable("adviser_fee_deductions", {
+  id: serial("id").primaryKey(),
+
+  accrualId: integer("accrual_id").references(() => adviserFeeAccruals.id).notNull(),
+  feeRuleId: integer("fee_rule_id").references(() => adviserFeeRules.id).notNull(),
+  feeConsentId: integer("fee_consent_id").references(() => feeConsents.id).notNull(),
+
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+
+  grossAmount: decimal("gross_amount", { precision: 15, scale: 2 }).notNull(),
+  adviserAmount: decimal("adviser_amount", { precision: 15, scale: 2 }).notNull(),
+  platformAmount: decimal("platform_amount", { precision: 15, scale: 2 }).notNull(),
+
+  currency: text("currency").notNull().default("AUD"),
+
+  status: text("status").notNull().default("pending_admin_approval"),
+  // pending_admin_approval | approved | execution_disabled | reversed
+
+  approvedBy: integer("approved_by").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+2. Fee engine service
+
+Create:
+
+server/services/fee-engine.ts
+
+Rules:
+
+Can accrue only if:
+- fee consent is active
+- consent is not expired
+- consent is not withdrawn
+- adviser-client link exists
+- fee rule is active
+
+Core functions:
+
+export function calculateDailyPercentageFee(baseAmount: number, rateBps: number) {
+  return (baseAmount * (rateBps / 10000)) / 365;
+}
+
+export function splitFee(gross: number, adviserSplitBps: number, platformSplitBps: number) {
+  if (adviserSplitBps + platformSplitBps !== 10000) {
+    throw new Error("Fee splits must equal 10000 bps");
+  }
+
+  return {
+    adviserAmount: gross * adviserSplitBps / 10000,
+    platformAmount: gross * platformSplitBps / 10000,
+  };
+}
+
+Base amount:
+
+Use current portfolio/wallet-derived AUM.
+If unavailable, baseAmount = 0 and grossFeeAmount = 0.
+Do not use fake history or projected performance.
+3. APIs
+Admin APIs
+POST  /api/admin/fee-rules
+PATCH /api/admin/fee-rules/:id/pause
+POST  /api/admin/fee-accruals/run
+GET   /api/admin/fee-accruals
+GET   /api/admin/fee-deductions
+POST  /api/admin/fee-deductions/:id/approve
+Adviser view-only APIs
+GET /api/adviser/fee-rules
+GET /api/adviser/fee-accruals
+GET /api/adviser/fee-deductions
+Client view-only API
+GET /api/client/fees
+4. Admin create fee rule
+POST /api/admin/fee-rules
+
+Body:
+
+{
+  "adviserUserId": 5,
+  "clientUserId": 12,
+  "feeConsentId": 9,
+  "calculationMethod": "percentage_aum",
+  "rateBps": 100,
+  "platformSplitBps": 3000,
+  "adviserSplitBps": 7000,
+  "effectiveFrom": "2026-04-26"
+}
+
+Rules:
+
+admin/compliance_admin only
+fee consent must be active
+fee consent must belong to adviser/client
+fee consent must not be expired or withdrawn
+splits must equal 10000
+audit log
+no deduction
+5. Run accruals
+POST /api/admin/fee-accruals/run
+
+Process:
+
+For each active adviserFeeRule:
+1. Load feeConsent
+2. Validate active/not expired/not withdrawn
+3. Validate adviserClients link
+4. Calculate base AUM
+5. Calculate gross fee
+6. Split adviser/platform
+7. Insert one accrual per feeRuleId + accrualDate
+8. Create pending deduction record
+
+Response:
+
+{
+  "processed": 10,
+  "createdAccruals": 8,
+  "createdDeductions": 8,
+  "skipped": 2
+}
+6. Approve deduction
+POST /api/admin/fee-deductions/:id/approve
+
+Rules:
+
+admin/compliance_admin only
+status must be pending_admin_approval
+approval does not move money
+status becomes approved
+approvedBy + approvedAt set
+audit log
+
+No deduct endpoint in Gate A.
+
+7. React pages
+/admin/fees
+
+Tabs:
+
+Fee Rules
+Accruals
+Deductions
+Exceptions
+
+Cards:
+
+Active fee rules
+Accrued this month
+Pending approval
+Approved but not executed
+Exceptions
+
+Actions:
+
+Create fee rule
+Run accruals
+Approve deduction
+
+No deduct button.
+
+/adviser/fees
+
+View-only:
+
+Active fee rules
+Accrued estimates
+Pending deductions
+Approved deductions
+
+Copy:
+
+Fee estimates and accruals are indicative only. Advisers cannot deduct fees or move client funds.
+/client/fees
+
+View-only:
+
+Active fee consents
+Accrued fee estimates
+Approved pending deductions
+Withdraw consent
+
+Copy:
+
+No fee is deducted in this view. Fee deductions require active consent and AMAX platform controls.
+8. Replit prompt
+Build Session 23A — 10C Fee Engine Gate A only.
+
+Purpose:
+Create fee rules, daily fee accruals and admin approval records from active DBFO-compliant fee consents.
+
+Add DB:
+- adviserFeeRules
+- adviserFeeAccruals
+- adviserFeeDeductions
+
+Add service:
+- server/services/fee-engine.ts
+
+Add APIs:
+Admin:
+- POST /api/admin/fee-rules
+- PATCH /api/admin/fee-rules/:id/pause
+- POST /api/admin/fee-accruals/run
+- GET /api/admin/fee-accruals
+- GET /api/admin/fee-deductions
+- POST /api/admin/fee-deductions/:id/approve
+
+Adviser view-only:
+- GET /api/adviser/fee-rules
+- GET /api/adviser/fee-accruals
+- GET /api/adviser/fee-deductions
+
+Client view-only:
+- GET /api/client/fees
+
+Rules:
+- fee accrues only from active fee consent
+- consent must not be expired
+- consent must not be withdrawn
+- adviser must be linked to client
+- splits must equal 10000 bps
+- daily accrual unique per feeRuleId + accrualDate
+- all writes audit logged
+- adviser is view-only
+- client is view-only except existing consent withdraw
+- admin approval does not move money
+- no wallet debit
+- no adviser credit
+- no deduction execution
+- no reversal
+- no investment execution
+
+Add UI:
+- /admin/fees
+- update /adviser/fees
+- add /client/fees
+
+Critical:
+Gate A only.
+Do not build real deduction.

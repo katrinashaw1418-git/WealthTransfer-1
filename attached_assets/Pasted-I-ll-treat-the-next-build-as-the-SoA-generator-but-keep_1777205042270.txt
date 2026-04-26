@@ -1,0 +1,294 @@
+I’ll treat the next build as the SoA generator, but keep it document-generation only: no execution, no wallet movement, no fee deduction.
+
+Thought for 8s
+
+Next build:
+
+Session 21 — SoA Generator Shell
+
+Purpose:
+
+Generate draft Statement of Advice documents from adviser/client/advice data.
+No execution.
+No fee deduction.
+No wallet movement.
+
+This is the right next step after DBFO fee consent UI, because ASIC says retail personal advice generally requires a Statement of Advice, and RG 175 covers when SOAs are required and what they must disclose, including remuneration, benefits and conflicts.
+
+1. DB schema
+
+Add or confirm these tables.
+
+export const soaDocuments = pgTable("soa_documents", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+
+  adviceRecordId: integer("advice_record_id").references(() => adviceRecords.id),
+  instructionId: integer("instruction_id").references(() => investmentInstructions.id),
+
+  documentStatus: text("document_status").notNull().default("draft"),
+  // draft | issued | viewed | accepted | withdrawn | superseded
+
+  title: text("title").notNull().default("Statement of Advice"),
+  scope: text("scope").notNull(),
+  basisOfAdvice: text("basis_of_advice").notNull(),
+  recommendationSummary: text("recommendation_summary").notNull(),
+  risks: text("risks").notNull(),
+  feesAndCosts: text("fees_and_costs").notNull(),
+  conflictsDisclosure: text("conflicts_disclosure").notNull(),
+  alternativesConsidered: text("alternatives_considered"),
+  replacementProductDisclosure: text("replacement_product_disclosure"),
+
+  documentHtml: text("document_html"),
+  documentUrl: text("document_url"),
+  documentHash: text("document_hash"),
+
+  issuedAt: timestamp("issued_at"),
+  viewedAt: timestamp("viewed_at"),
+  acceptedAt: timestamp("accepted_at"),
+  supersededAt: timestamp("superseded_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+If missing:
+
+export const soaAcknowledgements = pgTable("soa_acknowledgements", {
+  id: serial("id").primaryKey(),
+
+  soaDocumentId: integer("soa_document_id").references(() => soaDocuments.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+
+  acknowledgedName: text("acknowledged_name").notNull(),
+  acknowledgedAt: timestamp("acknowledged_at").defaultNow(),
+  ipAddress: text("ip_address"),
+
+  statement: text("statement").notNull(),
+});
+2. APIs
+POST /api/adviser/soa-drafts
+GET  /api/adviser/soa-documents
+GET  /api/adviser/soa-documents/:id
+POST /api/adviser/soa-documents/:id/issue
+
+GET  /api/client/soa-documents
+GET  /api/client/soa-documents/:id
+POST /api/client/soa-documents/:id/acknowledge
+3. Adviser create draft
+POST /api/adviser/soa-drafts
+
+Body:
+
+{
+  "clientUserId": 12,
+  "instructionId": 5,
+  "scope": "Limited advice regarding allocation to AMAX Corporate Credit Fund",
+  "basisOfAdvice": "Based on client profile, stated objectives, investment horizon and available product information.",
+  "recommendationSummary": "Recommend allocation of $50,000 to AMAX Corporate Credit Fund.",
+  "risks": "Capital risk, credit risk, liquidity risk, concentration risk.",
+  "feesAndCosts": "Platform and product fees as disclosed in the relevant offer documents.",
+  "conflictsDisclosure": "AMAX may receive platform and product-related fees. Related-party arrangements are disclosed.",
+  "alternativesConsidered": "Cash, term deposits and diversified fixed income products."
+}
+
+Rules:
+
+adviser must be linked to client
+status = draft
+no client visibility until issued
+audit log created
+4. Adviser issue SoA
+POST /api/adviser/soa-documents/:id/issue
+
+Rules:
+
+adviser must own document
+client must be linked
+document must be draft
+status becomes issued
+issuedAt set
+audit log created
+client can now view
+5. Client acknowledge SoA
+POST /api/client/soa-documents/:id/acknowledge
+
+Body:
+
+{
+  "acknowledgedName": "Wise User"
+}
+
+Rules:
+
+clientUserId must equal logged-in user
+document must be issued
+status becomes accepted
+acknowledgement record created
+audit log created
+this still does NOT execute instruction
+6. Backend skeleton
+app.post("/api/adviser/soa-drafts", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (role !== "adviser") {
+    return res.status(403).json({ error: "Adviser access required" });
+  }
+
+  const {
+    clientUserId,
+    instructionId,
+    scope,
+    basisOfAdvice,
+    recommendationSummary,
+    risks,
+    feesAndCosts,
+    conflictsDisclosure,
+    alternativesConsidered,
+    replacementProductDisclosure,
+  } = req.body;
+
+  const allowed = await adviserCanAccessClient(userId, clientUserId);
+  if (!allowed) {
+    return res.status(403).json({ error: "Client not linked to adviser" });
+  }
+
+  const documentHtml = renderSoaHtml({
+    scope,
+    basisOfAdvice,
+    recommendationSummary,
+    risks,
+    feesAndCosts,
+    conflictsDisclosure,
+    alternativesConsidered,
+    replacementProductDisclosure,
+  });
+
+  const documentHash = createHash("sha256").update(documentHtml).digest("hex");
+
+  const [soa] = await db.insert(soaDocuments).values({
+    adviserUserId: userId,
+    clientUserId,
+    instructionId,
+    scope,
+    basisOfAdvice,
+    recommendationSummary,
+    risks,
+    feesAndCosts,
+    conflictsDisclosure,
+    alternativesConsidered,
+    replacementProductDisclosure,
+    documentHtml,
+    documentHash,
+    documentStatus: "draft",
+  }).returning();
+
+  await writeAuditLog(
+    userId,
+    "soa_draft_created",
+    "soa_documents",
+    String(soa.id),
+    { clientUserId, instructionId },
+    req.ip || null
+  );
+
+  res.status(201).json({ soa });
+});
+7. React adviser flow
+
+Create:
+
+/adviser/soa
+/adviser/soa/:id
+
+UI:
+
+Create SoA Draft
+- Client
+- Linked instruction optional
+- Scope of advice
+- Basis of advice
+- Recommendation summary
+- Risks
+- Fees and costs
+- Conflicts disclosure
+- Alternatives considered
+
+[Save Draft]
+[Issue to Client]
+
+Table:
+
+Client
+Title
+Status
+Created
+Issued
+Actions
+8. React client flow
+
+Create:
+
+/client/soa
+/client/soa/:id
+
+Client view:
+
+Statement of Advice
+Status: Issued
+
+[Read document]
+[Download PDF later]
+[Type full name]
+[Acknowledge receipt]
+
+Important copy:
+
+Acknowledgement confirms receipt and review of the Statement of Advice. It does not execute any investment instruction or move client funds.
+9. Replit prompt
+Build Session 21 — SoA Generator Shell.
+
+Purpose:
+Create draft and issued Statement of Advice records linked to adviser/client/instruction data.
+No execution. No wallet movement. No fee deduction.
+
+Add DB:
+- soaDocuments
+- soaAcknowledgements
+
+Add APIs:
+- POST /api/adviser/soa-drafts
+- GET /api/adviser/soa-documents
+- GET /api/adviser/soa-documents/:id
+- POST /api/adviser/soa-documents/:id/issue
+- GET /api/client/soa-documents
+- GET /api/client/soa-documents/:id
+- POST /api/client/soa-documents/:id/acknowledge
+
+Rules:
+- adviser must be linked to client
+- client can only view own SoAs
+- draft SoA is adviser-only
+- issued SoA becomes client-visible
+- client acknowledgement does not execute instruction
+- all writes audit logged
+- include documentHash
+- no fee deduction
+- no wallet movement
+- no investment execution
+
+Add UI:
+- /adviser/soa list/create/view/issue
+- /client/soa list/view/acknowledge
+
+Do not build:
+- execution worker
+- fee deduction engine
+- commission engine
+
+After this:
+
+Visual re-skin
+→ 10C fee engine last

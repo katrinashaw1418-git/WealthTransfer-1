@@ -43,6 +43,10 @@ import AdminAdvisers from "@/pages/admin/advisers";
 import AdminAdviserClients from "@/pages/admin/adviser-clients";
 import AdminRegistrationInvites from "@/pages/admin/registration-invites";
 import AdminAuditLogs from "@/pages/admin/audit-logs";
+import AdminProducts from "@/pages/admin/products";
+import AdminInstructions from "@/pages/admin/instructions";
+import AdminReports from "@/pages/admin/reports";
+import AdminCompliance from "@/pages/admin/compliance";
 import ClientInstructions from "@/pages/client-instructions";
 import RegisterInvite from "@/pages/register-invite";
 import { Loader2 } from "lucide-react";
@@ -91,6 +95,10 @@ function AdminApp() {
         <Route path="/admin/advisers" component={AdminAdvisers} />
         <Route path="/admin/adviser-clients" component={AdminAdviserClients} />
         <Route path="/admin/audit-logs" component={AdminAuditLogs} />
+        <Route path="/admin/products" component={AdminProducts} />
+        <Route path="/admin/instructions" component={AdminInstructions} />
+        <Route path="/admin/reports" component={AdminReports} />
+        <Route path="/admin/compliance" component={AdminCompliance} />
         <Route path="/legal" component={Legal} />
         <Route component={NotFound} />
       </Switch>

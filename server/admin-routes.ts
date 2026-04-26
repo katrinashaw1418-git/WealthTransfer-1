@@ -32,6 +32,15 @@ import {
   adviserClients,
   registrationInvites,
   normalizeEmail,
+  // Session 19 — admin shell expansion
+  investmentProducts,
+  investmentInstructions,
+  reportRequests,
+  adminReviewNotes,
+  feeConsents,
+  adviceRecords,
+  adviceAcknowledgements,
+  insertInvestmentProductSchema,
 } from "@shared/schema";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
@@ -1167,6 +1176,543 @@ export function registerAdminRoutes(app: Express): void {
         page,
         limit,
         total: Number(totalRow[0]?.count ?? 0),
+      };
+    }),
+  );
+
+  // =========================================================================
+  // SESSION 19 — admin shell expansion
+  // -------------------------------------------------------------------------
+  // Investment products (CRUD) | Investment instructions (read-only review,
+  // with admin annotations) | Report requests (read-only) | Compliance overview.
+  // None of these touch money or feeConsents/adviceRecords/instructions data —
+  // they are read paths plus product catalogue and admin annotation writes.
+  // =========================================================================
+
+  // ----- shared schemas (Session 19) -------------------------------------
+  // Reuse the global insertInvestmentProductSchema; allow numeric or string
+  // for the decimal columns since drizzle-zod accepts string by default.
+  //
+  // Operational invariant: an ACTIVE product (isActive=true) must have a
+  // populated annualReturn in [0, 1] — downstream portfolio valuation is
+  // fail-closed when annualReturn is null, so allowing an active-but-
+  // unvaluable product would surface as silent "unknown valuation"
+  // everywhere it is selected. Inactive (draft) products can omit
+  // annualReturn entirely. When annualReturn IS supplied (active or not),
+  // it must be a parseable decimal in [0, 1].
+  function isValidAnnualReturn(v: unknown): boolean {
+    if (v === null || v === undefined || v === "") return false;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 && n <= 1;
+  }
+  const adminCreateProductSchema = insertInvestmentProductSchema
+    .extend({
+      minimumInvestment: z.union([z.string(), z.number()]).transform(String),
+      annualReturn: z
+        .union([z.string(), z.number()])
+        .transform(String)
+        .optional()
+        .nullable(),
+      isActive: z.boolean().optional(),
+    })
+    .superRefine((val, ctx) => {
+      const active = val.isActive !== false; // default true
+      const supplied =
+        val.annualReturn !== null &&
+        val.annualReturn !== undefined &&
+        val.annualReturn !== "";
+      if (active && !supplied) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["annualReturn"],
+          message: "annualReturn is required for an active product (else valuation is unknown)",
+        });
+      } else if (supplied && !isValidAnnualReturn(val.annualReturn)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["annualReturn"],
+          message: "annualReturn must be a decimal in [0, 1] (e.g. 0.11 for 11% p.a.)",
+        });
+      }
+    });
+  const adminUpdateProductSchema = z
+    .object({
+      name: z.string().min(1).optional(),
+      category: z.string().min(1).optional(),
+      subCategory: z.string().min(1).optional(),
+      investmentStrategy: z.string().min(1).optional(),
+      targetNetIrr: z.string().min(1).optional(),
+      grossIrr: z.string().nullable().optional(),
+      moic: z.string().nullable().optional(),
+      term: z.string().min(1).optional(),
+      structure: z.string().min(1).optional(),
+      distributions: z.string().min(1).optional(),
+      liquidity: z.string().min(1).optional(),
+      minimumInvestment: z.union([z.string(), z.number()]).transform(String).optional(),
+      riskProfile: z.string().min(1).optional(),
+      returnType: z.string().min(1).optional(),
+      lvr: z.string().nullable().optional(),
+      annualReturn: z.union([z.string(), z.number()]).transform(String).nullable().optional(),
+      returnMethod: z.string().min(1).optional(),
+      isActive: z.boolean().optional(),
+    })
+    // Same numeric bound as create: if a non-empty annualReturn is supplied
+    // on PATCH, it must be a decimal in [0, 1]. (Activation invariant —
+    // active row must have non-empty annualReturn — is enforced inline in
+    // the PATCH handler against the post-update view.)
+    .superRefine((val, ctx) => {
+      if (
+        Object.prototype.hasOwnProperty.call(val, "annualReturn") &&
+        val.annualReturn !== null &&
+        val.annualReturn !== undefined &&
+        val.annualReturn !== "" &&
+        !isValidAnnualReturn(val.annualReturn)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["annualReturn"],
+          message: "annualReturn must be a decimal in [0, 1] (e.g. 0.11 for 11% p.a.)",
+        });
+      }
+    });
+  const adminCreateReviewNoteSchema = z.object({
+    entityType: z.enum(["investment_instruction"]),
+    entityId: z.string().min(1),
+    note: z.string().min(1).max(4000),
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/products — full product catalogue (incl. inactive)
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/products",
+    adminRoute(async () => {
+      const rows = await db
+        .select()
+        .from(investmentProducts)
+        .orderBy(asc(investmentProducts.name));
+      return rows;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // POST /api/admin/products — create a new product
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/admin/products",
+    adminRoute(async (req, auth) => {
+      const parsed = adminCreateProductSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error("Invalid payload: " + parsed.error.issues.map((i) => i.message).join("; ")),
+          { status: 400 },
+        );
+      }
+      const data = parsed.data;
+      const created = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(investmentProducts)
+          .values(data as any)
+          .returning();
+        await auditTx(
+          tx,
+          auth.userId,
+          "admin_product_created",
+          "investment_product",
+          String(row.id),
+          { name: row.name, category: row.category, isActive: row.isActive },
+          req.ip || null,
+        );
+        return row;
+      });
+      return created;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // PATCH /api/admin/products/:id — partial update / isActive toggle
+  // -------------------------------------------------------------------------
+  app.patch(
+    "/api/admin/products/:id",
+    adminRoute(async (req, auth) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid product id"), { status: 400 });
+      }
+      const parsed = adminUpdateProductSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error("Invalid payload: " + parsed.error.issues.map((i) => i.message).join("; ")),
+          { status: 400 },
+        );
+      }
+      const updates = parsed.data;
+      if (Object.keys(updates).length === 0) {
+        throw Object.assign(new Error("No fields to update"), { status: 400 });
+      }
+
+      const [existing] = await db
+        .select()
+        .from(investmentProducts)
+        .where(eq(investmentProducts.id, id))
+        .limit(1);
+      if (!existing) {
+        throw Object.assign(new Error("Product not found"), { status: 404 });
+      }
+
+      // Mirror the create-time invariant: an active product must have an
+      // annualReturn, else portfolio valuation degrades to "unknown".
+      // We compute the post-update view and reject the PATCH if it would
+      // leave the row {isActive: true, annualReturn: null/empty}.
+      const willBeActive =
+        updates.isActive === undefined ? existing.isActive : updates.isActive;
+      const futureAnnualReturn =
+        Object.prototype.hasOwnProperty.call(updates, "annualReturn")
+          ? updates.annualReturn
+          : existing.annualReturn;
+      const futureHasReturn =
+        futureAnnualReturn !== null &&
+        futureAnnualReturn !== undefined &&
+        futureAnnualReturn !== "";
+      if (willBeActive && !futureHasReturn) {
+        throw Object.assign(
+          new Error(
+            "Cannot activate a product without an annualReturn — set annualReturn first or keep the product inactive.",
+          ),
+          { status: 400 },
+        );
+      }
+
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(investmentProducts)
+          .set(updates as any)
+          .where(eq(investmentProducts.id, id))
+          .returning();
+        await auditTx(
+          tx,
+          auth.userId,
+          "admin_product_updated",
+          "investment_product",
+          String(id),
+          {
+            updatedFields: Object.keys(updates),
+            previousIsActive: existing.isActive,
+            newIsActive: row.isActive,
+          },
+          req.ip || null,
+        );
+        return row;
+      });
+      return updated;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/instructions — read-only review list (paginated, filterable)
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/instructions",
+    adminRoute(async (req) => {
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+
+      const where = status ? eq(investmentInstructions.status, status) : undefined;
+
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select({
+            id: investmentInstructions.id,
+            adviserUserId: investmentInstructions.adviserUserId,
+            clientUserId: investmentInstructions.clientUserId,
+            productId: investmentInstructions.productId,
+            action: investmentInstructions.action,
+            amount: investmentInstructions.amount,
+            status: investmentInstructions.status,
+            adviceRecordId: investmentInstructions.adviceRecordId,
+            feeConsentId: investmentInstructions.feeConsentId,
+            executionAuthorisationId: investmentInstructions.executionAuthorisationId,
+            notes: investmentInstructions.notes,
+            rejectionReason: investmentInstructions.rejectionReason,
+            consentedAt: investmentInstructions.consentedAt,
+            rejectedAt: investmentInstructions.rejectedAt,
+            createdAt: investmentInstructions.createdAt,
+            updatedAt: investmentInstructions.updatedAt,
+            adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${investmentInstructions.adviserUserId})`,
+            adviserEmail: sql<string>`(SELECT email FROM ${users} u WHERE u.id = ${investmentInstructions.adviserUserId})`,
+            clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${investmentInstructions.clientUserId})`,
+            clientEmail: sql<string>`(SELECT email FROM ${users} u WHERE u.id = ${investmentInstructions.clientUserId})`,
+            productName: sql<string>`(SELECT name FROM ${investmentProducts} p WHERE p.id = ${investmentInstructions.productId})`,
+          })
+          .from(investmentInstructions)
+          .where(where as any)
+          .orderBy(desc(investmentInstructions.createdAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(investmentInstructions)
+          .where(where as any),
+      ]);
+
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/instructions/:id/review-notes — list admin notes for an instruction
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/instructions/:id/review-notes",
+    adminRoute(async (req) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid instruction id"), { status: 400 });
+      }
+      const rows = await db
+        .select({
+          id: adminReviewNotes.id,
+          adminUserId: adminReviewNotes.adminUserId,
+          entityType: adminReviewNotes.entityType,
+          entityId: adminReviewNotes.entityId,
+          note: adminReviewNotes.note,
+          createdAt: adminReviewNotes.createdAt,
+          adminUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${adminReviewNotes.adminUserId})`,
+        })
+        .from(adminReviewNotes)
+        .where(
+          and(
+            eq(adminReviewNotes.entityType, "investment_instruction"),
+            eq(adminReviewNotes.entityId, String(id)),
+          ),
+        )
+        .orderBy(desc(adminReviewNotes.createdAt))
+        .limit(200);
+      return rows;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // POST /api/admin/review-notes — attach a note to an entity
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/admin/review-notes",
+    adminRoute(async (req, auth) => {
+      const parsed = adminCreateReviewNoteSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error("Invalid payload: " + parsed.error.issues.map((i) => i.message).join("; ")),
+          { status: 400 },
+        );
+      }
+      const { entityType, entityId, note } = parsed.data;
+
+      // Validate the referenced entity exists so admins don't pin notes to
+      // non-existent rows. Today only investment_instruction is supported.
+      if (entityType === "investment_instruction") {
+        const idNum = Number(entityId);
+        if (!Number.isInteger(idNum) || idNum <= 0) {
+          throw Object.assign(new Error("Invalid entityId for investment_instruction"), { status: 400 });
+        }
+        const [hit] = await db
+          .select({ id: investmentInstructions.id })
+          .from(investmentInstructions)
+          .where(eq(investmentInstructions.id, idNum))
+          .limit(1);
+        if (!hit) {
+          throw Object.assign(new Error("Instruction not found"), { status: 404 });
+        }
+      }
+
+      const created = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(adminReviewNotes)
+          .values({
+            adminUserId: auth.userId,
+            entityType,
+            entityId,
+            note,
+          })
+          .returning();
+        await auditTx(
+          tx,
+          auth.userId,
+          "admin_review_note_added",
+          entityType,
+          entityId,
+          { noteLength: note.length },
+          req.ip || null,
+        );
+        return row;
+      });
+
+      return created;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/reports — list all report requests (paginated, filterable)
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/reports",
+    adminRoute(async (req) => {
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const reportType = typeof req.query.reportType === "string" ? req.query.reportType.trim() : "";
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+
+      const conditions = [] as any[];
+      if (status) conditions.push(eq(reportRequests.status, status));
+      if (reportType) conditions.push(eq(reportRequests.reportType, reportType));
+      const where = conditions.length ? and(...conditions) : undefined;
+
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select({
+            id: reportRequests.id,
+            adviserUserId: reportRequests.adviserUserId,
+            clientUserId: reportRequests.clientUserId,
+            reportType: reportRequests.reportType,
+            format: reportRequests.format,
+            status: reportRequests.status,
+            notes: reportRequests.notes,
+            downloadUrl: reportRequests.downloadUrl,
+            failureReason: reportRequests.failureReason,
+            requestedAt: reportRequests.requestedAt,
+            generatedAt: reportRequests.generatedAt,
+            expiresAt: reportRequests.expiresAt,
+            adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${reportRequests.adviserUserId})`,
+            clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${reportRequests.clientUserId})`,
+            clientEmail: sql<string>`(SELECT email FROM ${users} u WHERE u.id = ${reportRequests.clientUserId})`,
+          })
+          .from(reportRequests)
+          .where(where as any)
+          .orderBy(desc(reportRequests.requestedAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(reportRequests)
+          .where(where as any),
+      ]);
+
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/compliance/overview — single-call dashboard for the
+  // compliance page. Aggregates KYC mix, fee-consent renewal status, advice
+  // gate counts, instruction status mix, and the most recent compliance-shaped
+  // audit events.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/compliance/overview",
+    adminRoute(async () => {
+      const [
+        kycCounts,
+        feeConsentCounts,
+        instructionCounts,
+        adviceRecordsCount,
+        adviceAcksCount,
+        recentComplianceAudit,
+      ] = await Promise.all([
+        db
+          .select({ status: users.kycStatus, count: sql<number>`count(*)::int` })
+          .from(users)
+          .where(eq(users.role, "client"))
+          .groupBy(users.kycStatus),
+        db
+          .select({ status: feeConsents.renewalStatus, count: sql<number>`count(*)::int` })
+          .from(feeConsents)
+          .groupBy(feeConsents.renewalStatus),
+        db
+          .select({ status: investmentInstructions.status, count: sql<number>`count(*)::int` })
+          .from(investmentInstructions)
+          .groupBy(investmentInstructions.status),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(adviceRecords),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(adviceAcknowledgements),
+        db
+          .select({
+            id: auditLogs.id,
+            userId: auditLogs.userId,
+            action: auditLogs.action,
+            entityType: auditLogs.entityType,
+            entityId: auditLogs.entityId,
+            createdAt: auditLogs.createdAt,
+          })
+          .from(auditLogs)
+          .where(
+            sql`${auditLogs.action} ILIKE 'admin_%'
+              OR ${auditLogs.action} ILIKE '%fee_consent%'
+              OR ${auditLogs.action} ILIKE '%advice_%'
+              OR ${auditLogs.action} ILIKE '%execution_%'
+              OR ${auditLogs.action} ILIKE '%instruction%'`,
+          )
+          .orderBy(desc(auditLogs.createdAt))
+          .limit(25),
+      ]);
+
+      const kyc: Record<string, number> = {};
+      for (const r of kycCounts) {
+        kyc[r.status ?? "unknown"] = Number(r.count);
+      }
+      const feeConsent: Record<string, number> = {};
+      for (const r of feeConsentCounts) {
+        feeConsent[r.status] = Number(r.count);
+      }
+      const instructions: Record<string, number> = {};
+      for (const r of instructionCounts) {
+        instructions[r.status] = Number(r.count);
+      }
+
+      // Soon-to-expire fee consents (within 30 days, still active)
+      const expiringFeeConsents = await db
+        .select({
+          id: feeConsents.id,
+          clientId: feeConsents.clientId,
+          adviserId: feeConsents.adviserId,
+          feeType: feeConsents.feeType,
+          consentExpiryDate: feeConsents.consentExpiryDate,
+          renewalStatus: feeConsents.renewalStatus,
+          clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.clientId})`,
+          adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.adviserId})`,
+        })
+        .from(feeConsents)
+        .where(
+          and(
+            sql`${feeConsents.consentExpiryDate} <= now() + interval '30 days'`,
+            sql`${feeConsents.renewalStatus} IN ('active', 'renewal_due')`,
+          ),
+        )
+        .orderBy(asc(feeConsents.consentExpiryDate))
+        .limit(50);
+
+      return {
+        kyc,
+        feeConsent,
+        instructions,
+        adviceRecordsTotal: Number(adviceRecordsCount[0]?.count ?? 0),
+        adviceAcknowledgementsTotal: Number(adviceAcksCount[0]?.count ?? 0),
+        expiringFeeConsents,
+        recentComplianceAudit,
       };
     }),
   );

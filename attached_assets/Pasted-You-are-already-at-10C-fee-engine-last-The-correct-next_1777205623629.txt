@@ -1,0 +1,136 @@
+You are already at 10C fee engine last. The correct next build is not full deduction — it is:
+
+Session 23A — 10C Fee Engine Gate A
+Calculation + accrual + admin approval only
+No wallet debit
+No adviser credit
+No real deduction
+DB schema
+
+Add:
+
+adviserFeeRules
+adviserFeeAccruals
+adviserFeeDeductions
+
+Purpose:
+
+fee rule → daily accrual → pending deduction record → admin approval
+
+But deduction remains disabled.
+
+API map
+Adviser view-only
+GET /api/adviser/fee-rules
+GET /api/adviser/fee-accruals
+GET /api/adviser/fee-deductions
+Client view-only
+GET /api/client/fees
+Admin control
+POST  /api/admin/fee-rules
+PATCH /api/admin/fee-rules/:id/pause
+POST  /api/admin/fee-accruals/run
+GET   /api/admin/fee-accruals
+GET   /api/admin/fee-deductions
+POST  /api/admin/fee-deductions/:id/approve
+POST  /api/admin/fee-deductions/:id/deduct
+POST  /api/admin/fee-deductions/:id/reverse
+Critical gate
+
+For now:
+
+POST /api/admin/fee-deductions/:id/deduct
+
+must return:
+
+{
+  "error": "Fee deduction execution is disabled pending reconciliation approval."
+}
+
+No wallet movement.
+
+React pages
+/admin/fees
+
+Tabs:
+
+Fee rules
+Accruals
+Deductions
+Exceptions
+
+Cards:
+
+Active rules
+Accrued this month
+Pending approval
+Exceptions
+/adviser/fees
+
+View-only:
+
+Active consents
+Fee rules
+Accrued estimates
+Pending deductions
+/client/fees
+
+View-only:
+
+Active fee consents
+Accrued fee estimates
+Approved deductions
+Withdraw consent
+Replit prompt
+Build Session 23A — 10C Fee Engine Gate A only.
+
+Purpose:
+Create fee calculation, daily accrual and admin approval infrastructure based on active DBFO fee consents.
+
+Add DB:
+- adviserFeeRules
+- adviserFeeAccruals
+- adviserFeeDeductions
+
+Add APIs:
+Adviser:
+- GET /api/adviser/fee-rules
+- GET /api/adviser/fee-accruals
+- GET /api/adviser/fee-deductions
+
+Client:
+- GET /api/client/fees
+
+Admin:
+- POST /api/admin/fee-rules
+- PATCH /api/admin/fee-rules/:id/pause
+- POST /api/admin/fee-accruals/run
+- GET /api/admin/fee-accruals
+- GET /api/admin/fee-deductions
+- POST /api/admin/fee-deductions/:id/approve
+- POST /api/admin/fee-deductions/:id/deduct
+- POST /api/admin/fee-deductions/:id/reverse
+
+Rules:
+- fee accrual only if fee consent is active
+- fee consent must not be expired
+- fee consent must not be withdrawn
+- adviser must be linked to client
+- daily accrual must be unique per feeRuleId + accrualDate
+- adviser is view-only
+- client is view-only except existing consent withdraw
+- all writes audit logged
+- admin approval does not move money
+- deduction endpoint must remain disabled/stubbed
+- no wallet debit
+- no adviser wallet credit
+- no real money movement
+- no investment execution
+
+Add UI:
+- /admin/fees
+- /adviser/fees updates
+- /client/fees
+
+Critical:
+Gate A only. Do not build real deduction.

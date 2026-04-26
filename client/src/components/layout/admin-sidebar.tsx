@@ -8,6 +8,10 @@ import {
   Link2,
   ScrollText,
   Shield,
+  Package,
+  ListChecks,
+  FileText,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,6 +27,10 @@ const NAV_ITEMS = [
   { to: "/admin/registration-invites", label: "Registration Invites", icon: Mail },
   { to: "/admin/advisers", label: "Advisers", icon: Users },
   { to: "/admin/adviser-clients", label: "Adviser-Client Links", icon: Link2 },
+  { to: "/admin/products", label: "Investment Products", icon: Package },
+  { to: "/admin/instructions", label: "Instructions", icon: ListChecks },
+  { to: "/admin/reports", label: "Report Requests", icon: FileText },
+  { to: "/admin/compliance", label: "Compliance", icon: ShieldCheck },
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
 ] as const;
 

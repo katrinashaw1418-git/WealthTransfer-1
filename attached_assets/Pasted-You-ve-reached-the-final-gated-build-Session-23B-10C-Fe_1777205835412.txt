@@ -1,0 +1,252 @@
+You’ve reached the final gated build:
+
+Session 23B — 10C Fee Engine Gate B
+Real deduction + reconciliation controls
+
+But only start this after Gate A passes.
+
+Gate B purpose
+Approved fee deduction
+→ re-check live consent
+→ re-check wallet balance
+→ create audit-grade journal
+→ mark deduction deducted
+→ reconciliation-ready record
+Critical rule
+No automatic deduction.
+Admin approval required every time.
+DB schema additions
+
+If not already built, add:
+
+export const feeDeductionJournals = pgTable("fee_deduction_journals", {
+  id: serial("id").primaryKey(),
+
+  deductionId: integer("deduction_id").references(() => adviserFeeDeductions.id).notNull(),
+
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+
+  debitWalletId: integer("debit_wallet_id").references(() => wallets.id),
+  platformCreditWalletId: integer("platform_credit_wallet_id").references(() => wallets.id),
+  adviserCreditWalletId: integer("adviser_credit_wallet_id").references(() => wallets.id),
+
+  grossAmount: decimal("gross_amount", { precision: 15, scale: 2 }).notNull(),
+  adviserAmount: decimal("adviser_amount", { precision: 15, scale: 2 }).notNull(),
+  platformAmount: decimal("platform_amount", { precision: 15, scale: 2 }).notNull(),
+
+  currency: text("currency").notNull().default("AUD"),
+
+  status: text("status").notNull().default("posted"),
+  // posted | reversed | failed
+
+  postedBy: integer("posted_by").references(() => users.id),
+  postedAt: timestamp("posted_at").defaultNow(),
+
+  reversalReason: text("reversal_reason"),
+  reversedBy: integer("reversed_by").references(() => users.id),
+  reversedAt: timestamp("reversed_at"),
+});
+API endpoints
+POST /api/admin/fee-deductions/:id/deduct
+POST /api/admin/fee-deductions/:id/reverse
+GET  /api/admin/fee-deduction-journals
+GET  /api/admin/fee-reconciliation
+Deduct endpoint rules
+
+Before any deduction:
+
+1. admin/compliance_admin only
+2. deduction status must be approved
+3. linked fee consent must be active
+4. consent must not be expired
+5. consent must not be withdrawn
+6. client wallet must have sufficient available balance
+7. deduction must not already have a posted journal
+8. all wallet changes must be atomic transaction
+9. all writes must audit log
+Deduct API skeleton
+app.post("/api/admin/fee-deductions/:id/deduct", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (!["admin", "compliance_admin"].includes(role)) {
+    return res.status(403).json({ error: "Admin access required" });
+  }
+
+  const deductionId = Number(req.params.id);
+
+  return await db.transaction(async (tx) => {
+    const [deduction] = await tx
+      .select()
+      .from(adviserFeeDeductions)
+      .where(eq(adviserFeeDeductions.id, deductionId));
+
+    if (!deduction) throw new Error("Deduction not found");
+
+    if (deduction.status !== "approved") {
+      return res.status(400).json({ error: "Deduction must be approved before deduction" });
+    }
+
+    const [consent] = await tx
+      .select()
+      .from(feeConsents)
+      .where(eq(feeConsents.id, deduction.feeConsentId));
+
+    if (!consent || consent.renewalStatus !== "active") {
+      return res.status(400).json({ error: "Active fee consent required" });
+    }
+
+    if (consent.withdrawnAt) {
+      return res.status(400).json({ error: "Fee consent has been withdrawn" });
+    }
+
+    if (new Date() > new Date(consent.consentExpiryDate)) {
+      return res.status(400).json({ error: "Fee consent has expired" });
+    }
+
+    const [existingJournal] = await tx
+      .select()
+      .from(feeDeductionJournals)
+      .where(eq(feeDeductionJournals.deductionId, deductionId));
+
+    if (existingJournal) {
+      return res.status(409).json({ error: "Deduction already posted" });
+    }
+
+    const [clientWallet] = await tx
+      .select()
+      .from(wallets)
+      .where(and(
+        eq(wallets.userId, deduction.clientUserId),
+        eq(wallets.currency, deduction.currency)
+      ));
+
+    if (!clientWallet) {
+      return res.status(400).json({ error: "Client wallet not found" });
+    }
+
+    if (Number(clientWallet.availableBalance) < Number(deduction.grossAmount)) {
+      return res.status(400).json({ error: "Insufficient available balance" });
+    }
+
+    // Debit client wallet
+    await tx.update(wallets)
+      .set({
+        balance: sql`${wallets.balance} - ${deduction.grossAmount}`,
+        availableBalance: sql`${wallets.availableBalance} - ${deduction.grossAmount}`,
+      })
+      .where(eq(wallets.id, clientWallet.id));
+
+    // For first version, journal split only.
+    // Actual adviser/platform wallet credits can remain reconciliation-only if platform wallets are not finalised.
+
+    const [journal] = await tx.insert(feeDeductionJournals).values({
+      deductionId,
+      clientUserId: deduction.clientUserId,
+      adviserUserId: deduction.adviserUserId,
+      debitWalletId: clientWallet.id,
+      grossAmount: deduction.grossAmount,
+      adviserAmount: deduction.adviserAmount,
+      platformAmount: deduction.platformAmount,
+      currency: deduction.currency,
+      status: "posted",
+      postedBy: userId,
+    }).returning();
+
+    const [updated] = await tx.update(adviserFeeDeductions)
+      .set({
+        status: "deducted",
+        deductedAt: new Date(),
+      })
+      .where(eq(adviserFeeDeductions.id, deductionId))
+      .returning();
+
+    await writeAuditLog(
+      userId,
+      "fee_deduction_posted",
+      "adviser_fee_deductions",
+      String(deductionId),
+      { deductionId, journalId: journal.id, grossAmount: deduction.grossAmount },
+      req.ip || null
+    );
+
+    return res.json({ deduction: updated, journal });
+  });
+});
+Reversal endpoint
+POST /api/admin/fee-deductions/:id/reverse
+
+Rules:
+
+admin/compliance_admin only
+deduction must be deducted
+journal must be posted
+credit back client wallet
+mark journal reversed
+mark deduction reversed
+audit log
+React UI
+
+Patch:
+
+/admin/fees
+
+Add Gate B controls:
+
+Deductions tab
+- status
+- client
+- adviser
+- gross amount
+- platform split
+- adviser split
+- approve
+- deduct
+- reverse
+
+Button states:
+
+Approve → enabled when pending_admin_approval
+Deduct → enabled only when approved
+Reverse → enabled only when deducted
+
+Danger modal before deduction:
+
+You are about to post a real fee deduction.
+This will debit the client wallet.
+Confirm active fee consent, balance and reconciliation controls before proceeding.
+Replit prompt
+Build Session 23B — 10C Fee Engine Gate B.
+
+Only proceed if Gate A is already verified.
+
+Add:
+- feeDeductionJournals table
+- POST /api/admin/fee-deductions/:id/deduct
+- POST /api/admin/fee-deductions/:id/reverse
+- GET /api/admin/fee-deduction-journals
+- GET /api/admin/fee-reconciliation
+
+Rules:
+- admin/compliance_admin only
+- deduction must be approved before deduct
+- re-check active fee consent immediately before deduction
+- block if consent expired or withdrawn
+- block if insufficient client available balance
+- prevent duplicate posted journal
+- wallet update and journal insert must be atomic
+- all writes audit logged
+- reversal must restore client wallet and mark records reversed
+- no automatic deductions
+- no adviser-triggered deductions
+- no investment execution
+
+UI:
+- update /admin/fees deductions tab
+- show Approve / Deduct / Reverse buttons by status
+- add danger confirmation modal before real deduction
+- show reconciliation/journal view
+
+Important:
+This is real-money functionality. Keep it admin-only and audit-grade.

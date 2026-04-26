@@ -1322,3 +1322,34 @@ export const insertReportRequestSchema = createInsertSchema(reportRequests).omit
 });
 export type ReportRequest = typeof reportRequests.$inferSelect;
 export type InsertReportRequest = z.infer<typeof insertReportRequestSchema>;
+
+// ===========================================================================
+// Session 19 — admin_review_notes
+// ---------------------------------------------------------------------------
+// Free-text annotations admins can attach to any reviewable entity (currently
+// investment_instruction; future: adviser, application). Read-only artefact;
+// admins do not edit/delete prior notes — every change is a new row, mirroring
+// the audit-log pattern. The audit log itself separately records the
+// admin_review_note_added action.
+// ===========================================================================
+export const adminReviewNotes = pgTable("admin_review_notes", {
+  id: serial("id").primaryKey(),
+  adminUserId: integer("admin_user_id").references(() => users.id).notNull(),
+  // entityType is open-string today (no enum) to keep the table reusable for
+  // adviser/application notes without a schema change. Validated at the API.
+  entityType: text("entity_type").notNull(),
+  // String to match audit_logs.entityId (which can be email-typed for invites).
+  entityId: text("entity_id").notNull(),
+  note: text("note").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  entityIdx: index("admin_review_notes_entity_idx").on(table.entityType, table.entityId),
+  createdIdx: index("admin_review_notes_created_idx").on(table.createdAt),
+}));
+
+export const insertAdminReviewNoteSchema = createInsertSchema(adminReviewNotes).omit({
+  id: true,
+  createdAt: true,
+});
+export type AdminReviewNote = typeof adminReviewNotes.$inferSelect;
+export type InsertAdminReviewNote = z.infer<typeof insertAdminReviewNoteSchema>;
