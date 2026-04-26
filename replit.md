@@ -79,6 +79,47 @@ Pass with one P1 noted (chokepoint pattern not literal for enumeration queries) 
 
 SOA generation engine, commission tier rules, fact-find automation flow tied to retail accounts, retail-execution flow, PDF generator for `report_requests` (status is wired through but generator job is not yet implemented).
 
+## Recent Changes (April 2026) — Session 9.1 (Adviser Task Automation Cron)
+
+Wires up the three deterministic task triggers from the original adviser-layer brief that were left as a manual-only flow at the end of Session 9. Advisers no longer have to scan their client list by hand to find KYC chase-ups and fee-consent renewals.
+
+### What was built
+
+- **`server/services/adviser-task-automation.ts`** — single-file module with `runAdviserTaskAutomation()`. Scans every `adviser_clients` row where `is_active = true` and creates open `adviser_tasks` rows for three triggers:
+  1. **`kyc_followup`** — when client `kyc_status !== 'verified'`. Title `"Follow up KYC for {clientName}"`, priority `high`, due in 7 days.
+  2. **`fee_consent_renewal`** — when an active `fee_consents` row's `consent_expiry_date` falls in the next 30 days. One task per (adviser, client) — multiple expiring consents collapse into a single follow-up. Priority `urgent` if ≤7 days, else `high`.
+  3. **`portfolio_review`** — when no `portfolio_review` task (in any status) was created in the last 90 days for that (adviser, client). Title `"Quarterly portfolio review for {clientName}"`, priority `normal`, due in 14 days.
+
+- **Cron wiring** in `server/index.ts` — daily `setInterval`, staggered 120s after start so the three crons (wallet recon, ledger recon, task automation) don't overlap on first boot. Single-line summary log distinguishes true duplicate suppression from quarterly cadence suppression:
+  ```
+  [adviser-task-automation] completed: 1 link(s) scanned, 0 kyc_followup, 0 fee_consent_renewal, 0 portfolio_review created, 1 skipped (idempotency=0, cadence=1)
+  ```
+
+### Hard-rule invariants (unchanged from Session 9)
+
+- **Writes ONLY to `adviser_tasks`.** No mutation of `users`, `wallets`, `transactions`, `ledger_entries`, `kyc_status`, `advice_records`, `fee_consents`, or `exec_authorisations`. Verified by reading the module — the only `db.insert`/`db.update` call is into `adviserTasks`.
+- **Idempotent.** Each trigger checks for an existing OPEN/IN_PROGRESS task of the same `(adviser, client, taskType)` before inserting. The `portfolio_review` trigger additionally suppresses creation if any review task (any status) was created in the last 90 days, to prevent same-day re-triggering after an adviser completes one.
+- **Operates only on linked clients.** The driver query is `SELECT … FROM adviser_clients INNER JOIN users WHERE is_active = true`. Unlinked clients are invisible to the cron.
+- **Per-link error isolation.** A failure on one (adviser, client) is caught and logged; the rest of the batch continues.
+
+### Verification
+
+| Scenario | Result |
+|---|---|
+| Boot cron at 7:33 AM, all conditions clean (KYC verified, no expiring consents, recent review exists) | `1 link scanned, 0 created, 1 skipped` ✅ |
+| Flip wiseinvestor `kyc_status` to `pending`, run cron | `kycFollowupsCreated: 1`, task row inserted with title "Follow up KYC for Wise User", priority `high`, status `open` ✅ |
+| Re-run cron with the same task still open | `kycFollowupsCreated: 0`, `skipped: 2` (kyc + portfolio_review both hit idempotency) ✅ |
+
+### Architect review
+
+Pass on security, hard-rule invariants, schema correctness, and per-link error isolation. One open recommendation flagged but not actioned this session: the idempotency guard is check-then-insert against the live DB without a partial unique index or distributed lock. Race-safe under the current SINGLE Express process topology, but would need a partial unique index `(adviserUserId, clientUserId, taskType) WHERE status IN ('open','in_progress')` plus `ON CONFLICT DO NOTHING`, or a leader-election lock, before the cron can safely run on multi-replica deployments. The assumption is documented in the module header so the next reviewer doesn't have to re-derive it.
+
+### Still deferred
+
+PDF generator for `report_requests` — needs a dependency choice (pdfkit / puppeteer / HTML-to-print), security review of the file generation surface, and a fresh session brief from the external reviewer before implementation.
+
+Multi-replica hardening of the task automation cron — partial unique index + distributed lock — deferred until the deployment topology actually changes.
+
 ## Recent Changes (April 2026) — Session 8 (Reconciliation + Platform Account Hardening)
 
 This session closes the two operational follow-ups left open at the end of Session 7. Combined with Track B's ledger and Phase 2.4's execution gate, the system now has the **minimum viable financial primitives**: ledger = truth, reconciliation = verification, execution gate = control.

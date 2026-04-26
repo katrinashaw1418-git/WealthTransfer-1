@@ -106,6 +106,46 @@ app.use((req, res, next) => {
     setInterval(runLedgerReconciliationCron, 24 * 60 * 60 * 1000);
   }, 60 * 1000);
 
+  // ---------------------------------------------------------------------------
+  // SESSION 9.1 — Daily adviser-task automation
+  // ---------------------------------------------------------------------------
+  // Scans every active adviser-client link and creates open adviser_tasks
+  // rows for three deterministic triggers:
+  //   1. kyc_followup            — client.kycStatus !== 'verified'
+  //   2. fee_consent_renewal     — active fee consent expiring within 30 days
+  //   3. portfolio_review        — no portfolio_review created in last 90 days
+  //
+  // The cron is fully idempotent: re-running the same day will create zero
+  // new tasks. Writes ONLY to adviser_tasks — no client-owned state mutated.
+  // Staggered 120s after start so the three crons (wallet recon, ledger
+  // recon, task automation) do not overlap on first boot.
+  // ---------------------------------------------------------------------------
+  const { runAdviserTaskAutomation } = await import("./services/adviser-task-automation");
+
+  async function runAdviserTaskAutomationCron() {
+    try {
+      const s = await runAdviserTaskAutomation();
+      // Aggregate skipped = open-task duplicates + 90-day cadence suppression.
+      // We log both components so reviewers can tell idempotency hits from
+      // quarterly-review cadence skips at a glance.
+      const skipped = s.idempotencySkips + s.cadenceSkips;
+      log(
+        `[adviser-task-automation] completed: ${s.linksScanned} link(s) scanned, ` +
+          `${s.kycFollowupsCreated} kyc_followup, ` +
+          `${s.feeConsentRenewalsCreated} fee_consent_renewal, ` +
+          `${s.portfolioReviewsCreated} portfolio_review created, ` +
+          `${skipped} skipped (idempotency=${s.idempotencySkips}, cadence=${s.cadenceSkips})`
+      );
+    } catch (e) {
+      console.error("[adviser-task-automation] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runAdviserTaskAutomationCron();
+    setInterval(runAdviserTaskAutomationCron, 24 * 60 * 60 * 1000);
+  }, 120 * 1000);
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.

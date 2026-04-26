@@ -1,0 +1,307 @@
+Final architecture design
+AMAX Existing Platform
+├─ Client login / registration
+├─ KYC / onboarding
+├─ Wallets / FX / crypto
+├─ Portfolio
+├─ Transactions
+├─ Compliance centre
+└─ Locked AI advisory
+
+ADD Adviser Layer
+├─ Adviser role
+├─ Adviser-client linking
+├─ Adviser dashboard
+├─ Linked client list
+├─ Client detail / portfolio view
+├─ Fee consent tracking
+├─ Tasks
+└─ Report requests / client portfolio PDF
+
+Role model:
+
+client
+adviser
+admin
+compliance_admin
+
+Permission rule:
+
+Adviser can only access clients linked through adviserClients.
+Build order
+1. Auth foundation patch
+2. Adviser schema patch
+3. Adviser API patch
+4. Adviser UI routes/pages
+5. Task automation — only 3 supported triggers
+6. Report request / PDF layer
+7. Later: SOA / fact-find / commission only after AFSL partner confirms operating model
+Patch 1 — Auth foundation
+shared/schema.ts
+
+Change:
+
+password: text("password").notNull(),
+
+to:
+
+password: text("password"),
+
+Add inside users:
+
+googleId: text("google_id").unique(),
+appleId: text("apple_id").unique(),
+role: text("role").notNull().default("client"),
+server/index.ts
+
+Add startup migrations:
+
+await migrationDb.execute(sqlTag`ALTER TABLE users ALTER COLUMN password DROP NOT NULL`);
+await migrationDb.execute(sqlTag`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id text UNIQUE`);
+await migrationDb.execute(sqlTag`ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_id text UNIQUE`);
+await migrationDb.execute(sqlTag`ALTER TABLE users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'client'`);
+Patch 2 — Adviser schema
+
+Add to shared/schema.ts:
+
+export const adviserClients = pgTable("adviser_clients", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  assignedAt: timestamp("assigned_at").defaultNow(),
+  assignedBy: integer("assigned_by").references(() => users.id),
+}, (table) => ({
+  adviserClientUniq: uniqueIndex("adviser_clients_uniq")
+    .on(table.adviserUserId, table.clientUserId),
+}));
+
+export const feeConsents = pgTable("fee_consents", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  feeType: text("fee_type").notNull(),
+  amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
+  currency: text("currency").notNull().default("AUD"),
+  referenceDay: timestamp("reference_day").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  status: text("status").notNull().default("active"),
+  consentSignedAt: timestamp("consent_signed_at"),
+  withdrawnAt: timestamp("withdrawn_at"),
+  services: text("services"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const adviserTasks = pgTable("adviser_tasks", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id),
+  taskType: text("task_type").notNull(),
+  status: text("status").notNull().default("open"),
+  priority: text("priority").notNull().default("medium"),
+  title: text("title").notNull(),
+  description: text("description"),
+  dueAt: timestamp("due_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const reportRequests = pgTable("report_requests", {
+  id: serial("id").primaryKey(),
+  requestedBy: integer("requested_by").references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id),
+  clientUserId: integer("client_user_id").references(() => users.id),
+  reportType: text("report_type").notNull(),
+  status: text("status").notNull().default("pending"),
+  parameters: jsonb("parameters").notNull().default({}),
+  documentUrl: text("document_url"),
+  generatedAt: timestamp("generated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+Important: use decimal, not numeric, because your schema imports decimal.
+
+Patch 3 — Adviser APIs
+
+Add:
+
+GET /api/adviser/dashboard
+GET /api/adviser/clients
+GET /api/adviser/clients/:id
+GET /api/adviser/tasks
+PATCH /api/adviser/tasks/:id
+GET /api/adviser/fee-consents
+POST /api/adviser/fee-consents
+POST /api/adviser/reports/client-portfolio
+
+Helper logic:
+
+async function getRole(userId: number): Promise<string> {
+  const [user] = await db
+    .select({ role: users.role })
+    .from(users)
+    .where(eq(users.id, userId));
+
+  return user?.role ?? "client";
+}
+
+async function adviserCanAccessClient(adviserUserId: number, clientUserId: number) {
+  const [link] = await db
+    .select()
+    .from(adviserClients)
+    .where(and(
+      eq(adviserClients.adviserUserId, adviserUserId),
+      eq(adviserClients.clientUserId, clientUserId),
+    ));
+
+  return !!link;
+}
+Patch 4 — Adviser UI
+
+Add pages:
+
+client/src/pages/adviser-dashboard.tsx
+client/src/pages/adviser-clients.tsx
+client/src/pages/adviser-client-detail.tsx
+client/src/pages/adviser-tasks.tsx
+client/src/pages/adviser-reports.tsx
+
+Add routes:
+
+<Route path="/adviser/dashboard" component={AdviserDashboard} />
+<Route path="/adviser/clients" component={AdviserClients} />
+<Route path="/adviser/clients/:id" component={AdviserClientDetail} />
+<Route path="/adviser/tasks" component={AdviserTasks} />
+<Route path="/adviser/reports" component={AdviserReports} />
+
+Dashboard cards:
+
+Total linked clients
+KYC pending
+Fee consents expiring
+Open tasks
+Reports generated
+Patch 5 — Task automation
+
+Only build these triggers now:
+
+KYC pending
+Fee consent expiring within 30 days
+Quarterly portfolio review
+
+Do not build:
+
+SOA review
+fact-find missing
+risk-profile missing
+execution blocked
+commission tier task
+
+Those require tables and workflows that do not exist yet.
+
+Patch 6 — Report layer
+
+First report only:
+
+Client Portfolio Report
+
+It should use:
+
+wallets
+transactions
+portfolioSnapshots
+
+Not ledger_entries, because your uploaded AMAX-V2 zip does not currently have ledger_entries or accounts.
+
+Report rule:
+
+Do not show performance unless hasSufficientHistory = true.
+Otherwise show “Insufficient history”.
+Critical cleanup still required
+1. Old wallet files
+
+These still exist in the uploaded zip:
+
+wallets.tsx
+wallets-new-simple.tsx
+versions/wallets-v4.tsx
+versions/wallets-v5*.tsx
+
+Delete if not routed/imported.
+
+2. Portfolio integrity
+
+Your code still contains:
+
+historical_estimate
+backfillPortfolioHistory
+projection logic
+
+This conflicts with the stricter “real snapshots only” principle. Either remove historical estimates entirely or clearly label them as estimates everywhere.
+
+3. Do not build commission engine yet
+
+Because you are partnering with a retail AFSL company, the first version should track:
+
+fee consent
+client assignment
+tasks
+reports
+
+Not adviser commission splits.
+
+Final Replit instruction
+Keep the existing AMAX app. Do not rebuild or replace it.
+
+Add a separate adviser layer for financial planners from a partnered retail AFSL wealth-management company.
+
+First apply auth foundation:
+- make users.password nullable
+- add users.googleId
+- add users.appleId
+- add users.role
+
+Then add adviser foundation:
+- adviserClients
+- feeConsents
+- adviserTasks
+- reportRequests
+
+Add adviser routes/pages:
+- /adviser/dashboard
+- /adviser/clients
+- /adviser/clients/:id
+- /adviser/tasks
+- /adviser/reports
+
+Rules:
+- Adviser can only access linked clients through adviserClients
+- Adviser cannot move money
+- Adviser cannot edit wallet balances
+- Adviser cannot bypass KYC
+- Adviser cannot execute advice
+- Adviser cannot access unlinked clients
+
+Task automation only:
+- KYC pending
+- fee consent expiring
+- quarterly portfolio review
+
+Reporting:
+- build client portfolio report using existing wallets, transactions, and portfolioSnapshots
+- do not use ledger_entries because it does not exist in current AMAX-V2
+- do not show performance unless real sufficient history exists
+
+Do not build yet:
+- full SOA engine
+- fact-find automation
+- execution-authorisation engine
+- commission tier engine
+- adviser revenue split engine
+
+Final verdict:
+
+Architecture: correct
+Strategy: correct
+Current codebase: not adviser-ready yet
+Next step: auth foundation + adviser layer foundation only
