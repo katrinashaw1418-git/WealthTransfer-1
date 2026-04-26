@@ -1573,6 +1573,51 @@ export function registerAdminRoutes(app: Express): void {
     }),
   );
 
+  // -------------------------------------------------------------------------
+  // TASK #57 — Operator alert dashboard summary
+  // -------------------------------------------------------------------------
+  // Tiny aggregate endpoint feeding the admin dashboard tile. Returns counts
+  // bucketed by severity for two rolling windows (last 24h and last 7d) so
+  // operators logging in can see at-a-glance whether anything new has fired
+  // without having to open the full audit log page.
+  //
+  // Always returns every severity (info|warning|alert|critical) even when the
+  // count is zero so the UI tile can render a fixed-shape grid instead of
+  // conditionally hiding cells. Generated server-side via a single grouped
+  // query with FILTER aggregates so we don't do two round-trips.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/operator-alerts/summary",
+    adminRoute(async () => {
+      const rows = await db
+        .select({
+          severity: operatorAlerts.severity,
+          last24h: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '24 hours')::int`,
+          last7d: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '7 days')::int`,
+        })
+        .from(operatorAlerts)
+        .where(sql`${operatorAlerts.createdAt} >= now() - interval '7 days'`)
+        .groupBy(operatorAlerts.severity);
+
+      const empty = { info: 0, warning: 0, alert: 0, critical: 0 };
+      const last24h = { ...empty };
+      const last7d = { ...empty };
+      for (const row of rows) {
+        const sev = row.severity as keyof typeof empty;
+        if (sev in empty) {
+          last24h[sev] = Number(row.last24h ?? 0);
+          last7d[sev] = Number(row.last7d ?? 0);
+        }
+      }
+
+      return {
+        last24h,
+        last7d,
+        generatedAt: new Date().toISOString(),
+      };
+    }),
+  );
+
   // =========================================================================
   // SESSION 19 — admin shell expansion
   // -------------------------------------------------------------------------

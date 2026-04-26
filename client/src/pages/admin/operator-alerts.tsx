@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -93,11 +94,30 @@ function prettyJson(value: unknown): string {
   }
 }
 
+// Allow-list mirrored from the server endpoint so a malformed querystring
+// can never push an arbitrary severity value into the filter UI.
+function normalizeSeverity(raw: string | null): string {
+  if (raw === "info" || raw === "warning" || raw === "alert" || raw === "critical") {
+    return raw;
+  }
+  return SEVERITY_ANY;
+}
+
 export default function AdminOperatorAlerts() {
-  const [sourceInput, setSourceInput] = useState("");
-  const [severityInput, setSeverityInput] = useState<string>(SEVERITY_ANY);
-  const [appliedSource, setAppliedSource] = useState("");
-  const [appliedSeverity, setAppliedSeverity] = useState<string>(SEVERITY_ANY);
+  // Read filters from the querystring once, on first render — the dashboard
+  // tile links here with `?severity=critical` (etc.) so admins land on a
+  // pre-filtered view. We deliberately don't subscribe to live querystring
+  // changes here because the user can also edit filters from the page UI;
+  // re-syncing on every URL change would clobber their in-progress edits.
+  const initialSearch = useSearch();
+  const initialParams = new URLSearchParams(initialSearch);
+  const initialSeverity = normalizeSeverity(initialParams.get("severity"));
+  const initialSource = (initialParams.get("source") ?? "").slice(0, 128);
+
+  const [sourceInput, setSourceInput] = useState(initialSource);
+  const [severityInput, setSeverityInput] = useState<string>(initialSeverity);
+  const [appliedSource, setAppliedSource] = useState(initialSource);
+  const [appliedSeverity, setAppliedSeverity] = useState<string>(initialSeverity);
   const [page, setPage] = useState(1);
   const [selectedAlert, setSelectedAlert] = useState<OperatorAlertRow | null>(null);
   const limit = 50;

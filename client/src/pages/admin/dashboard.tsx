@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ClipboardList, Users, Link2, ScrollText } from "lucide-react";
+import { ClipboardList, Users, Link2, ScrollText, Siren } from "lucide-react";
 import { Link } from "wouter";
 
 interface DashboardData {
@@ -28,6 +28,23 @@ interface DashboardData {
   }>;
 }
 
+type Severity = "info" | "warning" | "alert" | "critical";
+
+interface OperatorAlertsSummary {
+  last24h: Record<Severity, number>;
+  last7d: Record<Severity, number>;
+  generatedAt: string;
+}
+
+const SEVERITIES: Severity[] = ["critical", "alert", "warning", "info"];
+
+const SEVERITY_TILE: Record<Severity, string> = {
+  info: "bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-400",
+  warning: "bg-amber-50 text-amber-800 border-amber-200 hover:border-amber-400",
+  alert: "bg-orange-50 text-orange-800 border-orange-200 hover:border-orange-400",
+  critical: "bg-red-50 text-red-800 border-red-200 hover:border-red-400",
+};
+
 function fmt(d: string | null): string {
   if (!d) return "—";
   try {
@@ -39,6 +56,9 @@ function fmt(d: string | null): string {
 
 export default function AdminDashboard() {
   const { data, isLoading } = useQuery<DashboardData>({ queryKey: ["/api/admin/dashboard"] });
+  const { data: alertsSummary, isLoading: alertsLoading } = useQuery<OperatorAlertsSummary>({
+    queryKey: ["/api/admin/operator-alerts/summary"],
+  });
 
   return (
     <div className="space-y-6 max-w-7xl">
@@ -93,6 +113,78 @@ export default function AdminDashboard() {
               <PipelineCell label="Under review" value={data?.applications.under_review ?? 0} />
               <PipelineCell label="Approved" value={data?.applications.approved ?? 0} />
               <PipelineCell label="Rejected" value={data?.applications.rejected ?? 0} />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Operator alerts summary */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Siren className="h-4 w-4 text-violet-600" />
+            Operator alerts
+          </CardTitle>
+          <Link href="/admin/operator-alerts">
+            <a
+              className="text-xs text-violet-700 hover:underline"
+              data-testid="link-operator-alerts-all"
+            >
+              View all alerts →
+            </a>
+          </Link>
+        </CardHeader>
+        <CardContent>
+          {alertsLoading ? (
+            <Skeleton className="h-24 w-full" />
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {SEVERITIES.map((sev) => {
+                  const count24h = alertsSummary?.last24h[sev] ?? 0;
+                  const count7d = alertsSummary?.last7d[sev] ?? 0;
+                  const trend = count7d - count24h;
+                  return (
+                    <Link
+                      key={sev}
+                      href={`/admin/operator-alerts?severity=${sev}`}
+                    >
+                      <a
+                        data-testid={`tile-operator-alert-${sev}`}
+                        className={`block border rounded-md p-3 transition-colors cursor-pointer ${SEVERITY_TILE[sev]}`}
+                      >
+                        <div className="text-xs uppercase tracking-wide font-medium">
+                          {sev}
+                        </div>
+                        <div className="mt-1 flex items-baseline gap-2">
+                          <span
+                            className="text-2xl font-semibold"
+                            data-testid={`text-alert-24h-${sev}`}
+                          >
+                            {count24h}
+                          </span>
+                          <span className="text-xs opacity-70">last 24h</span>
+                        </div>
+                        <div
+                          className="text-xs mt-1 opacity-80"
+                          data-testid={`text-alert-7d-${sev}`}
+                        >
+                          {count7d} in last 7d
+                          {count7d > 0 ? (
+                            <span className="ml-1 opacity-70">
+                              ({trend === 0 ? "all in last 24h" : `+${trend} earlier`})
+                            </span>
+                          ) : null}
+                        </div>
+                      </a>
+                    </Link>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-slate-400">
+                Counts cover the last 7 days. Click a severity to open the
+                alert log filtered to that level.
+              </p>
             </div>
           )}
         </CardContent>
