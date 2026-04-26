@@ -1,0 +1,119 @@
+
+Claude finished the response
+You said: https://www.
+
+Unconfirmed_919798.crdownload
+crdownload
+
+https://www.netwealth.com.au/  with reference to this wealth website, what other functions I need to add to my app? please note netwealth is an award winning app. It allows external financial planners to use its platform as intermediate to deal with retail customers.  Please do some market research about netwealth and other similar wealth management form and give me some advice for future update on my app.
+
+12:35 PM
+Claude responded: Before I give you a full analysis, I want to make sure I tailor the advice properly to your app.
+
+Searched the web
+Searched the web
+Before I give you a full analysis, I want to make sure I tailor the advice properly to your app. Could you tell me a bit more about what your app currently does?
+
+You said: Q: What best describes your app's current stage and primary function?
+Q: What best describes your app's current stage and primary function?
+A: Wealth management & investment portfolio tracking
+
+Q: Who are your primary target users? (Select all that apply)
+A: Financial planners / advisers, Institutional / wholesale investors, Retail / individual investors
+
+Q: Which features does your app currently have? (Select all that apply)
+A: Portfolio / investment tracking, Client reporting & dashboards
+
+12:37 PM
+Claude responded: Great context — thank you.
+Great context — thank you. Now I have a clear picture. Let me give you a thorough analysis benchmarked directly against Netwealth and the broader Australian wealth management market.
+
+Now I have a thorough picture of Netwealth's platform and a clear view of your app's current state. Here is the full strategic analysis.
+
+Market benchmark: Netwealth vs your app
+Your current foundation: portfolio/investment tracking + client reporting & dashboards — targeting financial planners, wholesale/institutional investors, and retail clients. That's a solid core. Here's what the market leaders do that you don't yet, and how to prioritise it.
+
+
+
+Strategic context — what makes Netwealth win
+Netwealth has been rated #1 for Overall Platform Satisfaction for 11 consecutive years by Investment Trends, and Best Advised Product by Chant West for 6 of the last 7 years. The reasons are instructive:
+
+The intermediary model is the moat. Netwealth operates with over 3,900 advisers using the platform 
+netwealth
+, which means their real product is not the end investor experience — it's the tools they give financial planners to run their businesses efficiently. Your equivalent is building features that make your adviser/planner users look brilliant to their retail clients, not just building a prettier dashboard.
+
+Their platform features span five pillars: portfolio management, practice management, customer engagement tools, investment research, and wealth protection. 
+netwealth
+ You currently cover the first and part of the third. The biggest gap you need to close is practice management — the tools that let advisers run multiple client books efficiently.
+
+The 2025 AdviceTech trend is automation + AI. Netwealth's own 2025 AdviceTech report focuses on how leading firms are embedding automation, dashboards and AI into daily workflows. 
+netwealth
+ This is the direction the whole sector is moving.
+
+My top 6 recommendations in priority order
+1. Workflow & task management — Netwealth's Activities module lets advisers action workflow tasks, track client approvals, and see pending alerts in one screen. Without this, advisers using your app still manage their workflow in email or spreadsheets. This is the #1 retention and stickiness feature for the B2B layer.
+
+2. eSignature & digital onboarding — Netwealth's eSignature tool lets clients sign applications on any device — desktop, tablet, or mobile — and supports prefilling from XPLAN so there's no double entry. 
+netwealth
+ In 2026, asking a client to print and sign a PDF is a dealbreaker.
+
+3. Model portfolio rebalancing + tax parcel management — Netwealth allows advisers to choose LIFO, FIFO or select specific parcels when selling investments, to get the best CGT outcome for clients. 
+netwealth
+ For the Australian market especially, this is table-stakes for any serious wealth platform.
+
+4. Client mobile app — Netwealth provides on-the-go access to portfolios and reports via their mobile app. 
+netwealth
+ Retail clients increasingly judge a platform by the quality of its mobile experience, not the desktop portal.
+
+5. Fee management engine — Netwealth supports flexible fee options at licensee or adviser level, including tiered fees, fixed fees, and family fee groups that link accounts of related trusts, companies, and SMSFs. 
+netwealth
+ This is critical to operating at scale with institutional and wholesale clients.
+
+6. Compliance & security centre — Particularly important given you're targeting AFSL-licensed advisers. Audit trails, role-based access controls, and compliance logging are not optional once you're dealing with regulated intermediaries.
+
+The interactive roadmap above is clickable — tap any feature card to get a deeper dive on building that specific capability. Would you like me to start with a technical spec or UI design for any of the Priority 1 items?
+
+You said: yes
+yes
+
+12:39 PM
+Claude responded: Which Priority 1 feature would you like to start with?
+Which Priority 1 feature would you like to start with?
+
+You said: Q: Which Priority 1 feature do you want to build first?
+Q: Which Priority 1 feature do you want to build first?
+A: [No preference]
+
+12:46 PM
+Claude responded: Let me build all six Priority 1 features as a comprehensive interactive prototype — this will give you a tangible feel for how they fit together.
+Let me build all six Priority 1 features as a comprehensive interactive prototype — this will give you a tangible feel for how they fit together.
+
+
+Check available skills
+Check available skills
+
+Here's your complete Priority 1 prototype with all six modules built and wired together. Here's what you can do with it:
+
+Navigate using the sidebar — each module is fully interactive. The fee calculator at the bottom of the Fee Management page is live (try changing the portfolio value). Task checkboxes in Workflow are clickable. Every screen uses real data structures so you can sense-check the UX.
+
+A few things worth noting across the modules:
+
+The Workflow module uses a colour-coded priority rail (red/amber/blue) on each task — this is a pattern Netwealth uses and advisers find extremely useful for triage at a glance. The three-column layout (priority, task, badge) should become your standard task atom across the whole app.
+
+The eSignature pipeline shows a 6-step onboarding flow — the key design decision here is that steps 4 and 5 prefill from verified data gathered in steps 1–2. This eliminates double-entry, which is one of Netwealth's most praised features.
+
+The Portfolio rebalancing page has the CGT parcel selector built in — the ability to choose FIFO, LIFO, or manual parcel selection is what separates a serious wealth platform from a basic tracker. The live "estimated CGT liability" calculation is something advisers will use before every sale.
+
+The Fee calculator on the fees page uses the correct tiered formula — it accurately calculates blended rates across brackets, which is harder to implement correctly than it looks.
+
+Would you like me to go deeper on any of these — for example, producing a technical spec, a React component, or a database schema for one of the modules?
+
+
+
+You're out of extra usage ∙ Your limit resets at 4:40 PM
+Buy more
+
+
+
+Claude is AI and can make mistakes. Please double-check responses.
+

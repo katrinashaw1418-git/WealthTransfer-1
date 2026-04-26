@@ -1,0 +1,888 @@
+
+
+I’ve gone through your roadmap carefully and cross-checked it against:
+
+Netwealth / XPLAN / HUB24 / Praemium capability benchmarks
+
+Your stated product scope (AMAX Wealth + adviser/intermediary model)
+
+Australian regulatory + operational requirements
+
+Here’s the clean, institutional-grade verification — no fluff.
+
+✅ 1. Overall Architecture — Correct (and strategically strong)
+Your structure:
+
+Adviser / Planner Layer (B2B)
+
+Transaction & Portfolio Tools
+
+Client Engagement & Onboarding
+
+Trust, Compliance & Protection
+
+👉 This is exactly how top-tier platforms are structured (Netwealth, HUB24).
+
+✔ You are not building a retail app
+✔ You are building an adviser operating system (OS)
+
+That’s the right call.
+
+⚠️ 2. Critical Gaps (What’s Missing or Underweighted)
+These are not optional if you want to compete seriously.
+
+❗ Gap 1 — Cash & Platform Administration Layer (VERY IMPORTANT)
+You currently imply it but don’t explicitly define it.
+
+You need a core platform ledger + cash management engine:
+
+Platform cash accounts (not bank accounts — ledger-based like you designed)
+
+Transaction lifecycle:
+
+pending → matched → settled → reconciled
+
+Distribution engine (income, dividends, fees)
+
+👉 Without this, everything else breaks.
+
+❗ Gap 2 — Order Management System (OMS)
+“Online equities trading” alone is too shallow.
+
+You need:
+
+Order routing (broker / custodian integration)
+
+Bulk orders (adviser trades across clients)
+
+Pre-trade compliance checks
+
+Trade allocation logic
+
+👉 This is core to adviser platforms (Netwealth/HUB24 strength).
+
+❗ Gap 3 — Managed Accounts / SMA Engine
+You listed:
+
+Model portfolios & rebalancing
+
+But that’s only half.
+
+You need:
+
+Managed accounts (SMA/MDA style)
+
+Drift monitoring
+
+Auto-rebalancing triggers
+
+Client-level deviations
+
+👉 This is one of the biggest revenue drivers in AU wealth platforms.
+
+❗ Gap 4 — Document & Record Management
+Missing completely.
+
+You need:
+
+Document vault per client
+
+Versioned advice documents (SOA/ROA)
+
+Audit-linked storage
+
+👉 Required for:
+
+AFSL compliance
+
+Adviser workflows
+
+Client trust
+
+❗ Gap 5 — Advice Layer (even if “general advice”)
+You don’t need full advice engine, but you need:
+
+Fact find storage
+
+Risk profiling
+
+Recommendation records
+
+👉 Otherwise advisers can’t actually use your platform for advice delivery.
+
+⚠️ 3. Priority Misalignment (Important Correction)
+Some features are mis-ranked.
+
+🔺 Should be Priority 1 (but not clearly positioned)
+1. Multi-client adviser dashboard → MUST be full, not “partial”
+This is the core product.
+
+Without this:
+
+advisers won’t adopt
+
+platform has no stickiness
+
+2. External integrations (XPLAN, etc.)
+You marked as Priority 2.
+
+👉 In reality:
+
+✔ Should be Priority 1.5 (almost mandatory early)
+
+Reason:
+
+Advisers already use XPLAN
+
+If you don’t integrate → they won’t switch
+
+3. KPI & reporting
+You marked Priority 2.
+
+👉 For advisers:
+
+✔ This is Priority 1 for retention
+
+Because:
+
+reporting = client-facing output
+
+revenue tracking = business survival
+
+⚠️ 4. Overestimated / Misplaced Features
+🔻 Public API / developer portal (Priority 3)
+Correct to delay.
+
+👉 But:
+
+Don’t even think about this until:
+
+core workflows stable
+
+integrations mature
+
+🔻 Superannuation module (Priority 3)
+Correct to delay, but note:
+
+👉 In Australia:
+
+Super is ~70% of assets
+
+So:
+
+Long-term = must-have
+
+Short-term = OK to defer
+
+🔻 Insurance integration (Priority 2)
+This is NOT core early.
+
+👉 Should actually be:
+
+✔ Priority 3 unless you go full advice platform
+
+✅ 5. What You Got Exactly Right (Strong Signals)
+These are high-quality decisions:
+
+✔ Workflow & task management (Priority 1)
+This is what turns your app into a daily-use tool
+
+✔ Fee management engine
+Critical for:
+
+scalability
+
+licensee/adviser economics
+
+✔ Tax management (FIFO/LIFO)
+Absolutely required for AU market
+
+✔ eSignature & onboarding
+Non-negotiable in 2026
+
+✔ Security & compliance centre
+Aligned with AFSL + AUSTRAC expectations
+
+✔ Client mobile app (read-only first)
+Correct scope — don’t overbuild
+
+🧠 6. Strategic Truth (Most Important Insight)
+You are currently building:
+
+👉 50% platform (portfolio + UI)
+👉 but missing 50% operations engine (execution + admin + workflow)
+
+Netwealth wins because:
+
+It runs the adviser’s entire business — not just portfolios.
+
+🔥 7. Corrected Priority Stack (What I would actually build)
+True Priority 1 (Build NOW)
+Adviser dashboard (FULL, not partial)
+
+Workflow & task management
+
+eSignature & onboarding
+
+Model portfolios + managed accounts engine
+
+Fee engine
+
+Cash ledger + transaction engine (missing)
+
+Reporting (client + business)
+
+Priority 1.5 (Do very early)
+XPLAN / CRM integration
+
+Document management
+
+Order management system (OMS)
+
+Priority 2
+Investment research tools
+
+Equities trading (execution layer)
+
+Insurance (optional)
+
+KPI analytics (enhanced)
+
+Priority 3
+API / developer portal
+
+Superannuation module
+
+Corporate actions automation
+
+📌 8. Final Verdict
+Your roadmap is:
+
+✔ Structurally correct
+✔ Strategically aligned with Netwealth model
+✔ Strong understanding of adviser-first design
+
+But:
+
+❗ Missing core infrastructure layers (ledger, OMS, admin engine)
+❗ Slight mis-prioritisation around integrations and reporting
+
+If you want next step (high value)
+I can do one of these at institutional level:
+
+Full system architecture (end-to-end)
+→ how ledger, OMS, custody, FX, DCE connect (very relevant to AMAX)
+
+Database schema for adviser platform
+→ production-ready tables (clients, accounts, trades, fees)
+
+Exact MVP build plan (12-week execution roadmap)
+→ what to build week-by-week
+
+Just tell me.
+
+
+1 and then 2
+
+Thought for a few seconds
+Yes — do it in this order:
+
+1. Full System Architecture first
+Build the platform as five connected engines:
+
+A. Identity + Access Layer
+Controls:
+
+client login
+
+adviser login
+
+licensee admin
+
+role-based access
+
+MFA
+
+audit trail
+
+This supports your Security & Compliance Centre requirement. 
+
+
+B. Client / Adviser Operating Layer
+Core adviser functions:
+
+multi-client adviser dashboard
+
+client groups / family groups
+
+workflow & task management
+
+onboarding status
+
+document vault
+
+eSignature
+
+adviser notes
+
+compliance flags
+
+This is your Netwealth-style adviser OS.
+
+C. Portfolio + Investment Layer
+Core wealth functions:
+
+portfolio holdings
+
+model portfolios
+
+rebalancing
+
+managed accounts / SMA logic
+
+tax parcel selection FIFO/LIFO/manual
+
+performance reporting
+
+asset allocation
+
+research/watchlists
+
+This is where your app becomes more than a tracker.
+
+D. Transaction + Ledger Layer
+This is the missing backbone.
+
+You need:
+
+client cash ledger
+
+investment account ledger
+
+pending transactions
+
+settled transactions
+
+deposits
+
+withdrawals
+
+FX transactions
+
+trade settlement
+
+fee deductions
+
+income distributions
+
+Important: this should be ledger-based, not described as AMAX holding client bank accounts.
+
+E. Integration + Execution Layer
+Connects your platform to external providers:
+
+XPLAN / adviser CRM
+
+broker / equities execution
+
+Independent Reserve / crypto execution if relevant
+
+custodian / wrap provider
+
+bank payment rails
+
+document signing provider
+
+accounting systems later: Xero, MYOB
+
+Recommended Architecture Map
+CLIENT APP / ADVISER PORTAL
+        ↓
+Identity + Access Layer
+        ↓
+Client / Adviser Operating Layer
+        ↓
+Portfolio + Investment Engine
+        ↓
+Transaction + Ledger Engine
+        ↓
+Execution / Custody / Broker / Banking Partners
+        ↓
+Reporting + Compliance + Audit Layer
+The most important correction:
+
+Do not build “portfolio tracking” alone. Build the operating system that advisers use to onboard, manage, transact, report, and evidence compliance.
+
+2. Database Schema — Production Direction
+Core Tables
+users
+users (
+  id,
+  email,
+  mobile,
+  password_hash,
+  role,
+  status,
+  mfa_enabled,
+  created_at,
+  updated_at
+)
+Roles:
+
+client
+adviser
+licensee_admin
+compliance_admin
+platform_admin
+advisers
+advisers (
+  id,
+  user_id,
+  licensee_id,
+  adviser_code,
+  name,
+  status,
+  created_at
+)
+clients
+clients (
+  id,
+  primary_user_id,
+  adviser_id,
+  client_type,
+  legal_name,
+  date_of_birth,
+  entity_name,
+  tax_residency,
+  risk_profile,
+  onboarding_status,
+  kyc_status,
+  aml_risk_rating,
+  created_at
+)
+Client types:
+
+individual
+joint
+company
+trust
+smsf
+wholesale_investor
+client_groups
+client_groups (
+  id,
+  adviser_id,
+  group_name,
+  group_type,
+  created_at
+)
+Examples:
+
+family group
+corporate group
+trust group
+SMSF group
+client_group_members
+client_group_members (
+  id,
+  group_id,
+  client_id,
+  relationship_type
+)
+Portfolio Tables
+accounts
+accounts (
+  id,
+  client_id,
+  account_type,
+  base_currency,
+  status,
+  opened_at,
+  closed_at
+)
+Account types:
+
+investment
+cash
+fx
+digital_asset
+super
+smsf
+portfolios
+portfolios (
+  id,
+  account_id,
+  adviser_id,
+  portfolio_name,
+  model_portfolio_id,
+  strategy_type,
+  status,
+  created_at
+)
+holdings
+holdings (
+  id,
+  portfolio_id,
+  asset_id,
+  quantity,
+  average_cost,
+  market_value,
+  unrealised_gain_loss,
+  valuation_date
+)
+assets
+assets (
+  id,
+  asset_type,
+  ticker,
+  isin,
+  asset_name,
+  exchange,
+  currency,
+  sector,
+  status
+)
+Asset types:
+
+cash
+equity
+etf
+managed_fund
+bond
+private_fund
+crypto
+property
+Model Portfolio / Rebalancing Tables
+model_portfolios
+model_portfolios (
+  id,
+  name,
+  risk_profile,
+  investment_objective,
+  status,
+  created_at
+)
+model_portfolio_allocations
+model_portfolio_allocations (
+  id,
+  model_portfolio_id,
+  asset_id,
+  target_weight,
+  min_weight,
+  max_weight
+)
+rebalance_events
+rebalance_events (
+  id,
+  portfolio_id,
+  trigger_type,
+  status,
+  estimated_trades,
+  approved_by,
+  approved_at,
+  created_at
+)
+Tax Parcel Tables
+tax_parcels
+tax_parcels (
+  id,
+  holding_id,
+  asset_id,
+  acquisition_date,
+  quantity,
+  cost_base,
+  remaining_quantity,
+  parcel_status
+)
+disposal_allocations
+disposal_allocations (
+  id,
+  transaction_id,
+  tax_parcel_id,
+  quantity_disposed,
+  realised_gain_loss,
+  cgt_method
+)
+CGT methods:
+
+FIFO
+LIFO
+manual
+optimised
+Transaction / Ledger Tables
+ledger_accounts
+ledger_accounts (
+  id,
+  client_id,
+  account_id,
+  ledger_type,
+  currency,
+  balance,
+  status
+)
+Ledger types:
+
+client_cash
+investment_cash
+fee_payable
+trade_pending
+settlement_pending
+income_pending
+ledger_entries
+ledger_entries (
+  id,
+  ledger_account_id,
+  transaction_id,
+  debit_amount,
+  credit_amount,
+  currency,
+  description,
+  created_at
+)
+Use double-entry logic.
+
+transactions
+transactions (
+  id,
+  client_id,
+  account_id,
+  transaction_type,
+  asset_id,
+  quantity,
+  price,
+  gross_amount,
+  fees,
+  tax_amount,
+  net_amount,
+  status,
+  trade_date,
+  settlement_date,
+  created_at
+)
+Transaction types:
+
+deposit
+withdrawal
+buy
+sell
+dividend
+distribution
+fee
+fx_conversion
+transfer
+rebalance
+Adviser Workflow Tables
+tasks
+tasks (
+  id,
+  adviser_id,
+  client_id,
+  task_type,
+  priority,
+  status,
+  due_date,
+  assigned_to,
+  description,
+  created_at
+)
+task_comments
+task_comments (
+  id,
+  task_id,
+  user_id,
+  comment,
+  created_at
+)
+Fee Engine Tables
+fee_schedules
+fee_schedules (
+  id,
+  licensee_id,
+  adviser_id,
+  fee_type,
+  calculation_method,
+  status,
+  created_at
+)
+fee_tiers
+fee_tiers (
+  id,
+  fee_schedule_id,
+  min_balance,
+  max_balance,
+  fee_rate,
+  fixed_amount
+)
+Fee types:
+
+platform_fee
+adviser_service_fee
+licensee_fee
+performance_fee
+admin_fee
+fee_accruals
+fee_accruals (
+  id,
+  client_id,
+  account_id,
+  fee_schedule_id,
+  accrued_amount,
+  period_start,
+  period_end,
+  status
+)
+Compliance / Audit Tables
+audit_logs
+audit_logs (
+  id,
+  user_id,
+  action,
+  entity_type,
+  entity_id,
+  ip_address,
+  user_agent,
+  created_at
+)
+compliance_flags
+compliance_flags (
+  id,
+  client_id,
+  flag_type,
+  severity,
+  status,
+  assigned_to,
+  resolution_notes,
+  created_at,
+  resolved_at
+)
+documents
+documents (
+  id,
+  client_id,
+  adviser_id,
+  document_type,
+  file_url,
+  version,
+  status,
+  signed_at,
+  uploaded_at
+)
+Document types:
+
+SOA
+ROA
+application_form
+identity_document
+wholesale_certificate
+trust_deed
+company_extract
+risk_profile
+fee_consent
+Final Build Order
+Build in this sequence:
+
+1. Users / roles / MFA / audit logs
+2. Clients / advisers / client groups
+3. Accounts / portfolios / holdings
+4. Ledger accounts / ledger entries / transactions
+5. Workflow / tasks / onboarding
+6. Documents / eSignature / compliance flags
+7. Fee engine
+8. Model portfolio / rebalancing / tax parcels
+9. External integrations
+This is the correct foundation for an AMAX Wealth adviser platform.
+
+
+and then 2
+
+2. Database schema — build-ready module map
+Use this as your developer handover structure.
+
+CORE PLATFORM
+users
+roles
+permissions
+user_roles
+audit_logs
+ADVISER / LICENSEE
+licensees
+advisers
+adviser_clients
+client_groups
+client_group_members
+CLIENT / ONBOARDING
+clients
+client_entities
+client_addresses
+client_contacts
+kyc_checks
+aml_risk_assessments
+onboarding_applications
+PORTFOLIO
+accounts
+portfolios
+assets
+holdings
+valuations
+performance_snapshots
+TRANSACTIONS / LEDGER
+ledger_accounts
+ledger_entries
+transactions
+cash_movements
+settlement_instructions
+reconciliations
+MODEL PORTFOLIOS
+model_portfolios
+model_allocations
+rebalance_events
+rebalance_trade_recommendations
+TAX
+tax_parcels
+disposal_allocations
+cgt_calculations
+tax_reports
+FEES
+fee_schedules
+fee_tiers
+fee_accruals
+fee_deductions
+fee_consent_records
+WORKFLOW
+tasks
+task_comments
+task_templates
+approval_requests
+notifications
+DOCUMENTS / ESIGNATURE
+documents
+document_versions
+signature_requests
+signature_events
+document_audit_logs
+COMPLIANCE
+compliance_flags
+compliance_reviews
+breach_register
+conflict_register
+complaints_register
+INTEGRATIONS
+integration_providers
+integration_connections
+sync_jobs
+external_reference_ids
+webhook_events
+Best build sequence
+Phase 1 — Core adviser platform
+users → roles → clients → advisers → accounts → portfolios → holdings → audit_logs
+Phase 2 — Operational backbone
+ledger_accounts → ledger_entries → transactions → reconciliations
+Phase 3 — Adviser OS
+tasks → approval_requests → documents → signature_requests → notifications
+Phase 4 — Wealth engine
+fee_schedules → fee_accruals → model_portfolios → rebalances → tax_parcels
+Phase 5 — Scale layer
+integrations → reporting → mobile app → API
+Final correction: do not build trading, API, or super module before ledger + workflow + documents are stable.
+
+
+
