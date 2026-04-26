@@ -55,6 +55,35 @@ import {
 } from "./services/adviser-access";
 import { insertAdviserTaskSchema, insertReportRequestSchema } from "@shared/schema";
 
+// Task #94 — wealth planner compliance helpers (objectives, documents,
+// append-only adviser notes, advice-record version snapshot hook).
+import {
+  OBJECTIVE_TYPES,
+  OBJECTIVE_PRIORITIES,
+  CLIENT_DOCUMENT_TYPES,
+  createClientObjective,
+  listClientObjectivesForAdviser,
+  createClientDocument,
+  listClientDocumentsForAdviser,
+  createAdviserNote,
+  listAdviserNotes,
+  transitionAdviceStatus,
+} from "./services/wealth-planner";
+import { adviceRecords } from "@shared/schema";
+
+// Both `clientUserId` (the established adviser-route convention used by
+// fee-rules / fee-deductions / etc.) AND `clientId` (the spec wording for the
+// new wealth-planner endpoints) are accepted on every list endpoint. This
+// avoids a noisy contract migration for callers built against either name.
+function readClientIdQuery(req: Request): number | null {
+  const raw =
+    (req.query as Record<string, unknown>).clientUserId ??
+    (req.query as Record<string, unknown>).clientId;
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 // ---------------------------------------------------------------------------
 // Local audit-log helper (fire-and-forget, never throws into the route).
 // ---------------------------------------------------------------------------
@@ -941,4 +970,248 @@ export function registerAdviserRoutes(app: Express): void {
       handleError(res, error, "Failed to list fee deductions");
     }
   });
+
+  // ===========================================================================
+  // TASK #94 — WEALTH PLANNER COMPLIANCE GAPS
+  // ---------------------------------------------------------------------------
+  // Adviser-side surface for the four new tables. Reads/writes are gated by
+  // assertAdviserClientLink in the service layer; this file only validates the
+  // request shape. Note carefully: there is intentionally NO PATCH and NO
+  // DELETE route for adviser_notes — that absence IS the append-only
+  // guarantee. Edits are expressed as a brand-new POST whose previousNoteId
+  // points at the row being amended.
+  // ===========================================================================
+
+  // ---- client objectives ----
+  const createObjectiveSchema = z.object({
+    clientId: z.number().int().positive(),
+    adviceRecordId: z.number().int().positive(),
+    objectiveType: z.enum(OBJECTIVE_TYPES),
+    label: z.string().min(1).max(200),
+    targetAmount: z
+      .string()
+      .regex(/^\d+(\.\d{1,4})?$/, "targetAmount must be a non-negative decimal with up to 4 dp")
+      .optional()
+      .nullable(),
+    targetCurrency: z.string().length(3).optional(),
+    targetDate: z.coerce.date().optional().nullable(),
+    priority: z.enum(OBJECTIVE_PRIORITIES).optional(),
+    notes: z.string().max(5000).optional().nullable(),
+  });
+
+  app.post(
+    "/api/adviser/client-objectives",
+    adviserRoute(async (req, auth) => {
+      const parsed = createObjectiveSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid objective payload"), { status: 400 });
+      }
+      const row = await createClientObjective(auth.userId, parsed.data);
+      audit(
+        auth.userId,
+        "client_objective.create",
+        "client_objective",
+        String(row.id),
+        { clientId: row.clientId, adviceRecordId: row.adviceRecordId },
+        req.ip ?? null,
+      );
+      return row;
+    }),
+  );
+
+  app.get(
+    "/api/adviser/client-objectives",
+    adviserRoute(async (req, auth) => {
+      const clientId = readClientIdQuery(req);
+      if (clientId == null) {
+        throw Object.assign(new Error("clientId is required"), { status: 400 });
+      }
+      const items = await listClientObjectivesForAdviser(auth.userId, clientId);
+      // Audit-trail every read so the regulator-facing surface can prove who
+      // looked at which client's objectives and when.
+      audit(
+        auth.userId,
+        "client_objective.read",
+        "client_objective",
+        null,
+        { clientId, count: items.length },
+        req.ip ?? null,
+      );
+      return { items };
+    }),
+  );
+
+  // ---- client documents ----
+  const createDocumentSchema = z.object({
+    clientId: z.number().int().positive(),
+    adviceRecordId: z.number().int().positive().optional().nullable(),
+    documentType: z.enum(CLIENT_DOCUMENT_TYPES),
+    fileName: z.string().min(1).max(500),
+    storageKey: z.string().min(1).max(2000),
+    mimeType: z.string().max(200).optional().nullable(),
+    fileSizeBytes: z.number().int().nonnegative().optional().nullable(),
+    description: z.string().max(2000).optional().nullable(),
+  });
+
+  app.post(
+    "/api/adviser/client-documents",
+    adviserRoute(async (req, auth) => {
+      const parsed = createDocumentSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid document payload"), { status: 400 });
+      }
+      const row = await createClientDocument(auth.userId, parsed.data);
+      audit(
+        auth.userId,
+        "client_document.create",
+        "client_document",
+        String(row.id),
+        { clientId: row.clientId, documentType: row.documentType },
+        req.ip ?? null,
+      );
+      return row;
+    }),
+  );
+
+  app.get(
+    "/api/adviser/client-documents",
+    adviserRoute(async (req, auth) => {
+      const clientId = readClientIdQuery(req);
+      if (clientId == null) {
+        throw Object.assign(new Error("clientId is required"), { status: 400 });
+      }
+      const items = await listClientDocumentsForAdviser(auth.userId, clientId);
+      // Document reads are an explicit compliance requirement: regulators
+      // need to see who pulled what and when, not just who uploaded.
+      audit(
+        auth.userId,
+        "client_document.read",
+        "client_document",
+        null,
+        { clientId, count: items.length },
+        req.ip ?? null,
+      );
+      return { items };
+    }),
+  );
+
+  // ---- adviser notes (APPEND-ONLY: no PATCH, no DELETE on this resource) ----
+  const createNoteSchema = z.object({
+    clientUserId: z.number().int().positive(),
+    body: z.string().min(1).max(10000),
+    adviceRecordId: z.number().int().positive().optional().nullable(),
+    previousNoteId: z.number().int().positive().optional().nullable(),
+  });
+
+  app.post(
+    "/api/adviser/client-notes",
+    adviserRoute(async (req, auth) => {
+      const parsed = createNoteSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid note payload"), { status: 400 });
+      }
+      const row = await createAdviserNote(auth.userId, parsed.data);
+      audit(
+        auth.userId,
+        "adviser_note.create",
+        "adviser_note",
+        String(row.id),
+        {
+          clientUserId: row.clientUserId,
+          previousNoteId: row.previousNoteId,
+          adviceRecordId: row.adviceRecordId,
+        },
+        req.ip ?? null,
+      );
+      return row;
+    }),
+  );
+
+  app.get(
+    "/api/adviser/client-notes",
+    adviserRoute(async (req, auth) => {
+      const clientId = readClientIdQuery(req);
+      if (clientId == null) {
+        throw Object.assign(new Error("clientId is required"), { status: 400 });
+      }
+      const items = await listAdviserNotes(auth.userId, clientId);
+      audit(
+        auth.userId,
+        "adviser_note.read",
+        "adviser_note",
+        null,
+        { clientUserId: clientId, count: items.length },
+        req.ip ?? null,
+      );
+      return { items };
+    }),
+  );
+
+  // ---------------------------------------------------------------------------
+  // POST /api/adviser/advice-records/:id/transition
+  // ---------------------------------------------------------------------------
+  // Real production wiring of the snapshot hook. An adviser flips their
+  // client's advice record to 'issued' (SOA goes live) or 'superseded' (a
+  // newer SOA replaces it). The status flip and the version snapshot run
+  // inside the same db.transaction so they succeed-or-fail together — there
+  // is no path to issue without snapshotting.
+  // ---------------------------------------------------------------------------
+  const transitionSchema = z.object({
+    newStatus: z.enum(["issued", "superseded"]),
+    soaIssued: z.boolean().optional(),
+    soaIssuedAt: z.coerce.date().optional().nullable(),
+  });
+
+  app.post(
+    "/api/adviser/advice-records/:id/transition",
+    adviserRoute(async (req, auth) => {
+      const adviceRecordId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(adviceRecordId) || adviceRecordId <= 0) {
+        throw Object.assign(new Error("Invalid advice record id"), { status: 400 });
+      }
+      const parsed = transitionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid transition payload"), { status: 400 });
+      }
+
+      // Adviser must own the client this advice record belongs to.
+      const [advice] = await db
+        .select({ id: adviceRecords.id, clientId: adviceRecords.clientId })
+        .from(adviceRecords)
+        .where(eq(adviceRecords.id, adviceRecordId))
+        .limit(1);
+      if (!advice) {
+        throw Object.assign(new Error("Advice record not found"), { status: 404 });
+      }
+      await assertAdviserClientLink(auth.userId, advice.clientId);
+
+      const out = await db.transaction(async (tx) => {
+        return transitionAdviceStatus({
+          adviceRecordId,
+          newStatus: parsed.data.newStatus,
+          issuedByUserId: auth.userId,
+          executor: tx as unknown as typeof db,
+          extraSets: {
+            soaIssued: parsed.data.soaIssued,
+            soaIssuedAt: parsed.data.soaIssuedAt ?? undefined,
+          },
+        });
+      });
+
+      audit(
+        auth.userId,
+        `advice_record.transition.${parsed.data.newStatus}`,
+        "advice_record",
+        String(adviceRecordId),
+        {
+          versionId: out.version.id,
+          versionNumber: out.version.versionNumber,
+          clientId: advice.clientId,
+        },
+        req.ip ?? null,
+      );
+
+      return { advice: out.advice, version: out.version };
+    }),
+  );
 }

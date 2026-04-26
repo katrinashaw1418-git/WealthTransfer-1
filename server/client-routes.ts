@@ -38,6 +38,15 @@ import {
 } from "./services/adviser-access";
 import { storage } from "./storage";
 
+// Task #94 — wealth planner compliance: client read-only objectives, documents,
+// and a viewing-ack-gated advice payload reader.
+import {
+  listClientObjectivesForClient,
+  listClientDocumentsForClient,
+  requireAcknowledgedAdvice,
+} from "./services/wealth-planner";
+import { adviceRecords } from "@shared/schema";
+
 async function audit(
   userId: number,
   action: string,
@@ -557,6 +566,132 @@ export function registerClientRoutes(app: Express): void {
       res.json({ items: rows, users: usersMap });
     } catch (error: any) {
       handleError(res, error, "Failed to load client fee deductions");
+    }
+  });
+
+  // ===========================================================================
+  // TASK #94 — Client read-only views over the wealth-planner tables.
+  // ---------------------------------------------------------------------------
+  // The client never writes to objectives / documents — those originate from
+  // their adviser. Reading their own data is unconditionally allowed and is
+  // scoped on auth.userId so cross-client leakage is impossible.
+  // ===========================================================================
+
+  // GET /api/client/objectives — own structured objectives.
+  app.get("/api/client/objectives", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const items = await listClientObjectivesForClient(auth.userId);
+      // Read audit so the regulator-facing surface can prove the client
+      // looked at their own objectives (a positive disclosure signal).
+      audit(
+        auth.userId,
+        "client_objective.read",
+        "client_objective",
+        null,
+        { actor: "client", count: items.length },
+        req.ip ?? null,
+      );
+      res.json({ items });
+    } catch (error: any) {
+      handleError(res, error, "Failed to load client objectives");
+    }
+  });
+
+  // GET /api/client/documents — own uploaded documents (fact-finds, etc.).
+  app.get("/api/client/documents", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const items = await listClientDocumentsForClient(auth.userId);
+      // Document reads are an explicit compliance requirement: the audit
+      // log must record every retrieval, not just the upload.
+      audit(
+        auth.userId,
+        "client_document.read",
+        "client_document",
+        null,
+        { actor: "client", count: items.length },
+        req.ip ?? null,
+      );
+      res.json({ items });
+    } catch (error: any) {
+      handleError(res, error, "Failed to load client documents");
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/client/advice/:id
+  // ---------------------------------------------------------------------------
+  // Viewing-ack gate: the client must have signed an adviceAcknowledgements row
+  // for THIS advice record before the route returns ANY part of the payload.
+  // Until then the route returns 403 with a structured body so the UI can
+  // render the disclaimer interstitial. This gate is re-evaluated against
+  // live state on every request — a cached "I already acked" boolean from the
+  // client cannot bypass it.
+  // ---------------------------------------------------------------------------
+  app.get("/api/client/advice/:id", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const adviceRecordId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(adviceRecordId)) {
+        return res.status(400).json({ error: "Invalid advice record id" });
+      }
+
+      const gate = await requireAcknowledgedAdvice(adviceRecordId, auth.userId);
+      if (!gate.allowed) {
+        const status = gate.reason === "advice_record_not_found" ? 404 : 403;
+        // When the gate fails because of a missing acknowledgement, return
+        // the full `adviceAcknowledgements` shape contract so the client UI
+        // knows exactly which fields to render in the disclaimer interstitial
+        // (the eleven required confirm_* booleans + signatureName). Without
+        // this shape the client can't safely build the form to retry.
+        const requiredShape =
+          gate.reason === "acknowledgement_missing"
+            ? {
+                table: "adviceAcknowledgements",
+                requiredFields: [
+                  "confirmPersonalDetails",
+                  "confirmFinancialInfo",
+                  "confirmObjectives",
+                  "confirmRiskProfile",
+                  "confirmScopeUnderstood",
+                  "confirmSoaViewed",
+                  "confirmFeesUnderstood",
+                  "confirmFeesConsented",
+                  "confirmValuesMayFall",
+                  "confirmReturnsNotGuaranteed",
+                  "confirmFsgReceived",
+                ],
+                signatureField: "signatureName",
+                allRequiredTrue: true,
+              }
+            : null;
+        return res.status(status).json({
+          error: gate.detail,
+          reason: gate.reason,
+          adviceRecordId,
+          adviceAcknowledgements: requiredShape,
+        });
+      }
+
+      // Gate cleared — load and return the full advice record. We do NOT trust
+      // the live row for audit reconstruction (that's adviceRecordVersions);
+      // for a viewing payload the live row is the right source.
+      const [row] = await db
+        .select()
+        .from(adviceRecords)
+        .where(eq(adviceRecords.id, adviceRecordId))
+        .limit(1);
+
+      res.json({
+        advice: row,
+        acknowledgement: {
+          id: gate.acknowledgementId,
+          acknowledgedAt: gate.acknowledgedAt,
+        },
+      });
+    } catch (error: any) {
+      handleError(res, error, "Failed to load advice record");
     }
   });
 }

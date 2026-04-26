@@ -2098,3 +2098,211 @@ export type OperatorAlertPruneRun = typeof operatorAlertPruneRuns.$inferSelect;
 export type InsertOperatorAlertPruneRun = z.infer<
   typeof insertOperatorAlertPruneRunSchema
 >;
+
+// =============================================================================
+// TASK #94 — Wealth planner compliance gaps
+// -----------------------------------------------------------------------------
+// Four narrow additions on top of the existing Phase 2.2 / 2.3 advice stack:
+//   1. clientObjectives        — structured replacement for the free-text
+//                                adviceRecords.objectivesSummary blob
+//   2. clientDocuments         — generic file store (fact-finds, ID copies,
+//                                correspondence, statements). SOA / ROA stay
+//                                in their existing dedicated tables.
+//   3. adviserNotes            — append-only adviser working notes; every
+//                                edit is a new row with previousNoteId.
+//                                Append-only is enforced by the absence of
+//                                PATCH/DELETE routes — see server/adviser-routes.ts.
+//   4. adviceRecordVersions    — immutable jsonb snapshot of an advice record
+//                                taken whenever its status flips to issued
+//                                or superseded. Powers post-hoc audit
+//                                reconstruction without trusting that the
+//                                live row was never edited in place.
+//
+// All four tables follow the Phase 2.2 retention pattern:
+// retentionUntil + deletionLocked, defaulted to lock-on-create. The actual
+// now()+7y rule is enforced by the same future trigger covering the rest of
+// Phase 2.2 / 2.3.
+// =============================================================================
+
+export const clientObjectives = pgTable("client_objectives", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  // The advice record this objective belongs to. Required so the objective is
+  // pinned to a specific SOA cycle and can never silently leak across advice
+  // records. Cascades for cleanup are intentionally NOT enabled — Corporations
+  // Act 7-year retention applies; deletionLocked + retentionUntil block
+  // deletion until the trigger phase clears the lock.
+  adviceRecordId: integer("advice_record_id").references(() => adviceRecords.id).notNull(),
+
+  // retirement | education | property | estate | income | other
+  objectiveType: text("objective_type").notNull(),
+
+  // Free-text label so a planner can name the objective ("kids' uni fund").
+  label: text("label").notNull(),
+
+  // Money targets are stored at 4dp to match the rest of the advice tables.
+  // Nullable because an objective can be qualitative (e.g. "estate planning").
+  targetAmount: decimal("target_amount", { precision: 14, scale: 4 }),
+  targetCurrency: text("target_currency").notNull().default("AUD"),
+  targetDate: timestamp("target_date"),
+
+  // primary | secondary
+  priority: text("priority").notNull().default("primary"),
+
+  notes: text("notes"),
+
+  createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+}, (table) => ({
+  // "show me everything for this client" / "for this advice record"
+  clientIdx: index("client_objectives_client_idx").on(table.clientId),
+  adviceRecordIdx: index("client_objectives_advice_record_idx").on(table.adviceRecordId),
+}));
+
+export const insertClientObjectiveSchema = createInsertSchema(clientObjectives).omit({
+  id: true,
+  createdAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type ClientObjective = typeof clientObjectives.$inferSelect;
+export type InsertClientObjective = z.infer<typeof insertClientObjectiveSchema>;
+
+export const clientDocuments = pgTable("client_documents", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  // Optional — many documents (ID copies, correspondence) are not pinned to a
+  // specific advice record. SOA / ROA artefacts STILL live in soaDocuments /
+  // roaDocuments; this table is for everything else.
+  adviceRecordId: integer("advice_record_id").references(() => adviceRecords.id),
+
+  // fact_find | risk_questionnaire | id_proof | correspondence | statement | other
+  documentType: text("document_type").notNull(),
+
+  fileName: text("file_name").notNull(),
+  // Opaque storage key. Real backend (S3 / Replit object storage) is a
+  // future task per the spec — the planner code must not assume any structure.
+  storageKey: text("storage_key").notNull(),
+  mimeType: text("mime_type"),
+  fileSizeBytes: integer("file_size_bytes"),
+
+  // Optional human description ("Aug 2026 super statement").
+  description: text("description"),
+
+  uploadedByUserId: integer("uploaded_by_user_id").references(() => users.id).notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+}, (table) => ({
+  clientIdx: index("client_documents_client_idx").on(table.clientId),
+  adviceRecordIdx: index("client_documents_advice_record_idx").on(table.adviceRecordId),
+  typeIdx: index("client_documents_type_idx").on(table.clientId, table.documentType),
+}));
+
+export const insertClientDocumentSchema = createInsertSchema(clientDocuments).omit({
+  id: true,
+  uploadedAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type ClientDocument = typeof clientDocuments.$inferSelect;
+export type InsertClientDocument = z.infer<typeof insertClientDocumentSchema>;
+
+// Append-only adviser working notes. The "append-only" guarantee lives in the
+// route layer: there is NO PATCH and NO DELETE route for this table. An "edit"
+// is implemented as a brand-new row whose previousNoteId points at the row it
+// replaces. Combined with deletionLocked=true and the absence of mutating
+// routes, the regulator-facing surface preserves a complete edit history.
+//
+// We deliberately do NOT add a database CHECK that previousNoteId points to a
+// note for the same client — the route layer validates this; a CHECK would
+// require a trigger and would still be bypassable by a direct SQL admin.
+export const adviserNotes = pgTable("adviser_notes", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+
+  // Optional — a note may be pinned to a specific advice record for audit
+  // anchoring (e.g. "client phoned to clarify objective #3 on the SOA").
+  adviceRecordId: integer("advice_record_id").references(() => adviceRecords.id),
+
+  // Self-reference: the prior version of this note. Null on the very first
+  // version. Each "edit" creates a new row; old rows stay in place.
+  previousNoteId: integer("previous_note_id"),
+
+  // Free-text note body. Limit enforced by the route's zod schema (10k chars).
+  body: text("body").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+}, (table) => ({
+  adviserClientIdx: index("adviser_notes_adviser_client_idx").on(table.adviserUserId, table.clientUserId),
+  clientIdx: index("adviser_notes_client_idx").on(table.clientUserId),
+  previousIdx: index("adviser_notes_previous_idx").on(table.previousNoteId),
+}));
+
+export const insertAdviserNoteSchema = createInsertSchema(adviserNotes).omit({
+  id: true,
+  createdAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type AdviserNote = typeof adviserNotes.$inferSelect;
+export type InsertAdviserNote = z.infer<typeof insertAdviserNoteSchema>;
+
+// Immutable per-version snapshot of an advice record. One row written each
+// time adviceRecords.status transitions to "issued" and again on
+// "superseded", inside the same DB transaction as the status flip. Audit
+// reconstruction reads from snapshotJsonb, never from the live row, so a
+// later in-place edit of adviceRecords cannot rewrite history.
+export const adviceRecordVersions = pgTable("advice_record_versions", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id").references(() => adviceRecords.id).notNull(),
+
+  // Monotonically increasing per adviceRecordId. The service hook computes
+  // versionNumber inside the same transaction that flips the status so the
+  // (adviceRecordId, versionNumber) pair is dense and gap-free.
+  versionNumber: integer("version_number").notNull(),
+
+  // The status the record was in when the snapshot was taken. Always either
+  // "issued" or "superseded" — those are the only statuses that trigger the
+  // hook. Stored explicitly so a reader doesn't have to infer from row order.
+  snapshotReason: text("snapshot_reason").notNull(),
+
+  // Full advice-record state at issuance. Stored as jsonb so we can index /
+  // query individual fields if a future audit needs to.
+  snapshotJsonb: jsonb("snapshot_jsonb").notNull(),
+
+  issuedByUserId: integer("issued_by_user_id").references(() => users.id),
+  issuedAt: timestamp("issued_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+}, (table) => ({
+  // (adviceRecordId, versionNumber) is the natural lookup. UNIQUE so a race
+  // can't write two rows at the same version number for the same record.
+  recordVersionUnique: uniqueIndex("advice_record_versions_record_version_uniq").on(
+    table.adviceRecordId,
+    table.versionNumber,
+  ),
+  recordIdx: index("advice_record_versions_record_idx").on(table.adviceRecordId),
+}));
+
+export const insertAdviceRecordVersionSchema = createInsertSchema(adviceRecordVersions).omit({
+  id: true,
+  issuedAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type AdviceRecordVersion = typeof adviceRecordVersions.$inferSelect;
+export type InsertAdviceRecordVersion = z.infer<typeof insertAdviceRecordVersionSchema>;
