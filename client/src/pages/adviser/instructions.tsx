@@ -160,7 +160,8 @@ export default function AdviserInstructions() {
       queryClient.invalidateQueries({ queryKey: ["/api/adviser/instructions"] });
       toast({
         title: "Instruction created",
-        description: "Sent to client for consent. No funds will move until the client approves.",
+        description:
+          "Sent to client to record consent. Client approval records consent only — execution requires AMAX platform approval and execution controls.",
       });
       setOpen(false);
       form.reset();
@@ -196,8 +197,9 @@ export default function AdviserInstructions() {
           </h1>
           <p className="text-sm text-gray-500 mt-1 max-w-2xl">
             Adviser-created investment actions. Every instruction is created in{" "}
-            <span className="font-medium">pending consent</span> and only takes effect
-            once the linked client explicitly approves it. No funds move from this screen.
+            <span className="font-medium">pending consent</span>. Client approval records consent
+            only. No instruction is executed and no funds move until AMAX platform approval and
+            execution controls are enabled.
           </p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
@@ -338,9 +340,9 @@ export default function AdviserInstructions() {
                   <ShieldAlert className="h-4 w-4 flex-shrink-0 mt-0.5" />
                   <span>
                     This instruction will be created with status{" "}
-                    <strong>pending consent</strong>. The client must approve it from
-                    their own portal before any further action is taken. No funds will
-                    be moved by this submission.
+                    <strong>pending consent</strong>. Client approval records consent only.
+                    No instruction is executed and no funds move until AMAX platform approval
+                    and execution controls are enabled.
                   </span>
                 </div>
                 <Button

@@ -93,6 +93,21 @@ const documentLibrary = [
 export default function Legal() {
   return (
     <div className="p-6 space-y-6">
+      <div
+        className="flex items-start gap-3 rounded-md border-2 border-amber-300 bg-amber-50 p-4 text-sm"
+        data-testid="banner-legal-draft"
+      >
+        <div className="flex-1">
+          <p className="font-semibold text-amber-900">Draft — placeholder regulatory details</p>
+          <p className="text-amber-800 mt-1">
+            AFSL Number, AR Number, ABN, AFCA Member Number and registered address shown below are
+            placeholders pending finalisation of the AFSL partner and corporate registration
+            details. Do not rely on these values. Final legal review and AFSL partner sign-off are
+            required before any external use of this document.
+          </p>
+        </div>
+      </div>
+
       <Tabs defaultValue="fsg" className="space-y-6">
         <div className="overflow-x-auto">
           <TabsList className="inline-flex h-auto gap-1 bg-sky-50 border border-sky-200 p-1 rounded-lg min-w-max">

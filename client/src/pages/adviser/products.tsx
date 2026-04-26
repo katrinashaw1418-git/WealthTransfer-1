@@ -170,6 +170,18 @@ export default function AdviserProducts() {
                 </div>
               </CardHeader>
               <CardContent className="flex-1">
+                {p.category === "digital_assets" && (
+                  <div
+                    className="mb-3 flex items-start gap-2 rounded-md border border-slate-300 bg-slate-100 p-2 text-xs text-slate-700"
+                    data-testid={`badge-specialist-${p.id}`}
+                  >
+                    <AlertCircle className="h-3.5 w-3.5 text-slate-600 flex-shrink-0 mt-0.5" />
+                    <span>
+                      <span className="font-medium">Specialist / higher-risk strategy.</span>{" "}
+                      Additional suitability assessment required.
+                    </span>
+                  </div>
+                )}
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
                   <div>
                     <dt className="text-xs uppercase text-gray-500">Target Net IRR (illustrative)</dt>

@@ -494,7 +494,13 @@ export default function Landing() {
             </div>
           </div>
 
-          <div className="bg-sky-50 border border-sky-100 rounded-lg p-6 mt-8 space-y-4">
+          <div className="bg-amber-50 border-2 border-amber-300 rounded-lg p-3 mt-8 text-xs text-amber-900">
+            <span className="font-semibold">Draft — placeholder regulatory details.</span>{" "}
+            AFSL Number, AR Number, ABN and AFCA Member Number shown below are placeholders pending
+            finalisation. Final legal review and AFSL partner sign-off required before external use.
+          </div>
+
+          <div className="bg-sky-50 border border-sky-100 rounded-lg p-6 mt-4 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-sky-900">
               <div>
                 <p className="font-medium text-sky-900 mb-1">AMAX Wealth</p>

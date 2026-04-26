@@ -1,0 +1,159 @@
+Next step should not be 10C fee engine yet.
+
+Do this order:
+
+1. Notifications
+2. Admin shell
+3. Visual re-skin
+4. 10C fee engine only after admin + notifications are stable
+
+Reason:
+
+Notifications = electricity
+Admin shell = control room
+Visual re-skin = professional presentation
+10C fee engine = real money, highest risk
+Immediate next step: Notifications
+
+Build:
+
+Bell icon real counts:
+- pending client consents
+- open high/urgent tasks
+- fee consents expiring
+- pending reports
+
+Add dropdown:
+
+Notifications
+- Client consent required
+- Fee consent expiring
+- Report ready / requested
+- KYC pending
+
+Clicking notification should deep-link to:
+
+/adviser/workflow
+/adviser/instructions
+/adviser/reports
+/adviser/clients/:id
+Then Admin shell
+
+Build admin pages for AMAX staff:
+
+/admin/advisers
+/admin/products
+/admin/client-links
+/admin/instructions
+/admin/reports
+/admin/compliance
+
+Admin can:
+
+approve adviser firms
+link adviser to clients
+manage product shelf
+review instructions
+view audit logs
+Then visual re-skin
+
+Apply navy/gold only after functionality is stable.
+
+Do not start 10C yet
+
+Fee engine touches:
+
+fee rules
+fee deductions
+client wallet debits
+adviser revenue
+reconciliation
+
+That is real-money infrastructure. Wait until:
+
+notifications work
+admin controls exist
+audit visibility exists
+AFSL partner model confirmed
+
+Final advice:
+
+Build notifications next.
+Then admin shell.
+Then re-skin.
+Then 10C.
+verify and cross check any amendment of fixes before next step
+Thought for a few seconds
+
+Verified from what you pasted. Before the next step, make these final small fixes.
+
+Must fix before notifications/admin
+Product return formatting consistency
+
+Some products still show:
+
+6-8%
+25-35%
+
+Change to:
+
+6–8%
+25–35%
+
+Use en dash consistently.
+
+Digital assets still too prominent
+
+You fixed ordering, but add a label on each digital asset card:
+
+Specialist / higher-risk strategy
+Additional suitability assessment required
+Instruction wording conflict
+
+Current wording says:
+
+only takes effect once the linked client explicitly approves it
+
+But you also say:
+
+Consent recorded ≠ executed
+
+Replace with:
+
+Every instruction is created as pending consent. Client approval records consent only. No instruction is executed and no funds move until AMAX platform approval and execution controls are enabled.
+Business page is now much better
+
+The AFSL wording is now consistent enough for demo, but final legal review is still needed before showing to an AFSL partner.
+
+FSG placeholder fields
+
+Before external demo, replace:
+
+[AFSL Number]
+[AR Number]
+[ABN]
+[Address]
+
+or clearly watermark:
+
+Draft — placeholder regulatory details
+Confirmed okay
+Adviser read-only controls: good
+Client consent hardening: good
+Business disclosure: fixed
+Product shelf order: improved
+%% bug: fixed
+DBFO fields: already present per your check
+
+This matches the design principle in your Wealth Planner Layer document: adviser layer is permissioned, read-only for money movement, and all asset-impacting actions require client consent.
+
+Next step
+
+Proceed with:
+
+Notifications first
+Admin shell second
+Visual re-skin third
+10C fee engine last
+
+No major blockers now.
