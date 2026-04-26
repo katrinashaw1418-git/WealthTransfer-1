@@ -1,0 +1,826 @@
+
+
+Thought for a few seconds
+Yes. Below is Phase 2.1 build spec — only factFindSnapshots, riskProfiles, scoring logic, and API endpoints.
+
+1. Drizzle schema
+Add to shared/schema.ts.
+
+export const factFindSnapshots = pgTable("fact_find_snapshots", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  employmentStatus: text("employment_status"),
+  incomeStability: text("income_stability"), // stable | variable | unstable
+  annualIncome: numeric("annual_income", { precision: 14, scale: 2 }),
+  annualExpenses: numeric("annual_expenses", { precision: 14, scale: 2 }),
+
+  cashAssets: numeric("cash_assets", { precision: 14, scale: 2 }),
+  investmentAssets: numeric("investment_assets", { precision: 14, scale: 2 }),
+  propertyAssets: numeric("property_assets", { precision: 14, scale: 2 }),
+  superAssets: numeric("super_assets", { precision: 14, scale: 2 }),
+  otherAssets: numeric("other_assets", { precision: 14, scale: 2 }),
+
+  mortgageDebt: numeric("mortgage_debt", { precision: 14, scale: 2 }),
+  personalDebt: numeric("personal_debt", { precision: 14, scale: 2 }),
+  creditCardDebt: numeric("credit_card_debt", { precision: 14, scale: 2 }),
+  otherDebt: numeric("other_debt", { precision: 14, scale: 2 }),
+
+  dependantsCount: integer("dependants_count").notNull().default(0),
+  liquidityBufferMonths: integer("liquidity_buffer_months"),
+  liquidityNeeds: text("liquidity_needs"), // low | medium | high
+
+  primaryObjective: text("primary_objective"),
+  investmentHorizon: text("investment_horizon"), // <2 | 2-5 | 5-10 | 10+
+  incomeReliance: text("income_reliance"), // full | partial | none
+
+  existingAllocation: jsonb("existing_allocation").$type<{
+    cash?: number;
+    bonds?: number;
+    equities?: number;
+    property?: number;
+    alternatives?: number;
+    crypto?: number;
+  }>(),
+
+  rawAnswers: jsonb("raw_answers").notNull(),
+
+  isComplete: boolean("is_complete").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+
+export const riskProfiles = pgTable("risk_profiles", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  factFindSnapshotId: integer("fact_find_snapshot_id")
+    .references(() => factFindSnapshots.id)
+    .notNull(),
+
+  behaviouralScore: integer("behavioural_score").notNull(),
+  capacityAdjustment: integer("capacity_adjustment").notNull(),
+  finalScore: integer("final_score").notNull(),
+
+  riskBand: text("risk_band").notNull(), // conservative | moderate | balanced | growth | high_growth
+  recommendedPortfolio: text("recommended_portfolio").notNull(),
+
+  overrideApplied: boolean("override_applied").notNull().default(false),
+  overrideReasons: jsonb("override_reasons").$type<string[]>().notNull().default([]),
+
+  allocation: jsonb("allocation").$type<{
+    cash: number;
+    bonds: number;
+    equities: number;
+    alternatives: number;
+    crypto: number;
+  }>().notNull(),
+
+  scoringInputs: jsonb("scoring_inputs").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+
+export const insertFactFindSnapshotSchema = createInsertSchema(factFindSnapshots);
+export const insertRiskProfileSchema = createInsertSchema(riskProfiles);
+
+export type FactFindSnapshot = typeof factFindSnapshots.$inferSelect;
+export type InsertFactFindSnapshot = typeof factFindSnapshots.$inferInsert;
+
+export type RiskProfile = typeof riskProfiles.$inferSelect;
+export type InsertRiskProfile = typeof riskProfiles.$inferInsert;
+2. Risk scoring function
+Create:
+
+server/services/risk-scoring.ts
+type RiskAnswers = {
+  marketDropReaction: "sell_all" | "sell_some" | "hold" | "buy_more";
+  volatilityTolerance: "low" | "some" | "moderate" | "high";
+  lossTolerance: "under_5" | "5_10" | "10_20" | "over_20";
+  investmentExperience: "none" | "basic" | "moderate" | "advanced";
+  incomeReliance: "full" | "partial" | "none";
+
+  incomeStability: "stable" | "variable" | "unstable";
+  liquidityBufferMonths: number;
+  dependantsCount: number;
+  debtRatio: "low" | "medium" | "high";
+  investmentHorizon: "<2" | "2-5" | "5-10" | "10+";
+  liquidityNeeds: "low" | "medium" | "high";
+};
+
+export function scoreRiskProfile(input: RiskAnswers) {
+  let behaviouralScore = 0;
+
+  behaviouralScore += {
+    sell_all: 0,
+    sell_some: 2,
+    hold: 4,
+    buy_more: 6,
+  }[input.marketDropReaction];
+
+  behaviouralScore += {
+    low: 1,
+    some: 3,
+    moderate: 5,
+    high: 7,
+  }[input.volatilityTolerance];
+
+  behaviouralScore += {
+    under_5: 1,
+    "5_10": 3,
+    "10_20": 5,
+    over_20: 7,
+  }[input.lossTolerance];
+
+  behaviouralScore += {
+    none: 1,
+    basic: 3,
+    moderate: 5,
+    advanced: 7,
+  }[input.investmentExperience];
+
+  behaviouralScore += {
+    full: 1,
+    partial: 3,
+    none: 5,
+  }[input.incomeReliance];
+
+  let capacityAdjustment = 0;
+
+  capacityAdjustment += {
+    stable: 2,
+    variable: 0,
+    unstable: -2,
+  }[input.incomeStability];
+
+  if (input.liquidityBufferMonths > 12) capacityAdjustment += 2;
+  else if (input.liquidityBufferMonths >= 6) capacityAdjustment += 1;
+  else capacityAdjustment -= 2;
+
+  if (input.dependantsCount === 0) capacityAdjustment += 1;
+  else if (input.dependantsCount >= 3) capacityAdjustment -= 2;
+
+  capacityAdjustment += {
+    low: 1,
+    medium: 0,
+    high: -2,
+  }[input.debtRatio];
+
+  let finalScore = behaviouralScore + capacityAdjustment;
+  finalScore = Math.max(5, Math.min(35, finalScore));
+
+  let riskBand = scoreToRiskBand(finalScore);
+
+  const overrideReasons: string[] = [];
+
+  if (input.investmentHorizon === "<2" && riskRank(riskBand) > riskRank("moderate")) {
+    riskBand = "moderate";
+    overrideReasons.push("Investment horizon is less than 2 years; maximum risk profile capped at Moderate.");
+  }
+
+  if (input.liquidityNeeds === "high" && riskRank(riskBand) > riskRank("balanced")) {
+    riskBand = "balanced";
+    overrideReasons.push("High liquidity need; maximum risk profile capped at Balanced.");
+  }
+
+  if (input.incomeReliance === "full" && riskRank(riskBand) > riskRank("balanced")) {
+    riskBand = "balanced";
+    overrideReasons.push("Client relies on portfolio income; maximum risk profile capped at Balanced.");
+  }
+
+  const recommendedPortfolio = riskBand;
+  const allocation = mapPortfolioAllocation(recommendedPortfolio);
+
+  return {
+    behaviouralScore,
+    capacityAdjustment,
+    finalScore,
+    riskBand,
+    recommendedPortfolio,
+    overrideApplied: overrideReasons.length > 0,
+    overrideReasons,
+    allocation,
+    scoringInputs: input,
+  };
+}
+
+function scoreToRiskBand(score: number) {
+  if (score <= 10) return "conservative";
+  if (score <= 16) return "moderate";
+  if (score <= 22) return "balanced";
+  if (score <= 28) return "growth";
+  return "high_growth";
+}
+
+function riskRank(band: string) {
+  return {
+    conservative: 1,
+    moderate: 2,
+    balanced: 3,
+    growth: 4,
+    high_growth: 5,
+  }[band] ?? 1;
+}
+
+function mapPortfolioAllocation(portfolio: string) {
+  const allocations = {
+    conservative: {
+      cash: 25,
+      bonds: 45,
+      equities: 25,
+      alternatives: 5,
+      crypto: 0,
+    },
+    moderate: {
+      cash: 15,
+      bonds: 35,
+      equities: 45,
+      alternatives: 5,
+      crypto: 0,
+    },
+    balanced: {
+      cash: 10,
+      bonds: 25,
+      equities: 55,
+      alternatives: 5,
+      crypto: 5,
+    },
+    growth: {
+      cash: 5,
+      bonds: 10,
+      equities: 70,
+      alternatives: 5,
+      crypto: 10,
+    },
+    high_growth: {
+      cash: 0,
+      bonds: 5,
+      equities: 75,
+      alternatives: 5,
+      crypto: 15,
+    },
+  };
+
+  return allocations[portfolio as keyof typeof allocations] ?? allocations.balanced;
+}
+3. API endpoints
+Add to server/routes.ts.
+
+import { factFindSnapshots, riskProfiles } from "@shared/schema";
+import { scoreRiskProfile } from "./services/risk-scoring";
+A. Create fact find snapshot
+app.post("/api/fact-find", async (req, res) => {
+  try {
+    const { userId } = requireAuth(req);
+    await requireKyc(userId, storage);
+
+    const payload = req.body;
+
+    const [snapshot] = await db
+      .insert(factFindSnapshots)
+      .values({
+        clientId: userId,
+        employmentStatus: payload.employmentStatus,
+        incomeStability: payload.incomeStability,
+        annualIncome: payload.annualIncome,
+        annualExpenses: payload.annualExpenses,
+
+        cashAssets: payload.cashAssets,
+        investmentAssets: payload.investmentAssets,
+        propertyAssets: payload.propertyAssets,
+        superAssets: payload.superAssets,
+        otherAssets: payload.otherAssets,
+
+        mortgageDebt: payload.mortgageDebt,
+        personalDebt: payload.personalDebt,
+        creditCardDebt: payload.creditCardDebt,
+        otherDebt: payload.otherDebt,
+
+        dependantsCount: payload.dependantsCount ?? 0,
+        liquidityBufferMonths: payload.liquidityBufferMonths,
+        liquidityNeeds: payload.liquidityNeeds,
+
+        primaryObjective: payload.primaryObjective,
+        investmentHorizon: payload.investmentHorizon,
+        incomeReliance: payload.incomeReliance,
+
+        existingAllocation: payload.existingAllocation ?? {},
+        rawAnswers: payload.rawAnswers ?? payload,
+        isComplete: true,
+      })
+      .returning();
+
+    res.json({
+      success: true,
+      factFindSnapshot: snapshot,
+    });
+  } catch (error) {
+    console.error("Create fact find error:", error);
+    res.status(500).json({ error: "Failed to create fact find snapshot" });
+  }
+});
+B. Score risk profile
+app.post("/api/risk-profile/score", async (req, res) => {
+  try {
+    const { userId } = requireAuth(req);
+    await requireKyc(userId, storage);
+
+    const { factFindSnapshotId, answers } = req.body;
+
+    const result = scoreRiskProfile(answers);
+
+    const [riskProfile] = await db
+      .insert(riskProfiles)
+      .values({
+        clientId: userId,
+        factFindSnapshotId,
+
+        behaviouralScore: result.behaviouralScore,
+        capacityAdjustment: result.capacityAdjustment,
+        finalScore: result.finalScore,
+
+        riskBand: result.riskBand,
+        recommendedPortfolio: result.recommendedPortfolio,
+
+        overrideApplied: result.overrideApplied,
+        overrideReasons: result.overrideReasons,
+
+        allocation: result.allocation,
+        scoringInputs: result.scoringInputs,
+      })
+      .returning();
+
+    res.json({
+      success: true,
+      riskProfile,
+    });
+  } catch (error) {
+    console.error("Risk scoring error:", error);
+    res.status(500).json({ error: "Failed to score risk profile" });
+  }
+});
+C. Get latest fact find
+app.get("/api/fact-find/latest", async (req, res) => {
+  try {
+    const { userId } = requireAuth(req);
+
+    const [snapshot] = await db
+      .select()
+      .from(factFindSnapshots)
+      .where(eq(factFindSnapshots.clientId, userId))
+      .orderBy(desc(factFindSnapshots.createdAt))
+      .limit(1);
+
+    res.json({ factFindSnapshot: snapshot ?? null });
+  } catch (error) {
+    console.error("Get latest fact find error:", error);
+    res.status(500).json({ error: "Failed to fetch fact find" });
+  }
+});
+D. Get latest risk profile
+app.get("/api/risk-profile/latest", async (req, res) => {
+  try {
+    const { userId } = requireAuth(req);
+
+    const [profile] = await db
+      .select()
+      .from(riskProfiles)
+      .where(eq(riskProfiles.clientId, userId))
+      .orderBy(desc(riskProfiles.createdAt))
+      .limit(1);
+
+    res.json({ riskProfile: profile ?? null });
+  } catch (error) {
+    console.error("Get latest risk profile error:", error);
+    res.status(500).json({ error: "Failed to fetch risk profile" });
+  }
+});
+4. Recommended payload
+Frontend sends:
+
+{
+  "employmentStatus": "full_time",
+  "incomeStability": "stable",
+  "annualIncome": "180000",
+  "annualExpenses": "90000",
+  "cashAssets": "100000",
+  "investmentAssets": "400000",
+  "propertyAssets": "900000",
+  "superAssets": "250000",
+  "otherAssets": "0",
+  "mortgageDebt": "500000",
+  "personalDebt": "0",
+  "creditCardDebt": "5000",
+  "otherDebt": "0",
+  "dependantsCount": 1,
+  "liquidityBufferMonths": 9,
+  "liquidityNeeds": "medium",
+  "primaryObjective": "wealth_accumulation",
+  "investmentHorizon": "10+",
+  "incomeReliance": "none",
+  "existingAllocation": {
+    "cash": 10,
+    "bonds": 10,
+    "equities": 60,
+    "property": 10,
+    "alternatives": 5,
+    "crypto": 5
+  },
+  "rawAnswers": {}
+}
+Risk score payload:
+
+{
+  "factFindSnapshotId": 1,
+  "answers": {
+    "marketDropReaction": "hold",
+    "volatilityTolerance": "moderate",
+    "lossTolerance": "10_20",
+    "investmentExperience": "moderate",
+    "incomeReliance": "none",
+    "incomeStability": "stable",
+    "liquidityBufferMonths": 9,
+    "dependantsCount": 1,
+    "debtRatio": "medium",
+    "investmentHorizon": "10+",
+    "liquidityNeeds": "medium"
+  }
+}
+5. Important build note
+This is Phase 2.1 only.
+
+Do not yet build:
+
+SOA documents
+fee consents
+advice acknowledgements
+execution authorisations
+DB triggers
+Next after this:
+
+Phase 2.2 — adviceRecords + soaDocuments schema
+
+Phase 2.2 — adviceRecords + soaDocuments schema
+
+Thought for a couple of seconds
+Below is Phase 2.2 only: adviceRecords, soaDocuments, and roaDocuments.
+
+Do not build fee consents, acknowledgements, execution authorisations, triggers, or UI yet.
+
+Phase 2.2 — Drizzle schema
+Add to shared/schema.ts.
+
+export const adviceRecords = pgTable("advice_records", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  factFindSnapshotId: integer("fact_find_snapshot_id")
+    .references(() => factFindSnapshots.id),
+
+  riskProfileId: integer("risk_profile_id")
+    .references(() => riskProfiles.id),
+
+  adviceType: text("advice_type").notNull().default("personal"),
+  adviceSource: text("advice_source").notNull().default("hybrid"), 
+  // ai | adviser | hybrid
+
+  status: text("status").notNull().default("draft"),
+  // draft | review_pending | issued | accepted | declined | superseded
+
+  scope: jsonb("scope").$type<string[]>().notNull().default([]),
+  excludedScope: jsonb("excluded_scope").$type<string[]>().notNull().default([]),
+
+  objectivesSummary: text("objectives_summary"),
+  financialSituationSummary: text("financial_situation_summary"),
+  strategySummary: text("strategy_summary"),
+  recommendationRationale: text("recommendation_rationale"),
+
+  recommendedPortfolio: text("recommended_portfolio"),
+  recommendedAllocation: jsonb("recommended_allocation").$type<{
+    cash: number;
+    bonds: number;
+    equities: number;
+    alternatives: number;
+    crypto: number;
+  }>(),
+
+  incompleteInfoWarningRequired: boolean("incomplete_info_warning_required")
+    .notNull()
+    .default(false),
+
+  incompleteInfoWarningText: text("incomplete_info_warning_text"),
+
+  switchingAdviceRequired: boolean("switching_advice_required")
+    .notNull()
+    .default(false),
+
+  switchingAdviceDetails: jsonb("switching_advice_details").$type<{
+    existingProduct?: string;
+    recommendedProduct?: string;
+    reasons?: string;
+    benefits?: string;
+    disadvantages?: string;
+    costs?: string;
+  }>(),
+
+  soaIssued: boolean("soa_issued").notNull().default(false),
+  soaIssuedAt: timestamp("soa_issued_at"),
+
+  soaViewed: boolean("soa_viewed").notNull().default(false),
+  soaViewedAt: timestamp("soa_viewed_at"),
+
+  soaDownloaded: boolean("soa_downloaded").notNull().default(false),
+  soaDownloadedAt: timestamp("soa_downloaded_at"),
+
+  earliestAcceptAt: timestamp("earliest_accept_at"),
+
+  adviceAccepted: boolean("advice_accepted").notNull().default(false),
+  acceptedAt: timestamp("accepted_at"),
+
+  adviceDeclined: boolean("advice_declined").notNull().default(false),
+  declinedAt: timestamp("declined_at"),
+  declineReason: text("decline_reason"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+SOA documents
+export const soaDocuments = pgTable("soa_documents", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  version: integer("version").notNull().default(1),
+
+  documentUrl: text("document_url"),
+  documentHash: text("document_hash"),
+
+  generatedBy: text("generated_by").notNull().default("system"),
+  // ai | adviser | system
+
+  documentStatus: text("document_status").notNull().default("draft"),
+  // draft | issued | superseded | void
+
+  openingScreenShown: boolean("opening_screen_shown").notNull().default(false),
+  openingScreenShownAt: timestamp("opening_screen_shown_at"),
+
+  fsgDelivered: boolean("fsg_delivered").notNull().default(false),
+  fsgDeliveredAt: timestamp("fsg_delivered_at"),
+
+  isLocked: boolean("is_locked").notNull().default(false),
+
+  issuedAt: timestamp("issued_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+ROA documents
+Even if you do not build ROA UI yet, add the table now.
+
+export const roaDocuments = pgTable("roa_documents", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  previousAdviceRecordId: integer("previous_advice_record_id")
+    .references(() => adviceRecords.id),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  version: integer("version").notNull().default(1),
+
+  documentUrl: text("document_url"),
+  documentHash: text("document_hash"),
+
+  reasonForRoa: text("reason_for_roa"),
+
+  documentStatus: text("document_status").notNull().default("draft"),
+  // draft | issued | superseded | void
+
+  isLocked: boolean("is_locked").notNull().default(false),
+
+  issuedAt: timestamp("issued_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+Insert schemas and types
+Add at bottom of schema.ts:
+
+export const insertAdviceRecordSchema = createInsertSchema(adviceRecords);
+export const insertSoaDocumentSchema = createInsertSchema(soaDocuments);
+export const insertRoaDocumentSchema = createInsertSchema(roaDocuments);
+
+export type AdviceRecord = typeof adviceRecords.$inferSelect;
+export type InsertAdviceRecord = typeof adviceRecords.$inferInsert;
+
+export type SoaDocument = typeof soaDocuments.$inferSelect;
+export type InsertSoaDocument = typeof soaDocuments.$inferInsert;
+
+export type RoaDocument = typeof roaDocuments.$inferSelect;
+export type InsertRoaDocument = typeof roaDocuments.$inferInsert;
+Build instruction for Replit
+Add Phase 2.2 schema only:
+- adviceRecords
+- soaDocuments
+- roaDocuments
+- insert schemas
+- TypeScript types
+
+Use integer foreign keys to users.id.
+Do not create clients table.
+Do not add feeConsents yet.
+Do not add adviceAcknowledgements yet.
+Do not add executionAuthorisations yet.
+Do not add DB triggers yet.
+Do not build UI yet.
+
+Run drizzle-kit generate and drizzle-kit push.
+Stop and confirm.
+
+
+Pasted text(92).txt
+Document
+
+Good — this is a different layer from your advice engine build.
+This is a production integrity + data truthfulness patch, and it’s actually very important.
+
+I’ll give you a clear verdict + what to do (no confusion with Phase 2 work).
+
+✅ 1. What this patch is doing (verified)
+From your file: 
+
+
+It is fixing three critical issues:
+
+🔴 A. Fake historical portfolio data
+You had:
+
+// backward projection using Math.pow
+// 365 days synthetic history
+👉 This is:
+
+❌ NOT real data
+❌ NOT defensible under AFSL
+❌ misleading performance representation
+✅ Patch replaces with:
+// only save today's real snapshot
+✔ Correct
+✔ Compliant
+✔ Auditable
+
+🔴 B. Fake monthly P&L
+You had:
+
+previousMonthValue = totalValue / (1 + blendedRate)
+👉 This is model-based return, not actual performance.
+
+✅ Patch replaces with:
+compare with real snapshot 30 days ago
+✔ Real performance
+✔ Source labelled (monthlyPnlSource)
+✔ No assumptions
+
+🔴 C. Fake chart / projections
+You had:
+
+fallback projection logic
+simulated history
+✅ Patch:
+only show stored snapshots
+OR show “insufficient history”
+✔ This is exactly what regulators expect
+
+🟢 2. This patch is CORRECT — you should apply it
+There is no downside.
+
+This patch is:
+✔ technically correct
+✔ regulator-safe
+✔ consistent with your non-custodial + advice model
+✔ required before any real launch
+🔴 3. One thing you must NOT do
+Do NOT mix this with:
+
+Phase 2 advice engine work
+This patch is:
+
+Infrastructure / data integrity layer
+Not:
+
+Advice engine layer
+🧠 4. Why this matters (very important)
+Right now your system is evolving into:
+
+Personal advice platform + portfolio tracking
+That means:
+
+ANY fake performance = legal exposure
+Because:
+
+You are now giving advice based on portfolio data
+👉 If portfolio data is synthetic → advice is contaminated
+
+⚠️ 5. One improvement I recommend (add this)
+In addition to the patch, add:
+
+dataSource: "snapshots" | "insufficient_history"
+And enforce UI:
+
+If insufficient_history:
+→ no performance %
+→ no trend claims
+🔴 6. Storage change (VERY important)
+From your patch:
+
+MemStorage → DatabaseStorage
+👉 This is CRITICAL
+
+If you don’t do this:
+
+❌ snapshots reset on restart
+❌ P&L becomes meaningless
+❌ audit trail broken
+🧪 7. Real-world check (must pass)
+After patch, test:
+
+Scenario 1
+New user → no history
+→ chart shows “insufficient history”
+Scenario 2
+User returns after 30 days
+→ P&L calculated from real snapshot
+Scenario 3
+Restart server
+→ snapshots persist
+🟡 8. AI advisory fix (important alignment)
+From your patch:
+
+const performanceData = [];
+👉 This is correct because:
+
+You removed fake performance inputs to AI
+Which aligns with:
+
+Session 1 compliance lock
+🟢 Final Position
+Patch = VALID
+Patch = REQUIRED
+Patch = SAFE to apply now
+🚦 What to do now (clear sequence)
+You now have two parallel tracks:
+
+Track A — Data integrity (this patch)
+👉 Apply immediately
+
+Track B — Advice engine
+Phase 2.1 → factFind + riskProfiles
+Phase 2.2 → adviceRecords + SOA
+⚠️ Important sequencing rule
+Apply THIS patch BEFORE enabling:
+- portfolio performance UI
+- any advisory logic using returns
+👍 Bottom line
+This patch fixes something subtle but dangerous:
+
+Fake performance → misleading advice → regulatory risk
+After this:
+
+Your portfolio engine becomes:
+✔ real
+✔ auditable
+✔ regulator-safe
+▶️ If you want next
+I can now give you:
+
+👉 reconciliation job design (daily vs custodian)
+👉 ledger architecture (idempotent, audit-grade)
+👉 transaction state machine (pending → settled → reversed)
+That’s the final 10% before real launch.
+
+
+

@@ -1,0 +1,220 @@
+Below is **Phase 2.2 only**: `adviceRecords`, `soaDocuments`, and `roaDocuments`.
+
+Do **not** build fee consents, acknowledgements, execution authorisations, triggers, or UI yet.
+
+---
+
+# Phase 2.2 — Drizzle schema
+
+Add to `shared/schema.ts`.
+
+```ts
+export const adviceRecords = pgTable("advice_records", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  factFindSnapshotId: integer("fact_find_snapshot_id")
+    .references(() => factFindSnapshots.id),
+
+  riskProfileId: integer("risk_profile_id")
+    .references(() => riskProfiles.id),
+
+  adviceType: text("advice_type").notNull().default("personal"),
+  adviceSource: text("advice_source").notNull().default("hybrid"), 
+  // ai | adviser | hybrid
+
+  status: text("status").notNull().default("draft"),
+  // draft | review_pending | issued | accepted | declined | superseded
+
+  scope: jsonb("scope").$type<string[]>().notNull().default([]),
+  excludedScope: jsonb("excluded_scope").$type<string[]>().notNull().default([]),
+
+  objectivesSummary: text("objectives_summary"),
+  financialSituationSummary: text("financial_situation_summary"),
+  strategySummary: text("strategy_summary"),
+  recommendationRationale: text("recommendation_rationale"),
+
+  recommendedPortfolio: text("recommended_portfolio"),
+  recommendedAllocation: jsonb("recommended_allocation").$type<{
+    cash: number;
+    bonds: number;
+    equities: number;
+    alternatives: number;
+    crypto: number;
+  }>(),
+
+  incompleteInfoWarningRequired: boolean("incomplete_info_warning_required")
+    .notNull()
+    .default(false),
+
+  incompleteInfoWarningText: text("incomplete_info_warning_text"),
+
+  switchingAdviceRequired: boolean("switching_advice_required")
+    .notNull()
+    .default(false),
+
+  switchingAdviceDetails: jsonb("switching_advice_details").$type<{
+    existingProduct?: string;
+    recommendedProduct?: string;
+    reasons?: string;
+    benefits?: string;
+    disadvantages?: string;
+    costs?: string;
+  }>(),
+
+  soaIssued: boolean("soa_issued").notNull().default(false),
+  soaIssuedAt: timestamp("soa_issued_at"),
+
+  soaViewed: boolean("soa_viewed").notNull().default(false),
+  soaViewedAt: timestamp("soa_viewed_at"),
+
+  soaDownloaded: boolean("soa_downloaded").notNull().default(false),
+  soaDownloadedAt: timestamp("soa_downloaded_at"),
+
+  earliestAcceptAt: timestamp("earliest_accept_at"),
+
+  adviceAccepted: boolean("advice_accepted").notNull().default(false),
+  acceptedAt: timestamp("accepted_at"),
+
+  adviceDeclined: boolean("advice_declined").notNull().default(false),
+  declinedAt: timestamp("declined_at"),
+  declineReason: text("decline_reason"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+```
+
+---
+
+# SOA documents
+
+```ts
+export const soaDocuments = pgTable("soa_documents", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  version: integer("version").notNull().default(1),
+
+  documentUrl: text("document_url"),
+  documentHash: text("document_hash"),
+
+  generatedBy: text("generated_by").notNull().default("system"),
+  // ai | adviser | system
+
+  documentStatus: text("document_status").notNull().default("draft"),
+  // draft | issued | superseded | void
+
+  openingScreenShown: boolean("opening_screen_shown").notNull().default(false),
+  openingScreenShownAt: timestamp("opening_screen_shown_at"),
+
+  fsgDelivered: boolean("fsg_delivered").notNull().default(false),
+  fsgDeliveredAt: timestamp("fsg_delivered_at"),
+
+  isLocked: boolean("is_locked").notNull().default(false),
+
+  issuedAt: timestamp("issued_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+```
+
+---
+
+# ROA documents
+
+Even if you do not build ROA UI yet, add the table now.
+
+```ts
+export const roaDocuments = pgTable("roa_documents", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  previousAdviceRecordId: integer("previous_advice_record_id")
+    .references(() => adviceRecords.id),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  version: integer("version").notNull().default(1),
+
+  documentUrl: text("document_url"),
+  documentHash: text("document_hash"),
+
+  reasonForRoa: text("reason_for_roa"),
+
+  documentStatus: text("document_status").notNull().default("draft"),
+  // draft | issued | superseded | void
+
+  isLocked: boolean("is_locked").notNull().default(false),
+
+  issuedAt: timestamp("issued_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+```
+
+---
+
+# Insert schemas and types
+
+Add at bottom of `schema.ts`:
+
+```ts
+export const insertAdviceRecordSchema = createInsertSchema(adviceRecords);
+export const insertSoaDocumentSchema = createInsertSchema(soaDocuments);
+export const insertRoaDocumentSchema = createInsertSchema(roaDocuments);
+
+export type AdviceRecord = typeof adviceRecords.$inferSelect;
+export type InsertAdviceRecord = typeof adviceRecords.$inferInsert;
+
+export type SoaDocument = typeof soaDocuments.$inferSelect;
+export type InsertSoaDocument = typeof soaDocuments.$inferInsert;
+
+export type RoaDocument = typeof roaDocuments.$inferSelect;
+export type InsertRoaDocument = typeof roaDocuments.$inferInsert;
+```
+
+---
+
+# Build instruction for Replit
+
+```text
+Add Phase 2.2 schema only:
+- adviceRecords
+- soaDocuments
+- roaDocuments
+- insert schemas
+- TypeScript types
+
+Use integer foreign keys to users.id.
+Do not create clients table.
+Do not add feeConsents yet.
+Do not add adviceAcknowledgements yet.
+Do not add executionAuthorisations yet.
+Do not add DB triggers yet.
+Do not build UI yet.
+
+Run drizzle-kit generate and drizzle-kit push.
+Stop and confirm.
+```

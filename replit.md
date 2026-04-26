@@ -14,6 +14,29 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 5 (Phase 2.2): Advice Records + SOA + ROA Schema
+
+**Schema-only.** No routes, no services, no UI. Fee consents, advice acknowledgements, execution authorisations and the DB triggers (execution gate + 7-year retention) are explicitly deferred to Phase 2.3+.
+
+Schema changes (`shared/schema.ts`):
+1. **`adviceRecords`** new table — the parent record for any piece of advice given to a client. Columns: `clientId` FK, optional `adviserId` FK, optional `factFindSnapshotId` FK → `fact_find_snapshots.id`, optional `riskProfileId` FK → `risk_profiles.id`, `adviceType` (default `personal`), `adviceSource` (default `hybrid` — `ai|adviser|hybrid`), `status` (default `draft` — `draft|review_pending|issued|accepted|declined|superseded`), `scope` + `excludedScope` (jsonb string[] default `'[]'`), four free-text summary fields (`objectivesSummary`, `financialSituationSummary`, `strategySummary`, `recommendationRationale`), `recommendedPortfolio` + `recommendedAllocation` (jsonb {cash, bonds, equities, alternatives, crypto}), `incompleteInfoWarningRequired` + `incompleteInfoWarningText`, `switchingAdviceRequired` + `switchingAdviceDetails` (jsonb {existingProduct, recommendedProduct, reasons, benefits, disadvantages, costs}), execution-gate flags (`soaIssued`/At, `soaViewed`/At, `soaDownloaded`/At, `earliestAcceptAt`, `adviceAccepted`/At, `adviceDeclined`/At, `declineReason`), `createdAt` + `updatedAt`, plus retention scaffolding.
+2. **`soaDocuments`** new table — Statement of Advice document store. Columns: `adviceRecordId` FK NOT NULL → `advice_records.id`, `clientId` FK, optional `adviserId` FK, `version` (default 1), `documentUrl` + `documentHash`, `generatedBy` (default `system` — `ai|adviser|system`), `documentStatus` (default `draft` — `draft|issued|superseded|void`), RG221 opening-screen ack (`openingScreenShown`/At), `fsgDelivered`/At, `isLocked`, `issuedAt`, `createdAt`, plus retention scaffolding.
+3. **`roaDocuments`** new table — Record of Advice (review-and-confirm cycles after the initial SOA). Columns: `adviceRecordId` FK NOT NULL → `advice_records.id`, optional self-style `previousAdviceRecordId` FK → `advice_records.id`, `clientId` FK, optional `adviserId` FK, `version` (default 1), `documentUrl` + `documentHash`, `reasonForRoa`, `documentStatus` (default `draft`), `isLocked`, `issuedAt`, `createdAt`, plus retention scaffolding.
+4. Insert schemas use `.omit()` for auto-generated fields (`id`, `createdAt`, `updatedAt` where present, `retentionUntil`, `deletionLocked`); `Insert*` and select types added for all 3 tables.
+
+DB migration: `drizzle-kit push --force` succeeded, schema verified via `information_schema`:
+- `advice_records` (36 cols), `soa_documents` (19 cols), `roa_documents` (15 cols) all present ✓
+- All 11 FKs correctly resolved (4 from advice_records, 3 from soa_documents, 4 from roa_documents) ✓
+- All NOT NULL constraints, defaults (`'draft'`, `'hybrid'`, `'personal'`, `'system'`, `'[]'::jsonb`, `false`, `1`, `true`, `now()`) match spec exactly ✓
+
+Typecheck: clean except for the same 2 pre-existing `server/storage.ts` errors at 3276/3299 (out of scope).
+
+Server restart: clean.
+
+Code review: PASS first pass — every column, FK target, jsonb shape, default and nullability matches spec; insert schemas correctly omit auto-generated fields; no scope creep.
+
+**No scope creep:** zero new routes / services / UI; no fee-consent / advice-ack / execution-auth tables; no DB triggers; no separate clients table; no migration of existing data.
+
 ## Recent Changes (April 2026) — Session 4 (Phase 2.1): Fact-Find + Risk-Profile Advice-Engine Foundation
 
 Phase 2.1 of the advice engine. **Schema + scoring + 4 API endpoints only.** SOA, fee consents, advice acks, execution authorisations, and the DB triggers (execution gate, 7-year retention) are explicitly deferred to Phase 2.2+. No UI built yet.

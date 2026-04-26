@@ -528,3 +528,204 @@ export const insertRiskProfileSchema = createInsertSchema(riskProfiles).omit({
 });
 export type RiskProfile = typeof riskProfiles.$inferSelect;
 export type InsertRiskProfile = z.infer<typeof insertRiskProfileSchema>;
+
+// ===========================================================================
+// Phase 2.2 — Advice records + SOA + ROA documents
+// ---------------------------------------------------------------------------
+// Three new tables, schema only. NO routes, NO services, NO UI added in this
+// phase. Fee consents, advice acknowledgements, execution authorisations and
+// the DB triggers (execution gate + 7-year retention) are explicitly deferred
+// to later phases.
+//
+// All FKs are integer references to users.id (matching the rest of the repo).
+// retentionUntil currently defaults to now() — the actual now()+7y rule will
+// be enforced by a DB trigger in a later phase.
+// ===========================================================================
+
+export const adviceRecords = pgTable("advice_records", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  factFindSnapshotId: integer("fact_find_snapshot_id")
+    .references(() => factFindSnapshots.id),
+
+  riskProfileId: integer("risk_profile_id")
+    .references(() => riskProfiles.id),
+
+  adviceType: text("advice_type").notNull().default("personal"),
+  adviceSource: text("advice_source").notNull().default("hybrid"),
+  // ai | adviser | hybrid
+
+  status: text("status").notNull().default("draft"),
+  // draft | review_pending | issued | accepted | declined | superseded
+
+  scope: jsonb("scope").$type<string[]>().notNull().default([]),
+  excludedScope: jsonb("excluded_scope").$type<string[]>().notNull().default([]),
+
+  objectivesSummary: text("objectives_summary"),
+  financialSituationSummary: text("financial_situation_summary"),
+  strategySummary: text("strategy_summary"),
+  recommendationRationale: text("recommendation_rationale"),
+
+  recommendedPortfolio: text("recommended_portfolio"),
+  recommendedAllocation: jsonb("recommended_allocation").$type<{
+    cash: number;
+    bonds: number;
+    equities: number;
+    alternatives: number;
+    crypto: number;
+  }>(),
+
+  incompleteInfoWarningRequired: boolean("incomplete_info_warning_required")
+    .notNull()
+    .default(false),
+  incompleteInfoWarningText: text("incomplete_info_warning_text"),
+
+  switchingAdviceRequired: boolean("switching_advice_required")
+    .notNull()
+    .default(false),
+  switchingAdviceDetails: jsonb("switching_advice_details").$type<{
+    existingProduct?: string;
+    recommendedProduct?: string;
+    reasons?: string;
+    benefits?: string;
+    disadvantages?: string;
+    costs?: string;
+  }>(),
+
+  // Execution-gate flags. These are populated by later-phase routes when the
+  // SOA is issued, viewed, downloaded, accepted or declined. They are NOT the
+  // execution gate itself — the gate is recomputed live from these + fee
+  // consent state in a later phase.
+  soaIssued: boolean("soa_issued").notNull().default(false),
+  soaIssuedAt: timestamp("soa_issued_at"),
+
+  soaViewed: boolean("soa_viewed").notNull().default(false),
+  soaViewedAt: timestamp("soa_viewed_at"),
+
+  soaDownloaded: boolean("soa_downloaded").notNull().default(false),
+  soaDownloadedAt: timestamp("soa_downloaded_at"),
+
+  // Cooling-off — earliest moment the client may accept the advice (e.g.
+  // soaViewedAt + 10 minutes). Computed and persisted by later-phase routes.
+  earliestAcceptAt: timestamp("earliest_accept_at"),
+
+  adviceAccepted: boolean("advice_accepted").notNull().default(false),
+  acceptedAt: timestamp("accepted_at"),
+
+  adviceDeclined: boolean("advice_declined").notNull().default(false),
+  declinedAt: timestamp("declined_at"),
+  declineReason: text("decline_reason"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+
+export const soaDocuments = pgTable("soa_documents", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  version: integer("version").notNull().default(1),
+
+  documentUrl: text("document_url"),
+  documentHash: text("document_hash"),
+
+  generatedBy: text("generated_by").notNull().default("system"),
+  // ai | adviser | system
+
+  documentStatus: text("document_status").notNull().default("draft"),
+  // draft | issued | superseded | void
+
+  // RG221-mandated opening screen acknowledgement (set when the client first
+  // views the SOA in the viewer). Phase 2.2 only persists the columns; the
+  // setter route is added in a later phase.
+  openingScreenShown: boolean("opening_screen_shown").notNull().default(false),
+  openingScreenShownAt: timestamp("opening_screen_shown_at"),
+
+  fsgDelivered: boolean("fsg_delivered").notNull().default(false),
+  fsgDeliveredAt: timestamp("fsg_delivered_at"),
+
+  isLocked: boolean("is_locked").notNull().default(false),
+
+  issuedAt: timestamp("issued_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+
+// ROA = Record of Advice (used for review-and-confirm cycles after the
+// initial SOA). Table added now per spec even though no ROA UI is built yet.
+export const roaDocuments = pgTable("roa_documents", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  // Self-reference into adviceRecords for the prior advice this ROA updates.
+  previousAdviceRecordId: integer("previous_advice_record_id")
+    .references(() => adviceRecords.id),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  version: integer("version").notNull().default(1),
+
+  documentUrl: text("document_url"),
+  documentHash: text("document_hash"),
+
+  reasonForRoa: text("reason_for_roa"),
+
+  documentStatus: text("document_status").notNull().default("draft"),
+  // draft | issued | superseded | void
+
+  isLocked: boolean("is_locked").notNull().default(false),
+
+  issuedAt: timestamp("issued_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+
+export const insertAdviceRecordSchema = createInsertSchema(adviceRecords).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type AdviceRecord = typeof adviceRecords.$inferSelect;
+export type InsertAdviceRecord = z.infer<typeof insertAdviceRecordSchema>;
+
+export const insertSoaDocumentSchema = createInsertSchema(soaDocuments).omit({
+  id: true,
+  createdAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type SoaDocument = typeof soaDocuments.$inferSelect;
+export type InsertSoaDocument = z.infer<typeof insertSoaDocumentSchema>;
+
+export const insertRoaDocumentSchema = createInsertSchema(roaDocuments).omit({
+  id: true,
+  createdAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type RoaDocument = typeof roaDocuments.$inferSelect;
+export type InsertRoaDocument = z.infer<typeof insertRoaDocumentSchema>;
