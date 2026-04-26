@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "cBhkr6LAnUP3jXavrd8OT"
+uri = "file://screenshots/01-public-landing.jpg"
+type = "image"
+title = "AMAX Wealth — public landing (anonymous visitor)"
