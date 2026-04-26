@@ -1,0 +1,401 @@
+Good — this is now the most complete and grounded state you’ve shared. I’ll give you exactly what you asked:
+
+👉 Next step + code patches (correct, not overbuilt, aligned with your actual system)
+
+✅ FINAL VERDICT (SHORT)
+
+Your current state is now:
+
+✔ Fake data removed
+✔ Snapshot logic corrected
+✔ Fee consent layer exists
+✔ Adviser structure defined
+✔ Architecture simplified (correctly)
+
+BUT:
+
+🔴 Ledger enforcement still not guaranteed
+🔴 Reconciliation not implemented
+🔴 Transaction safety not proven
+
+So the next build is NOT features.
+
+🚨 NEXT STEP (LOCK THIS IN)
+👉 Session: Ledger Enforcement + Transaction Safety
+
+This comes before everything else.
+
+🧩 REPLIT PROMPT
+
+Copy this exactly:
+
+Proceed with Ledger Enforcement + Transaction Safety.
+
+Purpose:
+Ensure balances are always derived from ledger entries and transactions are safe before enabling financial automation.
+
+Build:
+1. enforce ledger-only balance calculation
+2. remove ALL direct wallet balance mutations
+3. enforce transaction lifecycle states
+4. add idempotency protection to all money endpoints
+5. add ledger-backed balance helper
+6. add transaction status enforcement
+
+Do not build:
+- fee engine
+- payouts
+- reconciliation UI (next step)
+- external payments
+🧱 CODE PATCHES
+1. 🔴 Kill direct balance mutation (CRITICAL)
+
+Search entire codebase:
+
+wallet.balance +=
+wallet.balance -=
+wallet.balance =
+Replace with:
+await createLedgerEntry({
+  userId,
+  amount,
+  direction: "credit" | "debit",
+  currency,
+  referenceId,
+  type: "deposit" | "withdrawal" | "fee",
+});
+2. Add ledger balance helper
+server/services/ledger.ts
+export async function getLedgerBalance(userId: number, currency: string) {
+  const entries = await db
+    .select()
+    .from(ledgerEntries)
+    .where(and(
+      eq(ledgerEntries.userId, userId),
+      eq(ledgerEntries.currency, currency)
+    ));
+
+  return entries.reduce((sum, e) => {
+    const amount = Number(e.amount);
+    return e.direction === "credit" ? sum + amount : sum - amount;
+  }, 0);
+}
+3. Enforce wallet read-only balance
+
+Wherever you return wallet:
+
+const balance = await getLedgerBalance(userId, "AUD");
+
+return {
+  ...wallet,
+  balance: balance.toFixed(2),
+};
+
+👉 Wallet table becomes display only, not source of truth.
+
+4. Add transaction lifecycle
+REQUIRED states:
+status: "pending" | "settled" | "failed" | "reversed"
+Patch logic:
+if (status === "pending") {
+  // no ledger impact
+}
+
+if (status === "settled") {
+  await createLedgerEntry(...)
+}
+
+if (status === "failed") {
+  // no ledger entry
+}
+5. Add idempotency protection (VERY IMPORTANT)
+
+For ALL money endpoints:
+
+const existing = await db
+  .select()
+  .from(transactions)
+  .where(eq(transactions.idempotencyKey, key));
+
+if (existing.length > 0) {
+  return existing[0]; // prevent duplicate
+}
+6. Prevent duplicate ledger entries
+
+Add constraint:
+
+uniqueIndex("ledger_reference_unique")
+  .on(ledgerEntries.referenceId)
+🔴 HARD STOP CONDITIONS
+
+You cannot proceed until ALL true:
+
+✔ No wallet += anywhere
+✔ Ledger drives balances
+✔ Transactions have full lifecycle
+✔ Idempotency implemented
+✔ Duplicate prevention in place
+🧭 AFTER THIS (REAL NEXT STEP)
+
+Only after this:
+
+Session 25 — Reconciliation Layer
+
+Then:
+
+→ Fee engine (23A)
+→ Gate B (real deduction)
+→ Payout system
+🧠 MOST IMPORTANT INSIGHT
+
+You’ve now shifted from:
+
+❌ UI-driven fintech
+
+to:
+
+✔ ledger-driven financial system
+
+That’s the difference between:
+
+demo app vs real platform
+▶️ If you want next (high value)
+
+I can now give you:
+
+Option A (recommended)
+
+👉 Full ledger enforcement diff across routes.ts (line-by-line)
+
+Option B
+
+👉 Transaction lifecycle + idempotency patch (complete)
+
+Option C
+
+👉 Reconciliation engine (next phase)
+
+Say which one — don’t jump ahead again.
+
+option a
+Thought for 4s
+Option A — Ledger Enforcement Diff Across routes.ts
+
+Use this as the next Replit instruction.
+
+Proceed with Option A — Ledger Enforcement Patch.
+
+Purpose:
+Remove direct wallet balance mutation from routes.ts and enforce ledger-derived balances.
+
+Scope:
+1. Search routes.ts for all wallet balance mutations.
+2. Replace direct balance edits with ledger entries.
+3. Return ledger-derived balances in APIs.
+4. Do not silently correct drift.
+5. Do not build reconciliation UI yet.
+6. Do not build fee deduction or payouts.
+
+Your uploaded checklist correctly flags this as mandatory: wallet balances must be derived from ledger, not directly edited; “wallet balance ≠ ledger” is a hard fail condition.
+
+Patch 1 — Add ledger helper
+
+Create:
+
+server/services/ledger.ts
+import { db } from "../db";
+import { and, eq, sql } from "drizzle-orm";
+import { ledgerEntries } from "@shared/schema";
+
+export async function getLedgerBalance(userId: number, currency: string) {
+  const [row] = await db
+    .select({
+      balance: sql<string>`
+        COALESCE(SUM(
+          CASE
+            WHEN ${ledgerEntries.direction} = 'credit'
+            THEN ${ledgerEntries.amount}
+            ELSE -${ledgerEntries.amount}
+          END
+        ), 0)
+      `,
+    })
+    .from(ledgerEntries)
+    .where(
+      and(
+        eq(ledgerEntries.userId, userId),
+        eq(ledgerEntries.currency, currency)
+      )
+    );
+
+  return Number(row?.balance ?? 0);
+}
+
+export async function createLedgerEntry(params: {
+  userId: number;
+  currency: string;
+  amount: string | number;
+  direction: "credit" | "debit";
+  entryType: string;
+  referenceType: string;
+  referenceId: string;
+  metadata?: any;
+}) {
+  const [entry] = await db
+    .insert(ledgerEntries)
+    .values({
+      userId: params.userId,
+      currency: params.currency,
+      amount: String(params.amount),
+      direction: params.direction,
+      entryType: params.entryType,
+      referenceType: params.referenceType,
+      referenceId: params.referenceId,
+      metadata: params.metadata ?? {},
+    })
+    .returning();
+
+  return entry;
+}
+Patch 2 — Add duplicate-ledger protection
+
+In shared/schema.ts, ensure ledgerEntries has a unique reference guard:
+
+}, (table) => ({
+  ledgerReferenceUniq: uniqueIndex("ledger_entries_reference_uidx")
+    .on(table.referenceType, table.referenceId, table.entryType),
+}));
+
+This prevents the same settled transaction creating duplicate ledger impact.
+
+Patch 3 — Replace direct wallet mutation in routes.ts
+
+Search:
+
+wallet.balance
+availableBalance
+balance:
+availableBalance:
+
+Any code like this is unsafe:
+
+await db.update(wallets).set({
+  balance: newBalance,
+  availableBalance: newAvailableBalance,
+});
+
+Replace with ledger creation:
+
+await createLedgerEntry({
+  userId,
+  currency: "AUD",
+  amount,
+  direction: "credit",
+  entryType: "deposit_settlement",
+  referenceType: "transaction",
+  referenceId: String(transaction.id),
+  metadata: {
+    transactionId: transaction.id,
+    source: "deposit_settlement",
+  },
+});
+
+For debits:
+
+await createLedgerEntry({
+  userId,
+  currency: "AUD",
+  amount,
+  direction: "debit",
+  entryType: "withdrawal_settlement",
+  referenceType: "transaction",
+  referenceId: String(transaction.id),
+  metadata: {
+    transactionId: transaction.id,
+    source: "withdrawal_settlement",
+  },
+});
+Patch 4 — Only ledger-impact settled transactions
+
+Use this rule:
+
+if (transaction.status !== "settled") {
+  return res.json({
+    transaction,
+    ledgerImpact: false,
+  });
+}
+
+Only when status becomes settled:
+
+await createLedgerEntry(...);
+
+Do not create ledger entries for:
+
+pending
+failed
+cancelled
+
+For reversal:
+
+await createLedgerEntry({
+  userId,
+  currency,
+  amount,
+  direction: originalDirection === "credit" ? "debit" : "credit",
+  entryType: "transaction_reversal",
+  referenceType: "transaction_reversal",
+  referenceId: String(reversalTransaction.id),
+});
+Patch 5 — Return ledger-derived wallet balances
+
+Wherever API returns wallet balance, replace raw wallet values:
+
+const ledgerBalance = await getLedgerBalance(wallet.userId, wallet.currency);
+
+return {
+  ...wallet,
+  balance: ledgerBalance.toFixed(2),
+  availableBalance: ledgerBalance.toFixed(2),
+  balanceSource: "ledger",
+};
+
+Add clear source:
+
+balanceSource: "ledger"
+Patch 6 — Add audit log on ledger settlement
+
+After ledger entry:
+
+await writeAuditLog(
+  userId,
+  "ledger_entry_created",
+  "ledger_entries",
+  String(entry.id),
+  {
+    referenceType: "transaction",
+    referenceId: transaction.id,
+    amount,
+    currency,
+    direction,
+  },
+  req.ip || null
+);
+Verification checklist for Replit
+1. rg "wallet.balance|availableBalance" server/routes.ts
+2. Confirm no direct balance mutation remains.
+3. Confirm pending transaction creates no ledger entry.
+4. Confirm settled transaction creates exactly one ledger entry.
+5. Confirm retrying settlement does not create duplicate ledger entry.
+6. Confirm wallet API returns balanceSource: "ledger".
+7. Confirm failed transaction creates no ledger entry.
+8. Confirm reversal creates offsetting ledger entry only.
+Hard stop
+Do not build fee engine.
+Do not build payout.
+Do not build reconciliation UI yet.
+Do not move money using wallet.balance.
+
+Next after this patch:
+
+Option B — Transaction lifecycle + idempotency hardening
