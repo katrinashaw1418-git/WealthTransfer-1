@@ -1502,6 +1502,9 @@ export function registerAdminRoutes(app: Express): void {
   //   - source   : exact match on the originating job id
   //               (e.g. "wallet-ledger-reconciliation")
   //   - severity : one of info | warning | alert | critical
+  //   - q        : free-text substring match against title and the JSON
+  //                payload (details cast to text). Bound length-capped so a
+  //                very long query string can't blow up the index scan.
   //
   // Pagination matches the audit-logs endpoint (page + limit, capped at 200)
   // so the admin shell can reuse the same paging controls.
@@ -1514,6 +1517,7 @@ export function registerAdminRoutes(app: Express): void {
     adminRoute(async (req) => {
       const sourceRaw = typeof req.query.source === "string" ? req.query.source.trim() : "";
       const severityRaw = typeof req.query.severity === "string" ? req.query.severity.trim() : "";
+      const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
       // Allow-list severity to the four supported values so a typo can never
       // reach the DB and a malicious client can never inject an arbitrary
       // value past the filter.
@@ -1526,6 +1530,9 @@ export function registerAdminRoutes(app: Express): void {
           : null;
       // Bound source length so we don't index a 1MB query string.
       const validSource = sourceRaw.length > 0 && sourceRaw.length <= 128 ? sourceRaw : null;
+      // Bound search length similarly; ILIKE %…% can't use the existing
+      // indexes so we keep the input small to keep the seq scan cheap.
+      const validQ = qRaw.length > 0 && qRaw.length <= 200 ? qRaw : null;
 
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
       const page = Math.max(Number(req.query.page) || 1, 1);
@@ -1534,6 +1541,19 @@ export function registerAdminRoutes(app: Express): void {
       const conditions: SQL[] = [];
       if (validSource) conditions.push(eq(operatorAlerts.source, validSource));
       if (validSeverity) conditions.push(eq(operatorAlerts.severity, validSeverity));
+      if (validQ) {
+        // Escape LIKE meta-characters (\, %, _) so a literal "100%" is
+        // matched literally rather than as a wildcard. The pattern is then
+        // bound as a parameter — never interpolated into SQL.
+        const escaped = validQ.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+        const pattern = `%${escaped}%`;
+        const titleMatch = ilike(operatorAlerts.title, pattern);
+        // details is jsonb; cast to text so ILIKE can scan the serialised
+        // payload (matches user ids, job names, drift bucket strings, etc.).
+        const detailsMatch = sql`${operatorAlerts.details}::text ILIKE ${pattern}`;
+        const combined = or(titleMatch, detailsMatch);
+        if (combined) conditions.push(combined);
+      }
       const where: SQL | undefined =
         conditions.length === 0
           ? undefined

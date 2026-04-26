@@ -146,18 +146,21 @@ export default function AdminOperatorAlerts() {
   const initialParams = new URLSearchParams(initialSearch);
   const initialSeverity = normalizeSeverity(initialParams.get("severity"));
   const initialSource = (initialParams.get("source") ?? "").slice(0, 128);
+  const initialQ = (initialParams.get("q") ?? "").slice(0, 200);
 
   const [sourceInput, setSourceInput] = useState(initialSource);
   const [severityInput, setSeverityInput] = useState<string>(initialSeverity);
+  const [searchInput, setSearchInput] = useState(initialQ);
   const [appliedSource, setAppliedSource] = useState(initialSource);
   const [appliedSeverity, setAppliedSeverity] = useState<string>(initialSeverity);
+  const [appliedSearch, setAppliedSearch] = useState(initialQ);
   const [page, setPage] = useState(1);
   const [selectedAlert, setSelectedAlert] = useState<OperatorAlertRow | null>(null);
   const limit = 50;
 
   const queryKey = [
     "/api/admin/operator-alerts",
-    { source: appliedSource, severity: appliedSeverity, page },
+    { source: appliedSource, severity: appliedSeverity, q: appliedSearch, page },
   ];
 
   const { data, isLoading } = useQuery<OperatorAlertsPage>({
@@ -166,6 +169,7 @@ export default function AdminOperatorAlerts() {
       const params = new URLSearchParams();
       if (appliedSource.trim()) params.set("source", appliedSource.trim());
       if (appliedSeverity !== SEVERITY_ANY) params.set("severity", appliedSeverity);
+      if (appliedSearch.trim()) params.set("q", appliedSearch.trim());
       params.set("page", String(page));
       params.set("limit", String(limit));
       const token = (() => {
@@ -188,14 +192,17 @@ export default function AdminOperatorAlerts() {
   function clearFilters() {
     setSourceInput("");
     setSeverityInput(SEVERITY_ANY);
+    setSearchInput("");
     setAppliedSource("");
     setAppliedSeverity(SEVERITY_ANY);
+    setAppliedSearch("");
     setPage(1);
   }
 
   function applyFilters() {
     setAppliedSource(sourceInput);
     setAppliedSeverity(severityInput);
+    setAppliedSearch(searchInput);
     setPage(1);
   }
 
@@ -260,7 +267,16 @@ export default function AdminOperatorAlerts() {
                 <SelectItem value="critical">critical</SelectItem>
               </SelectContent>
             </Select>
-            <div />
+            <Input
+              placeholder="Search title or payload (e.g. user id, job name)"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") applyFilters();
+              }}
+              maxLength={200}
+              data-testid="input-filter-search"
+            />
             <div className="flex gap-2">
               <Button onClick={applyFilters} className="flex-1" data-testid="button-apply-filters">
                 Apply
