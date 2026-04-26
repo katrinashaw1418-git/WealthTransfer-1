@@ -1,0 +1,287 @@
+Your latest build + instructions are **mostly correct**, but there are a few **critical gaps and one hidden risk** you need to fix before moving forward.
+
+I’ll keep this tight and execution-focused.
+
+---
+
+# ✅ 1. What is correct (confirmed)
+
+### ✔ Schema direction
+
+```text
+✔ users.role → correct
+✔ adviserClients → correct
+✔ feeConsents → correct (core revenue object)
+```
+
+This aligns with your actual system maturity.
+
+---
+
+### ✔ OTP / mobile logic direction
+
+From your uploaded file, the key conclusion is:
+
+> You already have OTP infrastructure → reuse it instead of overbuilding
+
+✔ Correct and consistent with your codebase 
+
+---
+
+### ✔ Google login implementation
+
+Your current implementation:
+
+```ts
+<GoogleOAuthProvider clientId={...}>
+```
+
+✔ Correct
+✔ Safe fallback when env not set
+✔ Matches best practice
+
+---
+
+# 🔴 2. Critical issues you must fix
+
+## ❗ Issue 1 — `password` field still blocking OAuth + phone users
+
+Your schema:
+
+```ts
+password: text("password").notNull()
+```
+
+This **WILL break**:
+
+```text
+Google users
+Phone users
+Apple users
+```
+
+### ✔ Fix (must do)
+
+```ts
+password: text("password") // remove .notNull()
+```
+
+OR (temporary workaround):
+
+```ts
+password: "__oauth__" + providerId
+```
+
+👉 Recommendation: **make nullable properly**
+
+---
+
+## ❗ Issue 2 — `googleId` / `appleId` type mismatch risk
+
+From your file:
+
+> DB may have column, but schema.ts may not
+
+This creates:
+
+```text
+Runtime works ❌
+TypeScript breaks ❌
+```
+
+### ✔ Fix
+
+In `shared/schema.ts`:
+
+```ts
+googleId: text("google_id").unique(),
+appleId: text("apple_id").unique(),
+```
+
+---
+
+## ❗ Issue 3 — OTP reuse must be consistent
+
+Right now you have:
+
+```text
+email OTP system
+phone OTP system
+```
+
+But they must share:
+
+```text
+same expiry logic
+same validation endpoint
+same audit logging
+```
+
+👉 Your file correctly suggests:
+
+```text
+Reuse /api/auth/verify-otp
+```
+
+✔ That is the correct design 
+
+---
+
+# 🟡 3. Mobile verification — reality check
+
+You asked:
+
+> “can I build without external provider?”
+
+### ✔ Honest answer (important)
+
+```text
+❌ Real SMS → requires provider (law + carrier)
+✔ Email OTP → already sufficient for onboarding
+✔ Phone number collection → satisfies AUSTRAC CDD
+```
+
+👉 Your file correctly states:
+
+> phone is contact info, not identity proof 
+
+✔ This is legally correct for your current setup (Sumsub handles identity)
+
+---
+
+# 🔴 4. One hidden risk (not mentioned in your doc)
+
+## ❗ Duplicate account risk
+
+Scenario:
+
+```text
+User signs up with:
+- Google (email A)
+- Phone (email A)
+- Email signup (email A)
+```
+
+Without linking logic → you get:
+
+```text
+3 separate accounts ❌
+```
+
+---
+
+### ✔ Fix (must implement in ALL auth routes)
+
+```ts
+let user = await storage.getUserByEmail(email);
+
+if (!user) {
+  // create
+} else {
+  // link provider (googleId / appleId / phone)
+}
+```
+
+👉 This is critical for:
+
+```text
+AML/KYC consistency
+wallet ownership
+audit trails
+```
+
+---
+
+# 🟢 5. What your system now correctly supports
+
+After fixes:
+
+```text
+✔ Email + OTP signup
+✔ Google signup
+✔ Phone-assisted signup
+✔ Unified user identity
+✔ AUSTRAC-compliant onboarding path
+```
+
+---
+
+# 🧭 6. Clean final architecture (verified)
+
+```text
+User
+ → chooses method:
+    - Google
+    - Email
+    - Mobile
+
+All paths →
+ → backend normalises identity (email)
+ → single user record
+ → JWT issued
+ → redirect to /compliance (KYC)
+```
+
+---
+
+# 🟢 7. What to build next (correct order)
+
+### Phase 1 (now)
+
+```text
+1. Fix schema (password nullable, googleId, appleId)
+2. Fix identity linking logic
+3. Stabilise OTP reuse
+```
+
+---
+
+### Phase 2
+
+```text
+4. adviserClients
+5. feeConsents
+6. adviserTasks (limited triggers)
+```
+
+---
+
+### Phase 3
+
+```text
+7. reporting (PDF + dashboard)
+```
+
+---
+
+# 🧠 Final verdict
+
+Your current direction is now:
+
+```text
+✔ grounded in your real codebase
+✔ aligned with fintech compliance reality
+✔ avoids overengineering
+```
+
+But without the 3 fixes above, you will hit:
+
+```text
+❌ silent auth failures
+❌ duplicate users
+❌ broken OAuth flows
+```
+
+---
+
+# ▶️ If you want next step
+
+I can give you:
+
+```text
+👉 exact unified auth controller (Google + Email + Phone merged cleanly)
+👉 full user linking logic (production-safe)
+👉 onboarding state machine (Apply → KYC → Active)
+```
+
+That’s the piece that turns this into a **real fintech platform**, not just working login.
