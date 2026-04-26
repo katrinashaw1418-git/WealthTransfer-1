@@ -16,16 +16,20 @@
 
 import { 
   users, wallets, portfolios, transactions, fxRates, aiRecommendations, investmentProducts, userInvestments, portfolioSnapshots, applications, leads,
+  adviserFeeRules, adviserFeeAccruals, adviserFeeDeductions,
   type User, type InsertUser, type Wallet, type InsertWallet, 
   type Portfolio, type InsertPortfolio, type Transaction, type InsertTransaction,
   type FxRate, type InsertFxRate, type AiRecommendation, type InsertAiRecommendation,
   type InvestmentProduct, type InsertInvestmentProduct, type UserInvestment, type InsertUserInvestment,
   type PortfolioSnapshot, type InsertPortfolioSnapshot,
   type Application, type InsertApplication,
-  type Lead, type InsertLead
+  type Lead, type InsertLead,
+  type AdviserFeeRule, type InsertAdviserFeeRule,
+  type AdviserFeeAccrual, type InsertAdviserFeeAccrual,
+  type AdviserFeeDeduction, type InsertAdviserFeeDeduction,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, sql, and } from "drizzle-orm";
+import { eq, sql, and, desc, gte, lte, inArray } from "drizzle-orm";
 
 // Wallet update payload — `balance` and `availableBalance` are intentionally
 // excluded so callers cannot bypass the ledger-derived cache refresh.
@@ -88,6 +92,51 @@ export interface IStorage {
   // Leads (Flow A wizard captures)
   createLead(lead: InsertLead): Promise<Lead>;
   getLeadByEmail(email: string): Promise<Lead | undefined>;
+
+  // ---------------------------------------------------------------------------
+  // SESSION 23A — Adviser Fee Engine (Gate A scaffold)
+  // View/audit only; no money movement; no automatic processing.
+  // ---------------------------------------------------------------------------
+  createAdviserFeeRule(rule: InsertAdviserFeeRule): Promise<AdviserFeeRule>;
+  getAdviserFeeRule(id: number): Promise<AdviserFeeRule | undefined>;
+  pauseAdviserFeeRule(id: number, reason: string | null): Promise<AdviserFeeRule | undefined>;
+  listAdviserFeeRules(filters?: {
+    adviserUserId?: number;
+    clientUserId?: number;
+    status?: string;
+  }): Promise<AdviserFeeRule[]>;
+
+  insertAdviserFeeAccrual(accrual: InsertAdviserFeeAccrual): Promise<AdviserFeeAccrual | null>;
+  listAdviserFeeAccruals(filters?: {
+    feeRuleId?: number;
+    adviserUserId?: number;
+    clientUserId?: number;
+    fromDate?: Date;
+    toDate?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<AdviserFeeAccrual[]>;
+
+  insertAdviserFeeDeduction(
+    deduction: InsertAdviserFeeDeduction,
+  ): Promise<AdviserFeeDeduction>;
+  getAdviserFeeDeduction(id: number): Promise<AdviserFeeDeduction | undefined>;
+  listAdviserFeeDeductions(filters?: {
+    status?: string;
+    adviserUserId?: number;
+    clientUserId?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<AdviserFeeDeduction[]>;
+  updateAdviserFeeDeduction(
+    id: number,
+    patch: Partial<{
+      status: string;
+      approvedByUserId: number | null;
+      approvedAt: Date | null;
+      rejectedReason: string | null;
+    }>,
+  ): Promise<AdviserFeeDeduction | undefined>;
 }
 
 export class MemStorage implements IStorage {
@@ -3355,6 +3404,42 @@ export class MemStorage implements IStorage {
   async getLeadByEmail(email: string): Promise<Lead | undefined> {
     return Array.from(this.leadsStore.values()).find(l => l.email.toLowerCase() === email.toLowerCase());
   }
+
+  // ---------------------------------------------------------------------------
+  // SESSION 23A — Adviser Fee Engine (Gate A)
+  // MemStorage is legacy/tests-only — these methods throw because the fee
+  // engine is exercised exclusively against DatabaseStorage in production.
+  // ---------------------------------------------------------------------------
+  async createAdviserFeeRule(): Promise<AdviserFeeRule> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async getAdviserFeeRule(): Promise<AdviserFeeRule | undefined> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async pauseAdviserFeeRule(): Promise<AdviserFeeRule | undefined> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async listAdviserFeeRules(): Promise<AdviserFeeRule[]> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async insertAdviserFeeAccrual(): Promise<AdviserFeeAccrual | null> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async listAdviserFeeAccruals(): Promise<AdviserFeeAccrual[]> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async insertAdviserFeeDeduction(): Promise<AdviserFeeDeduction> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async getAdviserFeeDeduction(): Promise<AdviserFeeDeduction | undefined> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async listAdviserFeeDeductions(): Promise<AdviserFeeDeduction[]> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
+  async updateAdviserFeeDeduction(): Promise<AdviserFeeDeduction | undefined> {
+    throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
+  }
 }
 
 // Database Storage Implementation - prevents data loss on server restart
@@ -3577,6 +3662,168 @@ export class DatabaseStorage implements IStorage {
 
   async getLeadByEmail(email: string): Promise<Lead | undefined> {
     const [row] = await db.select().from(leads).where(sql`LOWER(${leads.email}) = LOWER(${email})`);
+    return row || undefined;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SESSION 23A — Adviser Fee Engine (Gate A scaffold).
+  // View/audit only; no money movement; no automatic processing.
+  // ---------------------------------------------------------------------------
+  async createAdviserFeeRule(rule: InsertAdviserFeeRule): Promise<AdviserFeeRule> {
+    const [row] = await db.insert(adviserFeeRules).values(rule).returning();
+    return row;
+  }
+
+  async getAdviserFeeRule(id: number): Promise<AdviserFeeRule | undefined> {
+    const [row] = await db
+      .select()
+      .from(adviserFeeRules)
+      .where(eq(adviserFeeRules.id, id))
+      .limit(1);
+    return row || undefined;
+  }
+
+  async pauseAdviserFeeRule(
+    id: number,
+    reason: string | null,
+  ): Promise<AdviserFeeRule | undefined> {
+    const now = new Date();
+    const [row] = await db
+      .update(adviserFeeRules)
+      .set({
+        status: "paused",
+        pausedAt: now,
+        pausedReason: reason,
+        updatedAt: now,
+      })
+      .where(eq(adviserFeeRules.id, id))
+      .returning();
+    return row || undefined;
+  }
+
+  async listAdviserFeeRules(filters?: {
+    adviserUserId?: number;
+    clientUserId?: number;
+    status?: string;
+  }): Promise<AdviserFeeRule[]> {
+    const conds: any[] = [];
+    if (filters?.adviserUserId)
+      conds.push(eq(adviserFeeRules.adviserUserId, filters.adviserUserId));
+    if (filters?.clientUserId)
+      conds.push(eq(adviserFeeRules.clientUserId, filters.clientUserId));
+    if (filters?.status) conds.push(eq(adviserFeeRules.status, filters.status));
+    return db
+      .select()
+      .from(adviserFeeRules)
+      .where(conds.length ? and(...conds) : sql`true`)
+      .orderBy(desc(adviserFeeRules.createdAt));
+  }
+
+  async insertAdviserFeeAccrual(
+    accrual: InsertAdviserFeeAccrual,
+  ): Promise<AdviserFeeAccrual | null> {
+    // Idempotency: rely on the unique (feeRuleId, accrualDate) index. If the
+    // pair already exists, return null so the caller can treat re-runs as
+    // no-ops without raising.
+    const rows = await db
+      .insert(adviserFeeAccruals)
+      .values(accrual)
+      .onConflictDoNothing({
+        target: [adviserFeeAccruals.feeRuleId, adviserFeeAccruals.accrualDate],
+      })
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async listAdviserFeeAccruals(filters?: {
+    feeRuleId?: number;
+    adviserUserId?: number;
+    clientUserId?: number;
+    fromDate?: Date;
+    toDate?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<AdviserFeeAccrual[]> {
+    const conds: any[] = [];
+    if (filters?.feeRuleId)
+      conds.push(eq(adviserFeeAccruals.feeRuleId, filters.feeRuleId));
+    if (filters?.adviserUserId)
+      conds.push(eq(adviserFeeAccruals.adviserUserId, filters.adviserUserId));
+    if (filters?.clientUserId)
+      conds.push(eq(adviserFeeAccruals.clientUserId, filters.clientUserId));
+    if (filters?.fromDate)
+      conds.push(gte(adviserFeeAccruals.accrualDate, filters.fromDate));
+    if (filters?.toDate)
+      conds.push(lte(adviserFeeAccruals.accrualDate, filters.toDate));
+    const limit = filters?.limit ?? 200;
+    const offset = filters?.offset ?? 0;
+    return db
+      .select()
+      .from(adviserFeeAccruals)
+      .where(conds.length ? and(...conds) : sql`true`)
+      .orderBy(desc(adviserFeeAccruals.accrualDate), desc(adviserFeeAccruals.id))
+      .limit(limit)
+      .offset(offset);
+  }
+
+  async insertAdviserFeeDeduction(
+    deduction: InsertAdviserFeeDeduction,
+  ): Promise<AdviserFeeDeduction> {
+    const [row] = await db
+      .insert(adviserFeeDeductions)
+      .values(deduction)
+      .returning();
+    return row;
+  }
+
+  async getAdviserFeeDeduction(id: number): Promise<AdviserFeeDeduction | undefined> {
+    const [row] = await db
+      .select()
+      .from(adviserFeeDeductions)
+      .where(eq(adviserFeeDeductions.id, id))
+      .limit(1);
+    return row || undefined;
+  }
+
+  async listAdviserFeeDeductions(filters?: {
+    status?: string;
+    adviserUserId?: number;
+    clientUserId?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<AdviserFeeDeduction[]> {
+    const conds: any[] = [];
+    if (filters?.status)
+      conds.push(eq(adviserFeeDeductions.status, filters.status));
+    if (filters?.adviserUserId)
+      conds.push(eq(adviserFeeDeductions.adviserUserId, filters.adviserUserId));
+    if (filters?.clientUserId)
+      conds.push(eq(adviserFeeDeductions.clientUserId, filters.clientUserId));
+    const limit = filters?.limit ?? 200;
+    const offset = filters?.offset ?? 0;
+    return db
+      .select()
+      .from(adviserFeeDeductions)
+      .where(conds.length ? and(...conds) : sql`true`)
+      .orderBy(desc(adviserFeeDeductions.createdAt))
+      .limit(limit)
+      .offset(offset);
+  }
+
+  async updateAdviserFeeDeduction(
+    id: number,
+    patch: Partial<{
+      status: string;
+      approvedByUserId: number | null;
+      approvedAt: Date | null;
+      rejectedReason: string | null;
+    }>,
+  ): Promise<AdviserFeeDeduction | undefined> {
+    const [row] = await db
+      .update(adviserFeeDeductions)
+      .set(patch)
+      .where(eq(adviserFeeDeductions.id, id))
+      .returning();
     return row || undefined;
   }
 }

@@ -12,6 +12,7 @@ import {
   ListChecks,
   FileText,
   HandCoins,
+  Coins,
   TrendingUp,
   Scale,
   User,

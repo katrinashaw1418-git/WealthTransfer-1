@@ -35,6 +35,7 @@ import {
   consentClientInstruction,
   rejectClientInstruction,
 } from "./services/adviser-access";
+import { storage } from "./storage";
 
 async function audit(
   userId: number,

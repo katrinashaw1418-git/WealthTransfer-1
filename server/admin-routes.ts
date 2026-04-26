@@ -49,7 +49,12 @@ import {
   insertInvestmentProductSchema,
   // Session 25 (Task #17) — wallet-vs-ledger drift visibility
   walletLedgerReconciliations,
+  // Session 23A — Fee Engine Gate A
+  adviserFeeRules,
+  adviserFeeAccruals,
+  adviserFeeDeductions,
 } from "@shared/schema";
+import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
 import { storage } from "./storage";

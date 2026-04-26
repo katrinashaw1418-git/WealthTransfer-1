@@ -28,6 +28,7 @@ import {
   adviserFeeAccruals,
   adviserFeeDeductions,
 } from "@shared/schema";
+import { storage } from "./storage";
 import { requireAuth, requireRole } from "./auth";
 import { generateReportPdf, REPORTS_DIR } from "./services/reports";
 import path from "node:path";

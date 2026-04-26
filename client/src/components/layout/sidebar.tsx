@@ -19,6 +19,7 @@ import {
   ClipboardCheck,
   FileText,
   Receipt,
+  Coins,
   type LucideIcon,
 } from "lucide-react";
 import amaxLogo from "@assets/AMAX_LOGO_BLUE_1776303944567.jpg";
