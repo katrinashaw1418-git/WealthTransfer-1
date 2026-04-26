@@ -3,6 +3,24 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Task #109: Before/after diff viewer in admin audit log
+
+The admin audit-log page (`/admin/audit-logs`) previously rendered the `metadata` JSONB column as a single stringified blob, which made it nearly impossible to see *what actually changed* on entries written through the standardised `{ before, after, ...extra }` shape from Task #95. This change adds a structured field-level diff that surfaces directly in the existing table without any backend or schema work.
+
+**Detection (frontend-only)**:
+- New helper `hasStandardisedDiff(meta)` returns true only when `metadata` is a plain object whose `before` / `after` keys (if present) hold either `null` or another plain object — matching the writer contract in `server/services/audit.ts`. Legacy entries (or entries that happen to use `before`/`after` for primitives or arrays) fall through to the original compact raw-JSON view, so nothing regresses.
+- `computeDiff(before, after)` classifies every top-level key into `added` / `removed` / `changed` / `unchanged` using `JSON.stringify` equality. Edge cases verified at runtime: create event (`before=null` → all fields added), delete event (`after=null` → all fields removed), no-op (all unchanged), and only-`after` partials.
+
+**UI**:
+- The Metadata cell on each row now shows a small "View diff" / "Hide diff" toggle plus colour-coded summary badges (`N changed`, `N added`, `N removed`).
+- Clicking the toggle expands an inline detail row (a `<TableRow colSpan={6}>` rendered conditionally under a keyed `<Fragment>`) with a three-column grid (Field / Before / After). Added is emerald, removed is rose with strikethrough, changed is amber, unchanged is dimmed slate and hidden behind a "Show unchanged (N)" link so the diff stays scannable.
+- Any extra metadata keys outside `before`/`after` (e.g. `actor`, `reason`, `requestId`) are surfaced in a small "Context" panel inside the same expanded row, so reviewers don't lose the surrounding evidence.
+
+**No backend changes** — the `GET /api/admin/audit-logs` endpoint and the `auditLogs` table shape are untouched. This is a pure UX uplift on the data the standardised writer already emits.
+
+**Files**:
+- `client/src/pages/admin/audit-logs.tsx` — only file touched.
+
 ## Recent Changes (April 2026) — Task #96: Review-pending lock on advice-record writes
 
 When an advice record is in `status='review_pending'`, the adviser's structured write paths into that record are now hard-locked. The lock returns **HTTP 423** with `reason='record_locked_under_review'` so the client UI can render an explicit lock banner instead of a generic error.

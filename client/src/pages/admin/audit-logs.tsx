@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ScrollText, ChevronLeft, ChevronRight, X } from "lucide-react";
+import {
+  ScrollText,
+  ChevronLeft,
+  ChevronRight,
+  X,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
 
 interface AuditRow {
   id: number;
@@ -44,11 +51,277 @@ function fmt(d: string | null): string {
   }
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+function isSnapshotValue(v: unknown): boolean {
+  // The standardised writer in server/services/audit.ts always sets
+  // `before` and `after` to either an object snapshot or null. Anything
+  // else (string, number, array, etc.) means it's a legacy metadata
+  // entry that just happens to use the same key name.
+  return v === null || isPlainObject(v);
+}
+
+function hasStandardisedDiff(meta: unknown): boolean {
+  if (!isPlainObject(meta)) return false;
+  const hasBefore = "before" in meta;
+  const hasAfter = "after" in meta;
+  if (!hasBefore && !hasAfter) return false;
+  if (hasBefore && !isSnapshotValue(meta.before)) return false;
+  if (hasAfter && !isSnapshotValue(meta.after)) return false;
+  return true;
+}
+
+interface DiffSummary {
+  added: string[];
+  removed: string[];
+  changed: string[];
+  unchanged: string[];
+}
+
+function computeDiff(before: unknown, after: unknown): DiffSummary {
+  const beforeObj = isPlainObject(before) ? before : {};
+  const afterObj = isPlainObject(after) ? after : {};
+  const allKeys = new Set([
+    ...Object.keys(beforeObj),
+    ...Object.keys(afterObj),
+  ]);
+  const out: DiffSummary = { added: [], removed: [], changed: [], unchanged: [] };
+  for (const k of Array.from(allKeys).sort()) {
+    const inBefore = k in beforeObj;
+    const inAfter = k in afterObj;
+    if (!inBefore && inAfter) {
+      out.added.push(k);
+    } else if (inBefore && !inAfter) {
+      out.removed.push(k);
+    } else {
+      const bv = beforeObj[k];
+      const av = afterObj[k];
+      if (JSON.stringify(bv) === JSON.stringify(av)) out.unchanged.push(k);
+      else out.changed.push(k);
+    }
+  }
+  return out;
+}
+
+function renderValue(v: unknown): string {
+  if (v === undefined) return "—";
+  if (v === null) return "null";
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+function DiffSummaryBadges({ summary }: { summary: DiffSummary }) {
+  const items: Array<{ label: string; count: number; cls: string; testid: string }> = [
+    { label: "changed", count: summary.changed.length, cls: "bg-amber-100 text-amber-800 border-amber-200", testid: "badge-diff-changed" },
+    { label: "added", count: summary.added.length, cls: "bg-emerald-100 text-emerald-800 border-emerald-200", testid: "badge-diff-added" },
+    { label: "removed", count: summary.removed.length, cls: "bg-rose-100 text-rose-800 border-rose-200", testid: "badge-diff-removed" },
+  ].filter((x) => x.count > 0);
+  if (items.length === 0) {
+    return (
+      <Badge variant="outline" className="text-[10px] font-normal text-slate-500">
+        no field changes
+      </Badge>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      {items.map((it) => (
+        <span
+          key={it.label}
+          className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium ${it.cls}`}
+          data-testid={it.testid}
+        >
+          {it.count} {it.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function DiffField({
+  fieldKey,
+  before,
+  after,
+  kind,
+}: {
+  fieldKey: string;
+  before: unknown;
+  after: unknown;
+  kind: "added" | "removed" | "changed" | "unchanged";
+}) {
+  const beforeText = renderValue(before);
+  const afterText = renderValue(after);
+
+  const beforeCellCls = (() => {
+    if (kind === "added") return "bg-slate-50 text-slate-400";
+    if (kind === "removed") return "bg-rose-50 text-rose-900 line-through";
+    if (kind === "changed") return "bg-amber-50 text-amber-900";
+    return "bg-slate-50 text-slate-600";
+  })();
+
+  const afterCellCls = (() => {
+    if (kind === "added") return "bg-emerald-50 text-emerald-900";
+    if (kind === "removed") return "bg-slate-50 text-slate-400";
+    if (kind === "changed") return "bg-amber-50 text-amber-900";
+    return "bg-slate-50 text-slate-600";
+  })();
+
+  return (
+    <div
+      className="grid grid-cols-[140px_1fr_1fr] gap-2 text-xs border-t border-slate-200 first:border-t-0 py-1.5"
+      data-testid={`diff-field-${fieldKey}`}
+    >
+      <div className="font-mono text-slate-700 truncate" title={fieldKey}>
+        {fieldKey}
+      </div>
+      <pre className={`whitespace-pre-wrap break-all rounded px-2 py-1 ${beforeCellCls}`}>
+        {kind === "added" ? "—" : beforeText}
+      </pre>
+      <pre className={`whitespace-pre-wrap break-all rounded px-2 py-1 ${afterCellCls}`}>
+        {kind === "removed" ? "—" : afterText}
+      </pre>
+    </div>
+  );
+}
+
+function MetadataDiff({ metadata }: { metadata: Record<string, unknown> }) {
+  const before = metadata.before;
+  const after = metadata.after;
+  const summary = computeDiff(before, after);
+
+  const beforeObj = isPlainObject(before) ? before : {};
+  const afterObj = isPlainObject(after) ? after : {};
+
+  const extraKeys = Object.keys(metadata).filter((k) => k !== "before" && k !== "after");
+
+  const [showUnchanged, setShowUnchanged] = useState(false);
+
+  type FieldKind = "added" | "removed" | "changed" | "unchanged";
+  const ordered: Array<{ key: string; kind: FieldKind }> = [
+    ...summary.changed.map((k) => ({ key: k, kind: "changed" as const })),
+    ...summary.added.map((k) => ({ key: k, kind: "added" as const })),
+    ...summary.removed.map((k) => ({ key: k, kind: "removed" as const })),
+    ...(showUnchanged
+      ? summary.unchanged.map((k) => ({ key: k, kind: "unchanged" as const }))
+      : []),
+  ];
+
+  return (
+    <div className="space-y-3" data-testid="metadata-diff-view">
+      <div className="grid grid-cols-[140px_1fr_1fr] gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+        <div>Field</div>
+        <div>Before</div>
+        <div>After</div>
+      </div>
+      {ordered.length === 0 ? (
+        <p className="text-xs text-slate-500">
+          No before/after fields recorded for this entry.
+        </p>
+      ) : (
+        <div className="rounded border border-slate-200 bg-white px-2">
+          {ordered.map(({ key, kind }) => (
+            <DiffField
+              key={key}
+              fieldKey={key}
+              before={beforeObj[key]}
+              after={afterObj[key]}
+              kind={kind}
+            />
+          ))}
+        </div>
+      )}
+      {summary.unchanged.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowUnchanged((v) => !v)}
+          className="text-xs text-violet-700 hover:text-violet-900 underline-offset-2 hover:underline"
+          data-testid="button-toggle-unchanged"
+        >
+          {showUnchanged
+            ? `Hide unchanged (${summary.unchanged.length})`
+            : `Show unchanged (${summary.unchanged.length})`}
+        </button>
+      )}
+      {extraKeys.length > 0 && (
+        <div className="border-t border-slate-200 pt-2">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+            Context
+          </div>
+          <pre
+            className="text-[11px] text-slate-700 whitespace-pre-wrap break-all bg-slate-50 rounded px-2 py-1"
+            data-testid="metadata-diff-context"
+          >
+            {JSON.stringify(
+              Object.fromEntries(extraKeys.map((k) => [k, metadata[k]])),
+              null,
+              2,
+            )}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetadataCell({
+  metadata,
+  expanded,
+  onToggle,
+}: {
+  metadata: unknown;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (!metadata) {
+    return <span className="text-xs text-slate-400">—</span>;
+  }
+  if (!hasStandardisedDiff(metadata)) {
+    return (
+      <pre className="text-[11px] text-slate-600 whitespace-pre-wrap break-all bg-slate-50 rounded px-2 py-1 max-h-32 overflow-auto">
+        {JSON.stringify(metadata)}
+      </pre>
+    );
+  }
+  const summary = computeDiff(
+    (metadata as Record<string, unknown>).before,
+    (metadata as Record<string, unknown>).after,
+  );
+  return (
+    <div className="flex items-start gap-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-7 px-2 -ml-2"
+        onClick={onToggle}
+        data-testid="button-toggle-diff"
+        aria-expanded={expanded}
+      >
+        {expanded ? (
+          <ChevronUp className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronDown className="h-3.5 w-3.5" />
+        )}
+        <span className="ml-1 text-xs">{expanded ? "Hide diff" : "View diff"}</span>
+      </Button>
+      <div className="pt-1">
+        <DiffSummaryBadges summary={summary} />
+      </div>
+    </div>
+  );
+}
+
 export default function AdminAuditLogs() {
   const [actionFilter, setActionFilter] = useState("");
   const [entityFilter, setEntityFilter] = useState("");
   const [userFilter, setUserFilter] = useState("");
   const [page, setPage] = useState(1);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
   const limit = 50;
 
   const queryKey = ["/api/admin/audit-logs", { actionFilter, entityFilter, userFilter, page }];
@@ -78,10 +351,16 @@ export default function AdminAuditLogs() {
     setEntityFilter("");
     setUserFilter("");
     setPage(1);
+    setExpandedId(null);
   }
 
   function applyFilters() {
     setPage(1);
+    setExpandedId(null);
+  }
+
+  function toggleExpand(id: number) {
+    setExpandedId((curr) => (curr === id ? null : id));
   }
 
   return (
@@ -90,6 +369,8 @@ export default function AdminAuditLogs() {
         <h1 className="text-2xl font-semibold text-slate-900">Audit log</h1>
         <p className="text-sm text-slate-500 mt-1">
           Every state-changing action across the platform. Read-only.
+          Entries that record before/after snapshots show a structured field-level
+          diff — click <span className="font-medium">View diff</span>.
         </p>
       </div>
 
@@ -142,7 +423,7 @@ export default function AdminAuditLogs() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              onClick={() => { setPage((p) => Math.max(1, p - 1)); setExpandedId(null); }}
               disabled={page <= 1 || isLoading}
               data-testid="button-prev-page"
             >
@@ -154,7 +435,7 @@ export default function AdminAuditLogs() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              onClick={() => { setPage((p) => Math.min(totalPages, p + 1)); setExpandedId(null); }}
               disabled={page >= totalPages || isLoading}
               data-testid="button-next-page"
             >
@@ -180,29 +461,47 @@ export default function AdminAuditLogs() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.items.map((row) => (
-                  <TableRow key={row.id} data-testid={`row-audit-${row.id}`}>
-                    <TableCell className="text-xs text-slate-600 whitespace-nowrap">
-                      {fmt(row.createdAt)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="font-mono text-xs">
-                        {row.action}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {row.entityType ?? "—"}
-                      {row.entityId ? ` #${row.entityId}` : ""}
-                    </TableCell>
-                    <TableCell className="text-sm font-mono">{row.userId ?? "—"}</TableCell>
-                    <TableCell className="text-xs text-slate-500">{row.ipAddress ?? "—"}</TableCell>
-                    <TableCell className="max-w-md">
-                      <pre className="text-[11px] text-slate-600 whitespace-pre-wrap break-all bg-slate-50 rounded px-2 py-1">
-                        {row.metadata ? JSON.stringify(row.metadata) : "—"}
-                      </pre>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {data.items.map((row) => {
+                  const isExpanded = expandedId === row.id;
+                  const showsDiff = hasStandardisedDiff(row.metadata);
+                  return (
+                    <Fragment key={row.id}>
+                      <TableRow data-testid={`row-audit-${row.id}`}>
+                        <TableCell className="text-xs text-slate-600 whitespace-nowrap align-top">
+                          {fmt(row.createdAt)}
+                        </TableCell>
+                        <TableCell className="align-top">
+                          <Badge variant="outline" className="font-mono text-xs">
+                            {row.action}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm align-top">
+                          {row.entityType ?? "—"}
+                          {row.entityId ? ` #${row.entityId}` : ""}
+                        </TableCell>
+                        <TableCell className="text-sm font-mono align-top">{row.userId ?? "—"}</TableCell>
+                        <TableCell className="text-xs text-slate-500 align-top">{row.ipAddress ?? "—"}</TableCell>
+                        <TableCell className="max-w-md align-top">
+                          <MetadataCell
+                            metadata={row.metadata}
+                            expanded={isExpanded}
+                            onToggle={() => toggleExpand(row.id)}
+                          />
+                        </TableCell>
+                      </TableRow>
+                      {isExpanded && showsDiff && (
+                        <TableRow
+                          data-testid={`row-audit-${row.id}-diff`}
+                          className="bg-slate-50/50 hover:bg-slate-50/50"
+                        >
+                          <TableCell colSpan={6} className="py-3">
+                            <MetadataDiff metadata={row.metadata as Record<string, unknown>} />
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
