@@ -1,0 +1,1044 @@
+
+
+Thought for 14s
+Verified and cross-checked.
+
+Verdict
+The generated amax_migrations.sql and amax_api.ts are directionally strong, but I would not run them in Replit unchanged yet.
+
+They correctly include the major items we required:
+
+SOA/ROA pathway
+
+DBFO fee consent fields
+
+execution compliance gate
+
+audit logs
+
+7-year retention locks
+
+digital SOA opening-screen tracking
+
+client acceptance flow
+
+OFA renewal/withdrawal routes 
+
+
+But there are several implementation issues that should be fixed before deployment.
+
+Critical fixes before running migrations
+1. It creates new clients and advisers tables
+Your existing AMAX app already uses users, applications, portfolios, wallets, transactions.
+
+So this migration risks creating a parallel identity system.
+
+Resolution:
+
+Do not create standalone clients unless you intentionally migrate from users.
+
+Better:
+
+client_id → users.id
+adviser_id → users.id
+or add a lightweight user_roles / adviser_profiles table.
+
+2. Enum creation is not idempotent
+This will fail if rerun:
+
+CREATE TYPE advice_source_type AS ENUM ...
+Resolution:
+
+Wrap enum creation in:
+
+DO $$ BEGIN
+  CREATE TYPE advice_source_type AS ENUM ('ai', 'adviser', 'hybrid');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+Same for all enums.
+
+3. prevent_locked_soa_edit blocks issuing the SOA
+The trigger says if OLD.is_locked = true, no update is allowed. That is okay after issue.
+
+But the API locks the SOA by updating:
+
+SET is_locked = true, issued_at = now()
+That first lock update should work.
+
+However, later if you need to set document_url, document_hash, or final metadata after locking, it will fail.
+
+Resolution:
+
+Ensure all final SOA fields are saved before setting is_locked = true.
+
+4. Fee consent validation function exists but is not attached
+The migration defines:
+
+validate_fee_consent()
+but no trigger uses it.
+
+Resolution:
+
+Either attach it to a future fee_deductions table, or remove it for now. It currently gives false confidence.
+
+5. fee_consent_valid may become stale
+The API sets:
+
+fee_consent_valid = true
+after consent is captured.
+
+But if consent later expires, it only changes if the daily maintenance job runs.
+
+Resolution:
+
+For execution, always calculate validity live from fee_consents, not only from the stored boolean.
+
+Critical API fixes
+6. Client identity is taken from request body
+Many endpoints accept:
+
+clientId
+adviserId
+from req.body.
+
+That is unsafe.
+
+Resolution:
+
+Use authenticated session/JWT:
+
+const clientId = req.user.id
+Only admins/advisers should be allowed to act for another client.
+
+7. No authorisation checks
+The API checks whether records exist, but not whether:
+
+client owns this advice
+adviser is linked to this client
+admin/compliance has permission
+Resolution:
+
+Add middleware:
+
+requireClientOwnsAdvice
+requireAdviserLinkedToClient
+requireComplianceRole
+8. Acceptance endpoint missing FSG checkbox
+Your verified spec required:
+
+I have received / accessed the FSG or Website Disclosure Information
+The API currently has many confirmations, but not that one.
+
+Resolution:
+
+Add:
+
+confirmFsgReceived
+and column:
+
+confirm_fsg_received BOOLEAN NOT NULL DEFAULT false
+9. SOA viewed endpoint updates all SOA documents
+This query:
+
+UPDATE soa_documents
+SET opening_screen_shown = true
+WHERE advice_record_id = $1
+could update older versions.
+
+Resolution:
+
+Update only the issued/latest SOA:
+
+WHERE advice_record_id = $1
+AND is_locked = true
+ORDER BY version DESC
+LIMIT 1
+or store soa_document_id in the route.
+
+10. downloaded is optional but gate only checks viewed
+Earlier spec allowed viewed/downloaded. The API gate only requires:
+
+soa_viewed
+That is acceptable if your UX forces in-app full SOA viewing. But if the full SOA is only PDF, then require soa_downloaded.
+
+Resolution:
+
+Choose one rule:
+
+SOA viewed in full in-app
+OR SOA downloaded
+and code that explicitly.
+
+Final corrected implementation direction
+Tell Replit/developer:
+
+Do not run the migration as-is.
+
+Patch it first to:
+1. reference existing users table instead of creating separate clients unless migration is intentional
+2. make enum creation idempotent
+3. add confirm_fsg_received
+4. add authorisation middleware
+5. derive client_id from authenticated user, not request body
+6. calculate fee consent validity live at execution
+7. update only current SOA version
+8. attach or remove unused fee validation trigger
+Overall score
+Compliance architecture: 8.5 / 10
+Replit/codebase fit: 6.5 / 10
+Ready to run: No
+Ready to patch: Yes
+The structure is good. The next step is to make it fit your actual AMAX Wealth schema, not a greenfield app.
+
+
+give me 1 the full architecture design of the app. 2 patches of code need to be added or updated in app according to above resolutions
+
+I’ll give you a full target architecture first, then specific patch blocks your Replit developer can apply. I’ll keep this additive to your existing AMAX Wealth app rather than replacing your current user/onboarding structure.
+
+Thought for 13s
+Below is the specific architecture + patch set I would give Replit/developer.
+
+This assumes: do not run the generated files unchanged. The current amax_api.ts is useful, but it is still greenfield-style and takes clientId/adviserId from request bodies, which must be patched. 
+
+ The regulatory spec also requires DBFO fee consent, ROA, RG221 digital SOA screen, execution gate and 7-year retention. 
+
+
+1. Full AMAX Wealth App Architecture
+AMAX Wealth Platform
+│
+├── Client Portal — B2C
+│   ├── Apply for Access
+│   ├── Onboarding / Fact Find
+│   ├── Risk Profile
+│   ├── Portfolio Dashboard
+│   ├── SOA / ROA Viewer
+│   ├── Advice Acceptance
+│   ├── Fee Consent
+│   └── Execution Authorisation
+│
+├── Adviser Portal — B2B Layer
+│   ├── Adviser Dashboard
+│   ├── Client List
+│   ├── Client Detail
+│   ├── Advice Draft / Review
+│   ├── SOA Issue
+│   └── Adviser Revenue View
+│
+├── Compliance/Admin Portal
+│   ├── Advice Review Queue
+│   ├── Audit Trail
+│   ├── Fee Consent Monitoring
+│   ├── OFA Renewal Monitoring
+│   └── Retention Lock Reports
+│
+├── Backend API
+│   ├── /api/advice/*
+│   ├── /api/client/advice/*
+│   ├── /api/client/fee-consents/*
+│   ├── /api/adviser/*
+│   └── /api/compliance/*
+│
+├── Database Layer
+│   ├── Existing tables:
+│   │   ├── users
+│   │   ├── applications
+│   │   ├── portfolios
+│   │   ├── wallets
+│   │   ├── transactions
+│   │   ├── ai_recommendations
+│   │   └── audit_logs
+│   │
+│   └── New advice tables:
+│       ├── adviser_profiles
+│       ├── adviser_clients
+│       ├── fact_find_snapshots
+│       ├── risk_profiles
+│       ├── advice_records
+│       ├── soa_documents
+│       ├── roa_documents
+│       ├── advice_acknowledgements
+│       ├── fee_consents
+│       └── execution_authorisations
+Core rule
+users.id = single identity source
+client_id = users.id
+adviser_id = users.id
+Do not create a separate clients identity table unless you intentionally migrate the whole app.
+
+2. SQL Patch Set
+Patch A — replace greenfield clients/advisers tables
+Do not use:
+
+CREATE TABLE clients ...
+CREATE TABLE advisers ...
+Use this instead:
+
+-- Adviser profile sits on top of existing users table
+CREATE TABLE IF NOT EXISTS adviser_profiles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+
+  adviser_code TEXT UNIQUE,
+  full_name TEXT,
+  email TEXT,
+  phone TEXT,
+
+  afsl_number TEXT,
+  authorised_rep_number TEXT,
+
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('pending', 'active', 'suspended', 'terminated')),
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS adviser_clients (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  adviser_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  relationship_type TEXT NOT NULL DEFAULT 'servicing'
+    CHECK (relationship_type IN ('servicing', 'primary', 'secondary', 'amx_direct')),
+
+  linked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  unlinked_at TIMESTAMPTZ,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+
+  UNIQUE (adviser_user_id, client_user_id)
+);
+Patch B — make enums idempotent
+Replace raw CREATE TYPE with:
+
+DO $$ BEGIN
+  CREATE TYPE advice_source_type AS ENUM ('ai', 'adviser', 'hybrid');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE execution_status_type AS ENUM ('not_allowed', 'allowed', 'executed');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE advice_record_status AS ENUM (
+    'draft',
+    'adviser_review',
+    'compliance_review',
+    'issued',
+    'accepted',
+    'declined',
+    'withdrawn',
+    'superseded'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+Patch C — advice tables must reference users(id)
+Use this pattern:
+
+CREATE TABLE IF NOT EXISTS fact_find_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  client_id UUID NOT NULL REFERENCES users(id),
+  adviser_id UUID NULL REFERENCES users(id),
+
+  income_annual NUMERIC(15,2),
+  expenses_annual NUMERIC(15,2),
+  assets_total NUMERIC(15,2),
+  liabilities_total NUMERIC(15,2),
+
+  objectives TEXT[],
+  investment_horizon_years INT,
+  liquidity_needs TEXT CHECK (liquidity_needs IN ('low','medium','high')),
+
+  employment_status TEXT,
+  dependants_count INT DEFAULT 0,
+
+  is_complete BOOLEAN NOT NULL DEFAULT false,
+  incomplete_reason TEXT,
+
+  retention_until DATE NOT NULL DEFAULT (CURRENT_DATE + INTERVAL '7 years'),
+  deletion_locked BOOLEAN NOT NULL DEFAULT true,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+Patch D — add confirm_fsg_received
+ALTER TABLE advice_acknowledgements
+ADD COLUMN IF NOT EXISTS confirm_fsg_received BOOLEAN NOT NULL DEFAULT false;
+If creating table fresh:
+
+CREATE TABLE IF NOT EXISTS advice_acknowledgements (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  advice_record_id UUID NOT NULL REFERENCES advice_records(id),
+  client_id UUID NOT NULL REFERENCES users(id),
+
+  confirm_personal_details BOOLEAN NOT NULL,
+  confirm_financial_info BOOLEAN NOT NULL,
+  confirm_objectives BOOLEAN NOT NULL,
+  confirm_risk_profile BOOLEAN NOT NULL,
+  confirm_scope_understood BOOLEAN NOT NULL,
+  confirm_soa_viewed BOOLEAN NOT NULL,
+  confirm_fees_understood BOOLEAN NOT NULL,
+  confirm_fees_consented BOOLEAN NOT NULL,
+  confirm_values_may_fall BOOLEAN NOT NULL,
+  confirm_returns_not_guaranteed BOOLEAN NOT NULL,
+  confirm_fsg_received BOOLEAN NOT NULL,
+
+  signature_name TEXT NOT NULL,
+  accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ip_address TEXT,
+  user_agent TEXT,
+
+  retention_until DATE NOT NULL DEFAULT (CURRENT_DATE + INTERVAL '7 years'),
+  deletion_locked BOOLEAN NOT NULL DEFAULT true,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+Patch E — live fee consent validity function
+Do not rely only on stored fee_consent_valid.
+
+CREATE OR REPLACE FUNCTION is_fee_consent_valid(p_advice_record_id UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+  valid_exists BOOLEAN;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1
+    FROM fee_consents
+    WHERE advice_record_id = p_advice_record_id
+      AND renewal_status = 'active'
+      AND withdrawn_at IS NULL
+      AND consent_expiry_date >= CURRENT_DATE
+  )
+  INTO valid_exists;
+
+  RETURN valid_exists;
+END;
+$$ LANGUAGE plpgsql;
+Patch F — execution gate must calculate live
+CREATE OR REPLACE FUNCTION check_execution_gate()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.execution_status = 'executed' THEN
+    IF NOT (
+      NEW.soa_issued = true
+      AND (NEW.soa_viewed = true OR NEW.soa_downloaded = true)
+      AND NEW.advice_accepted = true
+      AND is_fee_consent_valid(NEW.id) = true
+    ) THEN
+      RAISE EXCEPTION 'Execution blocked: compliance gate not satisfied.';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS enforce_execution_gate ON advice_records;
+
+CREATE TRIGGER enforce_execution_gate
+BEFORE UPDATE ON advice_records
+FOR EACH ROW
+WHEN (NEW.execution_status = 'executed')
+EXECUTE FUNCTION check_execution_gate();
+Patch G — retention delete blocks
+CREATE OR REPLACE FUNCTION block_retention_delete()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.deletion_locked = true AND CURRENT_DATE < OLD.retention_until THEN
+    RAISE EXCEPTION 'Delete blocked: record is under 7-year retention lock.';
+  END IF;
+
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+Apply to key tables:
+
+DROP TRIGGER IF EXISTS trg_block_delete_soa ON soa_documents;
+CREATE TRIGGER trg_block_delete_soa
+BEFORE DELETE ON soa_documents
+FOR EACH ROW EXECUTE FUNCTION block_retention_delete();
+
+DROP TRIGGER IF EXISTS trg_block_delete_roa ON roa_documents;
+CREATE TRIGGER trg_block_delete_roa
+BEFORE DELETE ON roa_documents
+FOR EACH ROW EXECUTE FUNCTION block_retention_delete();
+
+DROP TRIGGER IF EXISTS trg_block_delete_fee_consents ON fee_consents;
+CREATE TRIGGER trg_block_delete_fee_consents
+BEFORE DELETE ON fee_consents
+FOR EACH ROW EXECUTE FUNCTION block_retention_delete();
+
+DROP TRIGGER IF EXISTS trg_block_delete_ack ON advice_acknowledgements;
+CREATE TRIGGER trg_block_delete_ack
+BEFORE DELETE ON advice_acknowledgements
+FOR EACH ROW EXECUTE FUNCTION block_retention_delete();
+3. API Patch Set
+Patch 1 — add auth typing
+At top of amax_api.ts, add:
+
+type UserRole = "client" | "adviser" | "admin" | "compliance_admin";
+
+interface AuthUser {
+  id: string;
+  role: UserRole;
+  email?: string;
+}
+
+interface AuthRequest extends Request {
+  user?: AuthUser;
+}
+Patch 2 — never trust clientId from request body
+Add helpers:
+
+function requireAuth(req: AuthRequest, res: Response): AuthUser | null {
+  if (!req.user?.id) {
+    res.status(401).json({ error: "Authentication required" });
+    return null;
+  }
+  return req.user;
+}
+
+function requireRole(user: AuthUser, roles: UserRole[]) {
+  if (!roles.includes(user.role)) {
+    throw new Error("Unauthorised role");
+  }
+}
+Patch 3 — adviser-client authorisation check
+async function adviserCanAccessClient(adviserUserId: string, clientUserId: string): Promise<boolean> {
+  const { rows } = await db.query(
+    `SELECT 1
+     FROM adviser_clients
+     WHERE adviser_user_id = $1
+       AND client_user_id = $2
+       AND is_active = true
+       AND unlinked_at IS NULL
+     LIMIT 1`,
+    [adviserUserId, clientUserId]
+  );
+
+  return rows.length > 0;
+}
+
+async function requireAdviceAccess(user: AuthUser, adviceRecordId: string): Promise<void> {
+  const { rows } = await db.query(
+    `SELECT client_id, adviser_id
+     FROM advice_records
+     WHERE id = $1`,
+    [adviceRecordId]
+  );
+
+  if (!rows[0]) throw new Error("Advice record not found");
+
+  const record = rows[0];
+
+  if (user.role === "client" && record.client_id !== user.id) {
+    throw new Error("Client cannot access this advice record");
+  }
+
+  if (user.role === "adviser") {
+    const allowed = await adviserCanAccessClient(user.id, record.client_id);
+    if (!allowed) throw new Error("Adviser is not linked to this client");
+  }
+}
+Patch 4 — patch create fact-find route
+Replace body-based clientId logic with:
+
+router.post(
+  "/advice/fact-find",
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const user = requireAuth(req, res);
+    if (!user) return;
+
+    const {
+      clientId,
+      incomeAnnual,
+      expensesAnnual,
+      assetsTotal,
+      liabilitiesTotal,
+      objectives,
+      investmentHorizonYears,
+      liquidityNeeds,
+      employmentStatus,
+      dependantsCount,
+      isComplete,
+      incompleteReason,
+    } = req.body;
+
+    let finalClientId = user.id;
+    let adviserId: string | null = null;
+
+    if (user.role === "adviser") {
+      requireRole(user, ["adviser"]);
+      if (!clientId) return res.status(400).json({ error: "clientId required for adviser" });
+
+      const allowed = await adviserCanAccessClient(user.id, clientId);
+      if (!allowed) return res.status(403).json({ error: "Adviser not linked to client" });
+
+      finalClientId = clientId;
+      adviserId = user.id;
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO fact_find_snapshots (
+        client_id, adviser_id, income_annual, expenses_annual,
+        assets_total, liabilities_total, objectives,
+        investment_horizon_years, liquidity_needs, employment_status,
+        dependants_count, is_complete, incomplete_reason
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      RETURNING *`,
+      [
+        finalClientId,
+        adviserId,
+        incomeAnnual,
+        expensesAnnual,
+        assetsTotal,
+        liabilitiesTotal,
+        objectives,
+        investmentHorizonYears,
+        liquidityNeeds,
+        employmentStatus,
+        dependantsCount ?? 0,
+        isComplete ?? false,
+        incompleteReason ?? null,
+      ]
+    );
+
+    await writeAuditLog("FACT_FIND_SUBMITTED", {
+      clientId: finalClientId,
+      adviserId: adviserId ?? undefined,
+      eventData: { snapshotId: rows[0].id },
+      ipAddress: req.ip,
+      performedByRole: user.role,
+    });
+
+    res.status(201).json({ factFindSnapshot: rows[0] });
+  })
+);
+Patch 5 — patch client acceptance route
+Must include FSG checkbox and auth ownership.
+
+router.post(
+  "/client/advice/:adviceId/accept",
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const user = requireAuth(req, res);
+    if (!user) return;
+    requireRole(user, ["client"]);
+
+    const { adviceId } = req.params;
+
+    const {
+      confirmPersonalDetails,
+      confirmFinancialInfo,
+      confirmObjectives,
+      confirmRiskProfile,
+      confirmScopeUnderstood,
+      confirmSoaViewed,
+      confirmFeesUnderstood,
+      confirmFeesConsented,
+      confirmValuesMayFall,
+      confirmReturnsNotGuaranteed,
+      confirmFsgReceived,
+      signatureName,
+    } = req.body;
+
+    const allConfirmed = [
+      confirmPersonalDetails,
+      confirmFinancialInfo,
+      confirmObjectives,
+      confirmRiskProfile,
+      confirmScopeUnderstood,
+      confirmSoaViewed,
+      confirmFeesUnderstood,
+      confirmFeesConsented,
+      confirmValuesMayFall,
+      confirmReturnsNotGuaranteed,
+      confirmFsgReceived,
+    ].every(Boolean);
+
+    if (!allConfirmed || !signatureName) {
+      return res.status(400).json({
+        error: "All confirmations, FSG acknowledgement, and signatureName are required.",
+      });
+    }
+
+    const { rows: advice } = await db.query(
+      `SELECT *
+       FROM advice_records
+       WHERE id = $1 AND client_id = $2`,
+      [adviceId, user.id]
+    );
+
+    if (!advice[0]) {
+      return res.status(404).json({ error: "Advice record not found" });
+    }
+
+    if (!advice[0].soa_issued || !(advice[0].soa_viewed || advice[0].soa_downloaded)) {
+      return res.status(400).json({
+        error: "SOA must be issued and viewed or downloaded before acceptance.",
+      });
+    }
+
+    if (advice[0].earliest_accept_at && new Date() < new Date(advice[0].earliest_accept_at)) {
+      return res.status(400).json({
+        error: "Minimum review period not elapsed.",
+        earliestAcceptAt: advice[0].earliest_accept_at,
+      });
+    }
+
+    await db.query(
+      `INSERT INTO advice_acknowledgements (
+        advice_record_id, client_id,
+        confirm_personal_details, confirm_financial_info,
+        confirm_objectives, confirm_risk_profile,
+        confirm_scope_understood, confirm_soa_viewed,
+        confirm_fees_understood, confirm_fees_consented,
+        confirm_values_may_fall, confirm_returns_not_guaranteed,
+        confirm_fsg_received,
+        signature_name, accepted_at, ip_address, user_agent
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),$15,$16)`,
+      [
+        adviceId,
+        user.id,
+        confirmPersonalDetails,
+        confirmFinancialInfo,
+        confirmObjectives,
+        confirmRiskProfile,
+        confirmScopeUnderstood,
+        confirmSoaViewed,
+        confirmFeesUnderstood,
+        confirmFeesConsented,
+        confirmValuesMayFall,
+        confirmReturnsNotGuaranteed,
+        confirmFsgReceived,
+        signatureName,
+        req.ip,
+        req.headers["user-agent"] ?? null,
+      ]
+    );
+
+    await db.query(
+      `UPDATE advice_records
+       SET advice_accepted = true,
+           status = 'accepted',
+           accepted_at = now(),
+           signature_name = $1,
+           updated_at = now()
+       WHERE id = $2`,
+      [signatureName, adviceId]
+    );
+
+    await writeAuditLog("CLIENT_ACCEPTED_ADVICE", {
+      clientId: user.id,
+      adviceRecordId: adviceId,
+      eventData: { signatureName },
+      ipAddress: req.ip,
+      performedByRole: "client",
+    });
+
+    res.json({
+      message: "Advice accepted",
+      nextStep: "Complete fee consent before execution can proceed.",
+    });
+  })
+);
+Patch 6 — patch SOA viewed route to update only current SOA
+router.post(
+  "/client/advice/:adviceId/viewed",
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const user = requireAuth(req, res);
+    if (!user) return;
+    requireRole(user, ["client"]);
+
+    const { adviceId } = req.params;
+    const { openingScreenShown } = req.body;
+
+    const { rows: advice } = await db.query(
+      `UPDATE advice_records
+       SET soa_viewed = true,
+           soa_first_viewed_at = COALESCE(soa_first_viewed_at, now()),
+           earliest_accept_at = COALESCE(earliest_accept_at, now() + INTERVAL '10 minutes'),
+           updated_at = now()
+       WHERE id = $1 AND client_id = $2
+       RETURNING *`,
+      [adviceId, user.id]
+    );
+
+    if (!advice[0]) {
+      return res.status(404).json({ error: "Advice record not found" });
+    }
+
+    if (openingScreenShown) {
+      await db.query(
+        `UPDATE soa_documents
+         SET opening_screen_shown = true,
+             opening_screen_shown_at = now()
+         WHERE id = (
+           SELECT id
+           FROM soa_documents
+           WHERE advice_record_id = $1
+             AND is_locked = true
+           ORDER BY version DESC
+           LIMIT 1
+         )`,
+        [adviceId]
+      );
+    }
+
+    await writeAuditLog("SOA_VIEWED", {
+      clientId: user.id,
+      adviceRecordId: adviceId,
+      ipAddress: req.ip,
+      performedByRole: "client",
+    });
+
+    res.json({
+      soaViewed: true,
+      earliestAcceptAt: advice[0].earliest_accept_at,
+    });
+  })
+);
+Patch 7 — live compliance gate check
+Replace current checkComplianceGate with:
+
+async function checkComplianceGate(adviceRecordId: string): Promise<ComplianceGate> {
+  const { rows } = await db.query(
+    `SELECT 
+       ar.soa_issued,
+       (ar.soa_viewed OR ar.soa_downloaded) AS soa_viewed,
+       ar.advice_accepted,
+       EXISTS (
+         SELECT 1
+         FROM fee_consents fc
+         WHERE fc.advice_record_id = ar.id
+           AND fc.renewal_status = 'active'
+           AND fc.withdrawn_at IS NULL
+           AND fc.consent_expiry_date >= CURRENT_DATE
+       ) AS fee_consent_valid
+     FROM advice_records ar
+     WHERE ar.id = $1`,
+    [adviceRecordId]
+  );
+
+  if (!rows[0]) throw new Error("Advice record not found");
+  return rows[0] as ComplianceGate;
+}
+Patch 8 — patch execution endpoint
+router.post(
+  "/client/advice/:adviceId/execute",
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const user = requireAuth(req, res);
+    if (!user) return;
+    requireRole(user, ["client"]);
+
+    const { adviceId } = req.params;
+    const { executionScope, signatureName } = req.body;
+
+    if (!signatureName) {
+      return res.status(400).json({ error: "signatureName required" });
+    }
+
+    const { rows: advice } = await db.query(
+      `SELECT adviser_id
+       FROM advice_records
+       WHERE id = $1 AND client_id = $2`,
+      [adviceId, user.id]
+    );
+
+    if (!advice[0]) {
+      return res.status(404).json({ error: "Advice record not found" });
+    }
+
+    const gate = await checkComplianceGate(adviceId);
+
+    if (!gateIsSatisfied(gate)) {
+      const missing = [];
+      if (!gate.soa_issued) missing.push("soa_issued");
+      if (!gate.soa_viewed) missing.push("soa_viewed_or_downloaded");
+      if (!gate.advice_accepted) missing.push("advice_accepted");
+      if (!gate.fee_consent_valid) missing.push("fee_consent_valid");
+
+      return res.status(400).json({
+        error: "Execution blocked: compliance gate not satisfied",
+        missing,
+      });
+    }
+
+    const { rows: exec } = await db.query(
+      `INSERT INTO execution_authorisations (
+        advice_record_id, client_id, adviser_id,
+        authorised, execution_scope, signature_name,
+        gate_soa_issued, gate_soa_viewed,
+        gate_advice_accepted, gate_fee_consent_valid
+      ) VALUES ($1,$2,$3,true,$4,$5,$6,$7,$8,$9)
+      RETURNING *`,
+      [
+        adviceId,
+        user.id,
+        advice[0].adviser_id,
+        executionScope ?? [],
+        signatureName,
+        gate.soa_issued,
+        gate.soa_viewed,
+        gate.advice_accepted,
+        gate.fee_consent_valid,
+      ]
+    );
+
+    await db.query(
+      `UPDATE advice_records
+       SET execution_status = 'executed',
+           executed_at = now(),
+           updated_at = now()
+       WHERE id = $1 AND client_id = $2`,
+      [adviceId, user.id]
+    );
+
+    await writeAuditLog("EXECUTION_AUTHORISED", {
+      clientId: user.id,
+      adviserId: advice[0].adviser_id,
+      adviceRecordId: adviceId,
+      eventData: { executionScope, gateSnapshot: gate },
+      ipAddress: req.ip,
+      performedByRole: "client",
+    });
+
+    res.status(201).json({
+      message: "Execution authorised",
+      executionAuthorisation: exec[0],
+    });
+  })
+);
+Final Developer Instruction
+Give Replit this exact instruction:
+
+Patch the existing AMAX Wealth app. Do not create a parallel clients identity system.
+
+Use existing users.id as the core identity key:
+- client_id = users.id
+- adviser_id = users.id
+
+Add adviser_profiles and adviser_clients only as overlays.
+
+Patch the advice engine so client identity comes from authenticated req.user, not request body.
+
+Add confirm_fsg_received.
+
+Calculate fee consent validity live at execution.
+
+Only update the latest locked SOA version.
+
+Block execution unless:
+SOA issued
+AND SOA viewed or downloaded
+AND advice accepted
+AND valid fee consent exists.
+
+Enforce the same gate in both API and DB trigger.
+Final verdict: architecture is correct; patching is required before deployment.
+
+
+
+Pasted markdown(21).md
+File
+verify and cross check
+
+Thought for a couple of seconds
+Verified. This cross-check is correct and should override my earlier raw-SQL patches. 
+
+
+Final corrections
+1. Your app uses integer users.id, not UUID
+So all FK fields must be:
+
+integer("client_id").references(() => users.id)
+integer("adviser_id").references(() => users.id)
+Not:
+
+uuid("client_id")
+Internal table IDs can stay serial or UUID, but any reference to users.id must be integer.
+
+2. Your app uses Drizzle ORM
+So do not run the raw SQL table migrations directly.
+
+Correct approach:
+
+shared/schema.ts → add Drizzle table definitions
+drizzle-kit generate
+drizzle-kit migrate / push
+Raw SQL should only be used for:
+
+database triggers
+custom functions
+retention delete blocks
+execution gate trigger
+3. You need a role field
+Add to users:
+
+role: text("role").notNull().default("client")
+Allowed values:
+
+client
+adviser
+admin
+compliance_admin
+Also update JWT/AuthPayload to include role.
+
+4. You need wealth_applications
+Because the current schema apparently does not have a proper applications table.
+
+Add:
+
+wealth_applications
+with:
+
+user_id
+entity_type
+entity_name
+abn
+intended_use
+consent_general_advice
+status
+5. Advice engine tables must be rewritten in Drizzle
+Add these in schema.ts:
+
+adviser_profiles
+adviser_clients
+fact_find_snapshots
+risk_profiles
+advice_records
+soa_documents
+roa_documents
+advice_acknowledgements
+fee_consents
+execution_authorisations
+6. Add retention fields to existing audit_logs
+Add:
+
+retentionUntil
+deletionLocked
+Updated implementation instruction for Replit
+Give Replit this:
+
+Do not apply the raw SQL migration as-is.
+
+Translate the advice-engine schema into Drizzle ORM using integer foreign keys to users.id.
+
+Add users.role and include role in JWT/AuthPayload.
+
+Add wealth_applications table because the current schema does not contain the persisted Apply for Access structure.
+
+Keep execution gate and retention-lock triggers as separate raw SQL migrations after Drizzle schema is updated.
+Final verdict
+Architecture: correct
+Compliance logic: correct
+Earlier raw SQL patches: not directly compatible
+Required fix: Drizzle-compatible schema.ts + separate trigger SQL
+Yes — the next step should be:
+
+full Drizzle-compatible schema.ts additions + separate trigger migration file.
+
+
+
