@@ -3,6 +3,32 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Session 16B: Case-insensitive email guard + create-invite audit
+
+Hardens the duplicate-email defence introduced in Session 16 with a single canonical normaliser and a DB-level case-insensitive safety net. Closes the last gap in Task #4: an admin-side block path that previously rejected silently with no audit row.
+
+### What was added
+- **`normalizeEmail()` helper** (`shared/schema.ts`) — single source of truth for `String(x ?? "").trim().toLowerCase()`. Imported and used by `server/admin-routes.ts` (invite creation) and `server/routes.ts` (legacy `/api/auth/register`, which previously trusted `email.toLowerCase()` only at insert time and did the duplicate-user lookup with raw input).
+- **DB-level case-insensitive uniqueness**:
+  - `users_email_lower_unique` — `UNIQUE btree (lower(email))` alongside the existing `users_email_unique` constraint. Belt-and-braces: `User@x.com` and `user@x.com` cannot both exist as users even if a future code path forgets to normalise.
+  - `registration_invites_email_lower_active_unique` — `UNIQUE btree (lower(email)) WHERE used_at IS NULL`. Twin of the existing case-sensitive partial unique index, so case-only duplicates also collapse to "one live invite per identity".
+  - Pre-flight verified clean: `0` mixed-case rows in `users` or `registration_invites`, `0` lower(email) collisions. `npm run db:push` applied cleanly.
+- **Create-invite block path now audits** (`server/admin-routes.ts:543-551, 592-616`): the in-tx existing-user `SELECT` now matches via `lower(users.email) = ${normalisedEmail}` and tags its rejection with `code: "DUP_USER_EMAIL"`. The surrounding `catch` writes `registration_invite_rejected_duplicate_email` with `stage: "create_invite"`, `email`, `role`, and `existingUserId` — **outside** the rolled-back transaction so the audit trail captures the rejection regardless. Mirrors the validate/complete-side audit emission so reviewers see all three rejection paths under one action name.
+- **23505 mapper extended** to recognise both partial unique indexes (case-sensitive and lowercased), translating either to the same "another invitation in flight" 409.
+
+### Smoke tests run
+- Mixed-case dup attempt (`Wiseinvestor@…` against existing `wiseinvestor@…`) → **409**, audit row written with `stage: "create_invite"`, `existingUserId: 1`. ✅
+- Mixed-case new email (`NewPerson.MixedCase@Example.COM`) → **200**, DB row stored as `newperson.mixedcase@example.com`. ✅
+- Sequential re-issue with different case → **200**, prior invite revoked, exactly 1 active row. ✅
+- End-to-end validate + complete on the issued link → **201**, user row stored fully lowercased in both `email` and `username`. ✅
+- Pre-existing `server/storage.ts:3289,3312` TS errors untouched — all changes compile cleanly otherwise.
+
+### Why no SERIALIZABLE escalation
+The existing-user check is `READ COMMITTED` + in-tx `SELECT`, which leaves a sub-millisecond residual race window. The activation-side `users.email` UNIQUE + 23505→409 mapping is still the final guard. Now backed by the lowercased unique index too, so even a case-only race is caught at insert time. SERIALIZABLE would force retry loops in admin code for negligible benefit.
+
+### Deferred (still gating Task #3)
+Email delivery for invitation links remains pending — admin still copies the link from the post-issue dialog. Picking a transactional provider (Postmark / Resend / SES) is a Session 17 decision that needs user input.
+
 ## Recent Changes (April 2026) — Session 16: Admin invite UI + invite flow hardening
 
 This session ships the admin-side surface for the Session 14 invite engine and tightens two race-correctness gaps caught during code review.

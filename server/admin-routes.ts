@@ -31,6 +31,7 @@ import {
   users,
   adviserClients,
   registrationInvites,
+  normalizeEmail,
 } from "@shared/schema";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 
@@ -486,7 +487,7 @@ export function registerAdminRoutes(app: Express): void {
         );
       }
       const { email, role, relatedEntityType, relatedEntityId, adviserUserId } = parsed.data;
-      const normalisedEmail = email.toLowerCase();
+      const normalisedEmail = normalizeEmail(email);
 
       // Adviser-link guard: cheap, race-free, can stay outside the tx.
       // (If the adviser is somehow deleted between this check and the insert,
@@ -528,15 +529,21 @@ export function registerAdminRoutes(app: Express): void {
           // to a clean 409. We deliberately don't escalate to SERIALIZABLE
           // here — the cost (retry loops in admin code) outweighs the
           // sub-millisecond residual race window.
+          // Case-insensitive lookup so User@x.com and user@x.com collapse to
+          // the same identity. Belt-and-braces: the users_email_lower_unique
+          // index is the DB-level safety net.
           const [existingUser] = await (tx as any)
             .select({ id: users.id })
             .from(users)
-            .where(eq(users.email, normalisedEmail))
+            .where(sql`lower(${users.email}) = ${normalisedEmail}`)
             .limit(1);
           if (existingUser) {
+            // Tag the rejection so the surrounding catch can emit a clean,
+            // post-rollback audit row (audit inside the tx would roll back
+            // with the rejection itself).
             throw Object.assign(
               new Error("A user with this email already exists"),
-              { status: 409 },
+              { status: 409, code: "DUP_USER_EMAIL", existingUserId: existingUser.id },
             );
           }
 
@@ -580,9 +587,39 @@ export function registerAdminRoutes(app: Express): void {
           );
         });
       } catch (err: any) {
+        // Audit the existing-user rejection on the way out. The audit row lives
+        // OUTSIDE the rolled-back transaction so the rejection is still
+        // discoverable in the audit trail. Mirrors the validate/complete-time
+        // emission of `registration_invite_rejected_duplicate_email` so admin
+        // and self-serve rejection paths show up under one action name.
+        if (err?.code === "DUP_USER_EMAIL") {
+          await db.insert(auditLogs).values({
+            userId: auth.userId,
+            action: "registration_invite_rejected_duplicate_email",
+            entityType: "registration_invite",
+            entityId: null,
+            metadata: {
+              email: normalisedEmail,
+              role,
+              stage: "create_invite",
+              existingUserId: err.existingUserId ?? null,
+            } as any,
+            ipAddress: req.ip || null,
+          }).catch(() => { /* never let audit failure mask the 409 */ });
+          throw Object.assign(
+            new Error("A user with this email already exists."),
+            { status: 409 },
+          );
+        }
         // Partial unique index ensures only one live invite per email; concurrent
         // issuers race here. Translate the unique-violation to a clean 409.
-        if (err?.code === "23505" && String(err?.constraint || "").includes("registration_invites_email_active")) {
+        // We check both the case-sensitive and case-insensitive partial unique
+        // indexes — either one firing means another invite is already in flight.
+        if (
+          err?.code === "23505" &&
+          (String(err?.constraint || "").includes("registration_invites_email_active") ||
+            String(err?.constraint || "").includes("registration_invites_email_lower_active"))
+        ) {
           throw Object.assign(
             new Error("Another invitation is already in flight for this email — please refresh and retry."),
             { status: 409 },
@@ -641,6 +678,12 @@ export function registerAdminRoutes(app: Express): void {
       }
       const data = parsed.data;
 
+      // Canonicalise email at the boundary so the existence check and the
+      // insert use the same form. Combined with the lower(email) UNIQUE index
+      // this means User@x.com and user@x.com cannot both be created as
+      // advisers, even via this admin path.
+      const normalisedEmail = normalizeEmail(data.email);
+
       // Uniqueness checks (race-tolerated by the unique indexes too)
       const [byName] = await db
         .select({ id: users.id })
@@ -653,7 +696,7 @@ export function registerAdminRoutes(app: Express): void {
       const [byEmail] = await db
         .select({ id: users.id })
         .from(users)
-        .where(eq(users.email, data.email))
+        .where(sql`lower(${users.email}) = ${normalisedEmail}`)
         .limit(1);
       if (byEmail) {
         throw Object.assign(new Error("Email is already in use"), { status: 409 });
@@ -665,7 +708,7 @@ export function registerAdminRoutes(app: Express): void {
           .insert(users)
           .values({
             username: data.username,
-            email: data.email,
+            email: normalisedEmail,
             firstName: data.firstName,
             lastName: data.lastName,
             password: hashed,

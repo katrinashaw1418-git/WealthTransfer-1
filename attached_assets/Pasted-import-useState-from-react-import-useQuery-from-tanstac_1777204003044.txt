@@ -1,0 +1,127 @@
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+
+export default function AdminRegistrationInvites() {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("adviser");
+  const [relatedEntityType, setRelatedEntityType] = useState("");
+  const [relatedEntityId, setRelatedEntityId] = useState("");
+  const [adviserUserId, setAdviserUserId] = useState("");
+  const [inviteLink, setInviteLink] = useState("");
+  const [error, setError] = useState("");
+
+  const { data, refetch } = useQuery({
+    queryKey: ["/api/admin/registration-invites"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/registration-invites");
+      if (!res.ok) return { invites: [] };
+      return res.json();
+    },
+  });
+
+  async function createInvite() {
+    setError("");
+    setInviteLink("");
+
+    const res = await fetch("/api/admin/registration-invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        role,
+        relatedEntityType: relatedEntityType || null,
+        relatedEntityId: relatedEntityId ? Number(relatedEntityId) : null,
+        adviserUserId: adviserUserId ? Number(adviserUserId) : null,
+      }),
+    });
+
+    const json = await res.json();
+
+    if (!res.ok) {
+      setError(json.error || "Failed to create invite");
+      return;
+    }
+
+    setInviteLink(json.inviteLink);
+    await refetch();
+  }
+
+  return (
+    <div className="space-y-6 p-6">
+      <div>
+        <h1 className="text-2xl font-semibold">Registration Invites</h1>
+        <p className="text-sm text-muted-foreground">
+          Create secure activation links for advisers, clients and admins.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Create Invite</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+
+          <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full rounded-md border p-2">
+            <option value="adviser">Adviser</option>
+            <option value="client">Client</option>
+            <option value="admin">Admin</option>
+          </select>
+
+          <Input placeholder="Related entity type" value={relatedEntityType} onChange={(e) => setRelatedEntityType(e.target.value)} />
+          <Input placeholder="Related entity ID" value={relatedEntityId} onChange={(e) => setRelatedEntityId(e.target.value)} />
+
+          {role === "client" && (
+            <Input placeholder="Linked adviser user ID optional" value={adviserUserId} onChange={(e) => setAdviserUserId(e.target.value)} />
+          )}
+
+          {error && <p className="text-sm text-red-500">{error}</p>}
+
+          <Button onClick={createInvite}>Create Invite</Button>
+        </CardContent>
+      </Card>
+
+      {inviteLink && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Generated Invite Link</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="break-all rounded-md bg-muted p-3 text-sm">{inviteLink}</div>
+            <Button onClick={() => navigator.clipboard.writeText(inviteLink)}>
+              Copy Invite Link
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              This invite expires after 48 hours and can only be used once.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Invites</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {(data?.invites || []).map((invite: any) => (
+            <div key={invite.id} className="flex justify-between border-b py-3 text-sm">
+              <div>
+                <div className="font-medium">{invite.email}</div>
+                <div className="text-muted-foreground">{invite.role}</div>
+              </div>
+              <div className="text-right">
+                <div>{invite.usedAt ? "Used" : "Unused"}</div>
+                <div className="text-muted-foreground">
+                  Expires: {new Date(invite.expiresAt).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}

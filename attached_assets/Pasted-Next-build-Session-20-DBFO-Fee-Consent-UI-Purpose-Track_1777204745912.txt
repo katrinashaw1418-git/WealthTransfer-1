@@ -1,0 +1,353 @@
+Next build:
+
+Session 20 — DBFO Fee Consent UI
+
+Purpose:
+
+Track ongoing fee consent properly before any fee deduction engine.
+This is still consent tracking only — no money movement.
+1. DB schema
+
+Use existing feeConsents if already built. Ensure it has these fields:
+
+accountNumber: text("account_number"),
+accountName: text("account_name"),
+
+adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+
+feeType: text("fee_type").notNull(),
+// ongoing_service | one_off_advice | platform
+
+amountType: text("amount_type").notNull(),
+// fixed | percentage
+
+amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
+currency: text("currency").default("AUD"),
+
+referenceDay: timestamp("reference_day").notNull(),
+renewalWindowStart: timestamp("renewal_window_start").notNull(),
+renewalWindowEnd: timestamp("renewal_window_end").notNull(),
+consentExpiryDate: timestamp("consent_expiry_date").notNull(),
+
+renewalStatus: text("renewal_status").default("active"),
+// active | renewal_due | expired | withdrawn
+
+withdrawnAt: timestamp("withdrawn_at"),
+clientSignatureName: text("client_signature_name"),
+clientSignedAt: timestamp("client_signed_at"),
+
+services: text("services"),
+createdAt: timestamp("created_at").defaultNow(),
+
+Rule:
+
+referenceDay = start date
+renewalWindowStart = referenceDay - 60 days
+renewalWindowEnd = referenceDay + 150 days
+consentExpiryDate = renewalWindowEnd
+2. API endpoints
+GET  /api/adviser/fee-consents
+GET  /api/adviser/clients/:id/fee-consents
+POST /api/adviser/fee-consents
+PATCH /api/adviser/fee-consents/:id/withdraw
+
+GET  /api/client/fee-consents
+POST /api/client/fee-consents/:id/sign
+POST /api/client/fee-consents/:id/withdraw
+3. Adviser create consent
+POST /api/adviser/fee-consents
+
+Body:
+
+{
+  "clientUserId": 12,
+  "accountNumber": "ACC-001",
+  "accountName": "Wise User",
+  "feeType": "ongoing_service",
+  "amountType": "percentage",
+  "amount": "1.00",
+  "referenceDay": "2026-04-26",
+  "services": "Ongoing portfolio review and adviser servicing"
+}
+
+Server rules:
+
+adviser must be linked to client
+calculate renewalWindowStart
+calculate renewalWindowEnd
+calculate consentExpiryDate
+status = pending_client_signature
+no deduction created
+audit log
+4. Adviser create API skeleton
+app.post("/api/adviser/fee-consents", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (role !== "adviser") {
+    return res.status(403).json({ error: "Adviser access required" });
+  }
+
+  const {
+    clientUserId,
+    accountNumber,
+    accountName,
+    feeType,
+    amountType,
+    amount,
+    referenceDay,
+    services,
+  } = req.body;
+
+  const allowed = await adviserCanAccessClient(userId, clientUserId);
+  if (!allowed) {
+    return res.status(403).json({ error: "Client not linked to adviser" });
+  }
+
+  const ref = new Date(referenceDay);
+  const renewalWindowStart = new Date(ref.getTime() - 60 * 24 * 60 * 60 * 1000);
+  const renewalWindowEnd = new Date(ref.getTime() + 150 * 24 * 60 * 60 * 1000);
+
+  const [consent] = await db.insert(feeConsents).values({
+    adviserUserId: userId,
+    clientUserId,
+    accountNumber,
+    accountName,
+    feeType,
+    amountType,
+    amount: String(amount),
+    referenceDay: ref,
+    renewalWindowStart,
+    renewalWindowEnd,
+    consentExpiryDate: renewalWindowEnd,
+    renewalStatus: "pending_client_signature",
+    services,
+  }).returning();
+
+  await writeAuditLog(
+    userId,
+    "fee_consent_created",
+    "fee_consents",
+    String(consent.id),
+    { clientUserId, feeType, amountType, amount },
+    req.ip || null
+  );
+
+  res.status(201).json({ consent });
+});
+5. Client sign API
+POST /api/client/fee-consents/:id/sign
+
+Body:
+
+{
+  "clientSignatureName": "Wise User"
+}
+
+Rules:
+
+clientUserId must equal logged-in client
+status becomes active
+clientSignedAt set
+no fee deduction
+audit log
+app.post("/api/client/fee-consents/:id/sign", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const id = Number(req.params.id);
+
+  const [consent] = await db.select().from(feeConsents)
+    .where(eq(feeConsents.id, id));
+
+  if (!consent || consent.clientUserId !== userId) {
+    return res.status(404).json({ error: "Fee consent not found" });
+  }
+
+  const [updated] = await db.update(feeConsents)
+    .set({
+      renewalStatus: "active",
+      clientSignatureName: req.body.clientSignatureName,
+      clientSignedAt: new Date(),
+    })
+    .where(eq(feeConsents.id, id))
+    .returning();
+
+  await writeAuditLog(
+    userId,
+    "fee_consent_signed",
+    "fee_consents",
+    String(id),
+    { clientSignatureName: req.body.clientSignatureName },
+    req.ip || null
+  );
+
+  res.json({ consent: updated });
+});
+6. React pages
+Adviser page
+/adviser/fees
+
+Sections:
+
+Fee consent summary
+Create fee consent
+Client fee consent table
+Expiry / renewal alerts
+
+Fields:
+
+Client
+Account number
+Account name
+Fee type
+Amount type
+Amount
+Reference day
+Services
+
+Table columns:
+
+Client
+Fee type
+Amount
+Reference day
+Renewal window
+Expiry
+Status
+Actions
+Client page
+/client/fee-consents
+
+Sections:
+
+Pending fee consents
+Active fee consents
+Withdrawn / expired
+
+Actions:
+
+Sign consent
+Withdraw consent
+Download copy later
+7. React adviser form skeleton
+function CreateFeeConsentForm() {
+  const [form, setForm] = useState({
+    clientUserId: "",
+    accountNumber: "",
+    accountName: "",
+    feeType: "ongoing_service",
+    amountType: "percentage",
+    amount: "",
+    referenceDay: "",
+    services: "",
+  });
+
+  async function submit() {
+    const res = await fetch("/api/adviser/fee-consents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...form,
+        clientUserId: Number(form.clientUserId),
+      }),
+    });
+
+    if (!res.ok) {
+      const data = await res.json();
+      alert(data.error || "Failed to create fee consent");
+      return;
+    }
+
+    alert("Fee consent sent to client for signature.");
+  }
+
+  return (
+    <div className="space-y-3">
+      <input placeholder="Client user ID" />
+      <input placeholder="Account number" />
+      <input placeholder="Account name" />
+      <select>
+        <option value="ongoing_service">Ongoing service</option>
+        <option value="one_off_advice">One-off advice</option>
+      </select>
+      <select>
+        <option value="percentage">Percentage</option>
+        <option value="fixed">Fixed amount</option>
+      </select>
+      <input placeholder="Amount" />
+      <input type="date" />
+      <textarea placeholder="Services covered" />
+      <button onClick={submit}>Create fee consent</button>
+    </div>
+  );
+}
+8. React client sign flow
+async function signConsent(id: number, clientSignatureName: string) {
+  const res = await fetch(`/api/client/fee-consents/${id}/sign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clientSignatureName }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.error || "Failed to sign consent");
+  }
+}
+9. Replit prompt
+Build Session 20 — DBFO Fee Consent UI.
+
+Purpose:
+Create adviser/client fee consent tracking before any fee deduction engine.
+
+Patch or confirm feeConsents schema has:
+- accountNumber
+- accountName
+- adviserUserId
+- clientUserId
+- feeType
+- amountType
+- amount
+- currency
+- referenceDay
+- renewalWindowStart
+- renewalWindowEnd
+- consentExpiryDate
+- renewalStatus
+- withdrawnAt
+- clientSignatureName
+- clientSignedAt
+- services
+
+Add APIs:
+- GET /api/adviser/fee-consents
+- GET /api/adviser/clients/:id/fee-consents
+- POST /api/adviser/fee-consents
+- PATCH /api/adviser/fee-consents/:id/withdraw
+- GET /api/client/fee-consents
+- POST /api/client/fee-consents/:id/sign
+- POST /api/client/fee-consents/:id/withdraw
+
+Rules:
+- adviser must be linked to client
+- client can only sign own consent
+- calculate renewal window: referenceDay - 60 days to referenceDay + 150 days
+- no fee deduction
+- no wallet movement
+- audit every write
+
+Add UI:
+- /adviser/fees create/list fee consents
+- /client/fee-consents sign/withdraw fee consents
+
+Do not build:
+- fee deduction engine
+- SoA generator
+- investment execution
+- commission engine
+
+After this:
+
+SoA generator
+→ Visual re-skin
+→ 10C fee engine last

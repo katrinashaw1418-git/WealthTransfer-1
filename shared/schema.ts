@@ -3,25 +3,50 @@ import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-export const users = pgTable("users", {
-  id: serial("id").primaryKey(),
-  username: text("username").notNull().unique(),
-  email: text("email").notNull().unique(),
-  password: text("password").notNull(),
-  firstName: text("first_name").notNull(),
-  lastName: text("last_name").notNull(),
-  kycStatus: text("kyc_status").notNull().default("pending"), // pending, verified, rejected
-  userTier: text("user_tier").notNull().default("standard"), // standard, premium, hnwi
-  // Session 3 — Phase 1: role-based access for B2B adviser overlay.
-  // "client" (default) = retail/wholesale account holder; "adviser" = authorised rep linked to clients via adviserClients.
-  role: text("role").notNull().default("client"),
-  // Email verification — set on signup; required before login is allowed
-  emailVerified: boolean("email_verified").notNull().default(false),
-  emailVerificationToken: text("email_verification_token"),
-  emailVerificationTokenExpiry: timestamp("email_verification_token_expiry"),
-  emailOtp: text("email_otp"),
-  createdAt: timestamp("created_at").defaultNow(),
-});
+// ---------------------------------------------------------------------------
+// Email normalisation — single source of truth.
+//
+// Hard rule: every code path that reads an email from request input or stores
+// one in the DB MUST run it through normalizeEmail() first. Combined with the
+// case-insensitive unique indexes below (users_email_lower_unique +
+// registration_invites_email_lower_active_unique), this collapses the
+// "User@x.com vs user@x.com" duplicate-account hazard at both the
+// application layer and the DB layer (defence in depth).
+// ---------------------------------------------------------------------------
+export function normalizeEmail(email: unknown): string {
+  return String(email ?? "").trim().toLowerCase();
+}
+
+export const users = pgTable(
+  "users",
+  {
+    id: serial("id").primaryKey(),
+    username: text("username").notNull().unique(),
+    email: text("email").notNull().unique(),
+    password: text("password").notNull(),
+    firstName: text("first_name").notNull(),
+    lastName: text("last_name").notNull(),
+    kycStatus: text("kyc_status").notNull().default("pending"), // pending, verified, rejected
+    userTier: text("user_tier").notNull().default("standard"), // standard, premium, hnwi
+    // Session 3 — Phase 1: role-based access for B2B adviser overlay.
+    // "client" (default) = retail/wholesale account holder; "adviser" = authorised rep linked to clients via adviserClients.
+    role: text("role").notNull().default("client"),
+    // Email verification — set on signup; required before login is allowed
+    emailVerified: boolean("email_verified").notNull().default(false),
+    emailVerificationToken: text("email_verification_token"),
+    emailVerificationTokenExpiry: timestamp("email_verification_token_expiry"),
+    emailOtp: text("email_otp"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    // Case-insensitive uniqueness on email. The plain `.unique()` on the column
+    // above catches exact duplicates; this functional index catches case-only
+    // collisions (User@x.com vs user@x.com) so we cannot end up with two rows
+    // that resolve to the same identity. Application code MUST normalise on
+    // write (see normalizeEmail above) — this index is the safety net.
+    emailLowerUnique: uniqueIndex("users_email_lower_unique").on(sql`lower(${table.email})`),
+  }),
+);
 
 export const portfolios = pgTable("portfolios", {
   id: serial("id").primaryKey(),
@@ -310,6 +335,13 @@ export const registrationInvites = pgTable(
     // transaction rolls back. Mappers translate this to a 409.
     emailActiveUnique: uniqueIndex("registration_invites_email_active_unique")
       .on(table.email)
+      .where(sql`${table.usedAt} IS NULL`),
+    // Case-insensitive twin of the above. Belt-and-braces against any code path
+    // that forgets to normalise the email before insert: User@x.com and
+    // user@x.com cannot both have a live invite, even if some legacy caller
+    // skips normalizeEmail().
+    emailLowerActiveUnique: uniqueIndex("registration_invites_email_lower_active_unique")
+      .on(sql`lower(${table.email})`)
       .where(sql`${table.usedAt} IS NULL`),
   }),
 );

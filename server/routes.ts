@@ -23,6 +23,7 @@ import {
   applications as applicationsTable,
   factFindSnapshots,
   riskProfiles,
+  normalizeEmail,
 } from "@shared/schema";
 import { getRecommendation } from "@shared/recommendation-engine";
 import { scoreRiskProfile, type RiskAnswers } from "./services/risk-scoring";
@@ -828,17 +829,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auth/register", async (req, res) => {
     try {
-      const { email, password, firstName, lastName } = req.body;
-      if (!email || !password || !firstName || !lastName) {
+      const { email: rawEmail, password, firstName, lastName } = req.body;
+      if (!rawEmail || !password || !firstName || !lastName) {
         return res.status(400).json({ error: "All fields are required" });
       }
       if (password.length < 8) {
         return res.status(400).json({ error: "Password must be at least 8 characters" });
       }
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
+      if (!emailRegex.test(String(rawEmail))) {
         return res.status(400).json({ error: "Invalid email address" });
       }
+      // Normalise once, at the top — every downstream check (existing user,
+      // application lookup, insert) uses the same canonical form so case-only
+      // collisions can't slip through.
+      const email = normalizeEmail(rawEmail);
       const existingEmail = await storage.getUserByEmail(email);
       if (existingEmail) {
         return res.status(409).json({ error: "An account with this email already exists" });
@@ -863,7 +868,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const hashed = await hashPassword(password);
       const user = await storage.createUser({
         username,
-        email: email.toLowerCase(),
+        email,
         password: hashed,
         firstName,
         lastName,
@@ -1066,6 +1071,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const usernameTaken = await storage.getUserByUsername(inv.email);
       if (usernameTaken) {
+        // Same audit row name as the email-collision path so reviewers see ALL
+        // duplicate-rejection outcomes under `registration_invite_rejected_duplicate_email`.
+        // `stage:"complete_username"` distinguishes it from the email-side block.
+        await db.insert(auditLogs).values({
+          userId: null,
+          action: "registration_invite_rejected_duplicate_email",
+          entityType: "registration_invite",
+          entityId: String(inv.id),
+          metadata: { email: inv.email, stage: "complete_username" },
+          ipAddress: req.ip || null,
+        });
         return res.status(409).json({ error: "An account with this email already exists." });
       }
 
@@ -1198,6 +1214,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(error.status).json({ error: error.message });
       }
       if (error?.code === "23505") {
+        // Race-loser path: a parallel request won the create-user race between
+        // our pre-flight checks and our INSERT. Audit the rejection so the
+        // duplicate-email trail is complete across pre-flight + race outcomes.
+        // The lowercased unique index (`users_email_lower_unique`) catches
+        // case-only collisions here too.
+        await db.insert(auditLogs).values({
+          userId: null,
+          action: "registration_invite_rejected_duplicate_email",
+          entityType: "registration_invite",
+          entityId: null,
+          metadata: { stage: "complete_race", constraint: String(error?.constraint || "") },
+          ipAddress: req.ip || null,
+        }).catch(() => { /* never let audit failure mask the 409 */ });
         return res.status(409).json({ error: "An account with this email already exists." });
       }
       console.error("[registration-invites/complete] error:", error);

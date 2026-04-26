@@ -1,0 +1,203 @@
+next build and design the exact API + DB schema + React flow
+
+Next build:
+
+Session 18 — Notification Dismiss Layer
+
+Purpose:
+
+Keep the existing real-time notification aggregator, but let advisers dismiss individual alerts.
+
+Do not replace the current notification system with a stored notification table.
+
+1. DB schema
+
+Add:
+
+export const adviserNotificationDismissals = pgTable("adviser_notification_dismissals", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  sourceType: text("source_type").notNull(),
+  // instruction | task | fee_consent | report | kyc
+
+  sourceId: integer("source_id").notNull(),
+
+  dismissedAt: timestamp("dismissed_at").defaultNow(),
+}, (table) => ({
+  uniq: uniqueIndex("adviser_notification_dismissals_uniq")
+    .on(table.adviserUserId, table.sourceType, table.sourceId),
+}));
+2. APIs
+POST /api/adviser/notifications/dismiss
+DELETE /api/adviser/notifications/dismiss
+Dismiss
+app.post("/api/adviser/notifications/dismiss", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (role !== "adviser") {
+    return res.status(403).json({ error: "Adviser access required" });
+  }
+
+  const { sourceType, sourceId } = req.body;
+
+  if (!sourceType || !sourceId) {
+    return res.status(400).json({ error: "sourceType and sourceId required" });
+  }
+
+  await db.insert(adviserNotificationDismissals)
+    .values({
+      adviserUserId: userId,
+      sourceType,
+      sourceId: Number(sourceId),
+    })
+    .onConflictDoNothing();
+
+  res.json({ success: true });
+});
+Undo dismiss
+app.delete("/api/adviser/notifications/dismiss", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (role !== "adviser") {
+    return res.status(403).json({ error: "Adviser access required" });
+  }
+
+  const { sourceType, sourceId } = req.body;
+
+  await db.delete(adviserNotificationDismissals)
+    .where(and(
+      eq(adviserNotificationDismissals.adviserUserId, userId),
+      eq(adviserNotificationDismissals.sourceType, sourceType),
+      eq(adviserNotificationDismissals.sourceId, Number(sourceId))
+    ));
+
+  res.json({ success: true });
+});
+3. Patch existing aggregator
+
+In existing adviser notifications service, after deriving items, filter dismissed ones.
+
+Each notification item must expose:
+
+sourceType
+sourceId
+
+Example item:
+
+{
+  type: "instruction_consent_required",
+  sourceType: "instruction",
+  sourceId: instruction.id,
+  title: "Client consent required",
+  deepLink: "/adviser/instructions"
+}
+
+Filter:
+
+const dismissals = await db.select()
+  .from(adviserNotificationDismissals)
+  .where(eq(adviserNotificationDismissals.adviserUserId, adviserUserId));
+
+const dismissedSet = new Set(
+  dismissals.map(d => `${d.sourceType}:${d.sourceId}`)
+);
+
+const visibleItems = items.filter(
+  item => !dismissedSet.has(`${item.sourceType}:${item.sourceId}`)
+);
+
+Then recalculate:
+
+totalCount = visibleItems.length
+counts = counts derived from visibleItems
+4. React flow
+
+Patch:
+
+client/src/components/notifications-popover.tsx
+
+Add dismiss action per item:
+
+<button
+  className="text-xs text-slate-500 hover:text-slate-900"
+  onClick={async (e) => {
+    e.stopPropagation();
+
+    await fetch("/api/adviser/notifications/dismiss", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourceType: item.sourceType,
+        sourceId: item.sourceId,
+      }),
+    });
+
+    refetch();
+  }}
+>
+  Dismiss
+</button>
+
+Clicking main item should still deep-link:
+
+onClick={() => navigate(item.deepLink)}
+5. UX rule
+
+Dismiss means:
+
+Hide this alert for this adviser while the underlying issue still exists.
+
+It does not resolve:
+
+task
+instruction
+fee consent
+report
+KYC
+6. Audit log
+
+Optional but recommended:
+
+adviser_notification_dismissed
+adviser_notification_dismiss_restored
+7. Replit prompt
+Build Session 18 — Notification Dismiss Layer.
+
+Keep the existing real-time notification aggregator.
+Do not create a stored adviser_notifications table.
+
+Add:
+- adviserNotificationDismissals table
+- POST /api/adviser/notifications/dismiss
+- DELETE /api/adviser/notifications/dismiss
+
+Patch existing notification aggregator:
+- every item must expose sourceType and sourceId
+- filter out dismissed items for current adviser
+- recalculate counts from visible items only
+
+Patch React:
+- add Dismiss button to each notification in notifications popover
+- dismiss hides the alert
+- clicking item still deep-links to the relevant page
+
+Rules:
+- adviser can dismiss only own notifications
+- dismissal does not resolve underlying task/instruction/report/KYC issue
+- no fee engine
+- no SoA generator
+- no wallet movement
+- no investment execution
+
+After this:
+
+Admin shell expansion
+→ DBFO fee consent UI
+→ SoA generator
+→ 10C fee engine

@@ -1,0 +1,492 @@
+Thought for a couple of seconds
+Session 16 — Admin Registration Invites UI
+
+No new DB schema needed if registrationInvites already exists. Your uploaded notes confirm the backend invite API is already built and the missing piece is the standalone admin UI.
+
+1. API already used
+POST /api/admin/registration-invites
+
+Request:
+
+{
+  "email": "planner@example.com",
+  "role": "adviser",
+  "relatedEntityType": "adviser_application",
+  "relatedEntityId": 123,
+  "adviserUserId": null
+}
+
+Response:
+
+{
+  "inviteLink": "https://app.amaxwealth.com/register/invite?invite=..."
+}
+2. Optional API to add
+
+Add list view:
+
+GET /api/admin/registration-invites
+
+Returns:
+
+{
+  "invites": [
+    {
+      "id": 1,
+      "email": "planner@example.com",
+      "role": "adviser",
+      "relatedEntityType": "adviser_application",
+      "expiresAt": "2026-04-28T10:00:00Z",
+      "usedAt": null,
+      "createdAt": "2026-04-26T10:00:00Z"
+    }
+  ]
+}
+3. React page
+
+Create:
+
+client/src/pages/admin/registration-invites.tsx
+
+UI sections:
+
+Create Registration Invite
+- Email
+- Role
+- Related entity type
+- Related entity ID
+- Linked adviser ID for client invites
+
+Generated Invite Link
+- Display link
+- Copy button
+- Expiry notice: 48 hours
+
+Recent Invites
+- Email
+- Role
+- Status
+- Expires
+- Used
+4. React skeleton
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+
+export default function AdminRegistrationInvites() {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("adviser");
+  const [relatedEntityType, setRelatedEntityType] = useState("");
+  const [relatedEntityId, setRelatedEntityId] = useState("");
+  const [adviserUserId, setAdviserUserId] = useState("");
+  const [inviteLink, setInviteLink] = useState("");
+  const [error, setError] = useState("");
+
+  const { data, refetch } = useQuery({
+    queryKey: ["/api/admin/registration-invites"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/registration-invites");
+      if (!res.ok) return { invites: [] };
+      return res.json();
+    },
+  });
+
+  async function createInvite() {
+    setError("");
+    setInviteLink("");
+
+    const res = await fetch("/api/admin/registration-invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        role,
+        relatedEntityType: relatedEntityType || null,
+        relatedEntityId: relatedEntityId ? Number(relatedEntityId) : null,
+        adviserUserId: adviserUserId ? Number(adviserUserId) : null,
+      }),
+    });
+
+    const json = await res.json();
+
+    if (!res.ok) {
+      setError(json.error || "Failed to create invite");
+      return;
+    }
+
+    setInviteLink(json.inviteLink);
+    await refetch();
+  }
+
+  return (
+    <div className="space-y-6 p-6">
+      <div>
+        <h1 className="text-2xl font-semibold">Registration Invites</h1>
+        <p className="text-sm text-muted-foreground">
+          Create secure activation links for advisers, clients and admins.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Create Invite</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+
+          <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full rounded-md border p-2">
+            <option value="adviser">Adviser</option>
+            <option value="client">Client</option>
+            <option value="admin">Admin</option>
+          </select>
+
+          <Input placeholder="Related entity type" value={relatedEntityType} onChange={(e) => setRelatedEntityType(e.target.value)} />
+          <Input placeholder="Related entity ID" value={relatedEntityId} onChange={(e) => setRelatedEntityId(e.target.value)} />
+
+          {role === "client" && (
+            <Input placeholder="Linked adviser user ID optional" value={adviserUserId} onChange={(e) => setAdviserUserId(e.target.value)} />
+          )}
+
+          {error && <p className="text-sm text-red-500">{error}</p>}
+
+          <Button onClick={createInvite}>Create Invite</Button>
+        </CardContent>
+      </Card>
+
+      {inviteLink && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Generated Invite Link</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="break-all rounded-md bg-muted p-3 text-sm">{inviteLink}</div>
+            <Button onClick={() => navigator.clipboard.writeText(inviteLink)}>
+              Copy Invite Link
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              This invite expires after 48 hours and can only be used once.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Invites</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {(data?.invites || []).map((invite: any) => (
+            <div key={invite.id} className="flex justify-between border-b py-3 text-sm">
+              <div>
+                <div className="font-medium">{invite.email}</div>
+                <div className="text-muted-foreground">{invite.role}</div>
+              </div>
+              <div className="text-right">
+                <div>{invite.usedAt ? "Used" : "Unused"}</div>
+                <div className="text-muted-foreground">
+                  Expires: {new Date(invite.expiresAt).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+5. Route
+
+Add:
+
+<Route path="/admin/registration-invites" component={AdminRegistrationInvites} />
+6. Admin sidebar
+
+Add menu item:
+
+Registration Invites → /admin/registration-invites
+7. Replit prompt
+Build Session 16 — Admin Registration Invites UI.
+
+Use existing backend:
+POST /api/admin/registration-invites
+
+Add optional list endpoint:
+GET /api/admin/registration-invites
+
+Create page:
+client/src/pages/admin/registration-invites.tsx
+
+Add route:
+/admin/registration-invites
+
+Page must allow admin/compliance_admin to:
+- enter email
+- select role: client/adviser/admin
+- enter relatedEntityType
+- enter relatedEntityId
+- optionally enter adviserUserId for client invites
+- create invite
+- display generated invite link
+- copy invite link
+- show 48-hour expiry notice
+- show recent invites if GET endpoint exists
+
+Rules:
+- admin/compliance_admin only
+- do not expose raw invite after creation except generated response
+- do not allow invite activation page to change email or role
+- do not touch fee engine
+- do not touch SoA
+- do not touch wallet movement
+- do not touch execution
+next build
+
+Next build:
+
+Duplicate-email hardening for registration invites
+
+Why:
+
+Invite flow is identity infrastructure.
+Before email delivery or more admin features, prevent duplicate accounts and invite race conditions.
+
+Give Replit:
+
+Build duplicate-email hardening for registration invites.
+
+Scope:
+1. Enforce case-insensitive duplicate email checks when creating invites.
+2. Block creating an invite if:
+   - a user already exists with that email
+   - an unused invite already exists with that email
+3. Re-check duplicate email during invite activation.
+4. Normalize email to lowercase + trim before storage.
+5. Add clear error messages:
+   - "A user with this email already exists"
+   - "An active invite already exists for this email"
+6. Add audit log for duplicate invite attempt.
+7. Add tests or manual verification notes.
+
+Do not touch:
+- fee engine
+- SoA generator
+- wallet movement
+- investment execution
+- commission engine
+
+After this:
+
+Invite email delivery
+→ Notification dismiss layer
+→ Admin shell expansion
+→ DBFO fee consent UI
+design the exact API + DB schema + React flow
+Next Build — Duplicate Email Hardening
+
+Goal:
+
+Prevent duplicate users, duplicate active invites, and race-condition account creation.
+1. DB schema
+
+No new table required.
+
+Add database-level protection if missing:
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uidx
+ON users (lower(email));
+
+For active unused invites:
+
+CREATE UNIQUE INDEX IF NOT EXISTS registration_invites_active_email_uidx
+ON registration_invites (lower(email))
+WHERE used_at IS NULL;
+
+This prevents two active unused invites for the same email.
+
+2. API fixes
+
+Patch:
+
+POST /api/admin/registration-invites
+POST /api/auth/registration-invites/complete
+3. Email normalisation helper
+
+Add backend helper:
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+Use this everywhere:
+
+const normalizedEmail = normalizeEmail(email);
+4. Create invite API hardening
+
+Before creating invite:
+
+const normalizedEmail = normalizeEmail(req.body.email);
+
+const existingUser = await storage.getUserByEmail(normalizedEmail);
+
+if (existingUser) {
+  await writeAuditLog(
+    userId,
+    "registration_invite_duplicate_user_blocked",
+    "registration_invites",
+    null,
+    { email: normalizedEmail },
+    req.ip || null
+  );
+
+  return res.status(409).json({
+    error: "A user with this email already exists",
+  });
+}
+
+Check active invite:
+
+const [existingInvite] = await db
+  .select()
+  .from(registrationInvites)
+  .where(and(
+    sql`lower(${registrationInvites.email}) = ${normalizedEmail}`,
+    isNull(registrationInvites.usedAt),
+    sql`${registrationInvites.expiresAt} > NOW()`
+  ));
+
+if (existingInvite) {
+  await writeAuditLog(
+    userId,
+    "registration_invite_duplicate_active_invite_blocked",
+    "registration_invites",
+    String(existingInvite.id),
+    { email: normalizedEmail },
+    req.ip || null
+  );
+
+  return res.status(409).json({
+    error: "An active invite already exists for this email",
+  });
+}
+
+Insert normalized email only:
+
+await db.insert(registrationInvites).values({
+  email: normalizedEmail,
+  role: inviteRole,
+  relatedEntityType,
+  relatedEntityId,
+  adviserUserId,
+  inviteHash,
+  expiresAt,
+  createdBy: userId,
+});
+5. Complete registration hardening
+
+Before creating user:
+
+const normalizedEmail = normalizeEmail(invite.email);
+
+const existingUser = await storage.getUserByEmail(normalizedEmail);
+
+if (existingUser) {
+  await writeAuditLog(
+    null,
+    "registration_activation_duplicate_user_blocked",
+    "registration_invites",
+    String(invite.id),
+    { email: normalizedEmail },
+    req.ip || null
+  );
+
+  return res.status(409).json({
+    error: "A user with this email already exists",
+  });
+}
+
+Create user with normalized email:
+
+const user = await storage.createUser({
+  email: normalizedEmail,
+  username: normalizedEmail,
+  password: hashedPassword,
+  role: invite.role,
+  emailVerified: true,
+  kycStatus: invite.role === "client" ? "pending" : "not_required",
+  userTier: invite.role === "client" ? "standard" : "professional",
+});
+6. React flow
+
+Patch:
+
+/admin/registration-invites
+
+Before submit:
+
+const normalizedEmail = email.trim().toLowerCase();
+
+Send normalized email:
+
+body: JSON.stringify({
+  email: normalizedEmail,
+  role,
+  relatedEntityType: relatedEntityType || null,
+  relatedEntityId: relatedEntityId ? Number(relatedEntityId) : null,
+  adviserUserId: adviserUserId ? Number(adviserUserId) : null,
+})
+
+Show backend errors clearly:
+
+{error && (
+  <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+    {error}
+  </div>
+)}
+
+Expected errors:
+
+A user with this email already exists
+An active invite already exists for this email
+Invite is invalid or expired
+7. Manual verification checklist
+1. Create invite for Planner@Example.com
+2. Try create invite for planner@example.com
+   → blocked: active invite exists
+
+3. Activate invite
+4. Try create invite again for planner@example.com
+   → blocked: user already exists
+
+5. Try activate same invite again
+   → blocked: invite already used
+
+6. Try expired invite
+   → blocked: invite expired
+8. Replit prompt
+Build duplicate-email hardening for registration invites.
+
+Add DB indexes:
+- unique lower(email) on users
+- unique lower(email) on registration_invites where used_at is null
+
+Patch:
+- POST /api/admin/registration-invites
+- POST /api/auth/registration-invites/complete
+- /admin/registration-invites UI
+
+Rules:
+- normalize email using trim().toLowerCase()
+- block invite if user already exists
+- block invite if active unused invite exists
+- re-check duplicate user during activation
+- write audit logs for duplicate blocked attempts
+- show clear frontend errors
+
+Do not touch:
+- fee engine
+- SoA generator
+- wallet movement
+- investment execution
+- commission engine

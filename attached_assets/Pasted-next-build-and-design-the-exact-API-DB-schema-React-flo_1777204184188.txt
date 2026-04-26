@@ -1,0 +1,229 @@
+next build and design the exact API + DB schema + React flow
+Thought for a few seconds
+
+Next build:
+
+Session 17 — Invite Email Delivery
+
+Purpose:
+
+Admin creates invite → system emails activation link automatically
+
+This closes the onboarding loop.
+
+1. DB schema
+
+No new table required if registrationInvites already exists.
+
+Optional fields to add:
+
+emailSentAt: timestamp("email_sent_at"),
+emailSendStatus: text("email_send_status").default("not_sent"),
+// not_sent | sent | failed
+emailError: text("email_error"),
+2. API design
+Existing create invite endpoint
+POST /api/admin/registration-invites
+
+Enhance it to:
+
+1. create invite
+2. generate invite link
+3. send email
+4. return invite link + email status
+
+Response:
+
+{
+  "inviteLink": "https://app.amaxwealth.com/register/invite?invite=...",
+  "emailSent": true
+}
+Optional resend endpoint
+POST /api/admin/registration-invites/:id/resend
+
+Rules:
+
+admin only
+invite must be unused
+invite must not be expired
+send same invite link if raw invite is recoverable — but it should not be
+better: generate replacement invite hash + new raw invite + new expiry
+
+Recommended:
+
+Resend = rotate invite
+3. Email service
+
+Use your existing email system if already configured.
+
+Add:
+
+export async function sendRegistrationInviteEmail({
+  email,
+  role,
+  inviteLink,
+}: {
+  email: string;
+  role: string;
+  inviteLink: string;
+}) {
+  const subject = "Activate your AMAX Wealth account";
+
+  const body = `
+You have been invited to activate your AMAX Wealth ${role} account.
+
+Activate your account:
+${inviteLink}
+
+This link expires in 48 hours and can only be used once.
+
+If you did not expect this invite, please ignore this email.
+`;
+
+  return sendEmail({
+    to: email,
+    subject,
+    text: body,
+  });
+}
+4. Create invite endpoint patch
+let emailSent = false;
+let emailError: string | null = null;
+
+try {
+  await sendRegistrationInviteEmail({
+    email: normalizedEmail,
+    role: inviteRole,
+    inviteLink,
+  });
+
+  emailSent = true;
+
+  await db.update(registrationInvites)
+    .set({
+      emailSentAt: new Date(),
+      emailSendStatus: "sent",
+      emailError: null,
+    })
+    .where(eq(registrationInvites.id, invite.id));
+
+} catch (err: any) {
+  emailError = err.message;
+
+  await db.update(registrationInvites)
+    .set({
+      emailSendStatus: "failed",
+      emailError,
+    })
+    .where(eq(registrationInvites.id, invite.id));
+}
+
+Return:
+
+res.json({
+  inviteLink,
+  emailSent,
+  emailError,
+});
+5. React flow
+
+Patch:
+
+/admin/registration-invites
+
+After create invite, show:
+
+Invite created
+Email sent successfully ✅
+Invite link copied manually if needed
+
+If email fails:
+
+Invite created, but email failed.
+Copy and send link manually.
+
+UI fields:
+
+Email
+Role
+Related entity
+Linked adviser
+[Create and Send Invite]
+
+Success card:
+
+{inviteLink && (
+  <Card>
+    <CardHeader>
+      <CardTitle>Invite Created</CardTitle>
+    </CardHeader>
+    <CardContent>
+      {emailSent ? (
+        <p className="text-green-600">Activation email sent.</p>
+      ) : (
+        <p className="text-amber-600">
+          Invite created, but email delivery failed. Copy the link manually.
+        </p>
+      )}
+
+      <div className="break-all rounded-md bg-muted p-3 text-sm">
+        {inviteLink}
+      </div>
+
+      <Button onClick={() => navigator.clipboard.writeText(inviteLink)}>
+        Copy Invite Link
+      </Button>
+    </CardContent>
+  </Card>
+)}
+6. Audit logs
+
+Add:
+
+registration_invite_email_sent
+registration_invite_email_failed
+registration_invite_email_resent
+7. Replit prompt
+Build Session 17 — Invite Email Delivery.
+
+Purpose:
+When admin creates a registration invite, automatically email the invite link to the invited user.
+
+Use existing registrationInvites table.
+
+Add optional fields:
+- emailSentAt
+- emailSendStatus
+- emailError
+
+Patch:
+- POST /api/admin/registration-invites
+
+Add:
+- sendRegistrationInviteEmail helper
+- email success/failure handling
+- audit logs for email_sent and email_failed
+- frontend status message on /admin/registration-invites
+
+Rules:
+- invite still expires after 48 hours
+- invite remains one-time use
+- store invite hash only
+- raw invite only appears in generated email/link response
+- if email fails, still show copyable invite link to admin
+- do not send duplicate invites for same active email
+
+Do not touch:
+- fee engine
+- SoA generator
+- wallet movement
+- investment execution
+- commission engine
+
+After this:
+
+Notification dismiss layer
+→ Admin shell expansion
+→ DBFO fee consent UI
+→ SoA generator
+→ 10C fee engine

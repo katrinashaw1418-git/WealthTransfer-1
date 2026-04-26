@@ -1,0 +1,243 @@
+Thought for a few seconds
+
+Next build:
+
+Session 19 — Admin Shell Expansion
+
+Purpose:
+
+Give AMAX staff the control room to manage advisers, clients, products, instructions, reports and compliance before any fee engine or real-money logic.
+1. DB schema
+
+No major new schema if these already exist:
+
+users
+adviserProfiles
+adviserClients
+investmentProducts
+investmentInstructions
+reportRequests
+auditLogs
+registrationInvites
+
+Optional table if missing:
+
+export const adminReviewNotes = pgTable("admin_review_notes", {
+  id: serial("id").primaryKey(),
+
+  entityType: text("entity_type").notNull(),
+  // adviser | product | instruction | report | client_link
+
+  entityId: integer("entity_id").notNull(),
+
+  note: text("note").notNull(),
+
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+2. Admin pages
+
+Add:
+
+/admin/dashboard
+/admin/advisers
+/admin/products
+/admin/client-links
+/admin/instructions
+/admin/reports
+/admin/compliance
+3. API endpoints
+GET  /api/admin/overview
+
+GET  /api/admin/advisers
+PATCH /api/admin/advisers/:id/status
+
+GET  /api/admin/products
+POST /api/admin/products
+PATCH /api/admin/products/:id
+
+GET  /api/admin/client-links
+POST /api/admin/client-links
+DELETE /api/admin/client-links/:id
+
+GET  /api/admin/instructions
+PATCH /api/admin/instructions/:id/review
+
+GET  /api/admin/reports
+GET  /api/admin/audit-logs
+POST /api/admin/review-notes
+4. API rules
+
+All endpoints:
+
+const { userId } = requireAuth(req);
+const role = await getRole(userId);
+
+if (!["admin", "compliance_admin"].includes(role)) {
+  return res.status(403).json({ error: "Admin access required" });
+}
+
+Every write must call:
+
+writeAuditLog(...)
+5. React flow
+/admin/dashboard
+
+Cards:
+
+Pending adviser approvals
+Active advisers
+Linked clients
+Pending instructions
+Pending reports
+Recent audit events
+/admin/advisers
+
+Table:
+
+Adviser / firm
+Email
+AR number
+AFSL holder
+Status
+Linked clients
+Actions
+
+Actions:
+
+Approve
+Suspend
+Create invite
+View profile
+/admin/products
+
+Table:
+
+Product
+Category
+Risk
+Minimum investment
+Target return label
+Status
+Actions
+
+Actions:
+
+Create product
+Edit product
+Deactivate product
+
+Important:
+
+Only admin can create/edit products.
+Advisers can only view product shelf.
+/admin/client-links
+
+Purpose:
+
+Create adviser ↔ client permission links.
+
+Fields:
+
+Adviser
+Client
+Relationship type
+Authority scope
+/admin/instructions
+
+Table:
+
+Instruction
+Adviser
+Client
+Product
+Amount
+Status
+Created
+
+Actions:
+
+Review
+Flag
+Reject
+
+For now:
+
+No execution.
+No processing.
+No money movement.
+/admin/compliance
+
+Show:
+
+Audit logs
+Invite events
+Instruction events
+Adviser actions
+Client consent events
+Report requests
+6. React skeleton page map
+client/src/pages/admin/admin-dashboard.tsx
+client/src/pages/admin/admin-advisers.tsx
+client/src/pages/admin/admin-products.tsx
+client/src/pages/admin/admin-client-links.tsx
+client/src/pages/admin/admin-instructions.tsx
+client/src/pages/admin/admin-reports.tsx
+client/src/pages/admin/admin-compliance.tsx
+
+Add routes:
+
+<Route path="/admin/dashboard" component={AdminDashboard} />
+<Route path="/admin/advisers" component={AdminAdvisers} />
+<Route path="/admin/products" component={AdminProducts} />
+<Route path="/admin/client-links" component={AdminClientLinks} />
+<Route path="/admin/instructions" component={AdminInstructions} />
+<Route path="/admin/reports" component={AdminReports} />
+<Route path="/admin/compliance" component={AdminCompliance} />
+7. Replit prompt
+Build Session 19 — Admin Shell Expansion.
+
+Purpose:
+Create AMAX control room for adviser/product/client-link/compliance management before fee engine or real-money logic.
+
+Add admin pages:
+- /admin/dashboard
+- /admin/advisers
+- /admin/products
+- /admin/client-links
+- /admin/instructions
+- /admin/reports
+- /admin/compliance
+
+Add APIs:
+- GET /api/admin/overview
+- GET /api/admin/advisers
+- PATCH /api/admin/advisers/:id/status
+- GET /api/admin/products
+- POST /api/admin/products
+- PATCH /api/admin/products/:id
+- GET /api/admin/client-links
+- POST /api/admin/client-links
+- DELETE /api/admin/client-links/:id
+- GET /api/admin/instructions
+- PATCH /api/admin/instructions/:id/review
+- GET /api/admin/reports
+- GET /api/admin/audit-logs
+- POST /api/admin/review-notes
+
+Rules:
+- admin/compliance_admin only
+- all writes audit logged
+- advisers cannot create/edit products
+- advisers cannot approve themselves
+- no wallet movement
+- no fee deduction
+- no investment execution
+- no SoA generator
+
+After this:
+
+DBFO fee consent UI
+→ SoA generator
+→ Visual re-skin
+→ 10C fee engine last
