@@ -22,13 +22,16 @@
 // =============================================================================
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { gte, inArray, sql } from "drizzle-orm";
+import { eq, gte, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
-import { operatorAlerts, operatorAlertPruneRuns } from "@shared/schema";
+import { operatorAlertPruneRuns, operatorAlerts } from "@shared/schema";
 import {
   DEFAULT_RETENTION_DAYS,
+  DEFAULT_STALE_THRESHOLD_MS,
+  checkOperatorAlertsPruneFreshness,
   getRetentionDays,
   pruneOperatorAlerts,
+  pruneOperatorAlertsAndRecord,
 } from "./operator-alerts-prune";
 
 const insertedIds: number[] = [];
@@ -160,5 +163,234 @@ describe("pruneOperatorAlerts (Task #44)", () => {
 
     process.env.OPERATOR_ALERT_RETENTION_DAYS = "   ";
     expect(getRetentionDays()).toBe(DEFAULT_RETENTION_DAYS);
+  });
+});
+
+// ============================================================================
+// Task #60 — stalled-prune watchdog tests
+// ============================================================================
+// Locks in the watchdog's contract:
+//   1. A successful run is recorded with status='success' and prune metadata.
+//   2. A failed run is recorded with status='error' (and re-thrown so the
+//      caller's existing handler still fires).
+//   3. The watchdog fires when the most-recent SUCCESS row is older than the
+//      configured threshold; failed runs alone do not refresh the clock.
+//   4. The watchdog stays quiet when a fresh success row exists.
+//   5. Empty-table behaviour: warming-up server stays quiet; long-running
+//      server with no successes EVER fires.
+//
+// The watchdog's notify dispatcher is injected so we can assert exactly
+// what would have been paged to operators without writing extra rows to
+// `operator_alerts`.
+// ============================================================================
+
+const insertedPruneRunIds: number[] = [];
+
+async function insertPruneRunRow(opts: {
+  status: "success" | "error";
+  startedAt?: Date;
+}): Promise<number> {
+  const startedAt = opts.startedAt ?? new Date();
+  const [row] = await db
+    .insert(operatorAlertPruneRuns)
+    .values({
+      status: opts.status,
+      retentionDays: 30,
+      cutoff: new Date(startedAt.getTime() - 30 * 24 * 60 * 60 * 1000),
+      deleted: opts.status === "success" ? 0 : null,
+      durationMs: 1,
+      finishedAt: new Date(startedAt.getTime() + 1),
+      errorMessage: opts.status === "error" ? "synthetic test error" : null,
+      // Force startedAt explicitly so the watchdog sees the age we want.
+      startedAt: sql`${startedAt.toISOString()}::timestamp`,
+    })
+    .returning({ id: operatorAlertPruneRuns.id });
+  insertedPruneRunIds.push(row.id);
+  return row.id;
+}
+
+afterEach(async () => {
+  if (insertedPruneRunIds.length > 0) {
+    await db
+      .delete(operatorAlertPruneRuns)
+      .where(inArray(operatorAlertPruneRuns.id, insertedPruneRunIds));
+    insertedPruneRunIds.length = 0;
+  }
+});
+
+describe("pruneOperatorAlertsAndRecord (Task #60)", () => {
+  it("records a 'success' row with metadata when the prune completes", async () => {
+    const before = new Date();
+    const result = await pruneOperatorAlertsAndRecord({ retentionDays: 30 });
+
+    expect(result.success).toBe(true);
+    expect(result.recordId).not.toBeNull();
+    expect(result.prune).not.toBeNull();
+    expect(result.prune!.retentionDays).toBe(30);
+
+    const [row] = await db
+      .select()
+      .from(operatorAlertPruneRuns)
+      .where(eq(operatorAlertPruneRuns.id, result.recordId!));
+    insertedPruneRunIds.push(result.recordId!);
+
+    expect(row.status).toBe("success");
+    expect(row.retentionDays).toBe(30);
+    expect(row.deleted).toBe(result.prune!.deleted);
+    expect(row.cutoff).not.toBeNull();
+    expect(row.errorMessage).toBeNull();
+    expect(row.startedAt.getTime()).toBeGreaterThanOrEqual(
+      before.getTime() - 1000,
+    );
+  });
+
+  it("records an 'error' row and re-throws when the prune throws", async () => {
+    // retentionDays=0 is rejected synchronously by pruneOperatorAlerts.
+    await expect(
+      pruneOperatorAlertsAndRecord({ retentionDays: 0 }),
+    ).rejects.toThrow(/positive integer/);
+
+    // We can't capture the recordId via the throwing call, so look it up
+    // by the most recent error row with retentionDays=0. That uniquely
+    // identifies the synthetic insertion above.
+    const [row] = await db
+      .select()
+      .from(operatorAlertPruneRuns)
+      .where(eq(operatorAlertPruneRuns.status, "error"))
+      .orderBy(sql`${operatorAlertPruneRuns.startedAt} DESC`)
+      .limit(1);
+    expect(row).toBeDefined();
+    expect(row.retentionDays).toBe(0);
+    expect(row.deleted).toBeNull();
+    expect(row.cutoff).toBeNull();
+    expect(row.errorMessage).toMatch(/positive integer/);
+    insertedPruneRunIds.push(row.id);
+  });
+});
+
+describe("checkOperatorAlertsPruneFreshness (Task #60)", () => {
+  // Simple injection seam: capture every alert handed to the watchdog so we
+  // can assert source/severity/details without writing to operator_alerts.
+  type CapturedAlert = {
+    source: string;
+    severity: string;
+    title: string;
+    details: Record<string, unknown>;
+  };
+  function makeNotifyStub() {
+    const calls: CapturedAlert[] = [];
+    const notify = async (alert: CapturedAlert) => {
+      calls.push(alert);
+      return {
+        channelsAttempted: ["log" as const],
+        outcomes: [],
+        channels: ["log" as const],
+        alertId: 999,
+      };
+    };
+    return { notify, calls };
+  }
+
+  it("stays quiet when a recent successful run exists", async () => {
+    const now = new Date("2026-04-26T12:00:00.000Z");
+    // 12h-old success — well within the 48h threshold.
+    await insertPruneRunRow({
+      status: "success",
+      startedAt: new Date(now.getTime() - 12 * 60 * 60 * 1000),
+    });
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now,
+      notify,
+      // Uptime irrelevant when a row exists, but pin it so the test is
+      // deterministic regardless of the actual process uptime.
+      serverUptimeMs: 60 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(false);
+    expect(result.reason).toBe("fresh");
+    expect(calls).toHaveLength(0);
+    expect(result.thresholdMs).toBe(DEFAULT_STALE_THRESHOLD_MS);
+    expect(result.alertId).toBeNull();
+  });
+
+  it("fires a warning when the most recent success is older than the threshold", async () => {
+    const now = new Date("2026-04-26T12:00:00.000Z");
+    // 3-day-old success — beyond the 2-day threshold.
+    await insertPruneRunRow({
+      status: "success",
+      startedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+    });
+    // A more recent FAILURE must NOT refresh the freshness clock.
+    await insertPruneRunRow({
+      status: "error",
+      startedAt: new Date(now.getTime() - 1 * 60 * 60 * 1000),
+    });
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now,
+      notify,
+      serverUptimeMs: 30 * 24 * 60 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(true);
+    expect(result.reason).toBe("stale");
+    expect(result.alertId).toBe(999);
+    expect(calls).toHaveLength(1);
+    const alert = calls[0];
+    expect(alert.severity).toBe("warning");
+    expect(alert.source).toBe("operator-alerts-prune-watchdog");
+    expect(alert.details.ageHours as number).toBeGreaterThanOrEqual(48);
+  });
+
+  it("stays quiet on a fresh deploy (empty table, low uptime)", async () => {
+    // No rows inserted at all. Uptime well under the 48h threshold.
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now: new Date("2026-04-26T12:00:00.000Z"),
+      notify,
+      serverUptimeMs: 30 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(false);
+    expect(result.reason).toBe("warming-up");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("fires on a long-running deploy with no successful runs ever", async () => {
+    // Need to ensure no PRIOR successful rows survived from earlier in this
+    // test file. The first describe-block tests that exercise
+    // `pruneOperatorAlertsAndRecord` insert real success rows; their
+    // afterEach cleans those up. To stay independent of test-order, we
+    // verify by querying the table directly.
+    const successCount = await db
+      .select({ id: operatorAlertPruneRuns.id })
+      .from(operatorAlertPruneRuns)
+      .where(eq(operatorAlertPruneRuns.status, "success"));
+    if (successCount.length > 0) {
+      // Should never happen given our cleanup contract, but guard so the
+      // test fails loudly rather than silently passing for the wrong reason.
+      throw new Error(
+        `Expected zero pre-existing success rows, found ${successCount.length}`,
+      );
+    }
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now: new Date("2026-04-26T12:00:00.000Z"),
+      notify,
+      // 5 days uptime — well past the 48h threshold.
+      serverUptimeMs: 5 * 24 * 60 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(true);
+    expect(result.reason).toBe("never-run");
+    expect(calls).toHaveLength(1);
+    const alert = calls[0];
+    expect(alert.severity).toBe("warning");
+    expect(alert.source).toBe("operator-alerts-prune-watchdog");
+    expect(alert.title).toMatch(/never recorded a successful run/);
   });
 });

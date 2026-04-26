@@ -2008,37 +2008,67 @@ export type OperatorAlertRecord = typeof operatorAlerts.$inferSelect;
 export type InsertOperatorAlertRecord = z.infer<typeof insertOperatorAlertSchema>;
 
 // ---------------------------------------------------------------------------
-// Task #59 — operator-alert retention prune run history
+// Task #59 + Task #60 — operator-alert prune run log
 // ---------------------------------------------------------------------------
-// One row per execution of `pruneOperatorAlerts` (Task #44). Persisting the
-// outcome lets operators confirm at a glance from the admin UI that the daily
-// prune ran and how many rows it removed, without grepping server logs.
+// One row per invocation of `pruneOperatorAlertsAndRecord` (success or
+// failure). Two consumers depend on this table:
 //
-// Kept deliberately small — no payload, just the four numbers operators care
-// about (when it ran, retention window, cutoff, deleted, duration). At one
-// row per day, this table gains ~365 rows/year and never needs its own
+//   * Task #59 — the admin UI lists recent runs so operators can confirm at
+//     a glance that the daily prune is healthy without grepping server logs.
+//   * Task #60 — a watchdog reads "most recent successful run" to detect
+//     when the prune has silently stopped running (deploy that crashes the
+//     cron, env-var typo that throws on every tick, etc.). Only rows with
+//     status='success' refresh the freshness clock; a long streak of
+//     failures must page operators just like complete silence would.
+//
+// Kept small on purpose: only the metadata needed to (a) detect staleness,
+// (b) explain what the last run did. Full per-row audit of what was deleted
+// is out of scope; the prune service's own log line carries that detail. At
+// one row per day, this table gains ~365 rows/year and never needs its own
 // retention policy.
 // ---------------------------------------------------------------------------
 export const operatorAlertPruneRuns = pgTable(
   "operator_alert_prune_runs",
   {
     id: serial("id").primaryKey(),
-    // Wall-clock time the prune started — what operators actually want to see
-    // ("did it run today?"). DefaultNow keeps the insert path simple for the
-    // service.
+    // When the prune attempt began. Defaulted server-side so a caller cannot
+    // accidentally backdate a run and fool the watchdog.
     startedAt: timestamp("started_at").notNull().defaultNow(),
-    retentionDays: integer("retention_days").notNull(),
-    // Inclusive lower bound of rows kept (anything strictly older was deleted).
-    cutoff: timestamp("cutoff").notNull(),
-    // Number of operator_alerts rows removed in this run.
-    deleted: integer("deleted").notNull(),
-    // Wall-clock duration of the DELETE statement in ms.
-    durationMs: integer("duration_ms").notNull(),
+    // null for runs that threw before completing (errorMessage will be set).
+    finishedAt: timestamp("finished_at"),
+    // 'success' | 'error'. Watchdog filters by status='success'.
+    status: text("status").notNull(),
+    // Configured retention window for this run, captured for forensics.
+    // Nullable because a failure may occur before the window is resolved.
+    retentionDays: integer("retention_days"),
+    // Inclusive lower bound that was kept (anything older was deleted).
+    cutoff: timestamp("cutoff"),
+    // Affected-row count returned by the DELETE driver. 0 on a clean,
+    // nothing-to-prune day; null if the run failed before the DELETE ran.
+    deleted: integer("deleted"),
+    // Wall-clock duration of the prune call, in milliseconds. Useful for
+    // spotting slow runs before they balloon into timeouts.
+    durationMs: integer("duration_ms"),
+    // Truncated error message for failed runs; null on success.
+    errorMessage: text("error_message"),
   },
   (table) => ({
-    // Reads are always "show me the most recent N runs" — index startedAt.
-    startedAtIdx: index("operator_alert_prune_runs_started_at_idx").on(table.startedAt),
+    // Reads are "show me the most recent N runs" (Task #59 admin UI) and
+    // "most recent successful run" (Task #60 watchdog) — both want startedAt
+    // indexed.
+    startedAtIdx: index("operator_alert_prune_runs_started_at_idx").on(
+      table.startedAt,
+    ),
   }),
 );
 
+export const insertOperatorAlertPruneRunSchema = createInsertSchema(
+  operatorAlertPruneRuns,
+).omit({ id: true, startedAt: true });
+// Retained alongside `OperatorAlertPruneRun` for backwards compatibility
+// with the Task #59 admin route that imported the *Record name first.
 export type OperatorAlertPruneRunRecord = typeof operatorAlertPruneRuns.$inferSelect;
+export type OperatorAlertPruneRun = typeof operatorAlertPruneRuns.$inferSelect;
+export type InsertOperatorAlertPruneRun = z.infer<
+  typeof insertOperatorAlertPruneRunSchema
+>;

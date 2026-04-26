@@ -343,16 +343,18 @@ app.use((req, res, next) => {
   // (wallet recon, ledger recon, adviser-task automation, fee accruals) have
   // fired on first boot.
   // ---------------------------------------------------------------------------
-  const { pruneOperatorAlerts } = await import(
-    "./services/operator-alerts-prune"
-  );
+  const {
+    pruneOperatorAlertsAndRecord,
+    checkOperatorAlertsPruneFreshness,
+  } = await import("./services/operator-alerts-prune");
 
   async function runOperatorAlertsPruneCron() {
     try {
-      // pruneOperatorAlerts already logs the outcome line; we do not need to
-      // re-log it here. Returning the result is enough for the surrounding
-      // try/catch to confirm success.
-      await pruneOperatorAlerts();
+      // The recording wrapper writes one row to `operator_alert_prune_runs`
+      // per attempt (success or failure) so the freshness watchdog below
+      // has a durable signal to read. The wrapper still re-throws on
+      // failure, preserving this try/catch's existing logging contract.
+      await pruneOperatorAlertsAndRecord();
     } catch (e) {
       console.error("[operator-alerts-prune] cron error", e);
     }
@@ -362,6 +364,50 @@ app.use((req, res, next) => {
     void runOperatorAlertsPruneCron();
     setInterval(runOperatorAlertsPruneCron, 24 * 60 * 60 * 1000);
   }, 240 * 1000);
+
+  // ---------------------------------------------------------------------------
+  // TASK #60 — Stalled-prune watchdog
+  // ---------------------------------------------------------------------------
+  // The prune above is fire-and-forget; if it silently stops running
+  // (deploy that crashes the cron, env-var typo that throws on every tick,
+  // a future refactor that drops the setInterval entirely), the
+  // `operator_alerts` table starts growing again and nobody notices until
+  // it is huge.
+  //
+  // This watchdog dispatches a `notifyOperator` warning whenever no
+  // successful prune has been recorded for more than 2× the expected
+  // interval (= 48h). It runs independently of the prune cron above:
+  //   * Its own setTimeout/setInterval pair, so a broken prune cron
+  //     scheduler cannot also disable the watchdog scheduler.
+  //   * It only READS from `operator_alert_prune_runs`, so even a prune
+  //     that throws on every tick (and therefore writes only 'error' rows
+  //     or no rows at all) will leave a stale "most recent success"
+  //     timestamp the watchdog will detect.
+  //
+  // Frequency: once per day is plenty — the threshold is 48h, so checking
+  // hourly would only re-fire the same alert without adding signal. We
+  // stagger 300s after start so the four other daily crons have a chance
+  // to settle first.
+  // ---------------------------------------------------------------------------
+  async function runOperatorAlertsPruneWatchdog() {
+    try {
+      const result = await checkOperatorAlertsPruneFreshness();
+      if (result.fired) {
+        log(
+          `[operator-alerts-prune-watchdog] alerted: reason=${result.reason}, ` +
+            `mostRecentSuccessAt=${result.mostRecentSuccessAt?.toISOString() ?? "none"}, ` +
+            `ageMs=${result.ageMs ?? "n/a"}, thresholdMs=${result.thresholdMs}`,
+        );
+      }
+    } catch (e) {
+      console.error("[operator-alerts-prune-watchdog] watchdog error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runOperatorAlertsPruneWatchdog();
+    setInterval(runOperatorAlertsPruneWatchdog, 24 * 60 * 60 * 1000);
+  }, 300 * 1000);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
