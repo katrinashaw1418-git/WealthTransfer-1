@@ -47,6 +47,16 @@ export default function Landing() {
               <Phone className="w-4 h-4" />
               +61 2 8320 1908
             </a>
+            <button
+              type="button"
+              onClick={() => {
+                document.getElementById("for-advisers")?.scrollIntoView({ behavior: "smooth" });
+              }}
+              className="hidden md:inline text-sm text-sky-900 hover:text-sky-700 font-medium"
+              data-testid="link-for-advisers"
+            >
+              For Advisers
+            </button>
             <Button className="bg-sky-100 text-sky-900 hover:bg-sky-200 font-semibold" onClick={() => navigate("/login")}>
               Sign In
             </Button>
@@ -101,7 +111,7 @@ export default function Landing() {
             <span className="flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 text-green-500" />AUSTRAC registered — AMAX Global</span>
             <span className="flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 text-green-500" />AFCA member</span>
           </div>
-          <p className="text-center text-xs text-gray-400 mt-2">Wholesale clients only</p>
+          <p className="text-center text-xs text-gray-400 mt-2">For eligible Australian investors and authorised representatives</p>
         </div>
       </section>
 
@@ -186,6 +196,109 @@ export default function Landing() {
                 </CardContent>
               </Card>
             ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="py-20 bg-sky-900 text-white" id="for-advisers">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
+            <div>
+              <Badge className="bg-white/10 text-white border-white/20 mb-6">
+                For Wealth Planners & AFSL Partners
+              </Badge>
+              <h2 className="text-3xl md:text-4xl font-bold mb-4">
+                A platform layer for external advisers and authorised representatives
+              </h2>
+              <p className="text-sky-100 mb-8">
+                View linked-client portfolios, KYC and advice-record status, and
+                browse the AMAX product shelf — under your AFSL or as an Authorised
+                Representative on the AMAX licence. Instruction and fee-consent
+                workflows are coming in subsequent releases.
+              </p>
+              <ul className="space-y-3 mb-8 text-sm text-sky-100">
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-5 h-5 text-sky-300 flex-shrink-0 mt-0.5" />
+                  <span>Linked-client overlay: portfolio, KYC, advice-record visibility</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-5 h-5 text-sky-300 flex-shrink-0 mt-0.5" />
+                  <span>Read-only product shelf with target IRR, term, structure and minimums</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-5 h-5 text-sky-300 flex-shrink-0 mt-0.5" />
+                  <span>Audit log on every adviser write — read-only access to client state today</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="w-5 h-5 text-sky-300 flex-shrink-0 mt-0.5" />
+                  <span>DBFO-aligned design: instruction + fee-consent workflows on the roadmap</span>
+                </li>
+              </ul>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <Button
+                  size="lg"
+                  className="bg-white text-sky-900 hover:bg-sky-50 font-semibold"
+                  onClick={() => navigate("/login")}
+                  data-testid="button-adviser-signin"
+                >
+                  Adviser Sign In
+                  <ArrowRight className="w-4 h-4 ml-2" />
+                </Button>
+                <Button
+                  size="lg"
+                  variant="outline"
+                  className="border-white/30 text-white hover:bg-white/10 hover:text-white font-semibold bg-transparent"
+                  onClick={() => window.open("mailto:advisers@amaxwealth.com.au")}
+                  data-testid="button-adviser-contact"
+                >
+                  Request adviser onboarding
+                </Button>
+              </div>
+            </div>
+            <div className="bg-sky-800/50 border border-sky-700 rounded-lg p-8">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 bg-sky-500 rounded-lg flex items-center justify-center">
+                  <Users className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <p className="font-semibold">Adviser portal</p>
+                  <p className="text-xs text-sky-300">Authorised representatives only</p>
+                </div>
+              </div>
+              <div className="space-y-4 text-sm">
+                <div className="flex items-start gap-3">
+                  <Shield className="w-4 h-4 text-sky-300 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium">RG 175 chokepoints</p>
+                    <p className="text-sky-200 text-xs">
+                      No execution against client money without explicit client consent.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <FileText className="w-4 h-4 text-sky-300 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium">DBFO fee consent</p>
+                    <p className="text-sky-200 text-xs">
+                      Every fee deduction backed by an active fee-consent record.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <Scale className="w-4 h-4 text-sky-300 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium">Audit-by-default</p>
+                    <p className="text-sky-200 text-xs">
+                      Every adviser write is captured in the immutable audit log.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-sky-300 mt-6 pt-6 border-t border-sky-700">
+                Adviser access is granted per-client via the AMAX onboarding flow.
+                Contact us to discuss adviser onboarding under your AFSL.
+              </p>
+            </div>
           </div>
         </div>
       </section>

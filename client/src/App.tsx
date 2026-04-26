@@ -28,8 +28,10 @@ import NotFound from "@/pages/not-found";
 import AdviserDashboard from "@/pages/adviser/dashboard";
 import AdviserClients from "@/pages/adviser/clients";
 import AdviserClientDetail from "@/pages/adviser/client-detail";
+import AdviserClientHoldings from "@/pages/adviser/client-holdings";
 import AdviserTasks from "@/pages/adviser/tasks";
 import AdviserReports from "@/pages/adviser/reports";
+import AdviserProducts from "@/pages/adviser/products";
 import { Loader2 } from "lucide-react";
 
 function ProtectedApp() {
@@ -73,7 +75,9 @@ function ProtectedApp() {
         {/* the sidebar is also role-aware so non-advisers won't see these. */}
         <Route path="/adviser/dashboard" component={AdviserDashboard} />
         <Route path="/adviser/clients" component={AdviserClients} />
+        <Route path="/adviser/clients/:id/holdings" component={AdviserClientHoldings} />
         <Route path="/adviser/clients/:id" component={AdviserClientDetail} />
+        <Route path="/adviser/products" component={AdviserProducts} />
         <Route path="/adviser/tasks" component={AdviserTasks} />
         <Route path="/adviser/reports" component={AdviserReports} />
         <Route component={NotFound} />

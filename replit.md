@@ -14,6 +14,50 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 10A (Adviser Product Shelf + Client Holdings — Retail AFSL Reframe)
+
+User confirmed AMAX is a **retail AFSL** platform (not wholesale Path B), with external financial planners / Authorised Representatives accessing the platform under the Netwealth model. Session 10A is the first slice of the adviser-layer expansion: pure additive, read-only visibility — no money movement, no execution, no new tables.
+
+### What shipped
+
+- **Backend service (`server/services/adviser-access.ts`)**
+  - `listAdviserProducts()` — returns `investmentProducts` where `isActive=true`. No client scoping (catalogue is shared across all advisers).
+  - `getAdviserClientHoldings(adviserUserId, clientUserId)` — returns the linked client's `userInvestments` rows joined to `investmentProducts` so the UI gets product name/category in one round trip. **Calls `assertAdviserClientLink` first** (verified: returns 403 for unlinked client).
+  - Added `AdviserClientHoldingRow` TypeScript interface for the joined shape.
+- **Backend routes (`server/adviser-routes.ts`)**
+  - `GET /api/adviser/products` — adviser-gated via existing `adviserRoute()` wrapper.
+  - `GET /api/adviser/clients/:id/holdings` — adviser-gated; link enforcement runs in the service layer.
+- **Frontend pages**
+  - `client/src/pages/adviser/products.tsx` (NEW) — read-only product card grid (target IRR, term, structure, distributions, liquidity, minimum, risk badge).
+  - `client/src/pages/adviser/client-holdings.tsx` (NEW) — read-only holdings table with positions/invested/current summary cards.
+  - `client/src/pages/adviser/client-detail.tsx` — added "View Holdings" button linking to the new holdings page.
+- **Sidebar (`client/src/components/layout/sidebar.tsx`)** — added "Investment Products" entry to `adviserNav`.
+- **Router (`client/src/App.tsx`)** — registered `/adviser/products` and `/adviser/clients/:id/holdings`. The more-specific holdings route is registered before `/adviser/clients/:id` so wouter matches it correctly.
+- **Landing page (`client/src/pages/landing.tsx`)** — added a new "For Wealth Planners & AFSL Partners" section (id `for-advisers`) and a "For Advisers" header link that scrolls to it. Updated the trust-bar copy from "Wholesale clients only" to "For eligible Australian investors and authorised representatives".
+
+### Hard rules preserved (retail AFSL law, NOT custom)
+- Adviser still **never** executes against client money without explicit client consent (RG 175 / RG 245). Nothing in 10A creates an execution path.
+- Every adviser write (none added in 10A — pure read paths) goes through the existing audit + chokepoint pattern.
+- KYC bypass forbidden.
+
+### Smoke tested (demoadviser/adviser888, id=12, linked to wiseinvestor id=1)
+- `GET /api/adviser/products` → 200, returns active product shelf
+- `GET /api/adviser/clients/1/holdings` → 200, returns linked client's holdings joined to product shelf
+- `GET /api/adviser/clients/999/holdings` → **403 "Forbidden — you are not linked to this client"** (chokepoint working)
+
+### Architect-driven fixes during 10A (latent Session 9 bugs surfaced)
+- **Segmented `queryKey` was silently hitting the wrong endpoint.** The default queryFn in `client/src/lib/queryClient.ts` only uses `queryKey[0]` as the URL, so `useQuery({ queryKey: ["/api/adviser/clients", clientId] })` was hitting `/api/adviser/clients` (the LIST endpoint) for both detail and portfolio, returning the wrong shape. Affected pages: `client-detail.tsx` (detail + portfolio queries) and the new `client-holdings.tsx` (holdings query). Fixed by adding explicit `queryFn` closures that compose the full path via `apiFetch`. Segmented keys retained for cache-invalidation semantics. Audited remaining adviser pages — no other instances.
+- **`apiFetch` did not handle 401 expiry.** Switching to explicit `queryFn` exposed an inconsistency: the default queryFn redirects to `/login` on 401, but `apiFetch` (used widely in `client/src/lib/api.ts`, `client/src/hooks/use-portfolio.ts`, etc.) did not. Fixed by adding the same JWT-clear + redirect inside `apiFetch`, bringing all callers into a single consistent expired-token UX.
+
+### Conservative copy on landing page
+After the architect flagged that the adviser-section copy overstated current capability, the lead paragraph and feature list were softened to make explicit that 10A is read-only and that instruction + fee-consent workflows are on the roadmap (10B / 10C).
+
+### What's deferred to 10B / 10C (require explicit user go-ahead)
+- **Session 10B** — Investment instruction flow (adviser proposes allocation → client consents → execution gate). Recommendation: reuse `executionAuthorisations` + `adviceRecords` rather than introducing a new `investmentInstructions` table.
+- **Session 10C** — Fee engine (`adviserFeeRules`, `adviserFeeDeductions`). Real money movement; needs reviewer sign-off before any cash-wallet debit code lands.
+
+---
+
 ## Recent Changes (April 2026) — Session 9 (Read-only Adviser Overlay for Retail-AFSL Partner)
 
 This session adds a read-only adviser-access layer so a partner retail AFSL's advisers can view **their linked clients** (KYC, portfolio, fee consents, recent advice records) and run their own internal workflows (tasks, report requests) without ever touching client-owned state.

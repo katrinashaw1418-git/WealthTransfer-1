@@ -26,10 +26,13 @@ import {
   adviceRecords,
   portfolios,
   wallets,
+  investmentProducts,
+  userInvestments,
   type AdviserTask,
   type InsertAdviserTask,
   type ReportRequest,
   type InsertReportRequest,
+  type InvestmentProduct,
 } from "@shared/schema";
 import { and, eq, desc, lte, gte, sql, inArray } from "drizzle-orm";
 
@@ -228,6 +231,70 @@ export async function getAdviserClientAdviceRecords(
     .where(eq(adviceRecords.clientId, clientUserId))
     .orderBy(desc(adviceRecords.createdAt))
     .limit(50);
+}
+
+// -----------------------------------------------------------------------------
+// SESSION 10A — Investment product shelf (read-only).
+//
+// AMAX is the product issuer/platform. The investmentProducts table is the
+// AMAX-controlled shelf advisers may reference in conversations with clients.
+// Advisers cannot CREATE products and they cannot ALLOCATE on behalf of the
+// client from this endpoint — this is purely the menu they see.
+// -----------------------------------------------------------------------------
+export async function listAdviserProducts(): Promise<InvestmentProduct[]> {
+  return db
+    .select()
+    .from(investmentProducts)
+    .where(eq(investmentProducts.isActive, true))
+    .orderBy(desc(investmentProducts.createdAt));
+}
+
+// -----------------------------------------------------------------------------
+// SESSION 10A — Client product holdings (read-only).
+//
+// Returns the client's current allocations across the AMAX product shelf,
+// joined to the product record so the UI can show the product name + category
+// without a second round trip. Link enforcement runs first.
+// -----------------------------------------------------------------------------
+export interface AdviserClientHoldingRow {
+  id: number;
+  productId: number;
+  productName: string;
+  productCategory: string;
+  productSubCategory: string;
+  investedAmount: string;
+  currentValue: string;
+  totalReturn: string;
+  returnPercent: string;
+  status: string;
+  investmentDate: Date | null;
+  maturityDate: Date | null;
+}
+
+export async function getAdviserClientHoldings(
+  adviserUserId: number,
+  clientUserId: number,
+): Promise<AdviserClientHoldingRow[]> {
+  await assertAdviserClientLink(adviserUserId, clientUserId);
+  return db
+    .select({
+      id: userInvestments.id,
+      productId: userInvestments.productId,
+      productName: investmentProducts.name,
+      productCategory: investmentProducts.category,
+      productSubCategory: investmentProducts.subCategory,
+      investedAmount: userInvestments.investedAmount,
+      currentValue: userInvestments.currentValue,
+      totalReturn: userInvestments.totalReturn,
+      returnPercent: userInvestments.returnPercent,
+      status: userInvestments.status,
+      investmentDate: userInvestments.investmentDate,
+      maturityDate: userInvestments.maturityDate,
+    })
+    .from(userInvestments)
+    .innerJoin(investmentProducts, eq(investmentProducts.id, userInvestments.productId))
+    .where(eq(userInvestments.userId, clientUserId))
+    .orderBy(desc(userInvestments.investmentDate));
 }
 
 // -----------------------------------------------------------------------------

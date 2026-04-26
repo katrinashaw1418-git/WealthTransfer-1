@@ -51,6 +51,7 @@ const clientNav: NavItem[] = [
 const adviserNav: NavItem[] = [
   { name: "Dashboard", href: "/adviser/dashboard", icon: Home },
   { name: "Clients", href: "/adviser/clients", icon: Users },
+  { name: "Investment Products", href: "/adviser/products", icon: Building2 },
   { name: "Tasks", href: "/adviser/tasks", icon: ClipboardList },
   { name: "Reports", href: "/adviser/reports", icon: FileText },
   { name: "Legal & Compliance", href: "/legal", icon: Scale },

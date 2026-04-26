@@ -28,6 +28,8 @@ import {
   listAdviserReportRequests,
   createReportRequest,
   getAdviserDashboardSummary,
+  listAdviserProducts,
+  getAdviserClientHoldings,
 } from "./services/adviser-access";
 import { insertAdviserTaskSchema, insertReportRequestSchema } from "@shared/schema";
 
@@ -186,6 +188,34 @@ export function registerAdviserRoutes(app: Express): void {
         throw Object.assign(new Error("Invalid client id"), { status: 400 });
       }
       return getAdviserClientPortfolio(auth.userId, clientId);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 10A — GET /api/adviser/products
+  // Read-only AMAX product shelf (isActive=true). No client scoping needed:
+  // every authenticated adviser can see the catalogue.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/products",
+    adviserRoute(async (_req, _auth) => {
+      return listAdviserProducts();
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 10A — GET /api/adviser/clients/:id/holdings
+  // Read-only view of a linked client's userInvestments rows joined to the
+  // product shelf. Link enforcement runs inside getAdviserClientHoldings.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/clients/:id/holdings",
+    adviserRoute(async (req, auth) => {
+      const clientId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(clientId)) {
+        throw Object.assign(new Error("Invalid client id"), { status: 400 });
+      }
+      return getAdviserClientHoldings(auth.userId, clientId);
     }),
   );
 

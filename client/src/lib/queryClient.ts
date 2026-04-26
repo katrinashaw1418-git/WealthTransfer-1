@@ -43,6 +43,20 @@ export async function apiRequest(
 
 export async function apiFetch(url: string): Promise<Response> {
   const res = await fetch(url, { headers: authHeaders() });
+  // Mirror the default queryFn's 401 behavior so callers using apiFetch
+  // (including hooks and explicit queryFn closures) get the same expired-
+  // token UX as the default fetcher: clear the JWT and redirect to /login.
+  if (res.status === 401) {
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+    throw new Error("401: token expired");
+  }
   await throwIfResNotOk(res);
   return res;
 }

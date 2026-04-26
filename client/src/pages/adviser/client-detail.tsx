@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useRoute, Link } from "wouter";
+import { apiFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, FileText, ClipboardList } from "lucide-react";
+import { ArrowLeft, FileText, ClipboardList, Briefcase } from "lucide-react";
 
 interface ClientDetail {
   client: {
@@ -80,13 +81,24 @@ export default function AdviserClientDetail() {
   const [, params] = useRoute<{ id: string }>("/adviser/clients/:id");
   const clientId = params?.id;
 
+  // Note: the global queryFn only uses queryKey[0] as the URL, so segmented
+  // keys need an explicit queryFn that composes the full path. The segmented
+  // key is still useful for cache invalidation across nested resources.
   const detail = useQuery<ClientDetail>({
     queryKey: ["/api/adviser/clients", clientId],
     enabled: !!clientId,
+    queryFn: async () => {
+      const res = await apiFetch(`/api/adviser/clients/${clientId}`);
+      return res.json();
+    },
   });
   const portfolio = useQuery<PortfolioPayload>({
     queryKey: ["/api/adviser/clients", clientId, "portfolio"],
     enabled: !!clientId,
+    queryFn: async () => {
+      const res = await apiFetch(`/api/adviser/clients/${clientId}/portfolio`);
+      return res.json();
+    },
   });
 
   if (detail.isLoading) {
@@ -137,6 +149,12 @@ export default function AdviserClientDetail() {
           <p className="text-sm text-gray-500">{client.email}</p>
         </div>
         <div className="flex items-center gap-2">
+          <Link href={`/adviser/clients/${client.id}/holdings`}>
+            <Button variant="outline" size="sm" data-testid="button-view-holdings">
+              <Briefcase className="h-4 w-4 mr-2" />
+              View Holdings
+            </Button>
+          </Link>
           <Badge variant={client.kycStatus === "verified" ? "default" : "secondary"}>
             KYC: {client.kycStatus}
           </Badge>
