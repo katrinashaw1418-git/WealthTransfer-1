@@ -1962,6 +1962,7 @@ export function registerAdminRoutes(app: Express): void {
     }),
   );
 
+
   app.patch(
     "/api/admin/fee-rules/:id/pause",
     adminRoute(async (req, auth) => {
