@@ -124,6 +124,7 @@ import { registerAdminRoutes } from "../server/admin-routes";
 // ---------------------------------------------------------------------------
 const CLIENT_USERNAME = "__gateb_test_client__";
 const ADVISER_USERNAME = "__gateb_test_adviser__";
+const ADMIN_USERNAME = "__gateb_test_admin__";
 const CONSENT4_CLIENT_USERNAME = "__gateb_test_consent_expired_client__";
 const CONSENT5_CLIENT_USERNAME = "__gateb_test_consent_withdrawn_client__";
 const PLATFORM_FALLBACK_USERNAME = "__gateb_test_platform__";
@@ -134,10 +135,7 @@ const TEST_CURRENCY = "AUD";
 // regardless of execution order.
 // ---------------------------------------------------------------------------
 type TestResult = { passed: boolean; details: string };
-// Canonical operator-facing output contract from the task spec
-// (`.local/tasks/task-92.md` — "Done looks like"). The reporter prints
-// EXACTLY these names in exactly this order. Do not rename, do not
-// renumber, do not append details to PASS lines.
+// Canonical operator-facing contract from `.local/tasks/task-92.md`.
 const CANONICAL_ORDER: string[] = [
   "non-admin cannot deduct",
   "approved deduction posts once",
@@ -150,10 +148,7 @@ const CANONICAL_ORDER: string[] = [
   "wallet balance not directly mutated",
   "reconciliation clean after post/reversal",
 ];
-// Internal extras: extra safety assertions added in response to architect
-// + validator review. These RUN and a failure aborts the script with a
-// FAIL line, but they are NOT printed in the canonical operator output
-// — that contract is locked at the 10 lines above.
+// Internal extras: still run, but only emit on FAIL.
 const INTERNAL_EXTRAS: string[] = [
   "concurrent settle race posts exactly once",
   "concurrent reverse race reverses exactly once",
@@ -268,6 +263,7 @@ const created = {
   accrualIds: [] as number[],
   deductionIds: [] as number[],
   transactionIds: [] as number[],
+  ledgerEntryIds: [] as number[],
   reconciliationIds: [] as number[],
 };
 
@@ -665,26 +661,34 @@ async function cleanupTrackedRows(): Promise<void> {
       .where(inArray(adviserClients.id, created.adviserClientIds));
   }
 
-  // ledger_postings FK to transactions(id), so by-tx-id is the right key.
+  // ledger_postings: transactionId IS the primary key (one row per posted
+  // transaction; see shared/schema.ts ~L1320). Deleting by transactionId
+  // IS a PK delete, not an FK delete.
   if (created.transactionIds.length > 0) {
     await db
       .delete(ledgerPostings)
       .where(inArray(ledgerPostings.transactionId, created.transactionIds));
   }
-  // ledger_entries can be reached via either tracked tx or tracked account.
-  // Both passes are PK-targeted (transaction_id and account_id are FK PKs
-  // we collected). The two-pass form catches any entry that was written
-  // against a tracked account but somehow not against a tracked tx (would
-  // indicate a service-layer bug — this leaves no orphans either way).
+  // ledger_entries has its own serial `id` PK. Discover the entry PKs
+  // from tracked tx/account FKs first, then PK-delete by id.
   if (created.transactionIds.length > 0) {
-    await db
-      .delete(ledgerEntries)
+    const rows = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
       .where(inArray(ledgerEntries.transactionId, created.transactionIds));
+    for (const r of rows) pushUnique(created.ledgerEntryIds, r.id);
   }
   if (created.accountIds.length > 0) {
+    const rows = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
+      .where(inArray(ledgerEntries.accountId, created.accountIds));
+    for (const r of rows) pushUnique(created.ledgerEntryIds, r.id);
+  }
+  if (created.ledgerEntryIds.length > 0) {
     await db
       .delete(ledgerEntries)
-      .where(inArray(ledgerEntries.accountId, created.accountIds));
+      .where(inArray(ledgerEntries.id, created.ledgerEntryIds));
   }
   if (created.transactionIds.length > 0) {
     await db
@@ -713,16 +717,10 @@ async function cleanupTrackedRows(): Promise<void> {
 type CapturedHandler = (req: Request, res: any) => unknown;
 const captured = new Map<string, CapturedHandler>();
 
-// Express's `get/post/patch/delete/put` are heavily-overloaded `IRouterMatcher`
-// types. Re-declaring all overloads in this script just to capture handlers
-// would be both noisy and brittle (every Express minor bump risks drift).
-// Instead, we type our recorder narrowly (the one signature we actually use:
-// `(path, handler) => void`) and bridge to Express's IRouterMatcher with one
-// `unknown`-cast per method — `unknown` is the audited TS escape hatch, no
-// `any` is involved, so the type system still catches misuse INSIDE our
-// recorder (wrong arg shapes etc.).
+// Narrow recorder type bridged to Express's overloaded IRouterMatcher with
+// one audited `unknown` cast per verb (no `any`).
 type RouteRecorder = (path: string, handler: CapturedHandler) => void;
-type RouterMatcher = Express["get"]; // structurally identical to post/patch/delete/put
+type RouterMatcher = Express["get"];
 
 const makeRecorder =
   (verb: string): RouterMatcher =>
@@ -887,13 +885,39 @@ async function snapshotWalletVsLedger(opts: {
 
 async function test2_approvedDeductionPostsOnce(opts: {
   deductionId: number;
-  approverUserId: number;
+  adminUserId: number;
+  adminUsername: string;
+  adminEmail: string;
 }): Promise<void> {
-  const settled = await settleApprovedDeduction({
-    deductionId: opts.deductionId,
-    approverUserId: opts.approverUserId,
+  // End-to-end through the production admin route (same handler the
+  // browser hits): adminRoute(...) auth + role guard + audit + service.
+  const handler = captured.get("POST /api/admin/fee-deductions/:id/approve");
+  if (!handler) {
+    fail(
+      "approved deduction posts once",
+      "internal: approve route handler was not captured from registerAdminRoutes",
+    );
+    return;
+  }
+  const token = signToken({
+    userId: opts.adminUserId,
+    username: opts.adminUsername,
+    email: opts.adminEmail,
+    role: "admin",
   });
-  if (settled.settledTransactionId) {
+  const { req, res, result } = makeMockReqRes({
+    token,
+    params: { id: String(opts.deductionId) },
+    body: {},
+  });
+  await handler(req, res);
+
+  // Reload the deduction from disk to verify the route actually settled it.
+  const [settled] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, opts.deductionId));
+  if (settled?.settledTransactionId) {
     pushUnique(created.transactionIds, settled.settledTransactionId);
   }
 
@@ -902,7 +926,7 @@ async function test2_approvedDeductionPostsOnce(opts: {
     .select()
     .from(transactions)
     .where(eq(transactions.idempotencyKey, idemKey));
-  const receiptRows = settled.settledTransactionId
+  const receiptRows = settled?.settledTransactionId
     ? await db
         .select()
         .from(ledgerPostings)
@@ -910,7 +934,8 @@ async function test2_approvedDeductionPostsOnce(opts: {
     : [];
 
   const ok =
-    settled.status === "settled" &&
+    result.statusCode === 200 &&
+    settled?.status === "settled" &&
     settled.settledTransactionId !== null &&
     settled.settledTransactionId !== undefined &&
     txRows.length === 1 &&
@@ -918,12 +943,12 @@ async function test2_approvedDeductionPostsOnce(opts: {
   if (ok) {
     pass(
       "approved deduction posts once",
-      `status='settled', settledTransactionId=${settled.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
+      `route 200, status='settled', settledTransactionId=${settled.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
     );
   } else {
     fail(
       "approved deduction posts once",
-      `status='${settled.status}', settledTransactionId=${settled.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
+      `route ${result.statusCode}, status='${settled?.status}', settledTransactionId=${settled?.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
     );
   }
 }
@@ -1607,22 +1632,11 @@ async function test13_postingReceiptInvariantHolds(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
-// Status object returned by `runAllTests()`. The runner NEVER calls
-// process.exit itself — that decision lives in `main()`, AFTER the
-// guaranteed cleanup `finally` has run. This is critical: a hard exit
-// inside the runner would skip cleanup and leave seeded fixture rows
-// behind in the dev DB, violating the script's PK-tracked cleanup
-// contract.
+// Runner returns a status; only main() calls process.exit, AFTER cleanup.
 type RunStatus = { exitCode: number };
 
-// Console buffer used to silence production code (`postLedgerEntries`,
-// `runWalletLedgerReconciliation`, `runPostingReceiptInvariantCheck`,
-// etc.) which legitimately log operator alerts at runtime. The canonical
-// operator output for THIS script is locked at exactly the 10 PASS lines
-// + blank line + success banner — any extra stdout would break strict
-// matching. We restore the originals before the canonical reporter
-// runs, and dump the buffer only on FAIL so an operator can still see
-// the underlying production logs when something is broken.
+// Buffer production-code stdout so the canonical block is the only output
+// on PASS; dump on FAIL so operators can still debug.
 const consoleBuffer: { stream: "log" | "warn" | "error"; args: unknown[] }[] = [];
 const originalConsole = {
   log: console.log.bind(console),
@@ -1662,29 +1676,16 @@ async function main(): Promise<void> {
     status = { exitCode: 1 };
     console.error("Gate B verification roll-up threw:", err);
   } finally {
-    // Restore stdout BEFORE cleanup so cleanup failures (which are
-    // operator-actionable) are visible.
+    // Restore stdout before cleanup so cleanup errors are visible.
     restoreConsole();
-    // GUARANTEED post-run cleanup. Runs even if a test threw, so the dev
-    // DB is left in a clean state for the next run regardless of outcome.
-    // Cleanup operates on PK arrays only — it cannot accidentally widen
-    // scope, even if the run aborted mid-fixture (untracked rows simply
-    // are not deleted, which is correct).
     try {
       await cleanupTrackedRows();
     } catch (cleanupErr) {
       originalConsole.error("Post-run cleanup threw:", cleanupErr);
-      // Do NOT downgrade a successful run on cleanup failure — the test
-      // result itself is still valid — but DO ensure non-zero exit so an
-      // operator notices the cleanup gap.
       if (status.exitCode === 0) status = { exitCode: 1 };
     }
   }
-  // On FAIL: dump everything the production code logged so an operator
-  // can debug. On PASS: drop the buffer — canonical output stays clean.
-  if (status.exitCode !== 0) {
-    dumpConsoleBuffer();
-  }
+  if (status.exitCode !== 0) dumpConsoleBuffer();
   process.exit(status.exitCode);
 }
 
@@ -1717,11 +1718,16 @@ async function runAllTests(): Promise<RunStatus> {
     email: "gateb-adviser@test.invalid",
     role: "adviser",
   });
-  // Approver for settle/reverse — production hits these via an admin route,
-  // but the service-layer functions only need a user id to write into
-  // approvedByUserId / reversedByUserId. We use the adviser to keep the
-  // PLATFORM_USER_ID as the platform-only counterparty.
-  const approverUserId = adviserUserId;
+  // Admin used for the route-level happy paths (test 2 + reversal in test 8).
+  // Production approvals always come through `adminRoute(...)` with role=admin.
+  const adminUserId = await ensureUser({
+    username: ADMIN_USERNAME,
+    email: "gateb-admin@test.invalid",
+    role: "admin",
+  });
+  // Service-layer-only callers (race tests, accrual gates) still need a user
+  // id to write into approvedByUserId / reversedByUserId; reuse the admin.
+  const approverUserId = adminUserId;
 
   // Isolated client per consent-gate test so the consent rows stay scoped
   // and cleanup never touches the main pair's rules/accruals.
@@ -1739,6 +1745,7 @@ async function runAllTests(): Promise<RunStatus> {
   const allTestUserIds = [
     clientUserId,
     adviserUserId,
+    adminUserId,
     consent4ClientUserId,
     consent5ClientUserId,
   ];
@@ -1765,6 +1772,7 @@ async function runAllTests(): Promise<RunStatus> {
   created.accrualIds.length = 0;
   created.deductionIds.length = 0;
   created.transactionIds.length = 0;
+  created.ledgerEntryIds.length = 0;
   created.reconciliationIds.length = 0;
 
   await ensureFreshWallet(clientUserId);
@@ -1806,7 +1814,9 @@ async function runAllTests(): Promise<RunStatus> {
   // -----------------------------------------------------------------------
   await test2_approvedDeductionPostsOnce({
     deductionId: deductionAId,
-    approverUserId,
+    adminUserId,
+    adminUsername: ADMIN_USERNAME,
+    adminEmail: "gateb-admin@test.invalid",
   });
   const snapAfterSettle = await snapshotWalletVsLedger({
     clientUserId,
@@ -1911,19 +1921,8 @@ async function runAllTests(): Promise<RunStatus> {
   // -----------------------------------------------------------------------
   await test13_postingReceiptInvariantHolds();
 
-  // -----------------------------------------------------------------------
-  // CANONICAL operator-facing report. The contract from the task spec is:
-  //   * one PASS|FAIL line per CANONICAL_ORDER entry, in that exact order
-  //   * PASS lines: `PASS <name>` only — NO appended details
-  //   * FAIL lines: `FAIL <name> — <details>`
-  //   * blank line, then the success banner OR a non-zero exit
-  // INTERNAL_EXTRAS (race tests + posting-receipt invariant) RUN, and
-  // failures still abort the script with a FAIL line printed below the
-  // canonical block, but they do NOT appear in the canonical block.
-  // -----------------------------------------------------------------------
-  // Use `originalConsole.log` directly — `console.log` is currently
-  // silenced into the buffer by `silenceConsole()`. The canonical
-  // reporter MUST reach stdout regardless.
+  // Canonical reporter. Uses originalConsole.log so it reaches stdout
+  // even though console.log is currently silenced into the buffer.
   originalConsole.log("");
   let canonicalFailed = false;
   let canonicalMissing = 0;
@@ -1942,8 +1941,7 @@ async function runAllTests(): Promise<RunStatus> {
     }
   }
 
-  // INTERNAL_EXTRAS: only print FAIL lines (never PASS) so the canonical
-  // operator output is unchanged on the green path.
+  // INTERNAL_EXTRAS: only emit on FAIL.
   let extrasFailed = false;
   for (const name of INTERNAL_EXTRAS) {
     const r = results.get(name);
@@ -1964,9 +1962,7 @@ async function runAllTests(): Promise<RunStatus> {
     originalConsole.error(
       `\n${failedCount} fail(s), ${canonicalMissing} missing canonical assertion(s) in Gate B verification roll-up.`,
     );
-    // Return non-zero status — main() will exit AFTER cleanup. Do NOT
-    // call process.exit here; doing so would skip the guaranteed
-    // cleanup `finally` block in main() and leave fixture rows behind.
+    // Return non-zero — main() exits AFTER cleanup runs.
     return { exitCode: 1 };
   }
 
@@ -1974,7 +1970,12 @@ async function runAllTests(): Promise<RunStatus> {
   return { exitCode: 0 };
 }
 
+// `main()` itself owns the only `process.exit` call (after its `finally`
+// cleanup block). Any throw that escapes `main()` is unexpected; record
+// it on the unhandled-rejection channel and let Node exit with a non-zero
+// code on its own — we do not call `process.exit` here, keeping the
+// "only main() exits" invariant intact.
 main().catch((err) => {
   console.error("Gate B verification roll-up crashed:", err);
-  process.exit(1);
+  process.exitCode = 1;
 });
