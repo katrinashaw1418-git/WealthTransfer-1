@@ -41,6 +41,7 @@ import AdminDashboard from "@/pages/admin/dashboard";
 import AdminApplications from "@/pages/admin/applications";
 import AdminAdvisers from "@/pages/admin/advisers";
 import AdminAdviserClients from "@/pages/admin/adviser-clients";
+import AdminRegistrationInvites from "@/pages/admin/registration-invites";
 import AdminAuditLogs from "@/pages/admin/audit-logs";
 import ClientInstructions from "@/pages/client-instructions";
 import RegisterInvite from "@/pages/register-invite";
@@ -86,6 +87,7 @@ function AdminApp() {
         <Route path="/admin/"><Redirect to="/admin/dashboard" /></Route>
         <Route path="/admin/dashboard" component={AdminDashboard} />
         <Route path="/admin/applications" component={AdminApplications} />
+        <Route path="/admin/registration-invites" component={AdminRegistrationInvites} />
         <Route path="/admin/advisers" component={AdminAdvisers} />
         <Route path="/admin/adviser-clients" component={AdminAdviserClients} />
         <Route path="/admin/audit-logs" component={AdminAuditLogs} />

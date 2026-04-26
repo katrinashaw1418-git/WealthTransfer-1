@@ -3,6 +3,42 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Session 16: Admin invite UI + invite flow hardening
+
+This session ships the admin-side surface for the Session 14 invite engine and tightens two race-correctness gaps caught during code review.
+
+### What was built
+- **Admin page `/admin/registration-invites`** (`client/src/pages/admin/registration-invites.tsx`) — full UI for the previously-headless `POST /api/admin/registration-invites` endpoint. Email + role (`client | adviser | admin`) + optional adviser auto-link (only rendered when `role='client'`, force-reset via `useEffect` when role flips). One-time `inviteLink` shown in a modal post-issuance with copy-to-clipboard; closing the dialog discards the link from local state and the system has no way to re-emit it. Wired into `client/src/App.tsx` route table and `client/src/components/layout/admin-sidebar.tsx` nav as "Registration Invites".
+- **Phase 3 — invite-creation race tightening** (`server/admin-routes.ts`): the existing-user `SELECT` on `users.email` was moved INSIDE the create-invite transaction so the SELECT and the invite INSERT are a single atomic unit under READ COMMITTED. This collapses the "issue invite for an email that's being registered right now" UX hazard from a multi-millisecond pre-check window down to a single tx. The activation-side `users.email` UNIQUE + 23505 → 409 mapping remains the final correctness guard for the residual sub-millisecond window; SERIALIZABLE was deliberately not adopted (retry complexity outweighs benefit).
+- **Phase 3b — activation-time adviser revalidation** (`server/routes.ts:1098-1126`): when a client invite carries an `adviserUserId`, the activation tx now re-selects that user with `FOR UPDATE` and verifies `role='adviser'` BEFORE inserting the `adviser_clients` row. If the adviser was demoted/deleted between invite issuance and redemption, the tx aborts with `409 — adviser no longer available`, no orphan user is created, and the invite remains unused so an admin can investigate or re-issue. **Verified end-to-end**: demoting `wiseadviser` mid-flight yielded the 409, zero rows in `users` for that email, zero rows in `adviser_clients`, and `registration_invites.used_at IS NULL`.
+
+### Smoke tests run
+- 3 issuance shapes (client / client+adviser / adviser) → all 200 with valid one-time link.
+- 5 negatives: `adviserUserId` on `role=adviser` → 400, bad `adviserUserId` → 400, non-admin caller → 403, dup email re-issuance → 200 with prior invite revoked (verified DB shows exactly 1 active row), invite for an email that's already a real user → 409 with no DB leak.
+- Stale-adviser activation → 409, full tx rollback verified (no user, no link, invite still active).
+- Positive sanity: same flow with intact adviser → 201 + `adviser_clients` link present.
+
+### Code review (architect, evaluate_task)
+- Confirmed the Phase 2 form's role/adviser state-sync via `useEffect` is coherent.
+- Confirmed Phase 3 in-tx SELECT is genuinely tighter under READ COMMITTED.
+- Caught the missing activation-time adviser revalidation (fixed in Phase 3b above).
+- Confirmed dialog "show link only once" has no re-render leaks.
+
+### Known follow-ups (deferred, not blockers)
+- Email delivery: invites are still surfaced as raw links in the admin UI. Picking a transactional email provider (Postmark / Resend / SES) is a Session 17 decision and requires the user to commit to one.
+- Optional UX: schema for `adviserUserId` on the client form could tighten to `z.union([z.literal("none"), z.string().regex(/^\d+$/)])` to surface invalid values before the network round-trip — left as a polish follow-up.
+- Pre-existing TS errors at `server/storage.ts:3289,3312` remain (pre-date this session).
+
+## Recent Changes (April 2026) — Session 15B: Adviser notification dismissals (preference layer)
+
+Adviser notifications stay computed live by the existing aggregator (`server/services/adviser-access.ts:getAdviserNotifications`) — no persistent notifications table, no DB triggers. Session 15B adds a **pure preference layer** so advisers can dismiss individual items without rewriting the source-of-truth model.
+
+- New table `adviserNotificationDismissals` (`shared/schema.ts:341-373`) with unique index on `(adviserUserId, sourceType, sourceId)`, FK to `users.id`, and adviser-side index for fast prefetch. Stores nothing but the dismissal itself.
+- Aggregator now pre-fetches the calling adviser's dismissals once and applies an `exclude()` filter to all five buckets' items AND counts (KYC pending, advice expiring, fee consents expiring, recently linked clients, applications awaiting approval). Dismissed items disappear from both the popover list and the bell badge in lockstep.
+- New endpoints `POST /api/adviser/notifications/dismiss` and `DELETE /api/adviser/notifications/dismiss` (`server/adviser-routes.ts:187-249`), zod-validated. Idempotent via 23505 swallow on insert and no-op DELETE.
+- UI `client/src/components/notifications-popover.tsx`: X dismiss button on each item, mutation invalidates the bell query so badge + list refresh together. Item ids use `${sourceType}:${sourceId}` format; KYC dismissals reference `users.id`.
+- Verified end-to-end as `wiseadviser`: dismissing 1 KYC item moved kycPending 2→1 and total 6→5; idempotent re-POST; DELETE restores; 400/403/401 negatives all correct.
+
 ## Recent Changes (April 2026) — Session 14: Registration invites after admin approval
 
 ### What was missing

@@ -1,0 +1,201 @@
+Good — this changes the direction slightly, and I’m going to be direct so you don’t waste time rebuilding something that already works.
+
+1. Cross-check verdict (from your file)
+
+Your system already has Session 15 (Notifications) fully built, but using a live aggregator model, not a stored table:
+
+No adviser_notifications table
+No read/dismiss endpoints
+Everything derived from source tables in real time
+Proper scoping via adviserClients
+All 5 categories already implemented
+
+This is confirmed here:
+
+👉 Translation:
+
+Your "electricity layer" already exists.
+Do NOT rebuild it.
+2. Critical architectural decision (don’t ignore this)
+
+You now have two paths:
+
+Option A — KEEP current (recommended)
+Real-time aggregator (current system)
+
+Pros:
+
+Zero drift (financial-grade correctness)
+No duplication
+No cron / triggers
+Always accurate
+
+Cons:
+
+No “dismiss” / “read” state
+Option B — Replace with stored notifications (NOT recommended)
+adviser_notifications table (your earlier spec)
+
+Problem:
+
+You create a SECOND source of truth
+→ This will break compliance later (fees, execution, audit)
+3. Correct move (this is the right design)
+
+Do NOT rebuild notifications.
+
+Instead:
+
+Enhance the existing system with a lightweight dismissal layer
+Session 15B — Notification Dismiss Layer (Correct Build)
+1. DB schema (minimal, safe)
+export const adviserNotificationDismissals = pgTable(
+  "adviser_notification_dismissals",
+  {
+    id: serial("id").primaryKey(),
+
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+
+    sourceType: text("source_type").notNull(),
+    // instruction | task | fee_consent | report | kyc
+
+    sourceId: integer("source_id").notNull(),
+
+    dismissedAt: timestamp("dismissed_at").defaultNow(),
+  }
+);
+
+👉 This does NOT duplicate notifications
+👉 It only stores “user preference”
+
+2. API (very small)
+POST   /api/adviser/notifications/dismiss
+DELETE /api/adviser/notifications/dismiss
+Dismiss
+app.post("/api/adviser/notifications/dismiss", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const { sourceType, sourceId } = req.body;
+
+  await db.insert(adviserNotificationDismissals).values({
+    adviserUserId: userId,
+    sourceType,
+    sourceId,
+  });
+
+  res.json({ success: true });
+});
+Undo dismiss
+app.delete("/api/adviser/notifications/dismiss", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const { sourceType, sourceId } = req.body;
+
+  await db
+    .delete(adviserNotificationDismissals)
+    .where(and(
+      eq(adviserNotificationDismissals.adviserUserId, userId),
+      eq(adviserNotificationDismissals.sourceType, sourceType),
+      eq(adviserNotificationDismissals.sourceId, sourceId)
+    ));
+
+  res.json({ success: true });
+});
+3. Modify aggregator (IMPORTANT)
+
+Inside your existing notification service:
+
+LEFT JOIN adviser_notification_dismissals d
+ON d.adviser_user_id = adviserId
+AND d.source_type = 'instruction'
+AND d.source_id = instruction.id
+
+Then filter:
+
+WHERE d.id IS NULL
+4. React change (small but powerful)
+
+In your existing:
+
+notifications-popover.tsx
+
+Add dismiss button:
+
+<button
+  onClick={async () => {
+    await fetch("/api/adviser/notifications/dismiss", {
+      method: "POST",
+      body: JSON.stringify({
+        sourceType: n.type,
+        sourceId: n.id,
+      }),
+    });
+    refetch();
+  }}
+>
+  Dismiss
+</button>
+4. What you should build NEXT (correct sequence)
+
+Now that notifications are NOT the gap, your real gaps are:
+
+Priority 1 — Admin Invite UI (BIGGEST GAP)
+/admin/registration-invites
+
+Why:
+
+You have backend but no UI
+→ onboarding is broken
+Priority 2 — Duplicate email race fix (CRITICAL)
+Enforce UNIQUE(email) at DB level
+
+AND:
+
+INSERT ... ON CONFLICT DO NOTHING
+Priority 3 — Email delivery (IMPORTANT)
+Resend / SES / SendGrid integration
+Priority 4 — Admin Shell (what I gave earlier)
+5. Final advice (this is the real one)
+
+You said:
+
+“we need electricity, not just a new heart”
+
+Here’s the truth:
+
+You already built the electricity (notifications)
+You almost rebuilt it incorrectly (would create drift)
+
+Your real missing piece is:
+→ CONTROL (admin)
+→ DISTRIBUTION (invites)
+→ ACTIVATION (email)
+6. What to tell your dev agent (exact prompt)
+Do NOT rebuild notifications.
+
+Extend existing notification system with dismissal support:
+
+- Add adviser_notification_dismissals table
+- Add POST /dismiss and DELETE /dismiss endpoints
+- Update notification aggregator to exclude dismissed items
+- Add "Dismiss" button in notifications popover
+
+Then build:
+
+1. /admin/registration-invites page (UI only, backend exists)
+2. Enforce unique email constraint on users + invite flow
+3. Add email delivery for invites (Resend or SES)
+
+Do not build:
+- notification table
+- notification cron
+- notification triggers
+
+Reason:
+System already uses real-time aggregator (no drift architecture)
+
+If you want next after this, I’ll take you into:
+
+DBFO fee consent UI (this unlocks revenue)
+
+That’s where your platform becomes real, not just well-designed.

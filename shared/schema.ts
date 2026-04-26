@@ -322,6 +322,53 @@ export const insertRegistrationInviteSchema = createInsertSchema(registrationInv
 export type InsertRegistrationInvite = z.infer<typeof insertRegistrationInviteSchema>;
 export type RegistrationInvite = typeof registrationInvites.$inferSelect;
 
+// =============================================================================
+// SESSION 15B — Adviser notification dismissals (preference layer only).
+// -----------------------------------------------------------------------------
+// IMPORTANT: This table does NOT store notifications. Notifications are still
+// derived in real time by getAdviserNotifications() from the source-of-truth
+// tables (investmentInstructions, adviserTasks, feeConsents, reportRequests,
+// users.kycStatus). This table only records "this adviser chose to hide this
+// item from their bell". The aggregator LEFT JOINs against this table and
+// filters dismissed rows out of items[] (counts unaffected — accuracy first).
+// Re-firing the same source row (e.g. a renewed pending instruction) does NOT
+// resurrect a dismissal because the (sourceType, sourceId) pair is unchanged.
+// To "undo dismiss", we DELETE the row (POST and DELETE endpoints).
+// =============================================================================
+export const adviserNotificationDismissals = pgTable(
+  "adviser_notification_dismissals",
+  {
+    id: serial("id").primaryKey(),
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+    sourceType: text("source_type").notNull(), // consent | task | fee_consent | report | kyc
+    sourceId: integer("source_id").notNull(),
+    dismissedAt: timestamp("dismissed_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    // Idempotent dismiss: re-POSTing the same (adviser, sourceType, sourceId)
+    // hits the unique index → we treat 23505 as success in the route handler.
+    uniqDismissal: uniqueIndex("adviser_notification_dismissals_uidx").on(
+      table.adviserUserId,
+      table.sourceType,
+      table.sourceId,
+    ),
+    adviserIdx: index("adviser_notification_dismissals_adviser_idx").on(table.adviserUserId),
+  }),
+);
+
+export const insertAdviserNotificationDismissalSchema = createInsertSchema(
+  adviserNotificationDismissals,
+).omit({
+  id: true,
+  dismissedAt: true,
+});
+export type InsertAdviserNotificationDismissal = z.infer<
+  typeof insertAdviserNotificationDismissalSchema
+>;
+export type AdviserNotificationDismissal = typeof adviserNotificationDismissals.$inferSelect;
+
 export const applications = pgTable("applications", {
   id: serial("id").primaryKey(),
   fullName: text("full_name").notNull(),

@@ -1093,7 +1093,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
 
         // Optional adviser auto-link (only for client invites with adviserUserId).
+        // Re-validate role='adviser' AT ACTIVATION TIME — the adviser's role
+        // may have changed (demoted, deleted-then-recycled-id, etc.) between
+        // invite issuance and the user redeeming it. If the linked target is
+        // no longer an adviser, fail loudly rather than silently linking a
+        // client to a regular account.
         if (locked.role === "client" && locked.adviserUserId) {
+          const [stillAdviser] = await (tx as any)
+            .select({ id: users.id, role: users.role })
+            .from(users)
+            .where(eq(users.id, locked.adviserUserId))
+            .for("update")
+            .limit(1);
+          if (!stillAdviser || stillAdviser.role !== "adviser") {
+            throw Object.assign(
+              new Error(
+                "The adviser linked to this invitation is no longer available. " +
+                  "Please ask an administrator to re-issue the invite.",
+              ),
+              { status: 409 },
+            );
+          }
           await (tx as any).insert(adviserClients).values({
             adviserUserId: locked.adviserUserId,
             clientUserId: newUser.id,

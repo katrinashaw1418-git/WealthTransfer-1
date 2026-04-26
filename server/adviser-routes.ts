@@ -14,9 +14,9 @@
 import fs from "node:fs";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { db } from "./db";
-import { auditLogs, reportRequests } from "@shared/schema";
+import { auditLogs, reportRequests, adviserNotificationDismissals } from "@shared/schema";
 import { requireAuth, requireRole } from "./auth";
 import { generateReportPdf, REPORTS_DIR } from "./services/reports";
 import path from "node:path";
@@ -178,6 +178,70 @@ export function registerAdviserRoutes(app: Express): void {
     "/api/adviser/notifications",
     adviserRoute(async (_req, auth) => {
       return getAdviserNotifications(auth.userId);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 15B — Notification dismissals (preference layer only).
+  //
+  //   POST   /api/adviser/notifications/dismiss   { sourceType, sourceId }
+  //   DELETE /api/adviser/notifications/dismiss   { sourceType, sourceId }
+  //
+  // Notifications themselves are never stored — the aggregator continues to
+  // read from source-of-truth tables. These endpoints record only the
+  // adviser's preference to hide a specific item from their bell. Dismissals
+  // are scoped per-adviser; they cannot affect another adviser's view, the
+  // underlying source data, or any compliance signal.
+  //
+  // Idempotency: re-POSTing the same (sourceType, sourceId) is treated as
+  // success (the unique index swallows the duplicate). Re-DELETing a row that
+  // doesn't exist is also success.
+  // -------------------------------------------------------------------------
+  const dismissBodySchema = z.object({
+    sourceType: z.enum(["consent", "task", "fee_consent", "report", "kyc"]),
+    sourceId: z.number().int().positive(),
+  });
+
+  app.post(
+    "/api/adviser/notifications/dismiss",
+    adviserRoute(async (req, auth) => {
+      const parsed = dismissBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid dismiss payload"), { status: 400 });
+      }
+      const { sourceType, sourceId } = parsed.data;
+      try {
+        await db.insert(adviserNotificationDismissals).values({
+          adviserUserId: auth.userId,
+          sourceType,
+          sourceId,
+        });
+      } catch (err: any) {
+        // Postgres unique_violation — already dismissed; treat as success.
+        if (err?.code !== "23505") throw err;
+      }
+      return { success: true };
+    }),
+  );
+
+  app.delete(
+    "/api/adviser/notifications/dismiss",
+    adviserRoute(async (req, auth) => {
+      const parsed = dismissBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid dismiss payload"), { status: 400 });
+      }
+      const { sourceType, sourceId } = parsed.data;
+      await db
+        .delete(adviserNotificationDismissals)
+        .where(
+          and(
+            eq(adviserNotificationDismissals.adviserUserId, auth.userId),
+            eq(adviserNotificationDismissals.sourceType, sourceType),
+            eq(adviserNotificationDismissals.sourceId, sourceId),
+          ),
+        );
+      return { success: true };
     }),
   );
 

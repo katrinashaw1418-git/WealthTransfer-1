@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { Bell, AlertCircle, Clock, FileText, ShieldCheck, UserCheck } from "lucide-react";
+import { Bell, AlertCircle, Clock, FileText, ShieldCheck, UserCheck, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 
 type NotificationType = "consent" | "task" | "fee_consent" | "report" | "kyc";
 type NotificationSeverity = "info" | "warning" | "urgent";
@@ -88,6 +89,18 @@ export default function NotificationsPopover() {
     staleTime: 30_000,
   });
 
+  // SESSION 15B: dismiss preference layer. The aggregator filters dismissed
+  // items out of both list AND counts, so an optimistic invalidation gives
+  // the user instant feedback without waiting the 60s refetch interval.
+  const dismiss = useMutation({
+    mutationFn: async ({ sourceType, sourceId }: { sourceType: NotificationType; sourceId: number }) => {
+      await apiRequest("POST", "/api/adviser/notifications/dismiss", { sourceType, sourceId });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/adviser/notifications"] });
+    },
+  });
+
   const total = data?.totalCount ?? 0;
   const items = data?.items ?? [];
 
@@ -154,13 +167,25 @@ export default function NotificationsPopover() {
             <ul className="divide-y divide-slate-100" data-testid="notifications-list">
               {items.map((item) => {
                 const Icon = TYPE_ICON[item.type];
+                // item.id is composed as `${sourceType}:${sourceId}` in the
+                // aggregator — split here so the dismiss button can post the
+                // structured (sourceType, sourceId) the API expects.
+                const colonIdx = item.id.indexOf(":");
+                const sourceId = Number(item.id.slice(colonIdx + 1));
+                const isDismissing =
+                  dismiss.isPending &&
+                  dismiss.variables?.sourceType === item.type &&
+                  dismiss.variables?.sourceId === sourceId;
                 return (
-                  <li key={item.id}>
+                  <li
+                    key={item.id}
+                    className="group flex gap-3 p-3 hover:bg-slate-50 transition-colors"
+                    data-testid={`notification-${item.id}`}
+                  >
                     <Link
                       href={item.deepLink}
                       onClick={() => setOpen(false)}
-                      className="flex gap-3 p-3 hover:bg-slate-50 transition-colors"
-                      data-testid={`notification-${item.id}`}
+                      className="flex flex-1 min-w-0 gap-3"
                     >
                       <div className="flex-shrink-0 mt-0.5 relative">
                         <div className="h-8 w-8 rounded-full bg-slate-100 flex items-center justify-center">
@@ -186,6 +211,21 @@ export default function NotificationsPopover() {
                         </p>
                       </div>
                     </Link>
+                    <button
+                      type="button"
+                      aria-label={`Dismiss ${item.title}`}
+                      title="Dismiss"
+                      disabled={isDismissing || !Number.isFinite(sourceId)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!Number.isFinite(sourceId)) return;
+                        dismiss.mutate({ sourceType: item.type, sourceId });
+                      }}
+                      className="flex-shrink-0 self-start mt-0.5 rounded p-1 text-slate-300 opacity-0 hover:bg-slate-200 hover:text-slate-700 group-hover:opacity-100 focus:opacity-100 disabled:opacity-50"
+                      data-testid={`dismiss-${item.id}`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
                   </li>
                 );
               })}

@@ -488,20 +488,9 @@ export function registerAdminRoutes(app: Express): void {
       const { email, role, relatedEntityType, relatedEntityId, adviserUserId } = parsed.data;
       const normalisedEmail = email.toLowerCase();
 
-      // Reject if a real account already exists.
-      const [existingUser] = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.email, normalisedEmail))
-        .limit(1);
-      if (existingUser) {
-        throw Object.assign(
-          new Error("A user with this email already exists"),
-          { status: 409 },
-        );
-      }
-
-      // If linking to an adviser, the adviser must exist + be role=adviser.
+      // Adviser-link guard: cheap, race-free, can stay outside the tx.
+      // (If the adviser is somehow deleted between this check and the insert,
+      //  the FK on registration_invites.adviser_user_id would reject it anyway.)
       if (adviserUserId !== undefined) {
         if (role !== "client") {
           throw Object.assign(
@@ -527,6 +516,30 @@ export function registerAdminRoutes(app: Express): void {
 
       try {
         await db.transaction(async (tx) => {
+          // Re-check for an existing user INSIDE the tx so the SELECT and the
+          // invite INSERT happen in the same atomic unit. This collapses the
+          // create-invite race window from ~ms-of-network down to a single
+          // tx — practically eliminating the "issue invite for an email that
+          // is being registered right now" UX hazard.
+          //
+          // Final atomicity (against a user committing AFTER this SELECT but
+          // BEFORE our INSERT) is still owed to the activation tx, which
+          // re-checks via the users.email UNIQUE constraint and maps 23505
+          // to a clean 409. We deliberately don't escalate to SERIALIZABLE
+          // here — the cost (retry loops in admin code) outweighs the
+          // sub-millisecond residual race window.
+          const [existingUser] = await (tx as any)
+            .select({ id: users.id })
+            .from(users)
+            .where(eq(users.email, normalisedEmail))
+            .limit(1);
+          if (existingUser) {
+            throw Object.assign(
+              new Error("A user with this email already exists"),
+              { status: 409 },
+            );
+          }
+
           // Revoke any prior live invites for this email so only the freshest is valid.
           await (tx as any)
             .update(registrationInvites)

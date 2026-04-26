@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import {
   LayoutDashboard,
   ClipboardList,
+  Mail,
   Users,
   Link2,
   ScrollText,
@@ -19,6 +20,7 @@ interface AdminSidebarProps {
 const NAV_ITEMS = [
   { to: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/admin/applications", label: "Applications", icon: ClipboardList },
+  { to: "/admin/registration-invites", label: "Registration Invites", icon: Mail },
   { to: "/admin/advisers", label: "Advisers", icon: Users },
   { to: "/admin/adviser-clients", label: "Adviser-Client Links", icon: Link2 },
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },

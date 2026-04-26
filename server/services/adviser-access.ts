@@ -31,6 +31,7 @@ import {
   transactions,
   investmentInstructions,
   executionAuthorisations,
+  adviserNotificationDismissals,
   type AdviserTask,
   type InsertAdviserTask,
   type ReportRequest,
@@ -38,7 +39,7 @@ import {
   type InvestmentProduct,
   type InvestmentInstruction,
 } from "@shared/schema";
-import { and, eq, desc, lte, gte, sql, inArray } from "drizzle-orm";
+import { and, eq, desc, lte, gte, sql, inArray, notInArray } from "drizzle-orm";
 
 // -----------------------------------------------------------------------------
 // Link enforcement — the single chokepoint for "can this adviser see this
@@ -857,6 +858,32 @@ export async function getAdviserNotifications(
     };
   }
 
+  // ---- SESSION 15B: dismissals (preference layer; no notifications stored) ----
+  // Pre-fetch this adviser's dismissed (sourceType, sourceId) pairs once. Each
+  // bucket below excludes its own dismissed source IDs from BOTH the items
+  // query AND the count query, so the bell badge and the popover list agree.
+  // Dismissals on rows that no longer exist as live source data are harmless:
+  // they simply never match anything in the bucket queries.
+  const dismissalRows = await db
+    .select({
+      sourceType: adviserNotificationDismissals.sourceType,
+      sourceId: adviserNotificationDismissals.sourceId,
+    })
+    .from(adviserNotificationDismissals)
+    .where(eq(adviserNotificationDismissals.adviserUserId, adviserUserId));
+  const dismissedIds = {
+    consent: dismissalRows.filter((d) => d.sourceType === "consent").map((d) => d.sourceId),
+    task: dismissalRows.filter((d) => d.sourceType === "task").map((d) => d.sourceId),
+    fee_consent: dismissalRows.filter((d) => d.sourceType === "fee_consent").map((d) => d.sourceId),
+    report: dismissalRows.filter((d) => d.sourceType === "report").map((d) => d.sourceId),
+    kyc: dismissalRows.filter((d) => d.sourceType === "kyc").map((d) => d.sourceId),
+  };
+  // Helper: only emit `notInArray(...)` when the dismissed-IDs list is non-empty.
+  // Postgres `NOT IN ()` would be a syntax error and Drizzle's notInArray on []
+  // is undefined behaviour — this guard keeps the existing queries unchanged
+  // when no dismissals exist.
+  const exclude = (col: any, ids: number[]) => (ids.length ? notInArray(col, ids) : undefined);
+
   // ---- 1. Pending client consents (instructions awaiting client action) ----
   const pendingConsentRows = await db
     .select({
@@ -873,6 +900,7 @@ export async function getAdviserNotifications(
         eq(investmentInstructions.adviserUserId, adviserUserId),
         inArray(investmentInstructions.clientUserId, linkedClientIds),
         eq(investmentInstructions.status, "pending_consent"),
+        exclude(investmentInstructions.id, dismissedIds.consent),
       ),
     )
     .orderBy(desc(investmentInstructions.createdAt))
@@ -886,6 +914,7 @@ export async function getAdviserNotifications(
         eq(investmentInstructions.adviserUserId, adviserUserId),
         inArray(investmentInstructions.clientUserId, linkedClientIds),
         eq(investmentInstructions.status, "pending_consent"),
+        exclude(investmentInstructions.id, dismissedIds.consent),
       ),
     );
 
@@ -907,6 +936,7 @@ export async function getAdviserNotifications(
         inArray(adviserTasks.clientUserId, linkedClientIds),
         eq(adviserTasks.status, "open"),
         inArray(adviserTasks.priority, ["high", "urgent"]),
+        exclude(adviserTasks.id, dismissedIds.task),
       ),
     )
     .orderBy(desc(adviserTasks.createdAt))
@@ -921,6 +951,7 @@ export async function getAdviserNotifications(
         inArray(adviserTasks.clientUserId, linkedClientIds),
         eq(adviserTasks.status, "open"),
         inArray(adviserTasks.priority, ["high", "urgent"]),
+        exclude(adviserTasks.id, dismissedIds.task),
       ),
     );
 
@@ -938,6 +969,7 @@ export async function getAdviserNotifications(
         eq(feeConsents.renewalStatus, "active"),
         lte(feeConsents.consentExpiryDate, expiryHorizon),
         gte(feeConsents.consentExpiryDate, now),
+        exclude(feeConsents.id, dismissedIds.fee_consent),
       ),
     )
     .orderBy(feeConsents.consentExpiryDate)
@@ -952,6 +984,7 @@ export async function getAdviserNotifications(
         eq(feeConsents.renewalStatus, "active"),
         lte(feeConsents.consentExpiryDate, expiryHorizon),
         gte(feeConsents.consentExpiryDate, now),
+        exclude(feeConsents.id, dismissedIds.fee_consent),
       ),
     );
 
@@ -970,6 +1003,7 @@ export async function getAdviserNotifications(
         eq(reportRequests.adviserUserId, adviserUserId),
         inArray(reportRequests.clientUserId, linkedClientIds),
         inArray(reportRequests.status, ["requested", "generating"]),
+        exclude(reportRequests.id, dismissedIds.report),
       ),
     )
     .orderBy(desc(reportRequests.requestedAt))
@@ -983,10 +1017,13 @@ export async function getAdviserNotifications(
         eq(reportRequests.adviserUserId, adviserUserId),
         inArray(reportRequests.clientUserId, linkedClientIds),
         inArray(reportRequests.status, ["requested", "generating"]),
+        exclude(reportRequests.id, dismissedIds.report),
       ),
     );
 
   // ---- 5. KYC pending (linked clients with kycStatus != 'verified') ----
+  // Note: KYC dismissals reference users.id (the client's user ID), not a
+  // dedicated notification id. Item ids are emitted as `kyc:<userId>`.
   const kycRows = await db
     .select({
       id: users.id,
@@ -995,13 +1032,25 @@ export async function getAdviserNotifications(
       email: users.email,
     })
     .from(users)
-    .where(and(inArray(users.id, linkedClientIds), eq(users.kycStatus, "pending")))
+    .where(
+      and(
+        inArray(users.id, linkedClientIds),
+        eq(users.kycStatus, "pending"),
+        exclude(users.id, dismissedIds.kyc),
+      ),
+    )
     .limit(ITEM_LIMIT_PER_BUCKET);
 
   const [{ count: kycPendingCount }] = await db
     .select({ count: sql<number>`cast(count(*) as int)` })
     .from(users)
-    .where(and(inArray(users.id, linkedClientIds), eq(users.kycStatus, "pending")));
+    .where(
+      and(
+        inArray(users.id, linkedClientIds),
+        eq(users.kycStatus, "pending"),
+        exclude(users.id, dismissedIds.kyc),
+      ),
+    );
 
   // ---- Resolve client display names for items in one shot ----
   const referencedClientIds = Array.from(
