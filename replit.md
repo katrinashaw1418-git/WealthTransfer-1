@@ -59,6 +59,43 @@ The daily wallet-vs-ledger reconciliation cron (Task #25) was re-paging ops ever
 
 **Deferred to sibling task** ("Let admins resolve and annotate ledger drift from the reconciliation page"): a richer admin UI on top of the same `walletLedgerDriftAcknowledgements` table — bulk acknowledge, status timeline, free-text annotations beyond `note`/`clearReason`. The data model and API surface added here are designed to be that UI's read/write target unchanged.
 
+## Recent Changes (April 2026) — Task #33: Reverse a settled fee deduction
+
+Admin-initiated unwind of a settled `adviser_fee_deductions` row. Mirrors `settleApprovedDeduction` but posts the OPPOSITE balanced ledger triple against a NEW transactions row with deterministic key `fee_deduction_<id>_reversal`. **History is never edited** — the original `settled_*` columns stay intact; the reversal pointer lives in `reversal_transaction_id`.
+
+**Schema** — added 4 columns to `adviserFeeDeductions`: `reversedAt`, `reversedByUserId` (FK users), `reversedReason`, `reversalTransactionId` (FK transactions). New terminal status `reversed`. `insertAdviserFeeDeductionSchema` updated to omit them.
+
+**Service (`server/services/fee-engine.ts`)** — new `reverseSettledDeduction({deductionId, reverserUserId, reason})`:
+- Validates non-empty reason (≤1000 chars).
+- Locks the deduction row FOR UPDATE; idempotent fast-path returns the existing row if already `reversed`; rejects non-`settled` states with 409.
+- Inserts a NEW transactions row with `idempotencyKey='fee_deduction_<id>_reversal'` (UNIQUE on transactions.idempotency_key is the concurrency safety net).
+- Posts the OPPOSITE triple via `postLedgerEntries`: CREDIT client / DEBIT adviser / DEBIT platform-fee. Platform leg = `total - adviserShare` so any 4dp rounding drift is absorbed there (postLedgerEntries enforces zero-balance anyway).
+- Refreshes wallet cache for both client and adviser via `refreshWalletCacheBalance`.
+- Updates the deduction: `status='reversed'`, plus reversal timestamps / reason / pointer. Conditional WHERE re-asserts `status='settled'` under the row lock.
+- All 7 steps run inside ONE `db.transaction` — any failure rolls back the whole thing (no half-applied movement, deduction stays `settled`, safe to retry).
+
+**Backend (`server/admin-routes.ts`)** — new `POST /api/admin/fee-deductions/:id/reverse` (admin-only):
+- Body `{reason: string}`; rejects empty / whitespace with 400.
+- On success: audit row `fee_deduction_reversed` with reversal + settlement tx ids and amounts.
+- On failure: audit row `fee_deduction_reverse_failed` with the error message — operator trail is continuous even when the underlying tx rolled back.
+
+**Frontend (`client/src/pages/admin/fees.tsx`)** — Deductions tab:
+- New "Reverse" button on every `settled` row (next to retry/approve actions).
+- Confirmation `Dialog` with required `Textarea` reason (max 1000 chars), explicit explanation of the ledger movement that will happen, destructive-styled confirm button, busy state.
+- Reversed rows now display: red "reversed" badge, reversal date, "settle tx#X → reversal tx#Y" link, and the truncated reason.
+- `FeeDeductionRow` interface extended with the 4 new reversal fields.
+
+**Smoke test (verified live)**:
+1. Settle deduction #1 (10 AUD, 80/20 split) → `status=settled`, `settledTransactionId=19`. Ledger: client −10, adviser +8, platform +2.
+2. Reverse with empty body → `400 "A reason is required to reverse a settled deduction"`.
+3. Reverse with whitespace-only reason → `400 same`.
+4. Reverse with valid reason → `200 status=reversed, reversalTransactionId=20`. Ledger now balanced: client +10, adviser −8, platform −2. Net per-user ledger sums = 0 for both client (1) and adviser (12).
+5. Re-reverse the same deduction → `200`, returns the existing reversed row, NO additional transaction or ledger entries (verified: `fee_deduction_1*` keys = 2, ledger entries for tx 19+20 = 6).
+6. Reverse non-existent id → `404`. Reverse invalid id → `400`.
+7. Audit logs show `fee_deduction_settled` followed by `fee_deduction_reversed` for entity_id=1.
+
+**Hard rules unchanged**: history append-only (NO update of `settled_*` columns); only the `settled` state can transition to `reversed`; reversal is an admin-triggered, single-shot action protected by per-deduction deterministic idempotency key on the transactions row.
+
 ## Recent Changes (April 2026) — Build #3: Transaction lifecycle safety test
 
 A standalone test script that proves the integrity rails the deposit/withdraw money paths rely on, before any fee-engine money-movement work resumes. Hard-stop gate: if any of these fail, do not proceed to Gate B.

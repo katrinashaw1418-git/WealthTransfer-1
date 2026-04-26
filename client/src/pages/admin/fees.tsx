@@ -35,7 +35,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2, Clock, AlertCircle, Search, X } from "lucide-react";
+import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2, Clock, AlertCircle, Search, X, Undo2 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
@@ -152,6 +161,11 @@ interface FeeDeductionRow {
   settledAt: string | null;
   settledTransactionId: number | null;
   failureReason: string | null;
+  // Task #33 — reversal fields
+  reversedAt: string | null;
+  reversedByUserId: number | null;
+  reversedReason: string | null;
+  reversalTransactionId: number | null;
   createdAt: string;
 }
 
@@ -425,6 +439,57 @@ export default function AdminFeesPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
     } catch (err: any) {
       toast({ title: "Approve failed", description: err?.message ?? String(err), variant: "destructive" });
+    }
+  }
+
+  // -------- Reverse settled deduction (Task #33) --------
+  const [reverseTarget, setReverseTarget] = useState<FeeDeductionRow | null>(null);
+  const [reverseReason, setReverseReason] = useState("");
+  const [reverseSubmitting, setReverseSubmitting] = useState(false);
+
+  function openReverseDialog(row: FeeDeductionRow) {
+    setReverseTarget(row);
+    setReverseReason("");
+  }
+  function closeReverseDialog() {
+    if (reverseSubmitting) return;
+    setReverseTarget(null);
+    setReverseReason("");
+  }
+  async function submitReverse() {
+    if (!reverseTarget) return;
+    const trimmed = reverseReason.trim();
+    if (!trimmed) {
+      toast({
+        title: "Reason required",
+        description: "Tell future-you why this deduction was reversed.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setReverseSubmitting(true);
+    try {
+      await apiRequest(
+        "POST",
+        `/api/admin/fee-deductions/${reverseTarget.id}/reverse`,
+        { reason: trimmed },
+      );
+      toast({
+        title: "Deduction reversed",
+        description:
+          "Opposite ledger triple posted to a new transaction. Client credited; adviser + platform debited.",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
+      setReverseTarget(null);
+      setReverseReason("");
+    } catch (err: any) {
+      toast({
+        title: "Reverse failed",
+        description: err?.message ?? String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setReverseSubmitting(false);
     }
   }
 
@@ -908,7 +973,36 @@ export default function AdminFeesPage() {
                           </Badge>
                         </TableCell>
                         <TableCell className="text-xs">
-                          {d.status === "settled" && d.settledAt ? (
+                          {d.status === "reversed" ? (
+                            <div data-testid={`text-reversed-${d.id}`}>
+                              <div className="flex items-center gap-1">
+                                <Badge variant="destructive" className="text-[10px]">
+                                  reversed
+                                </Badge>
+                                {d.reversedAt && (
+                                  <span>{d.reversedAt.slice(0, 10)}</span>
+                                )}
+                              </div>
+                              <div className="text-muted-foreground">
+                                settle tx#{d.settledTransactionId ?? "—"} →
+                                reversal tx#
+                                <span data-testid={`text-reversal-tx-${d.id}`}>
+                                  {d.reversalTransactionId ?? "—"}
+                                </span>
+                              </div>
+                              {d.reversedReason && (
+                                <div
+                                  className="text-muted-foreground italic mt-0.5"
+                                  title={d.reversedReason}
+                                  data-testid={`text-reversed-reason-${d.id}`}
+                                >
+                                  "{d.reversedReason.length > 60
+                                    ? `${d.reversedReason.slice(0, 60)}…`
+                                    : d.reversedReason}"
+                                </div>
+                              )}
+                            </div>
+                          ) : d.status === "settled" && d.settledAt ? (
                             <div data-testid={`text-settled-${d.id}`}>
                               <div>{d.settledAt.slice(0, 10)}</div>
                               <div className="text-muted-foreground">
@@ -939,6 +1033,17 @@ export default function AdminFeesPage() {
                               {d.failureReason ? "Retry" : "Approve & settle"}
                             </Button>
                           )}
+                          {d.status === "settled" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => openReverseDialog(d)}
+                              data-testid={`button-reverse-${d.id}`}
+                            >
+                              <Undo2 className="h-4 w-4 mr-1" />
+                              Reverse
+                            </Button>
+                          )}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -949,6 +1054,69 @@ export default function AdminFeesPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog
+        open={reverseTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) closeReverseDialog();
+        }}
+      >
+        <DialogContent data-testid="dialog-reverse">
+          <DialogHeader>
+            <DialogTitle>Reverse settled deduction #{reverseTarget?.id}</DialogTitle>
+            <DialogDescription>
+              This will post the OPPOSITE balanced ledger triple against a NEW
+              transaction (history is never edited): the client will be credited{" "}
+              <strong>
+                {reverseTarget?.totalAccrued} {reverseTarget?.currency}
+              </strong>
+              , and the adviser + platform fee account will be debited their
+              respective shares. The deduction's status will become{" "}
+              <strong>reversed</strong>.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <Label htmlFor="reverse-reason">
+              Reason <span className="text-red-600">*</span>
+            </Label>
+            <Textarea
+              id="reverse-reason"
+              data-testid="textarea-reverse-reason"
+              value={reverseReason}
+              onChange={(e) => setReverseReason(e.target.value)}
+              placeholder="e.g. wrong amount, disputed by client, adviser left mid-period"
+              rows={4}
+              maxLength={1000}
+              disabled={reverseSubmitting}
+            />
+            <p className="text-xs text-muted-foreground">
+              Required. Stored on the deduction row and in the audit log so
+              future-you (or compliance) can see why this was unwound.
+            </p>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={closeReverseDialog}
+              disabled={reverseSubmitting}
+              data-testid="button-reverse-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={submitReverse}
+              disabled={reverseSubmitting || !reverseReason.trim()}
+              data-testid="button-reverse-confirm"
+            >
+              <Undo2 className="h-4 w-4 mr-1" />
+              {reverseSubmitting ? "Reversing…" : "Reverse deduction"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -2683,4 +2683,81 @@ export function registerAdminRoutes(app: Express): void {
       return settled;
     }),
   );
+
+  // -------------------------------------------------------------------------
+  // TASK #33 — Reverse a settled deduction.
+  //   POST /api/admin/fee-deductions/:id/reverse
+  //   Body: { reason: string }   (required, non-empty, ≤1000 chars)
+  //
+  // Posts the OPPOSITE balanced ledger triple against a NEW transactions row
+  // and flips the deduction to status='reversed'. The original `settled_*`
+  // columns are NEVER edited — history is append-only; the reversal pointer
+  // lives in `reversal_transaction_id`.
+  //
+  // Audit log row is written for both success ('fee_deduction_reversed') and
+  // failure ('fee_deduction_reverse_failed') so the operator trail is
+  // continuous even when the underlying DB transaction rolled back.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/admin/fee-deductions/:id/reverse",
+    adminRoute(async (req, auth) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid deduction id"), { status: 400 });
+      }
+      const reason =
+        typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+      if (!reason) {
+        throw Object.assign(
+          new Error("A reason is required to reverse a settled deduction"),
+          { status: 400 },
+        );
+      }
+
+      const { reverseSettledDeduction } = await import("./services/fee-engine");
+      let reversed;
+      try {
+        reversed = await reverseSettledDeduction({
+          deductionId: id,
+          reverserUserId: auth.userId,
+          reason,
+        });
+      } catch (err: any) {
+        await auditTx(
+          db,
+          auth.userId,
+          "fee_deduction_reverse_failed",
+          "adviser_fee_deduction",
+          String(id),
+          {
+            reason,
+            error: err?.message ? String(err.message) : String(err),
+            status: err?.status ?? null,
+          },
+          req.ip ?? null,
+        );
+        throw err;
+      }
+
+      await auditTx(
+        db,
+        auth.userId,
+        "fee_deduction_reversed",
+        "adviser_fee_deduction",
+        String(id),
+        {
+          reason,
+          reversalTransactionId: reversed.reversalTransactionId,
+          settledTransactionId: reversed.settledTransactionId,
+          totalAccrued: reversed.totalAccrued,
+          adviserShareAmount: reversed.adviserShareAmount,
+          platformShareAmount: reversed.platformShareAmount,
+          currency: reversed.currency,
+          status: reversed.status,
+        },
+        req.ip ?? null,
+      );
+      return reversed;
+    }),
+  );
 }

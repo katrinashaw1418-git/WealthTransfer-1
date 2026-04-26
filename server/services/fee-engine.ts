@@ -2,9 +2,14 @@
 // SESSION 23A — 10C ADVISER FEE ENGINE — GATE A SCAFFOLD
 // SESSION 23B — GATE B unlock: settlement of approved deductions wires real
 //   wallet/ledger postings via server/services/ledger.ts.
+// TASK #33 — REVERSAL: an admin-initiated unwind of a settled deduction. Posts
+//   the OPPOSITE balanced ledger triple against a NEW transactions row using a
+//   deterministic `fee_deduction_<id>_reversal` idempotency key. The original
+//   settled_* fields on the deduction are NEVER edited — history is append-
+//   only; the reversal pointer lives in `reversal_transaction_id`.
 // -----------------------------------------------------------------------------
 // Gate A invariants that REMAIN in force everywhere except the explicit
-// settlement entry-point below:
+// settlement / reversal entry-points below:
 //   - NO automatic / scheduled processing. Every accrual / deduction run
 //     stays admin-triggered.
 //   - The accrual + deduction-generation paths still MUST NOT touch any
@@ -710,6 +715,251 @@ export async function settleApprovedDeduction(opts: {
     }
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 5b. reverseSettledDeduction — TASK #33 entry-point.
+//   Mirrors `settleApprovedDeduction` but posts the OPPOSITE balanced ledger
+//   triple against a NEW transactions row. The original `settled_*` columns
+//   on the deduction are NEVER edited — history is append-only. Reversal
+//   metadata (reversedAt, reversedByUserId, reversedReason,
+//   reversalTransactionId) is populated atomically inside the same DB
+//   transaction as the reversing ledger pair.
+//
+//   Flow (single DB transaction):
+//     1. Lock the deduction row FOR UPDATE.
+//     2. Idempotency / state checks:
+//          - already reversed → return existing row unchanged
+//          - not currently 'settled' → 409
+//          - missing settledTransactionId (defensive) → 500-shaped throw
+//     3. Insert a NEW transactions row with the deterministic reversal key
+//        `fee_deduction_<id>_reversal`. UNIQUE(idempotency_key) on
+//        transactions is the safety net for a competing concurrent retry.
+//     4. Resolve the same three accounts (client, adviser, fee).
+//     5. Post the OPPOSITE balanced triple:
+//          CREDIT client(currency)              totalAccrued
+//          DEBIT  adviser(currency)             adviserShareAmount
+//          DEBIT  platform fee(currency)        (totalAccrued - adviserShareAmount)
+//        Platform leg is computed as `total - adviser` so any 4dp rounding
+//        drift between the two stored shares is absorbed there and the
+//        triple always balances; postLedgerEntries enforces this anyway.
+//     6. Refresh the wallet cache for both the client and the adviser.
+//     7. Update the deduction: status='reversed', reversedAt,
+//        reversedByUserId, reversedReason, reversalTransactionId.
+//        Conditional WHERE re-asserts status='settled' under the row lock.
+//
+//   On ANY error the transaction rolls back: no transactions row, no ledger
+//   entries, no wallet cache change, no status flip — the deduction stays
+//   `settled` and is safe to retry. The deterministic reversal idempotency
+//   key prevents double-posting on retry.
+// ---------------------------------------------------------------------------
+function reversalIdempotencyKey(deductionId: number): string {
+  return `fee_deduction_${deductionId}_reversal`;
+}
+
+export async function reverseSettledDeduction(opts: {
+  deductionId: number;
+  reverserUserId: number;
+  reason: string;
+}): Promise<AdviserFeeDeduction> {
+  const reason = (opts.reason ?? "").trim();
+  if (!reason) {
+    throw Object.assign(new Error("Reversal reason is required"), { status: 400 });
+  }
+  if (reason.length > 1000) {
+    throw Object.assign(
+      new Error("Reversal reason must be 1000 characters or fewer"),
+      { status: 400 },
+    );
+  }
+
+  const idemKey = reversalIdempotencyKey(opts.deductionId);
+
+  return await db.transaction(async (tx) => {
+    // (1) Lock the deduction row.
+    const [deduction] = await (tx as any)
+      .select()
+      .from(adviserFeeDeductions)
+      .where(eq(adviserFeeDeductions.id, opts.deductionId))
+      .for("update");
+
+    if (!deduction) {
+      throw Object.assign(new Error("Deduction not found"), { status: 404 });
+    }
+
+    // (2) Idempotency / state checks.
+    if (deduction.status === "reversed") {
+      return deduction;
+    }
+    if (deduction.status !== "settled") {
+      throw Object.assign(
+        new Error(
+          `Only settled deductions can be reversed (current status: '${deduction.status}')`,
+        ),
+        { status: 409 },
+      );
+    }
+    if (!deduction.settledTransactionId) {
+      throw Object.assign(
+        new Error(
+          "Deduction is marked settled but has no settledTransactionId — refusing to reverse",
+        ),
+        { status: 500 },
+      );
+    }
+
+    const total = Number(deduction.totalAccrued);
+    const adviserShare = Number(deduction.adviserShareAmount);
+    if (!(total > 0)) {
+      throw Object.assign(
+        new Error("Deduction totalAccrued must be > 0 to reverse"),
+        { status: 400 },
+      );
+    }
+    if (adviserShare < 0 || adviserShare > total) {
+      throw Object.assign(
+        new Error(
+          `adviserShareAmount (${adviserShare}) is outside [0, totalAccrued (${total})]`,
+        ),
+        { status: 400 },
+      );
+    }
+    const platformShare = Number((total - adviserShare).toFixed(8));
+
+    // (3) Insert the reversal transactions row with the deterministic key.
+    // A competing concurrent retry will lose the unique-violation race here
+    // and surface as a 23505 / 5xx — the caller can simply re-fetch and see
+    // the deduction in 'reversed' state.
+    const [txRow] = await (tx as any)
+      .insert(transactions)
+      .values({
+        userId: deduction.clientUserId,
+        type: "adviser_fee_deduction_reversal",
+        fromCurrency: deduction.currency,
+        toCurrency: null,
+        amount: toAmount8(total),
+        fee: "0.00000000",
+        exchangeRate: null,
+        status: "completed",
+        settlementStatus: "internal_only",
+        description:
+          `Reversal of adviser fee deduction #${deduction.id} ` +
+          `(${deduction.periodStart.toISOString().slice(0, 10)} → ` +
+          `${deduction.periodEnd.toISOString().slice(0, 10)})`,
+        sourceExchange: null,
+        blockchainTxHash: null,
+        idempotencyKey: idemKey,
+        metadata: {
+          kind: "adviser_fee_deduction_reversal",
+          deductionId: deduction.id,
+          reversesTransactionId: deduction.settledTransactionId,
+          adviserUserId: deduction.adviserUserId,
+          clientUserId: deduction.clientUserId,
+          adviserShareAmount: deduction.adviserShareAmount,
+          platformShareAmount: deduction.platformShareAmount,
+          accrualIds: deduction.accrualIds,
+          reason,
+        } as any,
+      })
+      .returning();
+
+    // (4 + 5) Resolve accounts + post the OPPOSITE balanced triple.
+    const clientAccount = await getOrCreateClientAccount(
+      deduction.clientUserId,
+      deduction.currency,
+      tx,
+    );
+    const adviserAccount = await getOrCreateClientAccount(
+      deduction.adviserUserId,
+      deduction.currency,
+      tx,
+    );
+    const feeAccount = await getOrCreateFeeAccount(deduction.currency, tx);
+
+    type Entry = {
+      accountId: number;
+      userId: number;
+      currency: string;
+      direction: "debit" | "credit";
+      amount: string;
+      description: string;
+    };
+    const entries: Entry[] = [
+      {
+        accountId: clientAccount.id,
+        userId: deduction.clientUserId,
+        currency: deduction.currency,
+        direction: "credit",
+        amount: toAmount8(total),
+        description: `Adviser fee deduction #${deduction.id} reversal (client credit)`,
+      },
+    ];
+    if (adviserShare > 0) {
+      entries.push({
+        accountId: adviserAccount.id,
+        userId: deduction.adviserUserId,
+        currency: deduction.currency,
+        direction: "debit",
+        amount: toAmount8(adviserShare),
+        description: `Adviser fee deduction #${deduction.id} reversal (adviser debit)`,
+      });
+    }
+    if (platformShare > 0) {
+      entries.push({
+        accountId: feeAccount.id,
+        userId: feeAccount.userId,
+        currency: deduction.currency,
+        direction: "debit",
+        amount: toAmount8(platformShare),
+        description: `Adviser fee deduction #${deduction.id} reversal (platform debit)`,
+      });
+    }
+    if (entries.length < 2) {
+      throw new Error(
+        "Cannot reverse deduction: no positive debit leg (adviser + platform shares both zero)",
+      );
+    }
+    await postLedgerEntries(txRow.id, entries, tx);
+
+    // (6) Refresh wallet cache for everyone whose ledger sum just changed.
+    await refreshWalletCacheBalance(
+      tx,
+      deduction.clientUserId,
+      deduction.currency,
+    );
+    if (adviserShare > 0) {
+      await refreshWalletCacheBalance(
+        tx,
+        deduction.adviserUserId,
+        deduction.currency,
+      );
+    }
+
+    // (7) Mark reversed. Conditional WHERE re-asserts status='settled' under
+    // the row lock — purely defensive.
+    const [updated] = await (tx as any)
+      .update(adviserFeeDeductions)
+      .set({
+        status: "reversed",
+        reversedAt: new Date(),
+        reversedByUserId: opts.reverserUserId,
+        reversedReason: reason,
+        reversalTransactionId: txRow.id,
+      })
+      .where(
+        and(
+          eq(adviserFeeDeductions.id, opts.deductionId),
+          eq(adviserFeeDeductions.status, "settled"),
+        ),
+      )
+      .returning();
+
+    if (!updated) {
+      // Shouldn't happen because we hold the row lock; if it does, abort.
+      throw new Error("Deduction status changed under us during reversal");
+    }
+    return updated;
+  });
 }
 
 // Re-export accrual type for convenience in route handlers that just need

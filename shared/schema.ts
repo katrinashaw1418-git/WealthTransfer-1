@@ -1789,7 +1789,7 @@ export const adviserFeeDeductions = pgTable(
     accrualIds: jsonb("accrual_ids").notNull().default(sql`'[]'::jsonb`),
 
     status: text("status").notNull().default("pending_approval"),
-    // pending_approval | approved | settled | rejected
+    // pending_approval | approved | settled | rejected | reversed
     //
     // SESSION 23B (Gate B): "settled" is the terminal success state after the
     // ledger postings have been written. "approved" is now legacy / transitional
@@ -1797,6 +1797,12 @@ export const adviserFeeDeductions = pgTable(
     // transaction as the ledger pair. A failed posting attempt rolls the row
     // back to pending_approval and records `failureReason` so the admin can
     // retry with full context.
+    //
+    // TASK #33: "reversed" is the terminal state after an admin has explicitly
+    // unwound a settled deduction. The reversal posts the OPPOSITE balanced
+    // ledger triple against a NEW transactions row (the original `settled_*`
+    // fields are NEVER edited — history is append-only); the reversal pointer
+    // lives in `reversal_transaction_id` below.
     approvedByUserId: integer("approved_by_user_id").references(() => users.id),
     approvedAt: timestamp("approved_at"),
     rejectedReason: text("rejected_reason"),
@@ -1815,6 +1821,18 @@ export const adviserFeeDeductions = pgTable(
     // settlement. Purely informational; the source-of-truth recovery signal
     // is `status === 'pending_approval' AND settled_at IS NULL`.
     failureReason: text("failure_reason"),
+
+    // Task #33 — reversal of a settled deduction. All four fields are populated
+    // atomically inside the same DB transaction that posts the reversing ledger
+    // triple, OR all four remain NULL. The reversal transaction has its own
+    // deterministic idempotency key (`fee_deduction_<id>_reversal`) so retries
+    // can never produce a second reversal posting.
+    reversedAt: timestamp("reversed_at"),
+    reversedByUserId: integer("reversed_by_user_id").references(() => users.id),
+    reversedReason: text("reversed_reason"),
+    reversalTransactionId: integer("reversal_transaction_id").references(
+      () => transactions.id,
+    ),
 
     createdAt: timestamp("created_at").defaultNow(),
   },
@@ -1859,6 +1877,10 @@ export const insertAdviserFeeDeductionSchema = createInsertSchema(adviserFeeDedu
   settledTransactionId: true,
   idempotencyKey: true,
   failureReason: true,
+  reversedAt: true,
+  reversedByUserId: true,
+  reversedReason: true,
+  reversalTransactionId: true,
   createdAt: true,
 });
 export type AdviserFeeDeduction = typeof adviserFeeDeductions.$inferSelect;
