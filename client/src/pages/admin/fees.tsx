@@ -182,6 +182,10 @@ interface Paginated<T> {
   limit: number;
   total: number;
   users?: UsersMap;
+  // Task #65 — present on the deductions endpoint only. Global count of
+  // rows currently held for insufficient funds, regardless of the active
+  // filter, so the header counter stays stable as admins toggle filters.
+  heldCount?: number;
 }
 
 // Session 27 (Task #23) — Latest fee accrual run summary surfaced near the
@@ -510,6 +514,15 @@ export default function AdminFeesPage() {
   const debouncedAccrualsSearch = useDebounced(accrualsSearch);
   const debouncedDeductionsSearch = useDebounced(deductionsSearch);
 
+  // -------- Deductions filter / sort state (Task #65) --------
+  // Status filter is server-side; "all" (the sentinel) maps to omitting the
+  // query param. Sort defaults to "newest first" so the table behaves like it
+  // always has unless an admin explicitly switches to held-first triage mode.
+  const [deductionsStatus, setDeductionsStatus] = useState<string>("all");
+  const [deductionsSort, setDeductionsSort] = useState<
+    "created_desc" | "created_asc" | "status_held_first"
+  >("created_desc");
+
   // -------- Queries --------
   const rulesQ = useQuery<Paginated<FeeRuleRow>>({
     queryKey: ["/api/admin/fee-rules", { q: debouncedRulesSearch }],
@@ -542,10 +555,23 @@ export default function AdminFeesPage() {
     refetchInterval: 30_000,
   });
   const deductionsQ = useQuery<Paginated<FeeDeductionRow>>({
-    queryKey: ["/api/admin/fee-deductions", { q: debouncedDeductionsSearch }],
+    queryKey: [
+      "/api/admin/fee-deductions",
+      {
+        q: debouncedDeductionsSearch,
+        status: deductionsStatus,
+        sort: deductionsSort,
+      },
+    ],
     queryFn: () => {
       const params = new URLSearchParams();
       if (debouncedDeductionsSearch.trim()) params.set("q", debouncedDeductionsSearch.trim());
+      if (deductionsStatus && deductionsStatus !== "all") {
+        params.set("status", deductionsStatus);
+      }
+      if (deductionsSort && deductionsSort !== "created_desc") {
+        params.set("sort", deductionsSort);
+      }
       const qs = params.toString();
       return fetchPaginated<Paginated<FeeDeductionRow>>(
         `/api/admin/fee-deductions${qs ? `?${qs}` : ""}`,
@@ -932,22 +958,93 @@ export default function AdminFeesPage() {
           </Card>
 
           <Card>
-            <CardHeader><CardTitle className="text-base">Deductions</CardTitle></CardHeader>
+            <CardHeader>
+              <div className="flex items-start justify-between gap-2">
+                <CardTitle className="text-base">Deductions</CardTitle>
+                {/* Task #65 — global counter of held rows. Always reflects the
+                    real number regardless of the active filter so admins can
+                    see at-a-glance how many top-ups need chasing. */}
+                {deductionsQ.data && (deductionsQ.data.heldCount ?? 0) > 0 && (
+                  <Badge
+                    variant="destructive"
+                    className="shrink-0"
+                    data-testid="badge-held-count"
+                  >
+                    <AlertCircle className="h-3 w-3 mr-1" />
+                    {deductionsQ.data.heldCount}{" "}
+                    {deductionsQ.data.heldCount === 1
+                      ? "deduction held"
+                      : "deductions held"}{" "}
+                    for insufficient funds
+                  </Badge>
+                )}
+              </div>
+            </CardHeader>
             <CardContent>
-              <div className="mb-4">
+              <div className="mb-4 flex flex-wrap items-end gap-3">
                 <SearchBox
                   value={deductionsSearch}
                   onChange={setDeductionsSearch}
                   placeholder="Search by client or adviser name / email"
                   testId="input-search-deductions"
                 />
+                <div>
+                  <Label className="text-xs text-muted-foreground">Status</Label>
+                  <Select
+                    value={deductionsStatus}
+                    onValueChange={(v) => setDeductionsStatus(v)}
+                  >
+                    <SelectTrigger
+                      className="w-[200px]"
+                      data-testid="select-deductions-status"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All statuses</SelectItem>
+                      <SelectItem value="pending_approval">Pending approval</SelectItem>
+                      <SelectItem value="insufficient_funds">
+                        Held — insufficient funds
+                      </SelectItem>
+                      <SelectItem value="settled">Settled</SelectItem>
+                      <SelectItem value="rejected">Rejected</SelectItem>
+                      <SelectItem value="reversed">Reversed</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-xs text-muted-foreground">Sort</Label>
+                  <Select
+                    value={deductionsSort}
+                    onValueChange={(v) =>
+                      setDeductionsSort(
+                        v as "created_desc" | "created_asc" | "status_held_first",
+                      )
+                    }
+                  >
+                    <SelectTrigger
+                      className="w-[220px]"
+                      data-testid="select-deductions-sort"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="created_desc">Newest first</SelectItem>
+                      <SelectItem value="created_asc">Oldest first</SelectItem>
+                      <SelectItem value="status_held_first">
+                        Held first (oldest-held)
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
               {deductionsQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
               ) : deductionsQ.data && deductionsQ.data.items.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                  {debouncedDeductionsSearch.trim()
-                    ? "No deductions match your search."
+                  {debouncedDeductionsSearch.trim() ||
+                  deductionsStatus !== "all"
+                    ? "No deductions match the current filters."
                     : "No deductions yet."}
                 </p>
               ) : (

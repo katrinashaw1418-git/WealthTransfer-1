@@ -2624,6 +2624,17 @@ export function registerAdminRoutes(app: Express): void {
       const adviserId = Number(req.query.adviserUserId);
       const clientId = Number(req.query.clientUserId);
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      // Task #65 — sort modes for the deductions table.
+      //   created_desc       (default) newest first
+      //   created_asc        oldest first
+      //   status_held_first  groups insufficient_funds rows at the top
+      //                      (oldest-held-first within them) so admins can
+      //                      triage top-ups without scanning every page.
+      const sortRaw = typeof req.query.sort === "string" ? req.query.sort.trim() : "";
+      const sort: "created_desc" | "created_asc" | "status_held_first" =
+        sortRaw === "created_asc" || sortRaw === "status_held_first"
+          ? sortRaw
+          : "created_desc";
       const filters: any[] = [];
       if (status) filters.push(eq(adviserFeeDeductions.status, status));
       if (Number.isInteger(adviserId) && adviserId > 0) filters.push(eq(adviserFeeDeductions.adviserUserId, adviserId));
@@ -2631,7 +2642,21 @@ export function registerAdminRoutes(app: Express): void {
       if (q) {
         const ids = await findUserIdsByQuery(q);
         if (ids.length === 0) {
-          return { items: [], page, limit, total: 0, users: {} };
+          // No users matched — short-circuit the listing, but still report
+          // the GLOBAL held count so the header counter stays stable
+          // regardless of the active search/filter (Task #65).
+          const heldRow = await db
+            .select({ count: sql<number>`count(*)::int` })
+            .from(adviserFeeDeductions)
+            .where(eq(adviserFeeDeductions.status, "insufficient_funds"));
+          return {
+            items: [],
+            page,
+            limit,
+            total: 0,
+            users: {},
+            heldCount: Number(heldRow[0]?.count ?? 0),
+          };
         }
         filters.push(
           or(
@@ -2642,18 +2667,37 @@ export function registerAdminRoutes(app: Express): void {
       }
       const where = filters.length ? and(...filters) : undefined;
 
-      const [rows, totalRow] = await Promise.all([
+      const orderBy =
+        sort === "created_asc"
+          ? [asc(adviserFeeDeductions.createdAt)]
+          : sort === "status_held_first"
+            ? [
+                // 0 for held, 1 for everything else, then oldest first within
+                // the held bucket so the longest-stuck top-ups float to the top.
+                sql`CASE WHEN ${adviserFeeDeductions.status} = 'insufficient_funds' THEN 0 ELSE 1 END`,
+                asc(adviserFeeDeductions.createdAt),
+              ]
+            : [desc(adviserFeeDeductions.createdAt)];
+
+      const [rows, totalRow, heldRow] = await Promise.all([
         db
           .select()
           .from(adviserFeeDeductions)
           .where(where as any)
-          .orderBy(desc(adviserFeeDeductions.createdAt))
+          .orderBy(...(orderBy as any))
           .limit(limit)
           .offset(offset),
         db
           .select({ count: sql<number>`count(*)::int` })
           .from(adviserFeeDeductions)
           .where(where as any),
+        // Task #65 — global count of held rows (NOT scoped to the current
+        // status/sort filter) so the header counter stays stable as admins
+        // toggle filters.
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(adviserFeeDeductions)
+          .where(eq(adviserFeeDeductions.status, "insufficient_funds")),
       ]);
       const usersMap = await getUserNameMap(
         rows.flatMap((r) => [r.clientUserId, r.adviserUserId, r.approvedByUserId]),
@@ -2664,6 +2708,7 @@ export function registerAdminRoutes(app: Express): void {
         limit,
         total: Number(totalRow[0]?.count ?? 0),
         users: usersMap,
+        heldCount: Number(heldRow[0]?.count ?? 0),
       };
     }),
   );
