@@ -3069,6 +3069,19 @@ export class MemStorage implements IStorage {
       sourceExchange: insertTransaction.sourceExchange ?? null,
       blockchainTxHash: insertTransaction.blockchainTxHash ?? null,
       createdAt: new Date(),
+      // Track B (Session 7): production-safety fields. MemStorage is legacy /
+      // tests-only — DatabaseStorage is the live path. We initialise these to
+      // null so the type satisfies the shared Transaction shape.
+      idempotencyKey: insertTransaction.idempotencyKey ?? null,
+      externalRef: insertTransaction.externalRef ?? null,
+      externalProvider: insertTransaction.externalProvider ?? null,
+      externalStatus: insertTransaction.externalStatus ?? null,
+      failureReason: insertTransaction.failureReason ?? null,
+      settledAt: insertTransaction.settledAt ?? null,
+      failedAt: insertTransaction.failedAt ?? null,
+      reversedAt: insertTransaction.reversedAt ?? null,
+      metadata: insertTransaction.metadata ?? {},
+      updatedAt: new Date(),
     };
     
     const userTransactions = this.transactions.get(insertTransaction.userId) || [];

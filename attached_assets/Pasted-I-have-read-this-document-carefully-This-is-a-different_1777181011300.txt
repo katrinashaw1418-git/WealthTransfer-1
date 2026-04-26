@@ -1,0 +1,35 @@
+I have read this document carefully. This is a different category of document from everything else in this conversation. It is a technical implementation specification, not a design or compliance discussion. My verification is from a product and compliance perspective rather than a code review.
+
+**What this document is doing and why it matters:**
+
+This document covers three distinct workstreams. Phase 2.3 adds database schema for fee consents, advice acknowledgements, and execution authorisations. Track B adds production safety infrastructure including idempotency, a double-entry ledger, accounts, and transaction state management. The portfolio integrity patch removes fake and modelled data and replaces it with real snapshot-based history.
+
+**What is correct and well-designed:**
+
+The portfolio integrity patch is the most important piece in this document from a compliance and investor trust perspective. Displaying modelled or synthetic performance data to investors is a serious problem. It creates a false impression of returns that did not occur. For a wealth platform targeting HNWIs and potentially wholesale investors under Australian law, showing fabricated performance history is an ASIC risk, not just a UX issue. The patch correctly removes all synthetic generation, replaces modelled P&L with real snapshot comparison, adds an insufficient history state, and blocks performance displays until real data exists. The final rule — no performance number should display unless calculated from real stored snapshots — is exactly right and should be treated as a standing product principle, not just a one-time fix.
+
+The double-entry ledger design in Track B is correct. The core principle — transaction creation does not equal balance change, balance changes only when ledger entries are posted after settlement confirmation — is the right model for a non-custodial platform. It prevents phantom balances appearing before funds are confirmed by the partner institution, which directly supports the beneficial entitlement wording discussed earlier in this conversation.
+
+The idempotency key requirement on money-movement endpoints is correct. Without it, network retries or double-submissions can create duplicate transactions. That is an operational and financial integrity risk.
+
+The transaction state machine with defined valid transitions — pending to processing or failed, processing to settled or failed, settled to reversed, failed and reversed as terminal states — is the right design. It prevents invalid state transitions and makes the audit trail consistent.
+
+The fee consent schema in Phase 2.3 correctly captures renewal windows, consent expiry, withdrawal timestamps, deletion locking, and retention periods. The deletion locked flag and retention until timestamp indicate that whoever designed this understands that financial records cannot be deleted on demand and must be retained under Australian law.
+
+The advice acknowledgement schema correctly captures granular boolean confirmations for each disclosure element — SOA viewed, fees understood, fees consented, values may fall, returns not guaranteed, FSG received. This is the attested checkbox model discussed earlier in this conversation applied at the database level.
+
+**Where I would flag caution:**
+
+The execution authorisation schema stores a snapshot of the compliance gate at the time of authorisation with an explicit note that the actual gate must still be recalculated live in the API before allowing execution. That note is critical and must not be lost. If the gate snapshot is used as the live gate rather than being recalculated, a user could be authorised to execute based on a stale gate state — for example, if their fee consent expired between the snapshot and the execution. The developer implementing the execution API must read that note and implement the live recalculation. It should also appear as a comment in the actual API code, not just in this specification document.
+
+The platform suspense account in the ledger service uses a hardcoded platform user ID of 1 with a comment to replace later. That hardcoded value is acceptable for initial development but must be replaced before any real money moves through the system. It should be tracked as a named technical debt item with a clear owner and deadline, not just a code comment.
+
+The getAccountBalance function calculates balance by summing all ledger entries for an account. For a system with high transaction volume this will become slow without an index on accountId in the ledger entries table. That index should be added at schema creation time, not retrofitted later.
+
+**The most important compliance point in this entire document:**
+
+The portfolio integrity patch's final rule belongs in your product principles document alongside the beneficial entitlement wording and the AFSL disclaimer. The three principles together form your core investor protection posture. First, funds are not held by AMAX — they are held by regulated third-party partners and the balance represents beneficial entitlement. Second, this platform provides general information only and does not constitute personal financial advice. Third, no performance number displays unless calculated from real stored snapshots. Those three rules, written down and enforced consistently across every surface of the platform, are what separates a credible regulated wealth product from a fintech that looks the part.
+
+**Overall verdict:**
+
+The document is technically sound. The portfolio integrity patch is the highest priority item and correctly treats synthetic performance data as a compliance risk rather than a UX issue. The ledger design is correct. The schema designs for fee consents and advice acknowledgements are well-structured. The three cautions I have raised — live gate recalculation enforcement, hardcoded platform user ID, and ledger entry index — are implementation details that should be addressed before the system handles real funds. The standing product principle on performance data display should be formalised in writing alongside the other two investor protection rules.

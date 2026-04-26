@@ -1986,6 +1986,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Track B (Session 7): Derived ledger balance — distinct from /api/wallets.
+  // /api/wallets returns the legacy cached balance (fast UX read).
+  // /api/ledger/balances/:currency returns the SUM of posted ledger entries —
+  // the source of truth for any reconciliation, audit, or compliance review.
+  // The two should always agree once Track B fully replaces the legacy path.
+  // ---------------------------------------------------------------------------
+  app.get("/api/ledger/balances/:currency", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      const { currency } = req.params;
+      if (!currency || !/^[A-Za-z]{3,10}$/.test(currency)) {
+        return res.status(400).json({ error: "Invalid currency code" });
+      }
+      const { getUserCurrencyBalance } = await import("./services/ledger");
+      const balance = await getUserCurrencyBalance(userId, currency);
+      res.json({
+        currency: currency.toUpperCase(),
+        balance,
+        source: "ledger_entries",
+      });
+    } catch (error: any) {
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error("Ledger balance error:", error);
+      res.status(500).json({ error: "Failed to fetch ledger balance" });
+    }
+  });
+
   // Get user transactions
   app.get("/api/transactions", async (req, res) => {
     try {

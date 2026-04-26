@@ -1,0 +1,939 @@
+
+
+Below is Track B — production safety only.
+
+Scope:
+
+idempotency
+accounts
+ledgerEntries
+derived balances
+transaction state validation
+minimal backend helpers
+Do not build custodian webhooks yet.
+Do not build reconciliation yet.
+Do not change advice engine.
+
+Track B.1 — Drizzle schema
+Add to shared/schema.ts.
+
+1. Accounts
+export const accounts = pgTable("accounts", {
+  id: serial("id").primaryKey(),
+
+  userId: integer("user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  currency: text("currency").notNull(),
+
+  accountType: text("account_type").notNull().default("client"),
+  // client | platform_suspense | fee | adjustment
+
+  status: text("status").notNull().default("active"),
+  // active | frozen | closed
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+2. Add fields to existing transactions
+Add these columns to your existing transactions table:
+
+idempotencyKey: text("idempotency_key").unique(),
+
+externalRef: text("external_ref"),
+externalProvider: text("external_provider"),
+externalStatus: text("external_status"),
+
+status: text("status").notNull().default("pending"),
+// pending | processing | settled | failed | reversed
+
+failureReason: text("failure_reason"),
+
+settledAt: timestamp("settled_at"),
+failedAt: timestamp("failed_at"),
+reversedAt: timestamp("reversed_at"),
+
+metadata: jsonb("metadata").default({}),
+updatedAt: timestamp("updated_at").defaultNow(),
+If your existing table already has some of these fields, do not duplicate them. Extend only what is missing.
+
+3. Ledger entries
+export const ledgerEntries = pgTable("ledger_entries", {
+  id: serial("id").primaryKey(),
+
+  transactionId: integer("transaction_id")
+    .references(() => transactions.id)
+    .notNull(),
+
+  accountId: integer("account_id")
+    .references(() => accounts.id)
+    .notNull(),
+
+  userId: integer("user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  currency: text("currency").notNull(),
+
+  direction: text("direction").notNull(),
+  // debit | credit
+
+  amount: numeric("amount", { precision: 18, scale: 8 }).notNull(),
+
+  description: text("description"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+Track B.2 — Insert schemas and types
+Add at bottom of shared/schema.ts.
+
+export const insertAccountSchema = createInsertSchema(accounts);
+export const insertLedgerEntrySchema = createInsertSchema(ledgerEntries);
+
+export type Account = typeof accounts.$inferSelect;
+export type InsertAccount = typeof accounts.$inferInsert;
+
+export type LedgerEntry = typeof ledgerEntries.$inferSelect;
+export type InsertLedgerEntry = typeof ledgerEntries.$inferInsert;
+Track B.3 — Ledger service
+Create:
+
+server/services/ledger.ts
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "../db";
+import { accounts, ledgerEntries, transactions } from "@shared/schema";
+
+type Direction = "debit" | "credit";
+
+type LedgerEntryInput = {
+  accountId: number;
+  userId: number;
+  currency: string;
+  direction: Direction;
+  amount: string;
+  description?: string;
+};
+
+export async function getOrCreateClientAccount(userId: number, currency: string) {
+  const [existing] = await db
+    .select()
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.userId, userId),
+        eq(accounts.currency, currency),
+        eq(accounts.accountType, "client")
+      )
+    )
+    .limit(1);
+
+  if (existing) return existing;
+
+  const [created] = await db
+    .insert(accounts)
+    .values({
+      userId,
+      currency,
+      accountType: "client",
+      status: "active",
+    })
+    .returning();
+
+  return created;
+}
+
+export async function getOrCreateSuspenseAccount(currency: string) {
+  const platformUserId = 1; // replace later with configured platform/system user
+
+  const [existing] = await db
+    .select()
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.userId, platformUserId),
+        eq(accounts.currency, currency),
+        eq(accounts.accountType, "platform_suspense")
+      )
+    )
+    .limit(1);
+
+  if (existing) return existing;
+
+  const [created] = await db
+    .insert(accounts)
+    .values({
+      userId: platformUserId,
+      currency,
+      accountType: "platform_suspense",
+      status: "active",
+    })
+    .returning();
+
+  return created;
+}
+
+export async function getAccountBalance(accountId: number) {
+  const [row] = await db
+    .select({
+      balance: sql<string>`
+        COALESCE(SUM(
+          CASE
+            WHEN ${ledgerEntries.direction} = 'credit'
+              THEN ${ledgerEntries.amount}
+            ELSE -${ledgerEntries.amount}
+          END
+        ), 0)
+      `,
+    })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.accountId, accountId));
+
+  return row?.balance ?? "0";
+}
+
+export async function getUserCurrencyBalance(userId: number, currency: string) {
+  const [row] = await db
+    .select({
+      balance: sql<string>`
+        COALESCE(SUM(
+          CASE
+            WHEN ${ledgerEntries.direction} = 'credit'
+              THEN ${ledgerEntries.amount}
+            ELSE -${ledgerEntries.amount}
+          END
+        ), 0)
+      `,
+    })
+    .from(ledgerEntries)
+    .where(
+      and(
+        eq(ledgerEntries.userId, userId),
+        eq(ledgerEntries.currency, currency)
+      )
+    );
+
+  return row?.balance ?? "0";
+}
+
+export async function postLedgerEntries(
+  transactionId: number,
+  entries: LedgerEntryInput[]
+) {
+  if (entries.length < 2) {
+    throw new Error("Ledger transaction must have at least two entries");
+  }
+
+  const currency = entries[0].currency;
+
+  const totalCredits = entries
+    .filter((e) => e.direction === "credit")
+    .reduce((sum, e) => sum + Number(e.amount), 0);
+
+  const totalDebits = entries
+    .filter((e) => e.direction === "debit")
+    .reduce((sum, e) => sum + Number(e.amount), 0);
+
+  if (currency && entries.some((e) => e.currency !== currency)) {
+    throw new Error("Multi-currency ledger entries require explicit FX transaction handling");
+  }
+
+  if (Math.abs(totalCredits - totalDebits) > 0.00000001) {
+    throw new Error("Ledger entries are not balanced");
+  }
+
+  await db.insert(ledgerEntries).values(
+    entries.map((entry) => ({
+      transactionId,
+      accountId: entry.accountId,
+      userId: entry.userId,
+      currency: entry.currency,
+      direction: entry.direction,
+      amount: entry.amount,
+      description: entry.description,
+    }))
+  );
+}
+Track B.4 — Idempotency helper
+Create:
+
+server/services/idempotency.ts
+import { eq } from "drizzle-orm";
+import { db } from "../db";
+import { transactions } from "@shared/schema";
+
+export function getIdempotencyKey(req: any): string {
+  const key = req.headers["idempotency-key"];
+
+  if (!key || typeof key !== "string") {
+    throw new Error("Missing Idempotency-Key header");
+  }
+
+  if (key.length < 12) {
+    throw new Error("Invalid Idempotency-Key");
+  }
+
+  return key;
+}
+
+export async function findTransactionByIdempotencyKey(key: string) {
+  const [existing] = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, key))
+    .limit(1);
+
+  return existing ?? null;
+}
+Track B.5 — Transaction state machine
+Create:
+
+server/services/transaction-state.ts
+type TransactionStatus =
+  | "pending"
+  | "processing"
+  | "settled"
+  | "failed"
+  | "reversed";
+
+const allowedTransitions: Record<TransactionStatus, TransactionStatus[]> = {
+  pending: ["processing", "failed"],
+  processing: ["settled", "failed"],
+  settled: ["reversed"],
+  failed: [],
+  reversed: [],
+};
+
+export function assertValidTransition(
+  current: TransactionStatus,
+  next: TransactionStatus
+) {
+  if (!allowedTransitions[current]?.includes(next)) {
+    throw new Error(`Invalid transaction transition: ${current} → ${next}`);
+  }
+}
+Track B.6 — Example deposit endpoint pattern
+Use this pattern for any money-movement endpoint.
+
+import { eq } from "drizzle-orm";
+import { transactions } from "@shared/schema";
+import {
+  getIdempotencyKey,
+  findTransactionByIdempotencyKey,
+} from "./services/idempotency";
+import {
+  getOrCreateClientAccount,
+  getOrCreateSuspenseAccount,
+  postLedgerEntries,
+} from "./services/ledger";
+
+app.post("/api/deposits/request", async (req, res) => {
+  try {
+    const { userId } = requireAuth(req);
+    await requireKyc(userId, storage);
+
+    const idempotencyKey = getIdempotencyKey(req);
+
+    const existing = await findTransactionByIdempotencyKey(idempotencyKey);
+    if (existing) {
+      return res.json({
+        success: true,
+        idempotentReplay: true,
+        transaction: existing,
+      });
+    }
+
+    const { amount, currency } = req.body;
+
+    const [tx] = await db
+      .insert(transactions)
+      .values({
+        userId,
+        type: "deposit",
+        amount,
+        currency,
+        status: "pending",
+        idempotencyKey,
+        metadata: {
+          source: "client_request",
+          settlementModel: "partner_confirmed",
+        },
+      })
+      .returning();
+
+    res.status(201).json({
+      success: true,
+      transaction: tx,
+      message:
+        "Deposit request recorded. Partner-issued funding details will be provided separately. Funds are not credited until partner confirmation.",
+    });
+  } catch (error: any) {
+    console.error("Deposit request error:", error);
+    res.status(400).json({ error: error.message ?? "Deposit request failed" });
+  }
+});
+Important: this endpoint creates a pending transaction only.
+It does not create ledger entries yet.
+
+Track B.7 — Example settlement function
+Later, when partner/custodian confirms receipt:
+
+export async function settleDepositTransaction(transactionId: number) {
+  const [tx] = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.id, transactionId))
+    .limit(1);
+
+  if (!tx) throw new Error("Transaction not found");
+
+  if (tx.status === "settled") {
+    return tx;
+  }
+
+  if (tx.status !== "processing" && tx.status !== "pending") {
+    throw new Error(`Cannot settle transaction in status ${tx.status}`);
+  }
+
+  const clientAccount = await getOrCreateClientAccount(tx.userId, tx.currency);
+  const suspenseAccount = await getOrCreateSuspenseAccount(tx.currency);
+
+  await postLedgerEntries(tx.id, [
+    {
+      accountId: clientAccount.id,
+      userId: tx.userId,
+      currency: tx.currency,
+      direction: "credit",
+      amount: tx.amount,
+      description: "Client deposit settled",
+    },
+    {
+      accountId: suspenseAccount.id,
+      userId: suspenseAccount.userId,
+      currency: tx.currency,
+      direction: "debit",
+      amount: tx.amount,
+      description: "Partner confirmed receipt",
+    },
+  ]);
+
+  const [updated] = await db
+    .update(transactions)
+    .set({
+      status: "settled",
+      settledAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(transactions.id, tx.id))
+    .returning();
+
+  return updated;
+}
+Track B.8 — Derived balance endpoint
+app.get("/api/balances/:currency", async (req, res) => {
+  try {
+    const { userId } = requireAuth(req);
+    const { currency } = req.params;
+
+    const balance = await getUserCurrencyBalance(userId, currency.toUpperCase());
+
+    res.json({
+      currency: currency.toUpperCase(),
+      balance,
+      source: "ledger_entries",
+    });
+  } catch (error) {
+    console.error("Balance error:", error);
+    res.status(500).json({ error: "Failed to fetch balance" });
+  }
+});
+Build instruction for Replit
+Track B — production safety only.
+
+Add:
+1. accounts table
+2. ledgerEntries table
+3. missing transaction fields:
+   - idempotencyKey
+   - externalRef
+   - externalProvider
+   - externalStatus
+   - status
+   - failureReason
+   - settledAt
+   - failedAt
+   - reversedAt
+   - metadata
+   - updatedAt
+
+Add:
+- insert schemas and TypeScript types
+- server/services/ledger.ts
+- server/services/idempotency.ts
+- server/services/transaction-state.ts
+- derived balance helper
+- example idempotent deposit request pattern if compatible
+
+Rules:
+- Do not build custodian webhooks yet
+- Do not build reconciliation yet
+- Do not build UI
+- Do not touch advice engine
+- Do not manually update balances
+- Do not create ledger entries until settlement confirmation
+
+Run drizzle-kit generate and drizzle-kit push.
+Stop and confirm.
+Key rule
+Transaction creation ≠ balance change
+Balance changes only when ledger entries are posted after settlement confirmation.
+
+Portfolio integrity patch
+   (remove fake history/P&L/charts + MemStorage → DatabaseStorage + insufficient_history state)
+
+Below is the Portfolio Integrity Patch only.
+
+Scope:
+
+Remove fake historical data
+Remove model-based monthly P&L
+Remove synthetic chart fallback
+Switch snapshots to DatabaseStorage
+Add insufficient_history state
+Do not touch advice engine, ledger, SOA, fee consent, or adviser layer.
+
+1. server/routes.ts — remove fake snapshot seeding
+Find and delete any block like this
+// Seed 365 daily snapshots on first run
+const days = 365;
+const dailyRate = blendedMonthlyRate / 30;
+
+for (let i = days; i >= 0; i--) {
+  const date = new Date();
+  date.setDate(date.getDate() - i);
+
+  const factor = Math.pow(1 + dailyRate, i);
+  const simulatedValue = totalValue / factor;
+
+  await storage.createPortfolioSnapshot({
+    userId,
+    totalValue: simulatedValue.toFixed(2),
+    fiatValue: fiatValue.toFixed(2),
+    cryptoValue: cryptoValue.toFixed(2),
+    stablecoinValue: stablecoinValue.toFixed(2),
+    investmentValue: investmentValue.toFixed(2),
+    snapshotDate: date,
+  });
+}
+Replace with real snapshot-only logic
+// --- Snapshot management ---
+// Only save today's real snapshot. Do not generate fake historical data.
+const today = new Date();
+today.setHours(0, 0, 0, 0);
+
+let allSnapshots = await storage.getPortfolioSnapshots(userId);
+
+const hasToday = allSnapshots.some((snapshot) => {
+  const snapshotDate = new Date(snapshot.snapshotDate);
+  snapshotDate.setHours(0, 0, 0, 0);
+  return snapshotDate.getTime() === today.getTime();
+});
+
+if (!hasToday) {
+  await storage.createPortfolioSnapshot({
+    userId,
+    totalValue: totalValue.toFixed(2),
+    fiatValue: fiatValue.toFixed(2),
+    cryptoValue: cryptoValue.toFixed(2),
+    stablecoinValue: stablecoinValue.toFixed(2),
+    investmentValue: investmentValue.toFixed(2),
+    snapshotDate: new Date(),
+  });
+
+  allSnapshots = await storage.getPortfolioSnapshots(userId);
+}
+2. server/routes.ts — replace model-based monthly P&L
+Delete model-based logic
+const previousMonthValue = totalValue / (1 + blendedMonthlyRate);
+const monthlyPnl = totalValue - previousMonthValue;
+const monthlyPnlPercent =
+  previousMonthValue > 0 ? (monthlyPnl / previousMonthValue) * 100 : 0;
+Replace with snapshot-based logic
+const thirtyDaysAgo = new Date();
+thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+const priorSnapshot = allSnapshots
+  .filter((snapshot) => new Date(snapshot.snapshotDate) <= thirtyDaysAgo)
+  .sort(
+    (a, b) =>
+      new Date(b.snapshotDate).getTime() -
+      new Date(a.snapshotDate).getTime()
+  )[0];
+
+let monthlyPnl = 0;
+let monthlyPnlPercent = 0;
+let monthlyPnlSource: "snapshots" | "insufficient_history" =
+  "insufficient_history";
+
+if (priorSnapshot) {
+  const priorValue = parseFloat(priorSnapshot.totalValue);
+  monthlyPnl = totalValue - priorValue;
+  monthlyPnlPercent =
+    priorValue > 0 ? (monthlyPnl / priorValue) * 100 : 0;
+  monthlyPnlSource = "snapshots";
+}
+Add to portfolio response
+monthlyPnlSource,
+3. server/routes.ts — fix history API
+Remove fallback projection logic
+Delete any fallback using:
+
+Math.pow(...)
+simulatedValue
+projected
+estimated
+fallback projection
+Replace with snapshot-only response
+let dataPoints: Array<{
+  date: string;
+  value: number;
+  timestamp: number;
+}> = [];
+
+const storedSnapshots = await storage.getPortfolioSnapshots(userId);
+
+if (storedSnapshots.length >= 2) {
+  const maxPoints = 22;
+  const step = Math.max(
+    1,
+    Math.floor(storedSnapshots.length / (maxPoints - 1))
+  );
+
+  const thinned = [];
+
+  for (let i = 0; i < storedSnapshots.length - 1; i += step) {
+    thinned.push(storedSnapshots[i]);
+  }
+
+  thinned.push(storedSnapshots[storedSnapshots.length - 1]);
+
+  dataPoints = thinned.map((snapshot) => ({
+    date: new Date(snapshot.snapshotDate).toISOString().split("T")[0],
+    value: Math.round(parseFloat(snapshot.totalValue)),
+    timestamp: new Date(snapshot.snapshotDate).getTime(),
+  }));
+} else {
+  dataPoints = storedSnapshots.map((snapshot) => ({
+    date: new Date(snapshot.snapshotDate).toISOString().split("T")[0],
+    value: Math.round(parseFloat(snapshot.totalValue)),
+    timestamp: new Date(snapshot.snapshotDate).getTime(),
+  }));
+}
+
+const firstValue = dataPoints[0]?.value ?? 0;
+const lastValue = dataPoints[dataPoints.length - 1]?.value ?? firstValue;
+
+const totalReturn = lastValue - firstValue;
+const totalReturnPercent =
+  firstValue > 0 ? (totalReturn / firstValue) * 100 : 0;
+
+res.json({
+  timeframe,
+  data: dataPoints,
+  currentValue: lastValue,
+  totalReturn: totalReturn.toFixed(2),
+  totalReturnPercent: totalReturnPercent.toFixed(2),
+  source: "snapshots",
+  hasSufficientHistory: dataPoints.length >= 2,
+});
+4. server/storage.ts — switch to database storage
+Find
+export const storage = new MemStorage();
+Replace
+export const storage = new DatabaseStorage();
+This is critical. Otherwise snapshots disappear on restart.
+
+5. client/src/components/portfolio-chart.tsx
+Find
+{historyData?.source === "snapshots" ? "Historical estimate" : "Simulated estimate"}
+Replace with
+{historyData?.source === "snapshots"
+  ? historyData?.hasSufficientHistory
+    ? "Historical data"
+    : "Limited history"
+  : "Simulated estimate"}
+Recommended: hide misleading chart when insufficient history
+{historyData?.source === "snapshots" && !historyData?.hasSufficientHistory ? (
+  <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+    <p className="text-sm font-medium text-amber-900">Limited history</p>
+    <p className="mt-1 text-sm text-amber-800">
+      Portfolio history will appear once at least two real snapshots are available.
+    </p>
+  </div>
+) : (
+  <YourExistingChartComponent />
+)}
+6. client/src/pages/portfolio.tsx
+Replace wording
+{monthlyReturn.toFixed(1)}% this month
+with:
+
+{portfolio?.monthlyPnlSource === "snapshots" ? (
+  <span>{monthlyReturn.toFixed(1)}% last 30 days</span>
+) : (
+  <span>Insufficient history</span>
+)}
+7. client/src/pages/wealth-overview.tsx
+Find generic label
+<span>return</span>
+Replace with
+<span>
+  {portfolio?.monthlyPnlSource === "snapshots"
+    ? "last 30 days"
+    : "insufficient history"}
+</span>
+8. client/src/pages/ai-advisory.tsx — remove fake performance chart
+Delete
+const calculatePerformanceData = () => {
+  // modeled / assumed performance data
+};
+
+const performanceData = calculatePerformanceData();
+Replace with
+const performanceData: any[] = [];
+Replace chart JSX with
+<div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+  <p className="text-sm font-medium text-amber-900">Performance unavailable</p>
+  <p className="mt-1 text-sm text-amber-800">
+    This chart previously used modeled assumptions. Re-enable only when connected
+    to real historical portfolio data.
+  </p>
+</div>
+Build instruction for Replit
+Portfolio integrity patch only.
+
+Apply these changes:
+1. Remove fake 365-day snapshot seeding from server/routes.ts
+2. Save only today's real snapshot
+3. Replace model-based monthly P&L with snapshot-based 30-day comparison
+4. Add monthlyPnlSource = "snapshots" | "insufficient_history" to portfolio response
+5. Remove projection/simulation fallback from history API
+6. Return source: "snapshots" and hasSufficientHistory from history API
+7. Switch storage export from MemStorage to DatabaseStorage
+8. Update portfolio chart labels:
+   - Historical data
+   - Limited history
+   - no simulated estimate where no real history exists
+9. Update portfolio / wealth overview wording:
+   - "last 30 days" only when monthlyPnlSource is snapshots
+   - otherwise "insufficient history"
+10. Remove fake AI advisory performance chart and show Performance unavailable notice
+
+Do not touch:
+- advice engine schema
+- fee consent
+- SOA
+- adviser layer
+- ledger/accounting
+- reconciliation
+
+Run build and confirm.
+Expected result
+Fake historical data: removed
+Fake monthly P&L: removed
+Synthetic chart fallback: removed
+Misleading labels: fixed
+Snapshots: real only
+Storage: database-backed
+History state: insufficient_history when real data is insufficient
+Final rule:
+
+No performance number should display unless it is calculated from real stored snapshots.
+
+
+Pasted text(94).txt
+Document
+
+This is a very strong document overall — but there are a few places where you need to tighten it before this becomes production-grade.
+
+I’ll give you a clean, institutional verification — not repeating what’s already obvious, just what actually matters.
+
+✅ Overall verdict
+Architecture:        ✔ Correct
+Compliance posture:  ✔ Strong
+Data integrity:      ✔ Fixed (major improvement)
+Production safety:   ⚠️ Almost there (needs 3 fixes)
+The document is coherent across all layers (advice + ledger + portfolio), which is rare.
+
+🟢 1. What is done correctly (keep as-is)
+A. Portfolio integrity patch (most important)
+This is the single biggest upgrade in your entire system.
+
+✔ synthetic history removed
+✔ model-based P&L removed
+✔ chart fallback removed
+✔ insufficient_history state added
+✔ snapshot-only logic enforced
+👉 This moves you from:
+
+“demo-grade fintech”
+→ “regulator-safe wealth platform”
+This principle must be permanent:
+
+No performance number unless derived from real stored data
+B. Ledger architecture (correct foundation)
+✔ double-entry
+✔ derived balances
+✔ no balance mutation
+✔ settlement-based posting
+This aligns perfectly with:
+
+non-custodial model + beneficial entitlement
+C. Idempotency
+✔ required on all money endpoints
+✔ prevents duplicate execution
+Without this, your system would break under retries.
+
+D. Transaction state machine
+pending → processing → settled
+pending → failed
+settled → reversed
+✔ Clean
+✔ auditable
+✔ regulator defensible
+
+E. Advice / fee / acknowledgement schemas
+✔ granular confirmations
+✔ retention flags
+✔ withdrawal tracking
+✔ renewal windows
+👉 This is AFSL-ready data structure
+
+🔴 2. The 3 real issues you must fix
+These are not optional.
+
+❗ Issue 1 — Execution gate (CRITICAL)
+From the document:
+
+executionAuthorisations stores gate snapshot
+BUT must be recalculated live
+👉 This is correct in theory, but dangerous in practice.
+
+Risk
+Fee consent expires AFTER snapshot
+→ system still allows execution
+→ compliance breach
+✅ Fix (must implement later)
+Never trust stored flags:
+
+function canExecute(adviceRecordId) {
+  const advice = getAdviceRecord(adviceRecordId);
+  const feeConsent = getActiveFeeConsent(adviceRecordId);
+
+  return (
+    advice.soaIssued &&
+    (advice.soaViewed || advice.soaDownloaded) &&
+    advice.adviceAccepted &&
+    feeConsent?.status === "active" &&
+    feeConsent.consentExpiryDate > now()
+  );
+}
+👉 The DB flags are audit, not authority
+
+❗ Issue 2 — Hardcoded platform account
+const platformUserId = 1;
+👉 This is dangerous if left in.
+
+Risk
+Wrong account ownership
+Cross-user contamination
+Audit failure
+✅ Fix
+Create a system config:
+
+SYSTEM_ACCOUNTS = {
+  PLATFORM_SUSPENSE_USER_ID: env.PLATFORM_USER_ID
+}
+Or:
+
+Dedicated system_accounts table
+❗ Issue 3 — Ledger performance (hidden scaling issue)
+Your balance query:
+
+SUM(ledger_entries)
+👉 Works now, breaks later.
+
+✅ Fix (add immediately)
+Add index:
+
+index("ledger_account_idx").on(ledgerEntries.accountId)
+Optional (later):
+
+materialised balance table (cached)
+🟡 3. Subtle but important refinement
+Reconciliation (not yet built)
+You mentioned it earlier — it is missing from implementation.
+
+Without it:
+
+ledger ≠ custodian
+→ silent drift
+→ financial loss
+Minimum version you need
+daily job:
+- fetch internal balances
+- fetch custodian balances
+- compare
+- log difference
+🧠 4. The 3 product principles (lock these in)
+This document implicitly defines them — make them explicit:
+
+Principle 1 — Non-custodial truth
+AMAX does not hold client funds.
+Balances represent beneficial entitlement held with regulated partners.
+Principle 2 — Advice boundary
+Platform provides general information unless a compliant advice process is completed.
+Principle 3 — Performance truth (NEW — from your patch)
+No performance data is shown unless derived from real historical snapshots.
+👉 These 3 together define your regulatory posture
+
+🔒 5. What you must NOT break later
+❌ Never reintroduce “estimated returns”
+❌ Never simulate history
+❌ Never allow execution without live gate check
+❌ Never write ledger entries before settlement
+❌ Never store balances manually
+🟢 Final position
+Portfolio integrity:     ✔ fixed (major win)
+Advice engine:           ✔ structured correctly
+Ledger architecture:     ✔ correct
+Production readiness:    ⚠️ needs 3 fixes
+🚦 What to do next (clear)
+1. Lock in portfolio integrity patch (done)
+2. Implement Track B (ledger + idempotency)
+3. Add execution gate LIVE validation
+4. Remove hardcoded platform account
+5. Add ledger index
+6. Add reconciliation job (next step)
+Bottom line
+You’ve crossed an important line:
+
+From:
+“feature-based fintech”
+
+To:
+“system-of-record financial platform”
+That means:
+
+correctness > features
+auditability > UX
+truth > convenience
+If you want next step, I’ll give you:
+
+👉 reconciliation cron job (exact code)
+👉 webhook idempotency handler
+👉 failure simulation script
+Those are what make this actually safe in production.
+
+
+

@@ -74,13 +74,37 @@ export const transactions = pgTable("transactions", {
   amount: decimal("amount", { precision: 15, scale: 8 }).notNull(),
   fee: decimal("fee", { precision: 15, scale: 8 }).notNull(),
   exchangeRate: decimal("exchange_rate", { precision: 15, scale: 8 }),
-  status: text("status").notNull(), // pending, completed, failed, cancelled
+  // Legacy status vocabulary (pending|completed|failed|cancelled) is preserved for existing
+  // wallet routes. New ledger-aware money-movement code paths use the Track B state machine
+  // (pending → processing → settled → failed → reversed) — see server/services/transaction-state.ts.
+  status: text("status").notNull(),
   // Explicit labeling — prevents UI/regulator confusion. "internal_only" = no external settlement.
   settlementStatus: text("settlement_status").notNull().default("internal_only"),
   description: text("description").notNull(),
   sourceExchange: text("source_exchange"), // binance, coinbase, etc.
   blockchainTxHash: text("blockchain_tx_hash"), // transaction hash for blockchain transfers
   createdAt: timestamp("created_at").defaultNow(),
+
+  // --- Track B (Session 7): production-safety fields ---
+  // Per-transaction idempotency key supplied by the client (or webhook). UNIQUE so duplicate
+  // submissions return the original transaction instead of creating a second one. Distinct from
+  // the per-user/per-route `idempotencyKeys` table below — that one is route-level dedup, this
+  // is transaction-level dedup that survives even if the request hits a different route.
+  idempotencyKey: text("idempotency_key").unique(),
+  // External partner / custodian reference — populated when funds are confirmed by the partner.
+  externalRef: text("external_ref"),
+  externalProvider: text("external_provider"),
+  externalStatus: text("external_status"),
+  failureReason: text("failure_reason"),
+  // Lifecycle timestamps for the Track B state machine. Each one is set when the corresponding
+  // state transition occurs and is never updated afterwards (audit-safe).
+  settledAt: timestamp("settled_at"),
+  failedAt: timestamp("failed_at"),
+  reversedAt: timestamp("reversed_at"),
+  // Free-form structured metadata for audit/diagnostics — settlement model, partner correlation
+  // ids, retry counts, etc. NEVER store balances or money amounts here — those go in ledger_entries.
+  metadata: jsonb("metadata").$type<Record<string, any>>().default({}),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 export const fxRates = pgTable("fx_rates", {
@@ -897,3 +921,74 @@ export const insertExecutionAuthorisationSchema = createInsertSchema(executionAu
 });
 export type ExecutionAuthorisation = typeof executionAuthorisations.$inferSelect;
 export type InsertExecutionAuthorisation = z.infer<typeof insertExecutionAuthorisationSchema>;
+
+// =============================================================================
+// SESSION 7 — TRACK B: PRODUCTION-SAFETY LEDGER (idempotency + double-entry)
+// =============================================================================
+// Foundation for non-custodial money movement. Core principles:
+//   1. Transaction creation ≠ balance change. Balances change ONLY when ledger
+//      entries are posted after settlement confirmation from the partner.
+//   2. Balances are DERIVED (SUM(credit) - SUM(debit)) — never stored, never
+//      mutated. The ledger is append-only.
+//   3. Every money endpoint requires an Idempotency-Key header.
+// =============================================================================
+
+// Accounts — one row per (userId, currency, accountType). Distinct from `wallets`
+// (which is a fast/cached display balance for the existing UX layer). Accounts back
+// the new ledger; wallets remain in place for legacy code paths.
+export const accounts = pgTable("accounts", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  currency: text("currency").notNull(),
+  // client | platform_suspense | fee | adjustment
+  accountType: text("account_type").notNull().default("client"),
+  // active | frozen | closed
+  status: text("status").notNull().default("active"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  // One account per (user, currency, type) — prevents accidental duplicates that would
+  // silently split a user's balance across two rows.
+  userCurrencyTypeIdx: uniqueIndex("accounts_user_currency_type_uidx").on(
+    table.userId, table.currency, table.accountType
+  ),
+}));
+
+// Ledger entries — append-only double-entry. Every settlement event posts a
+// matching debit + credit pair (or more) that sum to zero per currency.
+export const ledgerEntries = pgTable("ledger_entries", {
+  id: serial("id").primaryKey(),
+  transactionId: integer("transaction_id").references(() => transactions.id).notNull(),
+  accountId: integer("account_id").references(() => accounts.id).notNull(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  currency: text("currency").notNull(),
+  // debit | credit
+  direction: text("direction").notNull(),
+  // 18,8 supports both fiat (e.g. AUD) and crypto (e.g. BTC) precisions.
+  amount: decimal("amount", { precision: 18, scale: 8 }).notNull(),
+  description: text("description"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  // Reviewer fix #3 — index on accountId so the SUM(...) balance query stays fast as the
+  // ledger grows. Without this, every getAccountBalance() becomes a full table scan.
+  accountIdx: index("ledger_entries_account_idx").on(table.accountId),
+  // Per-user/per-currency balance roll-up index — used by /api/ledger/balances/:currency.
+  userCurrencyIdx: index("ledger_entries_user_currency_idx").on(table.userId, table.currency),
+  // Transaction → entries lookup (for displaying a transaction's posting detail).
+  transactionIdx: index("ledger_entries_transaction_idx").on(table.transactionId),
+}));
+
+export const insertAccountSchema = createInsertSchema(accounts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type Account = typeof accounts.$inferSelect;
+export type InsertAccount = z.infer<typeof insertAccountSchema>;
+
+export const insertLedgerEntrySchema = createInsertSchema(ledgerEntries).omit({
+  id: true,
+  createdAt: true,
+});
+export type LedgerEntry = typeof ledgerEntries.$inferSelect;
+export type InsertLedgerEntry = z.infer<typeof insertLedgerEntrySchema>;

@@ -14,6 +14,79 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 7 (Track B + Phase 2.4 Live Execution Gate)
+
+This session lands two pieces of foundational infrastructure that were missing before any real money could move through the platform:
+
+### Track B — production-safety ledger
+
+Schema additions to `shared/schema.ts`:
+1. **`accounts`** new table (7 cols) — one row per `(userId, currency, accountType)`. `accountType` is `client | platform_suspense | fee | adjustment`; `status` is `active | frozen | closed`. `UNIQUE INDEX accounts_user_currency_type_uidx` prevents accidentally splitting a user's balance across two duplicate rows.
+2. **`ledgerEntries`** new table (9 cols) — append-only double-entry. Each settlement event posts a balanced set of `debit | credit` entries that sum to zero per currency. Three indexes for query performance:
+   - `ledger_entries_account_idx` on `accountId` — **reviewer fix #3**, makes `SUM(...)` balance queries fast as the ledger grows.
+   - `ledger_entries_user_currency_idx` on `(userId, currency)` — used by `/api/ledger/balances/:currency`.
+   - `ledger_entries_transaction_idx` on `transactionId` — for transaction → posting-detail lookups.
+3. **`transactions`** extended with 10 new fields without touching the existing 14: `idempotencyKey` (UNIQUE — distinct from the per-route `idempotencyKeys` table; this is transaction-level dedup that survives across routes), `externalRef`, `externalProvider`, `externalStatus`, `failureReason`, `settledAt`, `failedAt`, `reversedAt`, `metadata` (jsonb default `'{}'`), `updatedAt` (default `now()`). Existing `status` field is **deliberately not modified** — legacy wallet routes keep their `pending|completed|failed|cancelled` vocabulary; the new Track B vocabulary (`pending|processing|settled|failed|reversed`) lives in the state-machine helper for new code paths only.
+4. Insert schemas + select/insert types via `createInsertSchema(...).omit(...)` for `accounts` and `ledgerEntries`.
+
+Service files (`server/services/`):
+1. **`ledger.ts`** — `getOrCreateClientAccount`, `getOrCreateSuspenseAccount`, `getAccountBalance` (derived from `SUM(credits) - SUM(debits)` — never stored, never mutated), `getUserCurrencyBalance`, `postLedgerEntries` (validates ≥ 2 entries, single currency, balanced to within `1e-8`). **Reviewer fix #2:** the platform suspense account user is resolved at runtime from `process.env.PLATFORM_USER_ID` and **throws hard** if unset or not a positive integer — refuses to fall back to a hardcoded `1`, because a wrong owner here silently mixes platform suspense funds into a real user's audit trail.
+2. **`idempotency.ts`** — `getIdempotencyKey(req)` (validates header presence, length ≥ 12, charset `[A-Za-z0-9_\-:.]`), `findTransactionByIdempotencyKey(key)`.
+3. **`transaction-state.ts`** — explicit transition matrix for the Track B vocabulary; `assertValidTransition`, `isValidTransition`, `isTerminal`. `failed` and `reversed` are terminal; reversals must post an opposing journal against a NEW transaction row (no in-place edits).
+
+Route addition (`server/routes.ts`):
+- `GET /api/ledger/balances/:currency` — returns `{currency, balance, source: "ledger_entries"}` from the SUM. Distinct from `/api/wallets` (legacy cached display balance). Once Track B fully replaces the legacy path, the two should always agree (a future reconciliation job will alert when they don't).
+
+Explicitly **out of scope** for this session and deferred (per spec "if compatible"):
+- Custodian webhooks
+- Reconciliation cron job
+- Wiring an example `/api/deposits/request` route — the existing `transactions.fee` and `transactions.description` are NOT NULL so the spec's example pattern would not compile against this schema; defer until the deposit flow is designed end-to-end.
+
+### Phase 2.4 — live execution gate
+
+New service file `server/services/execution-gate.ts`:
+- **`canExecute(adviceRecordId)`** — re-evaluates the four compliance gates **at the moment of every execution attempt** by reading live state: `adviceRecords.soaIssued`, `(soaViewed || soaDownloaded)`, `adviceAccepted`, plus the most recent `feeConsents` row's `renewalStatus === "active"` and `consentExpiryDate > now()`. Returns a discriminated union — either `{allowed: true, gate: {...}}` (with the live values used) or `{allowed: false, reason: <enum>, detail: <string>}`. The seven failure reasons (`advice_record_not_found`, `soa_not_issued`, `soa_not_viewed_or_downloaded`, `advice_not_accepted`, `fee_consent_missing`, `fee_consent_inactive`, `fee_consent_expired`) give callers structured audit data.
+- **`assertCanExecute(adviceRecordId)`** — throw-on-fail wrapper for code paths that just need to gate.
+- **Critical:** the snapshot booleans on `executionAuthorisations` (`gateSoaIssued`, `gateSoaViewed`, `gateAdviceAccepted`, `gateFeeConsentValid`) are **audit evidence only** — they prove the gate was satisfied at the moment of authorisation. They DO NOT prove the gate is still satisfied right now. The classic failure this prevents (reviewer-flagged): client signs at 10:00 → fee consent expires at 12:00 → trade executed at 14:00 against stale snapshot → compliance breach.
+
+Not yet wired to any execution endpoint — there is no execution endpoint yet. The function is sitting ready for the first route that needs it.
+
+### Reviewer cross-checks (all 3 addressed)
+
+| # | Reviewer concern | Resolution |
+|---|---|---|
+| 1 | Execution gate must recompute live, not trust snapshot | Implemented in `server/services/execution-gate.ts` — discriminated union return for structured audit |
+| 2 | Hardcoded `platformUserId = 1` is dangerous | Resolved via `process.env.PLATFORM_USER_ID` with hard validation (positive integer or throw) |
+| 3 | `SUM(ledger_entries)` will scale-fail without index | Three indexes on `ledger_entries` — `accountId`, `(userId, currency)`, `transactionId` |
+
+### Portfolio integrity patch — verified already complete
+
+Cross-checked all 8 spec steps against the existing codebase; **no changes needed**:
+
+| Step | Spec | Existing state |
+|---|---|---|
+| 1 | Remove fake 365-day snapshot seeding | No 365-day seed exists; only today's snapshot is created (`server/routes.ts:1354`) ✓ |
+| 2 | Snapshot-based monthly P&L | Already done at lines 1366-1384 ✓ |
+| 3 | Snapshot-only history API | Already done at lines 1410-1497 — uses stored snapshots only, with `hasSufficientHistory` flag ✓ |
+| 4 | `MemStorage → DatabaseStorage` | Already done at `server/storage.ts:3537` ✓ |
+| 5-7 | Chart labels + UI wording | Existing 3-state vocabulary `actual | historical_estimate | insufficient_history` is **strictly more conservative** than spec's 2-state `snapshots | insufficient_history` — kept as-is ✓ |
+| 8 | Remove fake AI advisory performance chart | No `calculatePerformanceData` exists in `client/src/pages/ai-advisory.tsx` ✓ |
+
+The performance-chart endpoint at lines 1499-1633 forecasts only when `projectionMethod === "realized_cagr"` (real history-derived) and falls back to "no forecast" otherwise — already complies with the "no performance number unless derived from real stored data" principle.
+
+### Verification
+
+- DB push: applied via direct SQL (drizzle-kit's interactive prompt couldn't be driven in non-TTY); confirmed via `information_schema`: 10 new transaction columns, 2 new tables, 4 new indexes (1 unique + 3 standard), 1 unique constraint.
+- Typecheck: clean except the same 2 pre-existing `server/storage.ts` errors (now at lines 3289/3312, shifted +13 from 3276/3299 due to my MemStorage extension) — both predate Session 1, out of scope.
+- Server restart: clean, port 5000 serving.
+- Smoke test: `GET /api/ledger/balances/AUD` returns `{"currency":"AUD","balance":"0","source":"ledger_entries"}` for the empty ledger; bad currency code → 400; missing auth → 401.
+
+### Operational follow-ups for the user
+
+1. **`PLATFORM_USER_ID` env var must be set before any Track B suspense-account operation.** It should point to a dedicated platform/system user, NOT user id 1 (which is a real demo user). Until set, any call to `getOrCreateSuspenseAccount(...)` throws with a helpful error message — by design.
+2. Track B is **plumbing only** — no money endpoint is wired through it yet. The legacy `/api/wallets/{deposit,withdraw,transfer}` endpoints remain in place. Wiring is a future phase.
+3. Reconciliation cron job (compare `ledger_entries` SUM vs partner-custodian balances) is the next item the reviewer called out and is not yet built.
+
 ## Recent Changes (April 2026) — Session 6 (Phase 2.3): Fee Consents + Advice Acknowledgements + Execution Authorisations Schema
 
 **Schema-only.** No routes, no services, no UI. DB triggers, ledger tables, and the live execution-gate recalculation are explicitly deferred to later phases.

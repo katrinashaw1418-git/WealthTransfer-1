@@ -1,0 +1,347 @@
+This is a **very strong document overall** — but there are a few places where you need to tighten it before this becomes production-grade.
+
+I’ll give you a **clean, institutional verification** — not repeating what’s already obvious, just what actually matters.
+
+---
+
+# ✅ Overall verdict
+
+```text
+Architecture:        ✔ Correct
+Compliance posture:  ✔ Strong
+Data integrity:      ✔ Fixed (major improvement)
+Production safety:   ⚠️ Almost there (needs 3 fixes)
+```
+
+The document is **coherent across all layers** (advice + ledger + portfolio), which is rare.
+
+---
+
+# 🟢 1. What is done *correctly* (keep as-is)
+
+## A. Portfolio integrity patch (most important)
+
+This is the **single biggest upgrade in your entire system**.
+
+```text
+✔ synthetic history removed
+✔ model-based P&L removed
+✔ chart fallback removed
+✔ insufficient_history state added
+✔ snapshot-only logic enforced
+```
+
+👉 This moves you from:
+
+```text
+“demo-grade fintech”
+→ “regulator-safe wealth platform”
+```
+
+This principle must be permanent:
+
+```text
+No performance number unless derived from real stored data
+```
+
+---
+
+## B. Ledger architecture (correct foundation)
+
+```text
+✔ double-entry
+✔ derived balances
+✔ no balance mutation
+✔ settlement-based posting
+```
+
+This aligns perfectly with:
+
+```text
+non-custodial model + beneficial entitlement
+```
+
+---
+
+## C. Idempotency
+
+```text
+✔ required on all money endpoints
+✔ prevents duplicate execution
+```
+
+Without this, your system would break under retries.
+
+---
+
+## D. Transaction state machine
+
+```text
+pending → processing → settled
+pending → failed
+settled → reversed
+```
+
+✔ Clean
+✔ auditable
+✔ regulator defensible
+
+---
+
+## E. Advice / fee / acknowledgement schemas
+
+```text
+✔ granular confirmations
+✔ retention flags
+✔ withdrawal tracking
+✔ renewal windows
+```
+
+👉 This is **AFSL-ready data structure**
+
+---
+
+# 🔴 2. The 3 real issues you must fix
+
+These are not optional.
+
+---
+
+## ❗ Issue 1 — Execution gate (CRITICAL)
+
+From the document:
+
+```text
+executionAuthorisations stores gate snapshot
+BUT must be recalculated live
+```
+
+👉 This is correct in theory, but dangerous in practice.
+
+### Risk
+
+```text
+Fee consent expires AFTER snapshot
+→ system still allows execution
+→ compliance breach
+```
+
+---
+
+## ✅ Fix (must implement later)
+
+Never trust stored flags:
+
+```ts
+function canExecute(adviceRecordId) {
+  const advice = getAdviceRecord(adviceRecordId);
+  const feeConsent = getActiveFeeConsent(adviceRecordId);
+
+  return (
+    advice.soaIssued &&
+    (advice.soaViewed || advice.soaDownloaded) &&
+    advice.adviceAccepted &&
+    feeConsent?.status === "active" &&
+    feeConsent.consentExpiryDate > now()
+  );
+}
+```
+
+👉 The DB flags are **audit**, not **authority**
+
+---
+
+## ❗ Issue 2 — Hardcoded platform account
+
+```ts
+const platformUserId = 1;
+```
+
+👉 This is dangerous if left in.
+
+### Risk
+
+```text
+Wrong account ownership
+Cross-user contamination
+Audit failure
+```
+
+---
+
+## ✅ Fix
+
+Create a system config:
+
+```ts
+SYSTEM_ACCOUNTS = {
+  PLATFORM_SUSPENSE_USER_ID: env.PLATFORM_USER_ID
+}
+```
+
+Or:
+
+```text
+Dedicated system_accounts table
+```
+
+---
+
+## ❗ Issue 3 — Ledger performance (hidden scaling issue)
+
+Your balance query:
+
+```ts
+SUM(ledger_entries)
+```
+
+👉 Works now, breaks later.
+
+---
+
+## ✅ Fix (add immediately)
+
+Add index:
+
+```ts
+index("ledger_account_idx").on(ledgerEntries.accountId)
+```
+
+Optional (later):
+
+```text
+materialised balance table (cached)
+```
+
+---
+
+# 🟡 3. Subtle but important refinement
+
+## Reconciliation (not yet built)
+
+You mentioned it earlier — it is **missing from implementation**.
+
+Without it:
+
+```text
+ledger ≠ custodian
+→ silent drift
+→ financial loss
+```
+
+---
+
+## Minimum version you need
+
+```text
+daily job:
+- fetch internal balances
+- fetch custodian balances
+- compare
+- log difference
+```
+
+---
+
+# 🧠 4. The 3 product principles (lock these in)
+
+This document implicitly defines them — make them explicit:
+
+---
+
+## Principle 1 — Non-custodial truth
+
+```text
+AMAX does not hold client funds.
+Balances represent beneficial entitlement held with regulated partners.
+```
+
+---
+
+## Principle 2 — Advice boundary
+
+```text
+Platform provides general information unless a compliant advice process is completed.
+```
+
+---
+
+## Principle 3 — Performance truth (NEW — from your patch)
+
+```text
+No performance data is shown unless derived from real historical snapshots.
+```
+
+---
+
+👉 These 3 together define your **regulatory posture**
+
+---
+
+# 🔒 5. What you must NOT break later
+
+```text
+❌ Never reintroduce “estimated returns”
+❌ Never simulate history
+❌ Never allow execution without live gate check
+❌ Never write ledger entries before settlement
+❌ Never store balances manually
+```
+
+---
+
+# 🟢 Final position
+
+```text
+Portfolio integrity:     ✔ fixed (major win)
+Advice engine:           ✔ structured correctly
+Ledger architecture:     ✔ correct
+Production readiness:    ⚠️ needs 3 fixes
+```
+
+---
+
+# 🚦 What to do next (clear)
+
+```text
+1. Lock in portfolio integrity patch (done)
+2. Implement Track B (ledger + idempotency)
+3. Add execution gate LIVE validation
+4. Remove hardcoded platform account
+5. Add ledger index
+6. Add reconciliation job (next step)
+```
+
+---
+
+# Bottom line
+
+You’ve crossed an important line:
+
+```text
+From:
+“feature-based fintech”
+
+To:
+“system-of-record financial platform”
+```
+
+That means:
+
+```text
+correctness > features
+auditability > UX
+truth > convenience
+```
+
+---
+
+If you want next step, I’ll give you:
+
+```text
+👉 reconciliation cron job (exact code)
+👉 webhook idempotency handler
+👉 failure simulation script
+```
+
+Those are what make this **actually safe in production**.
