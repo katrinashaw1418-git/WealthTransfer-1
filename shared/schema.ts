@@ -1681,12 +1681,32 @@ export const adviserFeeDeductions = pgTable(
     accrualIds: jsonb("accrual_ids").notNull().default(sql`'[]'::jsonb`),
 
     status: text("status").notNull().default("pending_approval"),
-    // pending_approval | approved | rejected
+    // pending_approval | approved | settled | rejected
     //
-    // GATE A INVARIANT: status flips only — no money is moved on approve.
+    // SESSION 23B (Gate B): "settled" is the terminal success state after the
+    // ledger postings have been written. "approved" is now legacy / transitional
+    // — Gate B's approve flow goes straight to "settled" inside the same DB
+    // transaction as the ledger pair. A failed posting attempt rolls the row
+    // back to pending_approval and records `failureReason` so the admin can
+    // retry with full context.
     approvedByUserId: integer("approved_by_user_id").references(() => users.id),
     approvedAt: timestamp("approved_at"),
     rejectedReason: text("rejected_reason"),
+
+    // Gate B settlement wiring — populated atomically with the ledger pair.
+    settledAt: timestamp("settled_at"),
+    settledTransactionId: integer("settled_transaction_id").references(
+      () => transactions.id,
+    ),
+    // Per-deduction idempotency key for the underlying transactions row.
+    // Reused on retries so a duplicated approve never produces a second
+    // posting; UNIQUE on transactions.idempotency_key enforces this even if
+    // the in-memory check loses a race.
+    idempotencyKey: text("idempotency_key").unique(),
+    // Surface for the most-recent posting failure. Cleared on a successful
+    // settlement. Purely informational; the source-of-truth recovery signal
+    // is `status === 'pending_approval' AND settled_at IS NULL`.
+    failureReason: text("failure_reason"),
 
     createdAt: timestamp("created_at").defaultNow(),
   },
@@ -1727,6 +1747,10 @@ export const insertAdviserFeeDeductionSchema = createInsertSchema(adviserFeeDedu
   approvedByUserId: true,
   approvedAt: true,
   rejectedReason: true,
+  settledAt: true,
+  settledTransactionId: true,
+  idempotencyKey: true,
+  failureReason: true,
   createdAt: true,
 });
 export type AdviserFeeDeduction = typeof adviserFeeDeductions.$inferSelect;

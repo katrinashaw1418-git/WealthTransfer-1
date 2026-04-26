@@ -59,6 +59,16 @@ interface FeeDeductionRow {
   adviserShareAmount: string;
   currency: string;
   status: string;
+  settledAt: string | null;
+  settledTransactionId: number | null;
+  failureReason: string | null;
+}
+
+function deductionStatusBadge(status: string) {
+  if (status === "settled") return <Badge variant="default">settled</Badge>;
+  if (status === "pending_approval") return <Badge variant="secondary">{status}</Badge>;
+  if (status === "rejected") return <Badge variant="destructive">{status}</Badge>;
+  return <Badge variant="outline">{status}</Badge>;
 }
 
 interface UserRef {
@@ -115,13 +125,14 @@ export default function AdviserFeesPage() {
         <h1 className="text-2xl font-semibold">Your fee rules</h1>
       </div>
 
-      <Alert variant="default" data-testid="alert-gate-a">
+      <Alert variant="default" data-testid="alert-gate-b">
         <ShieldAlert className="h-4 w-4" />
-        <AlertTitle>Gate A — read-only</AlertTitle>
+        <AlertTitle>Settlement is now live</AlertTitle>
         <AlertDescription>
-          Fee rules are created and managed by the licensee. Daily accruals and
-          pending deductions show what would be deducted; <strong>no money has
-          moved yet</strong>.
+          Fee rules are created and managed by the licensee. Deductions in{" "}
+          <strong>Settled</strong> status have moved real funds — your share has
+          been credited to your wallet. Anything still in{" "}
+          <strong>Pending approval</strong> has not moved any money yet.
         </AlertDescription>
       </Alert>
 
@@ -231,7 +242,7 @@ export default function AdviserFeesPage() {
 
         <TabsContent value="deductions">
           <Card>
-            <CardHeader><CardTitle className="text-base">Pending & approved deductions</CardTitle></CardHeader>
+            <CardHeader><CardTitle className="text-base">Deductions</CardTitle></CardHeader>
             <CardContent>
               {deductionsQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
@@ -245,6 +256,7 @@ export default function AdviserFeesPage() {
                       <TableHead>Total</TableHead>
                       <TableHead>Your share</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead>Settled</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -257,10 +269,9 @@ export default function AdviserFeesPage() {
                         <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
                         <TableCell>{d.totalAccrued} {d.currency}</TableCell>
                         <TableCell>{d.adviserShareAmount}</TableCell>
-                        <TableCell>
-                          <Badge variant={d.status === "pending_approval" ? "secondary" : "outline"}>
-                            {d.status}
-                          </Badge>
+                        <TableCell>{deductionStatusBadge(d.status)}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {d.settledAt ? d.settledAt.slice(0, 10) : "—"}
                         </TableCell>
                       </TableRow>
                     ))}

@@ -148,6 +148,10 @@ interface FeeDeductionRow {
   approvedByUserId: number | null;
   approvedAt: string | null;
   rejectedReason: string | null;
+  // Gate B settlement fields
+  settledAt: string | null;
+  settledTransactionId: number | null;
+  failureReason: string | null;
   createdAt: string;
 }
 
@@ -195,6 +199,13 @@ function formatRelative(iso: string): string {
   if (hr < 24) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
+}
+
+function deductionStatusVariant(status: string): "default" | "secondary" | "outline" | "destructive" {
+  if (status === "settled") return "default";
+  if (status === "pending_approval") return "secondary";
+  if (status === "rejected") return "destructive";
+  return "outline";
 }
 
 function todayIso() {
@@ -406,7 +417,11 @@ export default function AdminFeesPage() {
   async function approveDeduction(id: number) {
     try {
       await apiRequest("POST", `/api/admin/fee-deductions/${id}/approve`, {});
-      toast({ title: "Deduction approved", description: "Status flipped only — no money moved (Gate A)." });
+      toast({
+        title: "Deduction settled",
+        description:
+          "Client debited; adviser + platform credited. Ledger entries posted (Gate B).",
+      });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
     } catch (err: any) {
       toast({ title: "Approve failed", description: err?.message ?? String(err), variant: "destructive" });
@@ -813,7 +828,8 @@ export default function AdminFeesPage() {
               <CardTitle className="text-base">Generate pending deductions</CardTitle>
               <CardDescription>
                 Roll up non-skipped accruals in a window into per-(client, adviser) batches.
-                Approval is a status flip + audit row only — Gate A.
+                Approving a pending batch posts the client debit and the adviser/platform
+                credits to the ledger inside one DB transaction (Gate B).
               </CardDescription>
             </CardHeader>
             <CardContent className="flex gap-2 items-end">
@@ -870,6 +886,7 @@ export default function AdminFeesPage() {
                       <TableHead>Period</TableHead>
                       <TableHead>Total</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead>Settlement</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
                   </TableHeader>
@@ -886,19 +903,40 @@ export default function AdminFeesPage() {
                         <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
                         <TableCell>{d.totalAccrued} {d.currency}</TableCell>
                         <TableCell>
-                          <Badge variant={d.status === "pending_approval" ? "secondary" : "outline"}>
+                          <Badge variant={deductionStatusVariant(d.status)}>
                             {d.status}
                           </Badge>
                         </TableCell>
+                        <TableCell className="text-xs">
+                          {d.status === "settled" && d.settledAt ? (
+                            <div data-testid={`text-settled-${d.id}`}>
+                              <div>{d.settledAt.slice(0, 10)}</div>
+                              <div className="text-muted-foreground">
+                                tx#{d.settledTransactionId ?? "—"}
+                              </div>
+                            </div>
+                          ) : d.failureReason ? (
+                            <span
+                              className="text-red-600"
+                              title={d.failureReason}
+                              data-testid={`text-failure-${d.id}`}
+                            >
+                              Last attempt failed
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </TableCell>
                         <TableCell>
-                          {d.status === "pending_approval" && (
+                          {(d.status === "pending_approval" || d.status === "approved") && (
                             <Button
                               size="sm"
                               variant="default"
                               onClick={() => approveDeduction(d.id)}
                               data-testid={`button-approve-${d.id}`}
                             >
-                              <CheckCircle2 className="h-4 w-4 mr-1" /> Approve
+                              <CheckCircle2 className="h-4 w-4 mr-1" />
+                              {d.failureReason ? "Retry" : "Approve & settle"}
                             </Button>
                           )}
                         </TableCell>

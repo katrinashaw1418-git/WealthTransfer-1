@@ -166,6 +166,46 @@ export async function getOrCreateSuspenseAccount(
 }
 
 // ---------------------------------------------------------------------------
+// Platform fee account — destination for the licensee's share of adviser
+// fees (Session 23B / Gate B). Owned by the same PLATFORM_USER_ID as the
+// suspense account, but tagged with accountType='fee' so revenue is cleanly
+// segregated from in-flight settlement funds in the ledger.
+// ---------------------------------------------------------------------------
+export async function getOrCreateFeeAccount(
+  currency: string,
+  handle: DbHandle = db,
+) {
+  const platformUserId = getPlatformUserId();
+  const cur = currency.toUpperCase();
+
+  const [existing] = await (handle as any)
+    .select()
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.userId, platformUserId),
+        eq(accounts.currency, cur),
+        eq(accounts.accountType, "fee")
+      )
+    )
+    .limit(1);
+
+  if (existing) return existing;
+
+  const [created] = await (handle as any)
+    .insert(accounts)
+    .values({
+      userId: platformUserId,
+      currency: cur,
+      accountType: "fee",
+      status: "active",
+    })
+    .returning();
+
+  return created;
+}
+
+// ---------------------------------------------------------------------------
 // Derived balance queries — never read from any stored balance column
 // ---------------------------------------------------------------------------
 

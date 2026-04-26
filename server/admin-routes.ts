@@ -38,7 +38,7 @@ import {
   reportRequests,
   adminReviewNotes,
   feeConsents,
-  // Session 23A — fee engine Gate A
+  // Session 23A — fee engine Gate A / Session 23B — Gate B settlement
   adviserFeeRules,
   adviserFeeAccruals,
   adviserFeeDeductions,
@@ -52,7 +52,6 @@ import {
   // Session 27 (Task #23) — fee accrual run log
   feeAccrualRuns,
 } from "@shared/schema";
-import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
 import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
@@ -2335,46 +2334,57 @@ export function registerAdminRoutes(app: Express): void {
       if (!Number.isInteger(id) || id <= 0) {
         throw Object.assign(new Error("Invalid deduction id"), { status: 400 });
       }
-      const updated = await db.transaction(async (tx) => {
-        // Conditional UPDATE so we only flip a row that's still pending. If
-        // it was already approved/rejected, returning() is empty -> 409.
-        const rows = await tx
-          .update(adviserFeeDeductions)
-          .set({
-            status: "approved",
-            approvedByUserId: auth.userId,
-            approvedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(adviserFeeDeductions.id, id),
-              eq(adviserFeeDeductions.status, "pending_approval"),
-            ),
-          )
-          .returning();
-        if (!rows[0]) {
-          throw Object.assign(
-            new Error("Deduction not found or not in pending_approval"),
-            { status: 409 },
-          );
-        }
+
+      // GATE B: approve = settle. The service performs the entire flow
+      // (lock → insert transaction → post ledger entries → refresh wallet
+      // cache → mark settled) inside one DB transaction. Idempotent on
+      // deduction id — a retry of an already-settled deduction returns the
+      // existing row without re-posting.
+      const { settleApprovedDeduction } = await import("./services/fee-engine");
+      let settled;
+      try {
+        settled = await settleApprovedDeduction({
+          deductionId: id,
+          approverUserId: auth.userId,
+        });
+      } catch (err: any) {
+        // Audit the failed attempt so the operator trail is continuous.
+        // We do NOT rollback the audit row on the (already-rolled-back)
+        // settlement attempt — auditing a failure is the whole point.
         await auditTx(
-          tx,
+          db,
           auth.userId,
-          "fee_deduction_approved",
+          "fee_deduction_settle_failed",
           "adviser_fee_deduction",
           String(id),
           {
-            note: "Gate A: status flip only — no money was moved.",
-            totalAccrued: rows[0].totalAccrued,
-            adviserShareAmount: rows[0].adviserShareAmount,
-            platformShareAmount: rows[0].platformShareAmount,
+            error: err?.message ? String(err.message) : String(err),
+            status: err?.status ?? null,
           },
           req.ip ?? null,
         );
-        return rows[0];
-      });
-      return updated;
+        throw err;
+      }
+
+      // Successful settlement → audit the posting (with the transaction id
+      // so the auditor can walk straight to the ledger entries).
+      await auditTx(
+        db,
+        auth.userId,
+        "fee_deduction_settled",
+        "adviser_fee_deduction",
+        String(id),
+        {
+          settledTransactionId: settled.settledTransactionId,
+          totalAccrued: settled.totalAccrued,
+          adviserShareAmount: settled.adviserShareAmount,
+          platformShareAmount: settled.platformShareAmount,
+          currency: settled.currency,
+          status: settled.status,
+        },
+        req.ip ?? null,
+      );
+      return settled;
     }),
   );
 }
