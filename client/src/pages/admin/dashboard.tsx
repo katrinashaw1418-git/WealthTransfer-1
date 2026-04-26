@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -61,7 +62,12 @@ export default function AdminDashboard() {
     refetchOnWindowFocus: true,
     staleTime: 30_000,
   });
-  const { data: alertsSummary, isLoading: alertsLoading } = useQuery<OperatorAlertsSummary>({
+  const {
+    data: alertsSummary,
+    isLoading: alertsLoading,
+    isFetching: alertsFetching,
+    dataUpdatedAt: alertsUpdatedAt,
+  } = useQuery<OperatorAlertsSummary>({
     queryKey: ["/api/admin/operator-alerts/summary"],
     refetchInterval: 60_000,
     refetchOnWindowFocus: true,
@@ -193,6 +199,10 @@ export default function AdminDashboard() {
                 Counts cover the last 7 days. Click a severity to open the
                 alert log filtered to that level.
               </p>
+              <AlertsRefreshStatus
+                updatedAt={alertsUpdatedAt}
+                isFetching={alertsFetching}
+              />
             </div>
           )}
         </CardContent>
@@ -278,6 +288,44 @@ function StatCard({
     </Link>
   ) : (
     inner
+  );
+}
+
+function AlertsRefreshStatus({
+  updatedAt,
+  isFetching,
+}: {
+  updatedAt: number;
+  isFetching: boolean;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  let label: string;
+  if (isFetching) {
+    label = "updating…";
+  } else if (!updatedAt) {
+    label = "waiting for first refresh…";
+  } else {
+    const seconds = Math.max(0, Math.round((now - updatedAt) / 1000));
+    label =
+      seconds < 5
+        ? "last refreshed just now"
+        : `last refreshed ${seconds}s ago`;
+  }
+
+  return (
+    <p
+      className="text-xs text-slate-400 tabular-nums"
+      data-testid="text-alerts-refresh-status"
+      aria-live="polite"
+    >
+      auto-updating · {label}
+    </p>
   );
 }
 
