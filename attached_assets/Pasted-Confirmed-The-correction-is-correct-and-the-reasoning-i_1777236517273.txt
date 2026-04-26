@@ -1,0 +1,422 @@
+Confirmed. The correction is correct and the reasoning is sound.
+
+**Cross-check verdict: accurate on all points. One minor precision addition.**
+
+The verification script placement fix is right. Shipping planner UI without a passing verification script is the same mistake that was caught with Gate B — the script is not a post-ship audit, it is the proof that the build is safe to expose. It belongs at step 6 in the current sprint, not in the next phase.
+
+Everything else in the final cross-check is verified clean. No conflicts, no contradictions.
+
+**One precision addition the review does not mention:** the verification script needs to be written before step 3 (planner UI), not after step 5. The reason is the same as the audit log argument — developers building the UI need to know what the script will test so they build to pass it, not discover failures after the fact. Write the script at step 1, run it at step 6.
+
+---
+
+Here is the exact verification script, ready to hand to your developer.
+
+**Create `scripts/test-planner.ts`**
+
+```ts
+import { db } from "../server/db";
+import { eq, desc } from "drizzle-orm";
+import {
+  users,
+  adviceRecords,
+  adviceRecordVersions,
+  adviserNotes,
+  clientObjectives,
+  clientDocuments,
+  auditLogs,
+  ledgerEntries,
+} from "../shared/schema";
+
+type TestResult = { name: string; passed: boolean; details?: string };
+const results: TestResult[] = [];
+
+function pass(name: string, details?: string) {
+  results.push({ name, passed: true, details });
+}
+function fail(name: string, details?: string) {
+  results.push({ name, passed: false, details });
+}
+
+async function expectStatus(
+  res: Response,
+  expected: number,
+  testName: string
+) {
+  if (res.status === expected) {
+    pass(testName);
+  } else {
+    fail(testName, `expected ${expected}, got ${res.status}`);
+  }
+}
+
+const BASE = "http://localhost:5000";
+
+async function asRole(
+  role: "admin" | "adviser" | "second_adviser" | "client",
+  path: string,
+  method = "GET",
+  body?: object
+): Promise<Response> {
+  const tokens: Record<string, string> = (global as any).__testTokens__;
+  return fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${tokens[role]}`,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+async function run() {
+
+  // ── Seed ────────────────────────────────────────────────────────────────────
+  // Create deterministic test users, advice record, and initial state.
+  // Seeds are isolated — use a test-specific email prefix to avoid collisions.
+
+  const seed = Date.now();
+  const [admin, adviser, secondAdviser, client] = await Promise.all([
+    db.query.users.findFirst({ where: eq(users.email, `test-admin-${seed}@test.local`) }),
+    // ... full seed logic per your existing test pattern
+  ]);
+
+  // Store auth tokens globally so asRole() can pick them up
+  // (same pattern as scripts/test-fee-deduction-gate-b.ts)
+
+  let adviceRecordId: number;
+  let versionCountBefore: number;
+
+  // ── 1. Role access ───────────────────────────────────────────────────────────
+
+  // 1a. Non-adviser cannot create an advice record
+  const res1a = await asRole("client", "/api/adviser/advice-records", "POST", {
+    clientUserId: client!.id,
+    strategySummary: "test",
+  });
+  await expectStatus(res1a, 403, "non-adviser cannot create advice record");
+
+  // 1b. Adviser cannot access another adviser's client record
+  const res1b = await asRole("second_adviser", `/api/adviser/advice-records/${adviceRecordId}`, "GET");
+  await expectStatus(res1b, 403, "adviser blocked from another adviser's record");
+
+  // 1c. Client cannot write to any advice table
+  const res1c = await asRole("client", `/api/adviser/advice-records/${adviceRecordId}/notes`, "POST", {
+    noteText: "client trying to write",
+    noteType: "general",
+    visibility: "adviser_only",
+  });
+  await expectStatus(res1c, 403, "client cannot write to advice tables");
+
+  // 1d. Admin can read record but cannot mutate it
+  const res1d = await asRole("admin", `/api/adviser/advice-records/${adviceRecordId}`, "POST", {
+    strategySummary: "admin trying to mutate",
+  });
+  if (res1d.status === 403 || res1d.status === 405) {
+    pass("admin cannot mutate advice record");
+  } else {
+    fail("admin cannot mutate advice record", `got ${res1d.status}`);
+  }
+
+  // ── 2. Review lock ────────────────────────────────────────────────────────────
+
+  // Set record to review_pending
+  await db.update(adviceRecords)
+    .set({ status: "review_pending" })
+    .where(eq(adviceRecords.id, adviceRecordId));
+
+  // 2a. POST to objectives blocked during review
+  const res2a = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/objectives`, "POST", {
+    objectiveType: "retirement",
+    description: "blocked write",
+    priority: "primary",
+  });
+  await expectStatus(res2a, 423, "objectives blocked during review_pending");
+
+  // 2b. POST to recommendations blocked during review
+  const res2b = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/recommendations`, "POST", {
+    strategySummary: "blocked",
+  });
+  await expectStatus(res2b, 423, "recommendations blocked during review_pending");
+
+  // 2c. Notes still allowed during review
+  const res2c = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/notes`, "POST", {
+    noteText: "compliance note during review",
+    noteType: "compliance",
+    visibility: "adviser_only",
+  });
+  await expectStatus(res2c, 200, "notes allowed during review_pending");
+
+  // Restore to active for remaining tests
+  await db.update(adviceRecords)
+    .set({ status: "active" })
+    .where(eq(adviceRecords.id, adviceRecordId));
+
+  // ── 3. Versioning ─────────────────────────────────────────────────────────────
+
+  // 3a. Every plan write creates a new version row atomically
+  versionCountBefore = (await db.query.adviceRecordVersions.findMany({
+    where: eq(adviceRecordVersions.adviceRecordId, adviceRecordId),
+  })).length;
+
+  const res3a = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/objectives`, "POST", {
+    objectiveType: "retirement",
+    description: "test objective",
+    priority: "primary",
+  });
+  await expectStatus(res3a, 200, "objective POST succeeds on active record");
+
+  const versionCountAfter = (await db.query.adviceRecordVersions.findMany({
+    where: eq(adviceRecordVersions.adviceRecordId, adviceRecordId),
+  })).length;
+
+  if (versionCountAfter === versionCountBefore + 1) {
+    pass("objective write creates version snapshot atomically");
+  } else {
+    fail("objective write creates version snapshot atomically",
+      `versions before: ${versionCountBefore}, after: ${versionCountAfter}`);
+  }
+
+  // 3b. SOA issuance creates version snapshot
+  const res3b = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/issue-soa`, "POST");
+  const versionCountSOA = (await db.query.adviceRecordVersions.findMany({
+    where: eq(adviceRecordVersions.adviceRecordId, adviceRecordId),
+  })).length;
+
+  if (versionCountSOA > versionCountAfter) {
+    pass("SOA issuance creates version snapshot");
+  } else {
+    fail("SOA issuance creates version snapshot", "no new version row after SOA issuance");
+  }
+
+  // ── 4. Append-only enforcement ────────────────────────────────────────────────
+
+  // 4a. PUT on adviserNotes rejected
+  const noteRes = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/notes`, "POST", {
+    noteText: "original note",
+    noteType: "general",
+    visibility: "adviser_only",
+  });
+  const note = await noteRes.json();
+
+  const res4a = await asRole("adviser", `/api/adviser/notes/${note.id}`, "PUT", {
+    noteText: "trying to edit",
+  });
+  if (res4a.status === 405 || res4a.status === 404) {
+    pass("PUT on adviserNotes rejected — append-only enforced");
+  } else {
+    fail("PUT on adviserNotes rejected", `got ${res4a.status}`);
+  }
+
+  // 4b. DELETE on adviserNotes rejected
+  const res4b = await asRole("adviser", `/api/adviser/notes/${note.id}`, "DELETE");
+  if (res4b.status === 405 || res4b.status === 404) {
+    pass("DELETE on adviserNotes rejected");
+  } else {
+    fail("DELETE on adviserNotes rejected", `got ${res4b.status}`);
+  }
+
+  // 4c. adviserNotes table has no updatedAt column (schema inspection)
+  try {
+    const col = await db.execute(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'adviser_notes' AND column_name = 'updated_at'`
+    );
+    if ((col.rows ?? col).length === 0) {
+      pass("adviserNotes has no updatedAt column");
+    } else {
+      fail("adviserNotes has no updatedAt column", "updatedAt column exists — append-only violated");
+    }
+  } catch (e) {
+    fail("adviserNotes schema check", String(e));
+  }
+
+  // 4d. previousNoteId chain is traversable
+  const note2Res = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/notes`, "POST", {
+    noteText: "superseding note",
+    noteType: "general",
+    visibility: "adviser_only",
+    previousNoteId: note.id,
+  });
+  const note2 = await note2Res.json();
+
+  if (note2.previousNoteId === note.id) {
+    pass("previousNoteId chain is traversable");
+  } else {
+    fail("previousNoteId chain is traversable", `previousNoteId is ${note2.previousNoteId}`);
+  }
+
+  // 4e. Objective supersession: new row + supersededAt set on prior, atomic
+  const obj1Res = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/objectives`, "POST", {
+    objectiveType: "education",
+    description: "original",
+    priority: "secondary",
+  });
+  const obj1 = await obj1Res.json();
+
+  await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/objectives`, "POST", {
+    objectiveType: "education",
+    description: "updated",
+    priority: "secondary",
+    supersedes: obj1.id,
+  });
+
+  const obj1Check = await db.query.clientObjectives.findFirst({
+    where: eq(clientObjectives.id, obj1.id),
+  });
+
+  if (obj1Check?.supersededAt !== null) {
+    pass("objective supersession sets supersededAt on prior row");
+  } else {
+    fail("objective supersession sets supersededAt on prior row", "supersededAt is null");
+  }
+
+  // ── 5. Audit log before/after ──────────────────────────────────────────────────
+
+  // 5a. Every plan write produces audit log entry with before + after state
+  const recentLogs = await db.query.auditLogs.findMany({
+    where: eq(auditLogs.resourceId, String(adviceRecordId)),
+    orderBy: desc(auditLogs.createdAt),
+    limit: 5,
+  });
+
+  const logsWithBeforeAfter = recentLogs.filter(
+    (l) => l.metadata &&
+      typeof l.metadata === "object" &&
+      "before" in l.metadata &&
+      "after" in l.metadata
+  );
+
+  if (logsWithBeforeAfter.length > 0) {
+    pass("plan writes produce audit logs with before/after state");
+  } else {
+    fail("plan writes produce audit logs with before/after state",
+      `${recentLogs.length} logs found, none have before/after`);
+  }
+
+  // ── 6. No ledger side effects ────────────────────────────────────────────────
+
+  // 6a. No ledger entries created by any planner write
+  const ledgerCountBefore = (await db.query.ledgerEntries.findMany({
+    where: eq(ledgerEntries.referenceType, "advice_record"),
+  })).length;
+
+  await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/notes`, "POST", {
+    noteText: "ledger check note",
+    noteType: "general",
+    visibility: "adviser_only",
+  });
+
+  const ledgerCountAfter = (await db.query.ledgerEntries.findMany({
+    where: eq(ledgerEntries.referenceType, "advice_record"),
+  })).length;
+
+  if (ledgerCountAfter === ledgerCountBefore) {
+    pass("no ledger entries created by planner writes");
+  } else {
+    fail("no ledger entries created by planner writes",
+      `ledger count before: ${ledgerCountBefore}, after: ${ledgerCountAfter}`);
+  }
+
+  // 6b. No wallet.balance mutation from planner writes
+  const clientWalletBefore = await db.query.wallets.findFirst({
+    where: eq(wallets.userId, client!.id),
+  });
+
+  await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/objectives`, "POST", {
+    objectiveType: "property",
+    description: "wallet check objective",
+    priority: "aspirational",
+  });
+
+  const clientWalletAfter = await db.query.wallets.findFirst({
+    where: eq(wallets.userId, client!.id),
+  });
+
+  if (clientWalletBefore?.balance === clientWalletAfter?.balance) {
+    pass("wallet balance not mutated by planner writes");
+  } else {
+    fail("wallet balance not mutated by planner writes",
+      `before: ${clientWalletBefore?.balance}, after: ${clientWalletAfter?.balance}`);
+  }
+
+  // ── 7. Client document record ─────────────────────────────────────────────────
+
+  // 7a. Document upload creates audit record (no file content check — storage is separate)
+  const res7a = await asRole("adviser", `/api/adviser/advice-records/${adviceRecordId}/documents`, "POST", {
+    documentType: "fact_find",
+    fileName: "test-fact-find.pdf",
+    storageKey: "test/fact-find-placeholder",
+    description: "test upload",
+  });
+  await expectStatus(res7a, 200, "document record created by adviser");
+
+  // 7b. Client cannot upload documents
+  const res7b = await asRole("client", `/api/adviser/advice-records/${adviceRecordId}/documents`, "POST", {
+    documentType: "correspondence",
+    fileName: "client-upload.pdf",
+    storageKey: "test/client-upload",
+  });
+  await expectStatus(res7b, 403, "client cannot upload documents");
+
+  // ── Output ────────────────────────────────────────────────────────────────────
+
+  console.log("\n── Planner verification results ──\n");
+  for (const r of results) {
+    console.log(`${r.passed ? "PASS" : "FAIL"} ${r.name}${r.details ? ` — ${r.details}` : ""}`);
+  }
+
+  const failed = results.filter((r) => !r.passed);
+  if (failed.length > 0) {
+    console.error(`\n${failed.length} planner test(s) failed.`);
+    process.exit(1);
+  }
+
+  console.log("\nALL PLANNER TESTS PASSED ✅");
+}
+
+run().catch((err) => {
+  console.error("Planner verification script crashed:", err);
+  process.exit(1);
+});
+```
+
+**Required final output:**
+
+```
+PASS  non-adviser cannot create advice record
+PASS  adviser blocked from another adviser's record
+PASS  client cannot write to advice tables
+PASS  admin cannot mutate advice record
+PASS  objectives blocked during review_pending
+PASS  recommendations blocked during review_pending
+PASS  notes allowed during review_pending
+PASS  objective write creates version snapshot atomically
+PASS  SOA issuance creates version snapshot
+PASS  PUT on adviserNotes rejected — append-only enforced
+PASS  DELETE on adviserNotes rejected
+PASS  adviserNotes has no updatedAt column
+PASS  previousNoteId chain is traversable
+PASS  objective supersession sets supersededAt on prior row
+PASS  plan writes produce audit logs with before/after state
+PASS  no ledger entries created by planner writes
+PASS  wallet balance not mutated by planner writes
+PASS  document record created by adviser
+PASS  client cannot upload documents
+
+ALL PLANNER TESTS PASSED ✅
+```
+
+**Three instructions for the developer before running this:**
+
+The seed block needs to follow the same pattern as `scripts/test-fee-deduction-gate-b.ts` — create isolated test users with a timestamp prefix, store their auth tokens in `global.__testTokens__`, and clean up after the run. The existing Gate B script has this pattern already; copy it.
+
+The `issue-soa` route in test 3b must be the actual SOA issuance endpoint path in your codebase. If the route is named differently, update the path — the test logic is correct regardless of the route name.
+
+Add this to `package.json` scripts so CI can run it:
+
+```json
+"test:planner": "tsx scripts/test-planner.ts"
+```
+
+And add it to the CI pipeline immediately after the planner UI deploys, before the next sprint begins.

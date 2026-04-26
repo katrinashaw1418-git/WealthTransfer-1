@@ -1,0 +1,127 @@
+This is a significant and correct course correction. Let me do a precise cross-check before confirming anything.
+
+---
+
+## Cross-check verdict: the codebase review is correct. Here is the exact assessment.
+
+### What the codebase review gets exactly right
+
+The central finding is accurate and important. All prior wealth planner design work — including the schema, versioning, disclaimer gates, and recommendation tables specified in this conversation — was designed in a vacuum, without knowledge of what Phase 2.2/2.3 already shipped. The result was a parallel system that would have created duplicate source of truth, which is a worse compliance risk than any of the individual gaps the reviews were trying to fix.
+
+Specifically confirmed correct:
+
+`adviceRecords` already carries recommendation, portfolio, rationale, and allocation. Building `wealthPlanRecommendations` on top of it would create two legally binding recommendation sources with no defined precedence. In a regulatory dispute, "which record controls?" has no answer. That is an actual compliance failure, not a theoretical one.
+
+`adviceAcknowledgements` already carries `clientId`, `signatureName`, `acceptedAt`, `ipAddress`, `userAgent`. The proposed `adviceDisclaimerAcknowledgements` table would have been a weaker duplicate of something already stronger.
+
+`recommendedAllocation` is already typed at the ORM layer. The `ModelPortfolioSnapshot` shape constraint specified earlier was solving a problem that does not exist.
+
+The `adviceType = "personal"` default with a live `executionGate` is correct for an AFSL-enabled system. The instruction to lock `adviceType` to `"general"` was appropriate for a system without AFSL framework — which is not what this codebase is. Applying it here would have broken compliance, not protected it.
+
+The `adviceRecords.status = superseded` chain already handles version binding implicitly. The FK to a superseded record forces a new advice record and therefore a new acknowledgement. The explicit `wealthPlanVersionId` field on the acknowledgement table was solving a problem already solved differently.
+
+---
+
+### What the codebase review gets right but needs one precision correction
+
+The review states "building the duplicate tables is the problem" and this is correct. However it should be stated more precisely: the problem is not that the design work was wrong in principle — it was correct design for a greenfield system. The problem is that the design work was done without reading the existing schema first. The correct process going forward is: read the schema before specifying any new table.
+
+The Gate B JWT issue is a real separate problem and should be fixed before Task 94 proceeds. A verification script that cannot run is not a passing verification script.
+
+---
+
+### What the codebase review raises that is genuinely worth acting on
+
+Two real gaps confirmed in the existing system:
+
+**Audit log `before`/`after` standardisation.** The `auditLogs.metadata` field is unstructured. Existing writes capture rich payloads but not in a consistent `{ before, after }` shape. This is not blocking Task 94 but it is worth a dedicated task post-94 because regulators reviewing a complaint need to reconstruct state changes from the log alone, and inconsistent shapes make that unreliable.
+
+**Review lock enforcement.** `adviceRecords.status` includes `review_pending` but nothing in the routes blocks writes during that state. An adviser can edit a record while it is under compliance review. This is a real gap in the existing advice flow. It should be addressed as part of Task 94 or immediately after.
+
+---
+
+### What should be completely dropped from prior specifications
+
+Every table, endpoint, middleware, and verification test specified in this conversation that maps to something already in Phase 2.2/2.3:
+
+```
+DROP — wealthPlans
+DROP — wealthPlanVersions
+DROP — wealthPlanRecommendations
+DROP — riskProfileSnapshots
+DROP — adviceDisclaimerAcknowledgements
+DROP — wealthPlanComplianceFlags (no complianceFlags table exists to extend)
+DROP — POST /api/adviser/wealth-plans/:id/freeze
+DROP — disclaimerGate middleware as specified
+DROP — writeWithVersioning wrapper as specified
+DROP — adviceType lock to "general"
+DROP — ModelPortfolioSnapshot shape validation (already enforced)
+DROP — 29-test verification script as written (tests non-existent tables)
+```
+
+None of this gets deleted from the conversation history — it was correct design reasoning. It just does not apply to this codebase.
+
+---
+
+### Confirmed correct build path
+
+Here is the revised path, grounded in what actually exists.
+
+**Immediate — before Task 94:**
+
+Fix the Gate B verification script JWT env issue. Two lines. Ship it. Gate B is not verified until the script runs clean.
+
+**Task 94 — four additions only:**
+
+```ts
+// 1. clientObjectives
+// New — complements adviceRecords, does not duplicate it
+// Fields: clientUserId, adviceRecordId (FK), objectiveType,
+//         description, targetAmount, targetDate, priority,
+//         currency, createdBy, createdAt,
+//         supersededAt, supersededBy (append-only, same pattern)
+
+// 2. clientDocuments
+// New — fact find, uploads, correspondence
+// Fields: clientUserId, adviceRecordId (FK, nullable),
+//         documentType, fileName, storageKey,
+//         uploadedBy, uploadedAt, description
+
+// 3. adviserNotes
+// Partially designed — add previousNoteId
+// Fields: adviceRecordId (FK), noteText, noteType,
+//         visibility, previousNoteId (nullable, audit chain),
+//         createdBy, createdAt
+//         NO updatedAt — append-only
+
+// 4. adviceRecordVersions
+// New — snapshot on every adviceRecords status change
+// Fields: adviceRecordId (FK), versionNumber,
+//         snapshotJsonb, changeReason, createdBy, createdAt
+//         Written atomically in same tx as the status flip — no exceptions
+```
+
+**Task 94 — two fixes to existing system:**
+
+```
+1. adviceRecords route guard: if status = review_pending,
+   block any write to the record with 423 Locked.
+   Notes and compliance actions exempt.
+
+2. auditLogs.metadata standardisation helper:
+   All advice/planner writes must call writeAuditLog({ before, after })
+   using a shared helper, not inline JSON construction.
+   This is a follow-up task, not blocking 94.
+```
+
+**Task 94 — UI:**
+
+Build the planner UI layer on top of `adviceRecords`. Map every screen to existing fields. Do not introduce any state or data that lives outside the existing advice layer plus the four new tables. If a screen needs data that does not exist in `adviceRecords`, the answer is to add a field to one of the four new tables — not to create a fifth table.
+
+**Hard stop — unchanged:**
+
+No personal advice execution, no rebalancing, no bank transfer, no external payout. The `executionGate` already controls this. Do not build around it.
+
+---
+
+Here is the corrected architecture on a single diagram.

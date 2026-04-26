@@ -1,0 +1,704 @@
+Confirmed. Here is the complete, final, code-ready build specification incorporating every fix — written so a developer can execute it without referring back to any prior document.
+
+---
+
+## Step 4 — Wealth Planner Schema Foundation (final, all fixes applied)
+
+**Replit prompt**
+
+Proceed with Step 4 — Wealth Planner Schema Foundation.
+
+Purpose: Build the complete append-only, versioned, disclaimer-gated schema for the wealth planner. Every fix from the pre-build checklist is incorporated here. No editable mutable plan records. No personal advice fields. No execution paths.
+
+**Add to `shared/schema.ts`:**
+
+```ts
+// ─── Core plan ────────────────────────────────────────────────────────────────
+
+export const wealthPlans = pgTable("wealth_plans", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id).notNull(),
+  status: text("status").notNull().default("active"),
+  // active | under_review | closed
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  closedAt: timestamp("closed_at"),
+  closedBy: integer("closed_by").references(() => users.id),
+  closureReason: text("closure_reason"),
+}, (table) => ({
+  uniqClientAdviser: uniqueIndex("wealth_plans_client_adviser_uidx")
+    .on(table.clientUserId, table.adviserUserId),
+}));
+
+// Append-only. Created atomically on every plan write. Never updated directly.
+export const wealthPlanVersions = pgTable("wealth_plan_versions", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  versionNumber: integer("version_number").notNull(),
+  snapshotData: jsonb("snapshot_data").notNull(),
+  // Full serialised state of the plan at this version
+  changeReason: text("change_reason").notNull(),
+  isMaterialChange: boolean("is_material_change").notNull().default(false),
+  // true = stales all prior disclaimer acknowledgements for this plan
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  uniqPlanVersion: uniqueIndex("wealth_plan_versions_plan_ver_uidx")
+    .on(table.wealthPlanId, table.versionNumber),
+}));
+
+// ─── Risk profile ─────────────────────────────────────────────────────────────
+
+// Enforced shape for selectedModelPortfolio jsonb field.
+// Validated at service layer before insert — reject if shape does not conform.
+// type ModelPortfolioSnapshot = {
+//   name: string;
+//   assetAllocation: Record<string, number>; // must sum to 100
+//   benchmark: string;
+//   riskLevel: "conservative" | "balanced" | "growth" | "aggressive";
+//   version: string; // e.g. "v2024-03"
+// }
+
+// Append-only. New row on every capture. Never mutated.
+export const riskProfileSnapshots = pgTable("risk_profile_snapshots", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id).notNull(),
+  riskTolerance: text("risk_tolerance").notNull(),
+  // conservative | balanced | growth | aggressive
+  timeHorizonYears: integer("time_horizon_years").notNull(),
+  liquidityNeedsText: text("liquidity_needs_text").notNull(),
+  sourceOfWealth: text("source_of_wealth").notNull(),
+  employmentStatus: text("employment_status"),
+  annualIncomeRange: text("annual_income_range"),
+  netWorthRange: text("net_worth_range"),
+  investmentExperience: text("investment_experience"),
+  // none | limited | moderate | experienced
+  selectedModelPortfolio: jsonb("selected_model_portfolio"),
+  // Must conform to ModelPortfolioSnapshot shape — validated before insert
+  capturedBy: integer("captured_by").references(() => users.id).notNull(),
+  capturedAt: timestamp("captured_at").defaultNow(),
+});
+
+// ─── Objectives ───────────────────────────────────────────────────────────────
+
+// Append-only. Updates = new row + set supersededAt on prior, in one transaction.
+export const clientObjectives = pgTable("client_objectives", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id).notNull(),
+  objectiveType: text("objective_type").notNull(),
+  // retirement | education | property | estate | income | liquidity | other
+  description: text("description").notNull(),
+  targetAmount: decimal("target_amount", { precision: 15, scale: 2 }),
+  targetDate: date("target_date"),
+  priority: text("priority").notNull().default("primary"),
+  // primary | secondary | aspirational
+  currency: text("currency").notNull().default("AUD"),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  supersededAt: timestamp("superseded_at"),
+  supersededBy: integer("superseded_by"),
+  // id of the newer clientObjectives row that replaces this one
+});
+
+// ─── Disclaimer acknowledgements ──────────────────────────────────────────────
+
+// Compliance record. Never deleted or updated.
+// Gate checks: disclaimerVersion matches current config AND
+// wealthPlanVersionId post-dates the last material plan change.
+// A material wealthPlanVersions row (isMaterialChange = true) stales all
+// prior acknowledgements — client must re-acknowledge before plan data is served.
+export const adviceDisclaimerAcknowledgements = pgTable(
+  "advice_disclaimer_acknowledgements",
+  {
+    id: serial("id").primaryKey(),
+    clientUserId: integer("client_user_id")
+      .references(() => users.id).notNull(),
+    wealthPlanId: integer("wealth_plan_id")
+      .references(() => wealthPlans.id).notNull(),
+    wealthPlanVersionId: integer("wealth_plan_version_id")
+      .references(() => wealthPlanVersions.id).notNull(),
+    // Plan version the client was viewing when they acknowledged
+    disclaimerVersion: text("disclaimer_version").notNull(),
+    // e.g. "general-advice-v1.0" — must match ACTIVE_DISCLAIMER_VERSION in config
+    disclaimerText: text("disclaimer_text").notNull(),
+    // Full text shown at time of acknowledgement — locked, not a reference
+    acknowledgedAt: timestamp("acknowledged_at").defaultNow(),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    sessionId: text("session_id"),
+  }
+);
+
+// ─── Recommendations ──────────────────────────────────────────────────────────
+
+// adviceType LOCKED to "general". Server rejects any other value.
+// No personal advice until AFSL/AR framework is approved.
+export const wealthPlanRecommendations = pgTable("wealth_plan_recommendations", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id).notNull(),
+  // Version of the plan at time of recommendation — required for audit trail
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id).notNull(),
+  adviceType: text("advice_type").notNull().default("general"),
+  // HARD LOCK — server returns 400 PERSONAL_ADVICE_BLOCKED if any other value
+  generalAdviceDisclaimer: text("general_advice_disclaimer").notNull(),
+  // Full disclaimer text attached to this specific recommendation
+  recommendationText: text("recommendation_text").notNull(),
+  // Server checks for prohibited terms before insert (buy, allocate to, fund names)
+  // Returns flag in response if found — adviser must explicitly confirm before insert
+  assetClassFocus: text("asset_class_focus"),
+  // equities | fixed_income | property | cash | alternatives | mixed
+  riskProfileSnapshotId: integer("risk_profile_snapshot_id")
+    .references(() => riskProfileSnapshots.id).notNull(),
+  // Risk profile active at time of recommendation
+  // Server gate: recommendation risk level must not exceed client risk tolerance
+  status: text("status").notNull().default("draft"),
+  // draft | presented | acknowledged | superseded
+  presentedAt: timestamp("presented_at"),
+  acknowledgedAt: timestamp("acknowledged_at"),
+  acknowledgedBy: integer("acknowledged_by").references(() => users.id),
+  // Must be the clientUserId — server validates this on write
+  supersededAt: timestamp("superseded_at"),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ─── Planner notes ────────────────────────────────────────────────────────────
+
+// Append-only. No updatedAt column — absence is intentional and enforced.
+// New note supersedes prior. supersedesNoteId makes chain traversable.
+export const plannerNotes = pgTable("planner_notes", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  supersedesNoteId: integer("supersedes_note_id"),
+  // FK to plannerNotes.id — nullable for first note in any chain
+  noteText: text("note_text").notNull(),
+  noteType: text("note_type").notNull().default("general"),
+  // general | review | client_instruction | compliance | follow_up
+  visibility: text("visibility").notNull().default("adviser_only"),
+  // adviser_only | shared_with_client | admin_only
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  // No updatedAt. Append-only. Adding one is a schema violation.
+});
+
+// ─── Reviews ──────────────────────────────────────────────────────────────────
+
+export const wealthPlanReviews = pgTable("wealth_plan_reviews", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  reviewType: text("review_type").notNull().default("annual"),
+  // annual | triggered | compliance | initial
+  reviewedBy: integer("reviewed_by").references(() => users.id).notNull(),
+  reviewedAt: timestamp("reviewed_at").defaultNow(),
+  priorVersionId: integer("prior_version_id")
+    .references(() => wealthPlanVersions.id),
+  newVersionId: integer("new_version_id")
+    .references(() => wealthPlanVersions.id),
+  riskProfileSnapshotId: integer("risk_profile_snapshot_id")
+    .references(() => riskProfileSnapshots.id),
+  objectivesChanged: boolean("objectives_changed").notNull().default(false),
+  riskProfileChanged: boolean("risk_profile_changed").notNull().default(false),
+  recommendationsChanged: boolean("recommendations_changed").notNull().default(false),
+  reviewSummary: text("review_summary").notNull(),
+  nextReviewDue: date("next_review_due"),
+  clientAcknowledgedAt: timestamp("client_acknowledged_at"),
+  clientAcknowledgedBy: integer("client_acknowledged_by")
+    .references(() => users.id),
+});
+
+// ─── Compliance flags ─────────────────────────────────────────────────────────
+
+export const wealthPlanComplianceFlags = pgTable("wealth_plan_compliance_flags", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id),
+  flaggedBy: integer("flagged_by").references(() => users.id).notNull(),
+  flaggedAt: timestamp("flagged_at").defaultNow(),
+  flagReason: text("flag_reason").notNull(),
+  flagSeverity: text("flag_severity").notNull().default("medium"),
+  // low | medium | high | critical
+  resolvedBy: integer("resolved_by").references(() => users.id),
+  resolvedAt: timestamp("resolved_at"),
+  resolutionNote: text("resolution_note"),
+});
+
+// ─── Documents ────────────────────────────────────────────────────────────────
+
+export const wealthPlanDocuments = pgTable("wealth_plan_documents", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  uploadedBy: integer("uploaded_by").references(() => users.id).notNull(),
+  documentType: text("document_type").notNull(),
+  // statement_of_advice | fact_find | risk_questionnaire |
+  // correspondence | review_report | compliance_record | other
+  fileName: text("file_name").notNull(),
+  fileSizeBytes: integer("file_size_bytes"),
+  mimeType: text("mime_type"),
+  storageKey: text("storage_key").notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+  description: text("description"),
+});
+```
+
+---
+
+## Step 5 — Wealth Planner API + Compliance Gates (final, all gates enforced in code)
+
+**Replit prompt**
+
+Proceed with Step 5 — Wealth Planner API + Compliance Gates.
+
+Purpose: Build all planner endpoints with every compliance gate enforced server-side in code. Spec descriptions are not enforcement. Every gate listed here must produce a rejection if the condition is not met.
+
+### Core service wrapper — required before any endpoint is built
+
+```ts
+// services/wealthPlannerService.ts
+//
+// ALL writes to any planner table must go through this wrapper.
+// Direct ORM writes outside this function are prohibited.
+// assertWriteRole must be called at the top of every write path.
+
+export async function writeWithVersioning(
+  db: DbClient,
+  planId: number,
+  actorUserId: number,
+  changeReason: string,
+  isMaterialChange: boolean,
+  writeFn: (tx: Transaction) => Promise<void>
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    // 1. Verify plan is not under_review before any non-compliance write
+    //    (freeze endpoint is exempt from this check)
+    const plan = await tx.query.wealthPlans.findFirst({
+      where: eq(wealthPlans.id, planId)
+    });
+    if (!plan) throw new NotFoundError("wealth_plan_not_found");
+    if (plan.status === "under_review") {
+      throw new LockedError("plan_under_review");
+    }
+
+    // 2. Run the caller's write operations
+    await writeFn(tx);
+
+    // 3. Always create a version snapshot — no exceptions
+    const prior = await tx.query.wealthPlanVersions.findFirst({
+      where: eq(wealthPlanVersions.wealthPlanId, planId),
+      orderBy: desc(wealthPlanVersions.versionNumber),
+    });
+    const nextVersion = (prior?.versionNumber ?? 0) + 1;
+    const snapshot = await buildPlanSnapshot(tx, planId);
+
+    await tx.insert(wealthPlanVersions).values({
+      wealthPlanId: planId,
+      versionNumber: nextVersion,
+      snapshotData: snapshot,
+      changeReason,
+      isMaterialChange,
+      createdBy: actorUserId,
+    });
+
+    // 4. Write audit log with before + after state
+    await writeAuditLog(tx, {
+      userId: actorUserId,
+      action: changeReason,
+      resourceType: "wealth_plan",
+      resourceId: planId,
+      metadata: {
+        before: prior?.snapshotData ?? null,
+        after: snapshot,
+        versionNumber: nextVersion,
+        isMaterialChange,
+      },
+    });
+  });
+}
+
+// Role assertion — called at top of every write path, no exceptions
+export function assertWriteRole(user: User): void {
+  if (user.role !== "adviser") {
+    throw new ForbiddenError("write_role_required");
+  }
+}
+
+// Role assertion for reads — client sees own plan only, adviser sees own clients
+export function assertReadAccess(user: User, plan: WealthPlan): void {
+  if (user.role === "client" && plan.clientUserId !== user.id) {
+    throw new ForbiddenError("plan_access_denied");
+  }
+  if (user.role === "adviser" && plan.adviserUserId !== user.id) {
+    throw new ForbiddenError("plan_access_denied");
+  }
+  // admin and compliance_admin can read all — no additional check
+}
+```
+
+### Disclaimer gate — enforced as middleware, not a one-time check
+
+```ts
+// middleware/disclaimerGate.ts
+//
+// Applied to: GET /api/client/wealth-plan and all client plan data routes.
+// Checks both: disclaimerVersion AND wealthPlanVersionId staleness.
+
+export async function requireDisclaimerAcknowledgement(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  const { planId, userId } = req;
+
+  // Get current active disclaimer version from config
+  const activeDisclaimerVersion = config.ACTIVE_DISCLAIMER_VERSION;
+
+  // Get the most recent material change version for this plan
+  const lastMaterialVersion = await db.query.wealthPlanVersions.findFirst({
+    where: and(
+      eq(wealthPlanVersions.wealthPlanId, planId),
+      eq(wealthPlanVersions.isMaterialChange, true)
+    ),
+    orderBy: desc(wealthPlanVersions.versionNumber),
+  });
+
+  // Get the client's most recent acknowledgement for this plan
+  const ack = await db.query.adviceDisclaimerAcknowledgements.findFirst({
+    where: and(
+      eq(adviceDisclaimerAcknowledgements.clientUserId, userId),
+      eq(adviceDisclaimerAcknowledgements.wealthPlanId, planId)
+    ),
+    orderBy: desc(adviceDisclaimerAcknowledgements.acknowledgedAt),
+  });
+
+  // Gate 1: no acknowledgement at all
+  if (!ack) {
+    return res.status(403).json({ code: "DISCLAIMER_REQUIRED" });
+  }
+
+  // Gate 2: disclaimer text version is outdated
+  if (ack.disclaimerVersion !== activeDisclaimerVersion) {
+    return res.status(403).json({ code: "DISCLAIMER_VERSION_OUTDATED" });
+  }
+
+  // Gate 3: a material plan change occurred after the client's last acknowledgement
+  // The ack is stale if any material version was created after it was acknowledged
+  if (lastMaterialVersion) {
+    const ackVersion = await db.query.wealthPlanVersions.findFirst({
+      where: eq(wealthPlanVersions.id, ack.wealthPlanVersionId)
+    });
+    if (!ackVersion || ackVersion.versionNumber < lastMaterialVersion.versionNumber) {
+      return res.status(403).json({ code: "DISCLAIMER_STALE_AFTER_MATERIAL_CHANGE" });
+    }
+  }
+
+  next();
+}
+```
+
+### Endpoints
+
+```
+POST   /api/adviser/wealth-plans
+POST   /api/adviser/wealth-plans/:id/freeze
+GET    /api/adviser/wealth-plans/:id
+POST   /api/adviser/wealth-plans/:id/risk-profiles
+POST   /api/adviser/wealth-plans/:id/objectives
+POST   /api/adviser/wealth-plans/:id/recommendations
+POST   /api/adviser/wealth-plans/:id/notes
+POST   /api/adviser/wealth-plans/:id/reviews
+POST   /api/adviser/wealth-plans/:id/documents
+
+POST   /api/client/wealth-plan/acknowledge-disclaimer
+GET    /api/client/wealth-plan                         ← disclaimer gate middleware
+GET    /api/client/wealth-plan/recommendations         ← disclaimer gate middleware
+
+GET    /api/admin/wealth-plans
+GET    /api/admin/wealth-plans/:id
+POST   /api/admin/wealth-plans/:id/flag
+```
+
+### Per-endpoint logic
+
+**`POST /api/adviser/wealth-plans/:id/freeze`**
+```
+1. assertWriteRole(user) — adviser only
+2. assertReadAccess(user, plan) — adviser must own this plan
+3. Verify plan.status = active — cannot freeze an already-frozen or closed plan
+4. Call writeWithVersioning with:
+   - changeReason: "plan_frozen_for_review"
+   - isMaterialChange: false
+   - writeFn: set plan.status = under_review
+5. Return the new version id and plan state
+```
+
+**`POST /api/adviser/wealth-plans/:id/risk-profiles`**
+```
+1. assertWriteRole(user)
+2. assertReadAccess(user, plan)
+3. Validate selectedModelPortfolio shape if present:
+   - Must have: name (string), assetAllocation (Record<string, number>),
+     benchmark (string), riskLevel (enum), version (string)
+   - assetAllocation values must sum to 100 (±0.01 tolerance)
+   - Return 400 MODEL_PORTFOLIO_SHAPE_INVALID if not conformant
+4. Call writeWithVersioning with isMaterialChange: true
+   (a new risk profile is always a material change)
+```
+
+**`POST /api/adviser/wealth-plans/:id/recommendations`**
+```
+1. assertWriteRole(user)
+2. assertReadAccess(user, plan)
+3. Hard reject: if body.adviceType !== "general"
+   → 400 { code: "PERSONAL_ADVICE_BLOCKED",
+            message: "adviceType must be general. Personal advice requires AFSL/AR framework." }
+4. Risk alignment gate:
+   - Load riskProfileSnapshot by riskProfileSnapshotId from body
+   - Derive implied risk level from assetClassFocus or explicit field
+   - If recommendation risk > client risk tolerance → 400 RISK_ALIGNMENT_EXCEEDED
+   - Risk order: conservative < balanced < growth < aggressive
+5. Product language guard:
+   - Scan recommendationText for prohibited terms:
+     ["buy", "purchase", "invest in", "allocate to", "switch to",
+      and any string matching a known fund name pattern]
+   - If found: do NOT reject — return 200 with:
+     { warning: "PROHIBITED_LANGUAGE_DETECTED", terms: [...], requiresConfirmation: true }
+   - Only insert if request includes confirmedProhibitedLanguage: true in body
+6. Attach wealthPlanVersionId from the current plan version
+7. Call writeWithVersioning with isMaterialChange: true
+```
+
+**`POST /api/adviser/wealth-plans/:id/objectives`**
+```
+1. assertWriteRole(user)
+2. assertReadAccess(user, plan)
+3. If superseding an existing objective:
+   - In the same transaction (inside writeWithVersioning):
+     a. Insert new objective row
+     b. Set supersededAt = now(), supersededBy = new row id on prior objective
+   - Never delete the prior row
+4. isMaterialChange: true
+```
+
+**`POST /api/adviser/wealth-plans/:id/notes`**
+```
+1. assertWriteRole(user) — adviser only
+2. assertReadAccess(user, plan)
+3. Plan status check: notes ARE allowed when status = under_review
+   (notes are the one write permitted during a review lock)
+4. If supersedesNoteId is provided:
+   - Verify the referenced note belongs to the same wealthPlanId
+5. writeWithVersioning with isMaterialChange: false
+   (notes do not trigger disclaimer staleness)
+```
+
+**`POST /api/admin/wealth-plans/:id/flag`**
+```
+1. Require role: admin | compliance_admin
+2. No assertWriteRole — flag is a compliance action, not a plan write
+3. Insert into wealthPlanComplianceFlags
+4. flagSeverity must be one of: low | medium | high | critical
+5. Audit log the flag action
+6. Do NOT call writeWithVersioning — flags are not plan versions
+```
+
+**`POST /api/client/wealth-plan/acknowledge-disclaimer`**
+```
+1. Require role: client
+2. Load current plan for this client
+3. Verify disclaimerVersion in body matches config.ACTIVE_DISCLAIMER_VERSION
+   → 400 DISCLAIMER_VERSION_MISMATCH if not
+4. Load the current latest wealthPlanVersions id for this plan
+5. Insert adviceDisclaimerAcknowledgements with:
+   - wealthPlanVersionId = current latest version id
+   - disclaimerVersion = config.ACTIVE_DISCLAIMER_VERSION
+   - disclaimerText = full text from config (not from client body)
+   - ipAddress, userAgent, sessionId from request
+6. Never allow client to supply the disclaimerText in the body
+   — always write the server's canonical text
+```
+
+### What no endpoint does
+
+```
+No endpoint touches wallet.balance
+No endpoint creates a ledger entry
+No endpoint executes a trade or instruction
+No endpoint writes to any fee deduction table
+No endpoint exists for rebalancing
+No endpoint accepts adviceType = "personal"
+No PUT or PATCH on: plannerNotes, riskProfileSnapshots, clientObjectives,
+  adviceDisclaimerAcknowledgements, wealthPlanVersions, wealthPlanDocuments
+DELETE is not implemented on any planner table
+Admin cannot call writeWithVersioning — the function rejects non-adviser callers
+```
+
+---
+
+## Step 7 — Wealth Planner Verification Script (final, all 16 tests)
+
+**Create `scripts/test-wealth-planner.ts`**
+
+```ts
+type TestResult = { name: string; passed: boolean; details?: string };
+const results: TestResult[] = [];
+function pass(name: string, details?: string) { results.push({ name, passed: true, details }); }
+function fail(name: string, details?: string) { results.push({ name, passed: false, details }); }
+
+async function run() {
+  // Setup: create admin, adviser, second_adviser, client users
+  // Create active wealth plan for adviser + client
+  // Seed initial risk profile, objectives
+
+  // ── Access control ────────────────────────────────────────────────────────
+
+  // 1. Non-adviser cannot create a plan
+  // 2. Adviser cannot access another adviser's client plan
+  // 3. Client cannot write to any plan table
+  // 4. Admin can read plan but writeWithVersioning rejects admin role
+  // 5. Client cannot view plan without acknowledged disclaimer
+
+  // ── Disclaimer gate ───────────────────────────────────────────────────────
+
+  // 6. Disclaimer acknowledgement records full text, version, IP, user-agent, sessionId
+  // 7. Outdated disclaimerVersion string blocks plan access (DISCLAIMER_VERSION_OUTDATED)
+  // 8. Material plan change stales the prior acknowledgement
+  //    - Adviser posts a new risk profile (isMaterialChange = true)
+  //    - Client's prior ack now references an older version
+  //    - GET /api/client/wealth-plan returns 403 DISCLAIMER_STALE_AFTER_MATERIAL_CHANGE
+  //    - Client re-acknowledges → access restored
+  // 9. Non-material plan change (e.g. note) does NOT stale the acknowledgement
+
+  // ── Versioning ────────────────────────────────────────────────────────────
+
+  // 10. Every plan write creates a new wealthPlanVersions row atomically
+  // 11. Direct ORM write to wealthPlans outside writeWithVersioning
+  //     → verify no version was created (i.e., the wrapper is the only write path)
+  // 12. Risk profile snapshot is immutable — no update permitted
+  // 13. Objective supersession: new row created, supersededAt set on prior, in one tx
+
+  // ── Compliance gates ──────────────────────────────────────────────────────
+
+  // 14. adviceType = "personal" is rejected server-side (400 PERSONAL_ADVICE_BLOCKED)
+  // 15. Recommendation risk exceeding client risk profile is blocked (400 RISK_ALIGNMENT_EXCEEDED)
+  // 16. Prohibited language in recommendationText returns warning + requiresConfirmation
+  //     and is not inserted without confirmedProhibitedLanguage: true
+
+  // ── Plan lock ─────────────────────────────────────────────────────────────
+
+  // 17. POST /freeze sets status = under_review and creates a version row
+  // 18. While under_review: POST to recommendations → 423 Locked
+  // 19. While under_review: POST to risk-profiles → 423 Locked
+  // 20. While under_review: POST to notes → 200 OK (notes allowed during review)
+
+  // ── Append-only ───────────────────────────────────────────────────────────
+
+  // 21. PUT/PATCH on plannerNotes → 405 Method Not Allowed
+  // 22. DELETE on any planner table → 405 Method Not Allowed
+  // 23. plannerNotes table has no updatedAt column (schema inspection)
+  // 24. supersedesNoteId chain: note B supersedesNoteId = note A id — traversable
+
+  // ── Audit log ────────────────────────────────────────────────────────────
+
+  // 25. Every plan write produces an audit log entry with before + after state
+
+  // ── No side effects ───────────────────────────────────────────────────────
+
+  // 26. No ledger entry created by any planner write
+  // 27. No wallet.balance mutation by any planner write
+
+  // ── ModelPortfolio shape ──────────────────────────────────────────────────
+
+  // 28. Risk profile with malformed selectedModelPortfolio → 400 MODEL_PORTFOLIO_SHAPE_INVALID
+  // 29. Risk profile with assetAllocation not summing to 100 → 400 MODEL_PORTFOLIO_SHAPE_INVALID
+
+  for (const r of results) {
+    console.log(
+      `${r.passed ? "PASS" : "FAIL"} ${r.name}${r.details ? ` — ${r.details}` : ""}`
+    );
+  }
+
+  const failed = results.filter(r => !r.passed);
+  if (failed.length > 0) {
+    console.error(`\n${failed.length} wealth planner test(s) failed.`);
+    process.exit(1);
+  }
+  console.log("\nALL WEALTH PLANNER TESTS PASSED ✅");
+}
+
+run().catch((err) => {
+  console.error("Wealth planner test crashed:", err);
+  process.exit(1);
+});
+```
+
+**Required final output:**
+
+```
+PASS  non-adviser cannot create a plan
+PASS  adviser blocked from another adviser's client
+PASS  client cannot write to any plan table
+PASS  admin write blocked by writeWithVersioning
+PASS  client blocked without disclaimer acknowledgement
+PASS  disclaimer ack records full text, version, IP, user-agent, sessionId
+PASS  outdated disclaimer version blocked
+PASS  material plan change stales prior acknowledgement
+PASS  non-material change does not stale acknowledgement
+PASS  every plan write creates a version row atomically
+PASS  direct ORM write produces no version row
+PASS  risk profile snapshot is immutable
+PASS  objective supersession is atomic new-row + supersededAt
+PASS  personal adviceType blocked server-side
+PASS  recommendation risk exceeding client risk blocked
+PASS  prohibited language returns warning, not inserted without confirmation
+PASS  freeze sets under_review and creates version
+PASS  recommendations blocked while under_review
+PASS  risk profiles blocked while under_review
+PASS  notes allowed while under_review
+PASS  PUT/PATCH on plannerNotes rejected
+PASS  DELETE on planner tables rejected
+PASS  plannerNotes has no updatedAt column
+PASS  supersedesNoteId chain is traversable
+PASS  every plan write produces audit log with before/after state
+PASS  no ledger entry from any planner write
+PASS  no wallet balance mutation from any planner write
+PASS  malformed modelPortfolio shape rejected
+PASS  assetAllocation not summing to 100 rejected
+
+ALL WEALTH PLANNER TESTS PASSED ✅
+```
+
+Hard stop. If any of the 29 tests fails, do not proceed to Step 6 UI build and do not proceed toward AFSL/AR work.
+
+---
+
+Here is the final complete architecture map for handoff.This is the complete, final, handoff-ready specification. Three things a developer needs to understand before touching the keyboard:
+
+`writeWithVersioning` is not a helper function — it is the only write path. Every planner write goes through it. There is no "quick fix" route that bypasses it. If a future endpoint needs to write to a plan table and someone considers skipping the wrapper for simplicity, that is the exact failure mode this architecture prevents.
+
+The disclaimer gate runs on every request to client plan data, not just on first login. A client who acknowledged at 9am, then the adviser posted a new risk profile (material change) at 10am, will get a `403 DISCLAIMER_STALE_AFTER_MATERIAL_CHANGE` at 10:01am even with a valid session. This is intentional. The gate must never be converted to a one-time session check.
+
+The verification script has 29 tests, not 12. The expanded count reflects all the fixes incorporated in this final version. If any test fails, do not proceed to the UI build. The test script is the proof that the controls are enforced in code, not just described in comments.

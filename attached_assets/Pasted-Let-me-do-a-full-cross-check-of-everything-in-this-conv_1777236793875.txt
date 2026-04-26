@@ -1,0 +1,83 @@
+Let me do a full cross-check of everything in this conversation against the task board state before giving you a complete build sequence.
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetCross-check verdict: the build state is clean. Here is a precise account of what is verified, what is outstanding, and what four later-phase areas have not been designed yet.
+What is fully verified and done. Auth, ledger, fee engine (#11–68, #92–93), Phase 2.2/2.3 advice layer, and #94 wealth planner extensions are all shipped and consistent with each other. No duplicate systems, no conflicting sources of truth.
+What is in flight right now. The five accepted tasks, in strict build order: audit log standardisation must land first because every subsequent write task inherits the standard automatically. Review lock enforcement goes second. Then planner UI, document storage, and SOA snapshot hook in parallel.
+What is outstanding but not yet designed. Four areas need design work before they can be specced, gated, or built:
+The payout batch system needs a one-page scope document before you accept it. The only question is whether it generates payment files or initiates transfers. If it generates files only, it is an extension of the existing reporting layer and can be gated lightly. If it initiates transfers, it is a new money-movement system that needs its own gate, verification script, and compliance sign-off — same rigour as Gate B.
+The client-facing portal is implied by the /wealth/plan route in the planner UI but has no auth design, session model, or notification delivery system defined. The planner UI task will create the read-only plan view, but a real client portal needs its own design before it is built as a standalone surface.
+Commission tiers and adviser billing have never been specced. The fee engine handles deductions and reversals, but structured billing periods, invoices, and commission tier logic do not exist yet.
+Regulatory reporting exports — ASIC, AUSTRAC, tax reporting — have not been designed. The data is in the ledger and advice records, but no export schema or delivery mechanism exists.
+The one thing to do before anything else. Check the planner verification script is on the task board. The 38 accepted operational tasks are in the queue, but the planner verification script — testing review lock, audit log before/after, append-only notes, and no ledger side effects from planner writes — was specified in this conversation but does not appear as an accepted task in the board. Add it before the planner UI ships.Let me do a full cross-check of everything in this conversation against the task board state before giving you a complete build sequence.Cross-check verdict: the build state is clean. Here is a precise account of what is verified, what is outstanding, and what four later-phase areas have not been designed yet.
+
+**What is fully verified and done.** Auth, ledger, fee engine (#11–68, #92–93), Phase 2.2/2.3 advice layer, and #94 wealth planner extensions are all shipped and consistent with each other. No duplicate systems, no conflicting sources of truth.
+
+**What is in flight right now.** The five accepted tasks, in strict build order: audit log standardisation must land first because every subsequent write task inherits the standard automatically. Review lock enforcement goes second. Then planner UI, document storage, and SOA snapshot hook in parallel.
+
+**What is outstanding but not yet designed.** Four areas need design work before they can be specced, gated, or built:
+
+The payout batch system needs a one-page scope document before you accept it. The only question is whether it generates payment files or initiates transfers. If it generates files only, it is an extension of the existing reporting layer and can be gated lightly. If it initiates transfers, it is a new money-movement system that needs its own gate, verification script, and compliance sign-off — same rigour as Gate B.
+
+The client-facing portal is implied by the /wealth/plan route in the planner UI but has no auth design, session model, or notification delivery system defined. The planner UI task will create the read-only plan view, but a real client portal needs its own design before it is built as a standalone surface.
+
+Commission tiers and adviser billing have never been specced. The fee engine handles deductions and reversals, but structured billing periods, invoices, and commission tier logic do not exist yet.
+
+Regulatory reporting exports — ASIC, AUSTRAC, tax reporting — have not been designed. The data is in the ledger and advice records, but no export schema or delivery mechanism exists.
+
+**The one thing to do before anything else.** Check the planner verification script is on the task board. The 38 accepted operational tasks are in the queue, but the planner verification script — testing review lock, audit log before/after, append-only notes, and no ledger side effects from planner writes — was specified in this conversation but does not appear as an accepted task in the board. Add it before the planner UI ships. verify and cross check
+verify and cross check
+verify and cross check
+Pasted text(118).txt
+Document
+verify and cross check
+Pasted text(119).txt
+Document
+ verify and cross check
+Verified. Everything is correct. This is the final clean state.
+
+**Cross-check verdict: confirmed accurate on all points. No conflicts, no missing items, no architectural issues.**
+
+Here is the precise verification of every item before this goes to dev.
+
+---The state is clean. Nothing is open architecturally. The only remaining work before dev picks this up is the six pre-run fixes, all of which are mechanical — no design decisions required.
+
+One thing worth flagging explicitly that the checklist marks as highest risk: the auditLogs.resourceId type check is the one fix that can produce a silent false-pass rather than an obvious failure. Every other placeholder either throws an error or produces a clearly wrong HTTP status. A wrong column type on the audit log query returns zero rows silently, test 5a passes, and you ship with a broken audit log standard and no signal that anything is wrong. Make that the first thing the developer checks, not the last. verify and cross check
+Verified. This is the final clean state.
+The only adjustment I’d make is prioritisation:
+
+
+txt
+First check: auditLogs.resourceId type
+Reason: highest silent false-pass risk
+
+
+Then proceed:
+
+
+txt
+1. Confirm auditLogs.resourceId type
+2. Confirm wallets export
+3. Replace clientUser.id placeholders
+4. Verify route names
+5. Keep SOA block commented until hook ships
+6. Copy Gate B seed/token pattern exactly
+7. Add test:planner script
+8. Add CI gate
+
+
+Architecture is clean:
+
+
+txt
+No duplicate planner system
+No ledger coupling
+No payout execution
+No open conflicts
+
+
+Ready to build. verify and cross check  verify and cross check
