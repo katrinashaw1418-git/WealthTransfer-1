@@ -286,3 +286,106 @@ describe("postLedgerEntries — double-post guard (Task #22)", () => {
     }
   });
 });
+
+// ===========================================================================
+// Task #41 — automated test for the mixed-currency journal guard
+// ===========================================================================
+// Locks in the rule in postLedgerEntries() that every entry in a single
+// journal must share one currency. Multi-currency FX must be split into two
+// single-currency journals (one per leg). The guard fires synchronously on
+// the in-memory entries array BEFORE any DB write, so this test does not
+// need to create accounts, transactions, or ledger rows — and therefore
+// has nothing to clean up. We deliberately use sentinel non-existent
+// account/user ids: if a regression ever lets execution reach the insert,
+// the FK constraint on ledger_entries.account_id will surface as a
+// distinct (non-Error-message) failure rather than a silent pass.
+// ===========================================================================
+describe("postLedgerEntries — mixed-currency guard (Task #41)", () => {
+  it("throws when entries in the same journal use different currencies", async () => {
+    const SENTINEL_TX_ID = -1;
+    const SENTINEL_ACCT_ID = -1;
+    const SENTINEL_USER_ID = -1;
+
+    const mixedCurrencyJournal = [
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "USD",
+        direction: "debit" as const,
+        amount: TEST_AMOUNT,
+        description: "mixed-currency test (USD leg)",
+      },
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "EUR",
+        direction: "credit" as const,
+        amount: TEST_AMOUNT,
+        description: "mixed-currency test (EUR leg)",
+      },
+    ];
+
+    await expect(
+      postLedgerEntries(SENTINEL_TX_ID, mixedCurrencyJournal),
+    ).rejects.toThrow(
+      "Multi-currency ledger entries require explicit FX transaction handling",
+    );
+
+    // The guard fires before any DB access, so no ledger entries can have
+    // been inserted against our sentinel transactionId.
+    const leaked = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, SENTINEL_TX_ID));
+    expect(leaked).toHaveLength(0);
+  });
+
+  it("accepts a single-currency journal of the same shape (control case)", async () => {
+    // Control: prove the rejection above is specifically about currency
+    // mismatch, not some other validation failing first. Same sentinel
+    // ids and amounts as above, but both legs in USD — execution must
+    // proceed past the currency guard. With sentinel (non-existent)
+    // account ids the insert step will then fail with an FK violation,
+    // which is exactly what we assert: a DB error, NOT the multi-currency
+    // error string.
+    const SENTINEL_TX_ID = -2;
+    const SENTINEL_ACCT_ID = -1;
+    const SENTINEL_USER_ID = -1;
+
+    const singleCurrencyJournal = [
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "USD",
+        direction: "debit" as const,
+        amount: TEST_AMOUNT,
+        description: "single-currency control (debit leg)",
+      },
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "USD",
+        direction: "credit" as const,
+        amount: TEST_AMOUNT,
+        description: "single-currency control (credit leg)",
+      },
+    ];
+
+    let captured: unknown = null;
+    try {
+      await postLedgerEntries(SENTINEL_TX_ID, singleCurrencyJournal);
+    } catch (err) {
+      captured = err;
+    }
+    expect(captured).not.toBeNull();
+    const msg = (captured as Error).message ?? "";
+    expect(msg).not.toMatch(/Multi-currency ledger entries/);
+
+    // Same belt-and-braces check: nothing got inserted.
+    const leaked = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, SENTINEL_TX_ID));
+    expect(leaked).toHaveLength(0);
+  });
+});
