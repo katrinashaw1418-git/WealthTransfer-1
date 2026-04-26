@@ -121,6 +121,7 @@ const CANONICAL_ORDER: string[] = [
   "8. ack row captures the full eleven-confirm disclaimer",
   "9. non-adviser (admin/client) rejected on adviser CRUD AND admin retains audit-log read access",
   "10. risk-profile and adviceType immutable via transition; snapshots written; no ledger drift",
+  "11. review_pending blocks objective/document/transition writes; notes still allowed",
 ];
 const results = new Map<string, TestResult>();
 
@@ -1232,6 +1233,168 @@ async function test10_transitionAndImmutability(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Test 11 — Task #96 review-pending lock.
+//   - With adviceRecords.status = 'review_pending':
+//       POST /api/adviser/client-objectives             -> 423 + reason
+//       POST /api/adviser/client-documents (with adviceRecordId) -> 423 + reason
+//       POST /api/adviser/advice-records/:id/transition -> 423 + reason
+//       POST /api/adviser/client-notes                  -> 200 (notes are exempt)
+//   - Zero new rows leak through on the 423 paths.
+// Runs LAST so it can flip the live status without disturbing earlier
+// assertions; restores the prior status for cleanliness on rerun.
+// ---------------------------------------------------------------------------
+async function test11_reviewPendingLock(opts: {
+  adviserUserId: number;
+  clientUserId: number;
+  adviceRecordId: number;
+}): Promise<void> {
+  const NAME =
+    "11. review_pending blocks objective/document/transition writes; notes still allowed";
+
+  const [orig] = await db
+    .select({ status: adviceRecords.status })
+    .from(adviceRecords)
+    .where(eq(adviceRecords.id, opts.adviceRecordId));
+
+  // Snapshot row counts BEFORE the locked probes — leakage check is the
+  // teeth on the lock; without it a route could return 423 *after* writing.
+  const beforeObjectives = await db
+    .select({ id: clientObjectives.id })
+    .from(clientObjectives)
+    .where(eq(clientObjectives.adviceRecordId, opts.adviceRecordId));
+  const beforeDocuments = await db
+    .select({ id: clientDocuments.id })
+    .from(clientDocuments)
+    .where(eq(clientDocuments.adviceRecordId, opts.adviceRecordId));
+  const beforeVersions = await db
+    .select({ id: adviceRecordVersions.id })
+    .from(adviceRecordVersions)
+    .where(eq(adviceRecordVersions.adviceRecordId, opts.adviceRecordId));
+
+  // Flip into review_pending for the duration of the probes.
+  await db
+    .update(adviceRecords)
+    .set({ status: "review_pending" })
+    .where(eq(adviceRecords.id, opts.adviceRecordId));
+
+  const token = signToken({
+    userId: opts.adviserUserId,
+    username: ADVISER_USERNAME,
+    email: "wpc-adviser@test.invalid",
+    role: "adviser",
+  });
+
+  const expectedReason = "record_locked_under_review";
+  const lockedNoteBody =
+    "Compliance reviewer note while record is under review (test 11)";
+
+  // ---- BLOCKED: objective POST ----
+  const postObj = captured.get("POST /api/adviser/client-objectives")!;
+  const r1 = makeMockReqRes({
+    token,
+    body: {
+      clientId: opts.clientUserId,
+      adviceRecordId: opts.adviceRecordId,
+      objectiveType: "income",
+      label: "should be locked under review (test 11)",
+    },
+  });
+  await postObj(r1.req, r1.res);
+
+  // ---- BLOCKED: document POST (with adviceRecordId) ----
+  const postDoc = captured.get("POST /api/adviser/client-documents")!;
+  const r2 = makeMockReqRes({
+    token,
+    body: {
+      clientId: opts.clientUserId,
+      adviceRecordId: opts.adviceRecordId,
+      documentType: "fact_find",
+      fileName: "locked-under-review.pdf",
+      storageKey: "wpc-locked-under-review-key",
+    },
+  });
+  await postDoc(r2.req, r2.res);
+
+  // ---- BLOCKED: transition POST (issued) ----
+  const postTrans = captured.get(
+    "POST /api/adviser/advice-records/:id/transition",
+  )!;
+  const r3 = makeMockReqRes({
+    token,
+    params: { id: String(opts.adviceRecordId) },
+    body: { newStatus: "issued" },
+  });
+  await postTrans(r3.req, r3.res);
+
+  // ---- ALLOWED: note POST stays open ----
+  const postNote = captured.get("POST /api/adviser/client-notes")!;
+  const r4 = makeMockReqRes({
+    token,
+    body: {
+      clientUserId: opts.clientUserId,
+      adviceRecordId: opts.adviceRecordId,
+      body: lockedNoteBody,
+    },
+  });
+  await postNote(r4.req, r4.res);
+
+  // Re-snapshot to assert no objective/document/version leaked through.
+  const afterObjectives = await db
+    .select({ id: clientObjectives.id })
+    .from(clientObjectives)
+    .where(eq(clientObjectives.adviceRecordId, opts.adviceRecordId));
+  const afterDocuments = await db
+    .select({ id: clientDocuments.id })
+    .from(clientDocuments)
+    .where(eq(clientDocuments.adviceRecordId, opts.adviceRecordId));
+  const afterVersions = await db
+    .select({ id: adviceRecordVersions.id })
+    .from(adviceRecordVersions)
+    .where(eq(adviceRecordVersions.adviceRecordId, opts.adviceRecordId));
+
+  const lockedNote = await db
+    .select({ id: adviserNotes.id })
+    .from(adviserNotes)
+    .where(eq(adviserNotes.body, lockedNoteBody));
+
+  // Restore original status so reruns don't drift.
+  await db
+    .update(adviceRecords)
+    .set({ status: orig?.status ?? "draft" })
+    .where(eq(adviceRecords.id, opts.adviceRecordId));
+
+  const objBlocked =
+    r1.result.statusCode === 423 &&
+    (r1.result.body as { reason?: string } | undefined)?.reason ===
+      expectedReason;
+  const docBlocked =
+    r2.result.statusCode === 423 &&
+    (r2.result.body as { reason?: string } | undefined)?.reason ===
+      expectedReason;
+  const transBlocked =
+    r3.result.statusCode === 423 &&
+    (r3.result.body as { reason?: string } | undefined)?.reason ===
+      expectedReason;
+  const noteAllowed = r4.result.statusCode === 200 && lockedNote.length === 1;
+  const noLeakage =
+    afterObjectives.length === beforeObjectives.length &&
+    afterDocuments.length === beforeDocuments.length &&
+    afterVersions.length === beforeVersions.length;
+
+  if (objBlocked && docBlocked && transBlocked && noteAllowed && noLeakage) {
+    pass(
+      NAME,
+      `objectives=423, documents=423, transition=423 (reason='${expectedReason}'); note=200 (id=${lockedNote[0].id}); leakage Δ=0/0/0 (obj/doc/ver)`,
+    );
+  } else {
+    fail(
+      NAME,
+      `objBlocked=${objBlocked} (status=${r1.result.statusCode}, body=${JSON.stringify(r1.result.body)}), docBlocked=${docBlocked} (status=${r2.result.statusCode}, body=${JSON.stringify(r2.result.body)}), transBlocked=${transBlocked} (status=${r3.result.statusCode}, body=${JSON.stringify(r3.result.body)}), noteAllowed=${noteAllowed} (status=${r4.result.statusCode}, rowFound=${lockedNote.length}), noLeakage=${noLeakage} (objΔ=${afterObjectives.length - beforeObjectives.length}, docΔ=${afterDocuments.length - beforeDocuments.length}, verΔ=${afterVersions.length - beforeVersions.length})`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
@@ -1310,13 +1473,22 @@ async function main(): Promise<void> {
     clientUserId,
     adviceRecordId,
   });
-  // Test 10 runs LAST so its money-isolation half covers EVERY write in
-  // this script (including the transition-route writes inside test 10
-  // itself, which happen before snapshotMoneyTables() is re-read).
+  // Test 10 runs second-to-last so its money-isolation half covers EVERY
+  // wealth-planner write up to that point (including its own transition-route
+  // writes, which happen before snapshotMoneyTables() is re-read).
   await test10_transitionAndImmutability({
     adviceRecordId,
     adviserUserId,
     before: moneyBefore,
+  });
+  // Test 11 (Task #96 review-pending lock) runs LAST: it temporarily flips
+  // status to 'review_pending' to exercise the lock and restores the prior
+  // status before returning. It does not touch money tables, so test 10's
+  // earlier money-isolation check is still authoritative.
+  await test11_reviewPendingLock({
+    adviserUserId,
+    clientUserId,
+    adviceRecordId,
   });
 
   console.log("");

@@ -144,6 +144,45 @@ export async function requireAcknowledgedAdvice(
 }
 
 // ---------------------------------------------------------------------------
+// Compliance review lock
+// ---------------------------------------------------------------------------
+// Task #96 — when an advice record is in status 'review_pending' the adviser
+// cannot keep mutating the record's structured surface (objectives,
+// documents tied to the record, the SOA/status transition itself).
+// Notes are deliberately exempt: compliance reviewers need to add notes on
+// a record while it is under review, and notes are append-only by design
+// (no PATCH/DELETE), so they cannot rewrite the artefact under review.
+//
+// Throws a 423 Locked with a structured `reason='record_locked_under_review'`
+// so the client UI can render an explicit lock banner instead of a generic
+// error. The route layer's handleError surfaces both the status and the
+// reason verbatim.
+// ---------------------------------------------------------------------------
+export const REVIEW_LOCK_REASON = "record_locked_under_review";
+
+export async function assertAdviceRecordNotUnderReview(
+  adviceRecordId: number,
+  executor: Executor = db,
+): Promise<void> {
+  const [advice] = await executor
+    .select({ id: adviceRecords.id, status: adviceRecords.status })
+    .from(adviceRecords)
+    .where(eq(adviceRecords.id, adviceRecordId))
+    .limit(1);
+  if (!advice) {
+    // Surface as 404 — distinct from the lock so callers don't conflate
+    // "missing record" with "record locked under review".
+    throw Object.assign(new Error("Advice record not found"), { status: 404 });
+  }
+  if (advice.status === "review_pending") {
+    throw Object.assign(
+      new Error("Advice record is locked while under compliance review"),
+      { status: 423, reason: REVIEW_LOCK_REASON },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Advice-record version snapshot hook
 // ---------------------------------------------------------------------------
 // Called from inside the same DB transaction that flips

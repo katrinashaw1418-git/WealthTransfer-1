@@ -72,6 +72,10 @@ import {
   createAdviserNote,
   listAdviserNotes,
   transitionAdviceStatus,
+  // Task #96 — review-pending lock guard. Notes are deliberately exempt:
+  // compliance reviewers must be able to add notes on a record under review.
+  assertAdviceRecordNotUnderReview,
+  REVIEW_LOCK_REASON,
 } from "./services/wealth-planner";
 import { adviceRecords } from "@shared/schema";
 // Task #95 — standardised audit-log writer (before/after snapshots) for the
@@ -123,7 +127,15 @@ async function audit(
 // ---------------------------------------------------------------------------
 function handleError(res: any, error: any, fallbackMessage: string) {
   if (error?.status) {
-    return res.status(error.status).json({ error: error.message });
+    // Task #96 — surface a structured `reason` when the thrown error carries
+    // one (e.g. the review-pending lock returns reason='record_locked_under_review').
+    // The client UI keys lock banners off this field, so the envelope must
+    // carry it through verbatim instead of collapsing to a generic message.
+    const body: Record<string, unknown> = { error: error.message };
+    if (typeof error.reason === "string") {
+      body.reason = error.reason;
+    }
+    return res.status(error.status).json(body);
   }
   console.error(`[adviser-routes] ${fallbackMessage}:`, error);
   res.status(500).json({ error: fallbackMessage });
@@ -1038,6 +1050,10 @@ export function registerAdviserRoutes(app: Express): void {
       if (!parsed.success) {
         throw Object.assign(new Error("Invalid objective payload"), { status: 400 });
       }
+      // Task #96 — block all structured writes against an advice record that
+      // is currently under compliance review. Notes are exempt (separate
+      // route below). Throws 423 + reason='record_locked_under_review'.
+      await assertAdviceRecordNotUnderReview(parsed.data.adviceRecordId);
       const row = await createClientObjective(auth.userId, parsed.data);
       audit(
         auth.userId,
@@ -1091,6 +1107,13 @@ export function registerAdviserRoutes(app: Express): void {
       const parsed = createDocumentSchema.safeParse(req.body);
       if (!parsed.success) {
         throw Object.assign(new Error("Invalid document payload"), { status: 400 });
+      }
+      // Task #96 — when a document is being attached to a specific advice
+      // record, that record must not be under compliance review. Documents
+      // uploaded with no adviceRecordId (general client file storage) are
+      // not gated, since they aren't part of the artefact under review.
+      if (parsed.data.adviceRecordId != null) {
+        await assertAdviceRecordNotUnderReview(parsed.data.adviceRecordId);
       }
       const row = await createClientDocument(auth.userId, parsed.data);
       audit(
@@ -1227,6 +1250,19 @@ export function registerAdviserRoutes(app: Express): void {
         throw Object.assign(new Error("Advice record not found"), { status: 404 });
       }
       await assertAdviserClientLink(auth.userId, advice.clientId);
+
+      // Task #96 — adviser cannot self-transition (issue or supersede) a
+      // record that is currently under compliance review. The approval flow
+      // for review_pending lives outside the adviser surface; the adviser
+      // route returns 423 + reason='record_locked_under_review' so the UI
+      // can surface a lock banner. We re-use the already-selected `advice`
+      // row instead of re-querying.
+      if (advice.status === "review_pending") {
+        throw Object.assign(
+          new Error("Advice record is locked while under compliance review"),
+          { status: 423, reason: REVIEW_LOCK_REASON },
+        );
+      }
 
       // Task #95 — write the audit row INSIDE the same db.transaction as
       // the status flip + version snapshot so an audit-insert failure

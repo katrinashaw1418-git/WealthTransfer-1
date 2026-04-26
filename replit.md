@@ -3,6 +3,25 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Task #96: Review-pending lock on advice-record writes
+
+When an advice record is in `status='review_pending'`, the adviser's structured write paths into that record are now hard-locked. The lock returns **HTTP 423** with `reason='record_locked_under_review'` so the client UI can render an explicit lock banner instead of a generic error.
+
+**Locked routes** (in `server/adviser-routes.ts`):
+- `POST /api/adviser/client-objectives` — always (objective is always tied to an advice record)
+- `POST /api/adviser/client-documents` — only when `adviceRecordId` is supplied (general client docs without an advice record are not gated)
+- `POST /api/adviser/advice-records/:id/transition` — adviser cannot self-issue or self-supersede a record under compliance review; that approval flow lives outside the adviser surface
+
+**Allowed during review_pending** — `POST /api/adviser/client-notes`. Compliance reviewers need to add notes on a record under review, and notes are append-only by design (no PATCH/DELETE), so they cannot rewrite the artefact under review.
+
+**Mechanism**:
+- `assertAdviceRecordNotUnderReview(adviceRecordId, executor?)` exported from `server/services/wealth-planner.ts` (alongside `requireAcknowledgedAdvice`). Throws `{ status: 423, reason: 'record_locked_under_review' }` when the live row is in review.
+- The shared `handleError` envelope in `server/adviser-routes.ts` now passes `error.reason` through verbatim into the response JSON, so any thrown error carrying a `reason` field surfaces it.
+
+**Verification** — `scripts/test-wealth-planner-compliance.ts` extended with canonical assertion 11: with `status='review_pending'`, objectives/documents/transition POSTs all return 423 + correct reason and write zero rows; notes POST returns 200 and writes the row. Script now passes **11/11**.
+
+**Known follow-up** (proposed, not in #96 scope): the lock check is non-atomic relative to the subsequent write (TOCTOU window). A concurrent flip into `review_pending` between check and insert could theoretically slip past. Practical risk is low (status flips are rare admin actions, not high-throughput), but a future hardening should fold the predicate into the write transaction's WHERE clause. Tracked separately.
+
 ## Recent Changes (April 2026) — Task #94: Wealth planner compliance gaps
 
 Four narrow tables added on top of the existing Phase 2.2 / 2.3 advice stack to close compliance gaps without duplicating any of the existing wealth/SOA/ROA infrastructure. No `wealthPlans` / `wealthPlanVersions` were introduced — the gaps are filled in-place against `adviceRecords` / `soaDocuments` / `adviceAcknowledgements`.
