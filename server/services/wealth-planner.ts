@@ -33,6 +33,7 @@ import {
   type AdviceRecordVersion,
 } from "@shared/schema";
 import { assertAdviserClientLink } from "./adviser-access";
+import { requireAdviceRecordWritable } from "./advice-write-gate";
 
 // Drizzle's `db` and the tx handle returned by `db.transaction(async tx =>)`
 // share the same query surface; we type the executor loosely to accept either.
@@ -345,6 +346,11 @@ export async function createClientObjective(
     });
   }
 
+  // Task #96 — block child writes while a compliance review is in progress.
+  // Objectives are an advice-record child by design (the FK is NOT NULL on
+  // clientObjectives.adviceRecordId), so the guard always fires here.
+  await requireAdviceRecordWritable(input.adviceRecordId);
+
   const [row] = await db
     .insert(clientObjectives)
     .values({
@@ -427,6 +433,12 @@ export async function createClientDocument(
         status: 400,
       });
     }
+    // Task #96 — when a document is being attached to a specific advice
+    // record (e.g. a fact-find or risk questionnaire that supports a plan
+    // currently under review), respect the same write lock as objectives.
+    // Documents uploaded WITHOUT an adviceRecordId are general client
+    // documents and are not gated.
+    await requireAdviceRecordWritable(input.adviceRecordId);
   }
 
   const [row] = await db
@@ -488,6 +500,10 @@ export async function createAdviserNote(
   adviserUserId: number,
   input: CreateAdviserNoteInput,
 ): Promise<AdviserNote> {
+  // Task #96 — adviser_notes are EXPLICITLY EXEMPT from the
+  // requireAdviceRecordWritable() lock. The compliance reviewer needs to be
+  // able to leave notes on a record while it is in status='review_pending',
+  // and the adviser needs to be able to respond. Do NOT add the guard here.
   await assertAdviserClientLink(adviserUserId, input.clientUserId);
 
   // If this is an "edit" of an existing note, the previous note must belong
