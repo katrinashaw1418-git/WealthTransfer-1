@@ -84,32 +84,7 @@ The daily wallet-vs-ledger reconciliation cron (Task #25) was re-paging ops ever
 
 ## Recent Changes (April 2026) — Task #92: Gate B verification roll-up script
 
-Single-shot, re-runnable verification script that proves the entire fee-deduction Gate B safety surface end-to-end. Hard-stop gate: if any of the 13 named PASS/FAIL assertions fails, fee-deduction work must NOT proceed (and any in-flight follow-on task that depends on Gate B is paused).
-
-**Script (`scripts/test-fee-deduction-gate-b.ts`)** — 13 assertions in canonical order:
-1. **non-admin cannot deduct** — captures the real `registerAdminRoutes` handler via mock Express; signs a non-admin JWT via `signToken`; asserts 403 + deduction stays `pending_approval`.
-2. **approved deduction posts once** — `settleApprovedDeduction` flips status='settled', sets `settledTransactionId`, inserts exactly one `transactions` row with deterministic key `fee_deduction_<id>` + matching `ledger_postings` receipt.
-3. **duplicate deduction blocked** — second `settleApprovedDeduction` is the idempotent fast-path: row counts unchanged (transactions 1→1, ledger_entries 3→3, ledger_postings 1→1).
-4. **expired consent blocked** — `runDailyAccruals` against a rule whose `feeConsents.consentExpiryDate` is in the past inserts a 0-amount accrual with `gateReason='consent_expired'`.
-5. **withdrawn consent blocked** — same shape, `gateReason='consent_withdrawn'`.
-6. **insufficient ledger balance blocked** — throws `InsufficientFundsError`, flips deduction to `insufficient_funds` with `failureReason` set, no `transactions` row, no ledger entries.
-7. **ledger debit created** — settle posts the balanced triple: client debit + adviser credit + platform credit, debits=credits.
-8. **reversal ledger credit created** — `reverseSettledDeduction` posts the OPPOSITE triple against a NEW `transactions` row with key `fee_deduction_<id>_reversal`; original row's `settled_*` columns untouched.
-9. **wallet balance not directly mutated** — at three checkpoints (pre-settle, post-settle, post-reversal), wallet cache equals ledger sum for both client and adviser. No code path bypassed `postLedgerEntries` to write to `wallets` directly.
-10. **reconciliation clean** — `runWalletLedgerReconciliation` returns `status='match'` with `driftAmount=0` for both client and adviser after the full settle + reversal cycle.
-11. **concurrent settle race posts exactly once** — two parallel `settleApprovedDeduction` calls on the same pending row collapse to a single posting (1 transaction + 1 ledger_postings receipt + 3 ledger_entries). Proves the FOR UPDATE row lock + idempotent fast-path + UNIQUE on `transactions.idempotency_key` + PRIMARY KEY on `ledger_postings.transaction_id` close the double-post window even under contention.
-12. **concurrent reverse race reverses exactly once** — same shape on `reverseSettledDeduction` with the `_reversal` idempotency key. Final `status='reversed'` with a single `reversalTransactionId`.
-13. **posting-receipt invariant holds** — directly invokes `runPostingReceiptInvariantCheck()` (the same Task #63 function `server/index.ts` runs at boot + daily) and asserts that, scoped to this run's tracked transactionIds, every distinct `ledger_entries.transaction_id` has a matching `ledger_postings` row. Catches any future regression where a settle/reverse path forgets to write the receipt.
-
-**Cleanup pattern** — strict PK-only deletes, mirroring the posting-receipt-invariant safety model. The `created` tracker captures every PK we insert (users, wallets, accounts, adviser-client links, advice records, fee consents, fee rules, fee accruals, deductions, transactions, reconciliations). Pre-run cleanup uses `discoverPriorRunRows()` to FK-walk from the deterministic test users into the tracker, then runs the same PK-only delete pipeline. End-of-run cleanup runs in a `finally` block so the dev DB is left clean even if a test throws. No DELETE in the script ever scopes by `user_id IN (...)` or uses `sql.raw`.
-
-**Bootstrap (`scripts/_bootstrap-test-env.ts`)** — sets `NODE_ENV=development` + `ALLOW_LOCAL_DEV_AUTH=true` before any module import that touches `server/auth.ts`. ESM evaluates imports in source order, so the bootstrap is the script's first import. Refuses to run if the local-dev auth context cannot be established.
-
-**Test users** — creates 4 dedicated deterministic users (`__gateb_test_client__`, `__gateb_test_adviser__`, `__gateb_test_consent_expired_client__`, `__gateb_test_consent_withdrawn_client__`) plus an auto-minted `__gateb_test_platform__` if `PLATFORM_USER_ID` is unset. The users themselves persist across runs (re-found via `ensureUser()`); all child rows are wiped by the PK-only cleanup pipeline both before and after each run.
-
-**Verdict** — `ALL GATE B FEE DEDUCTION TESTS PASSED ✅`. Gate B is verified. Reconciliation is clean for the test users. The drift alerts that surface for user 1 (admin) during the run are pre-existing dev-data drift unrelated to Gate B and out of scope for this task.
-
-**Next** — proceed to Task #93 (Fee reconciliation + payout reporting, read-only) and Task #94 (Wealth Planner extensions on top of `adviceRecords` — NOT a parallel `wealthPlans` system; see follow-up notes for the rejected duplicate-table approach). No execution of payouts; no bank rails. 10C fee engine remains money-movement-locked behind admin/compliance_admin roles + active signed consent re-check immediately before posting.
+Run `npx tsx scripts/test-fee-deduction-gate-b.ts` as the canonical Gate B safety check before any fee-deduction follow-on work. The script is a single-shot, re-runnable PASS/FAIL roll-up that exercises all ten Gate B compliance assertions (non-admin cannot deduct; approved deduction posts once; duplicate deduction blocked; expired/withdrawn consent blocked; insufficient ledger balance blocked; ledger debit + reversal credit created; wallet cache never directly mutated; reconciliation clean after post/reversal) against the production `settleApprovedDeduction` / `reverseSettledDeduction` / `runDailyAccruals` / `runWalletLedgerReconciliation` code paths. Exits 0 with `ALL GATE B FEE DEDUCTION TESTS PASSED ✅` on green; exits non-zero with `FAIL <name> — <details>` per failed assertion. Cleanup is strict PK-only (mirroring the `posting-receipt-invariant.ts` safety pattern) and runs in a `finally` block so the dev DB is left clean even on a failed run. Hard-stop gate: if any assertion fails, do not proceed to Task #93 (payout reporting) or any other Gate B-dependent work until it is fixed.
 
 ## Recent Changes (April 2026) — Task #33: Reverse a settled fee deduction
 

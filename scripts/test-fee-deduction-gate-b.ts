@@ -134,20 +134,30 @@ const TEST_CURRENCY = "AUD";
 // regardless of execution order.
 // ---------------------------------------------------------------------------
 type TestResult = { passed: boolean; details: string };
+// Canonical operator-facing output contract from the task spec
+// (`.local/tasks/task-92.md` — "Done looks like"). The reporter prints
+// EXACTLY these names in exactly this order. Do not rename, do not
+// renumber, do not append details to PASS lines.
 const CANONICAL_ORDER: string[] = [
-  "1. non-admin cannot deduct",
-  "2. approved deduction posts once",
-  "3. duplicate deduction blocked",
-  "4. expired consent blocked",
-  "5. withdrawn consent blocked",
-  "6. insufficient ledger balance blocked",
-  "7. ledger debit created",
-  "8. reversal ledger credit created",
-  "9. wallet balance not directly mutated",
-  "10. reconciliation clean after post/reversal",
-  "11. concurrent settle race posts exactly once",
-  "12. concurrent reverse race reverses exactly once",
-  "13. posting-receipt invariant holds",
+  "non-admin cannot deduct",
+  "approved deduction posts once",
+  "duplicate deduction blocked",
+  "expired consent blocked",
+  "withdrawn consent blocked",
+  "insufficient ledger balance blocked",
+  "ledger debit created",
+  "reversal ledger credit created",
+  "wallet balance not directly mutated",
+  "reconciliation clean after post/reversal",
+];
+// Internal extras: extra safety assertions added in response to architect
+// + validator review. These RUN and a failure aborts the script with a
+// FAIL line, but they are NOT printed in the canonical operator output
+// — that contract is locked at the 10 lines above.
+const INTERNAL_EXTRAS: string[] = [
+  "concurrent settle race posts exactly once",
+  "concurrent reverse race reverses exactly once",
+  "posting-receipt invariant holds",
 ];
 const results = new Map<string, TestResult>();
 
@@ -185,8 +195,8 @@ function settleRace<T>(p: Promise<T>): Promise<RaceOutcome<T>> {
 }
 
 function record(name: string, passed: boolean, details: string): void {
-  if (!CANONICAL_ORDER.includes(name)) {
-    throw new Error(`Internal: unknown canonical test name '${name}'`);
+  if (!CANONICAL_ORDER.includes(name) && !INTERNAL_EXTRAS.includes(name)) {
+    throw new Error(`Internal: unknown test name '${name}'`);
   }
   results.set(name, { passed, details });
 }
@@ -784,7 +794,7 @@ async function test1_nonAdminCannotDeduct(opts: {
   const handler = captured.get("POST /api/admin/fee-deductions/:id/approve");
   if (!handler) {
     fail(
-      "1. non-admin cannot deduct",
+      "non-admin cannot deduct",
       "internal: approve route handler was not captured from registerAdminRoutes",
     );
     return;
@@ -819,12 +829,12 @@ async function test1_nonAdminCannotDeduct(opts: {
   const stillPending = after?.status === "pending_approval";
   if (isRoleForbidden && stillPending) {
     pass(
-      "1. non-admin cannot deduct",
+      "non-admin cannot deduct",
       `route returned 403 (role guard), deduction still status='${after.status}'`,
     );
   } else {
     fail(
-      "1. non-admin cannot deduct",
+      "non-admin cannot deduct",
       `expected 403 (role guard) + status='pending_approval', got status=${result.statusCode}, dedStatus='${after?.status}'`,
     );
   }
@@ -907,12 +917,12 @@ async function test2_approvedDeductionPostsOnce(opts: {
     receiptRows.length === 1;
   if (ok) {
     pass(
-      "2. approved deduction posts once",
+      "approved deduction posts once",
       `status='settled', settledTransactionId=${settled.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
     );
   } else {
     fail(
-      "2. approved deduction posts once",
+      "approved deduction posts once",
       `status='${settled.status}', settledTransactionId=${settled.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
     );
   }
@@ -932,7 +942,7 @@ async function test3_duplicateDeductionBlocked(opts: {
   const settledTxId = txBefore[0]?.id;
   if (!settledTxId) {
     fail(
-      "3. duplicate deduction blocked",
+      "duplicate deduction blocked",
       "no settled transactions row found from test #2 — cannot evaluate duplicate guard",
     );
     return;
@@ -973,12 +983,12 @@ async function test3_duplicateDeductionBlocked(opts: {
     receiptsAfter.length === receiptsBefore.length;
   if (ok) {
     pass(
-      "3. duplicate deduction blocked",
+      "duplicate deduction blocked",
       `re-settle returned same row; transactions ${txBefore.length}→${txAfter.length}, ledger_entries ${entriesBefore.length}→${entriesAfter.length}, ledger_postings ${receiptsBefore.length}→${receiptsAfter.length}`,
     );
   } else {
     fail(
-      "3. duplicate deduction blocked",
+      "duplicate deduction blocked",
       `second.status='${second.status}', transactions ${txBefore.length}→${txAfter.length}, entries ${entriesBefore.length}→${entriesAfter.length}, receipts ${receiptsBefore.length}→${receiptsAfter.length}`,
     );
   }
@@ -1020,12 +1030,12 @@ async function test4_expiredConsentBlocked(opts: {
     Number(accrual.accrualAmount) === 0;
   if (ok) {
     pass(
-      "4. expired consent blocked",
+      "expired consent blocked",
       `accrual rule#${ruleId} accrualDate=${accrualDate.toISOString().slice(0, 10)} gateReason='${accrual.gateReason}', amount=${accrual.accrualAmount}`,
     );
   } else {
     fail(
-      "4. expired consent blocked",
+      "expired consent blocked",
       `expected gateReason='consent_expired' + amount=0, got gateReason='${accrual?.gateReason}', amount='${accrual?.accrualAmount}'`,
     );
   }
@@ -1066,12 +1076,12 @@ async function test5_withdrawnConsentBlocked(opts: {
     Number(accrual.accrualAmount) === 0;
   if (ok) {
     pass(
-      "5. withdrawn consent blocked",
+      "withdrawn consent blocked",
       `accrual rule#${ruleId} accrualDate=${accrualDate.toISOString().slice(0, 10)} gateReason='${accrual.gateReason}', amount=${accrual.accrualAmount}`,
     );
   } else {
     fail(
-      "5. withdrawn consent blocked",
+      "withdrawn consent blocked",
       `expected gateReason='consent_withdrawn' + amount=0, got gateReason='${accrual?.gateReason}', amount='${accrual?.accrualAmount}'`,
     );
   }
@@ -1137,12 +1147,12 @@ async function test6_insufficientLedgerBlocked(opts: {
     receiptN === 0;
   if (ok) {
     pass(
-      "6. insufficient ledger balance blocked",
+      "insufficient ledger balance blocked",
       `InsufficientFundsError thrown, deduction status='insufficient_funds', failureReason set, transactions=0, ledger_postings=0`,
     );
   } else {
     fail(
-      "6. insufficient ledger balance blocked",
+      "insufficient ledger balance blocked",
       `caught=${caught instanceof Error ? caught.constructor.name : String(caught)}, status='${after?.status}', failureReason='${after?.failureReason ?? ""}', transactions=${txRows[0]?.n ?? 0}, ledger_postings=${receiptN}`,
     );
   }
@@ -1160,7 +1170,7 @@ async function test7_ledgerDebitCreated(opts: {
     .where(eq(adviserFeeDeductions.id, opts.deductionId));
   if (!deduction?.settledTransactionId) {
     fail(
-      "7. ledger debit created",
+      "ledger debit created",
       `deduction#${opts.deductionId} has no settledTransactionId — settle from test #2 didn't land`,
     );
     return;
@@ -1189,12 +1199,12 @@ async function test7_ledgerDebitCreated(opts: {
     Math.abs(Number(clientDebits[0].amount) - expected) < 1e-8;
   if (ok) {
     pass(
-      "7. ledger debit created",
+      "ledger debit created",
       `tx#${deduction.settledTransactionId}: 3 entries, debits=${totalDebits}, credits=${totalCredits}, client debit=${clientDebits[0].amount}`,
     );
   } else {
     fail(
-      "7. ledger debit created",
+      "ledger debit created",
       `tx#${deduction.settledTransactionId}: entries=${entries.length}, debits=${totalDebits}, credits=${totalCredits}, clientDebits=${clientDebits.length} (expected ${expected})`,
     );
   }
@@ -1220,7 +1230,7 @@ async function test8_reversalLedgerCreditCreated(opts: {
     !reversed.reversalTransactionId
   ) {
     fail(
-      "8. reversal ledger credit created",
+      "reversal ledger credit created",
       `reverse returned status='${reversed.status}', reversalTransactionId=${reversed.reversalTransactionId}`,
     );
     return;
@@ -1255,12 +1265,12 @@ async function test8_reversalLedgerCreditCreated(opts: {
     Math.abs(Number(clientCredits[0].amount) - expected) < 1e-8;
   if (ok) {
     pass(
-      "8. reversal ledger credit created",
+      "reversal ledger credit created",
       `reversal tx#${reversed.reversalTransactionId}: status='reversed', client credit=${clientCredits[0].amount}, debits=${totalDebits}, credits=${totalCredits}`,
     );
   } else {
     fail(
-      "8. reversal ledger credit created",
+      "reversal ledger credit created",
       `reversalTransactions=${reversalTxRows.length}, entries=${entries.length}, debits=${totalDebits}, credits=${totalCredits}, clientCredits=${clientCredits.length}`,
     );
   }
@@ -1289,12 +1299,12 @@ async function test9_walletNotDirectlyMutated(
 
   if (driftLines.length === 0) {
     pass(
-      "9. wallet balance not directly mutated",
+      "wallet balance not directly mutated",
       `${snapshots.length} checkpoints; wallet cache == ledger sum at each (client + adviser)`,
     );
   } else {
     fail(
-      "9. wallet balance not directly mutated",
+      "wallet balance not directly mutated",
       driftLines.join(" | "),
     );
   }
@@ -1331,12 +1341,12 @@ async function test10_reconciliationClean(opts: {
     Math.abs(Number(adviserRow.driftAmount ?? 0)) < 0.01;
   if (ok) {
     pass(
-      "10. reconciliation clean after post/reversal",
+      "reconciliation clean after post/reversal",
       `client status='${clientRow.status}' drift=${clientRow.driftAmount}; adviser status='${adviserRow.status}' drift=${adviserRow.driftAmount}`,
     );
   } else {
     fail(
-      "10. reconciliation clean after post/reversal",
+      "reconciliation clean after post/reversal",
       `client=${JSON.stringify({ status: clientRow?.status, drift: clientRow?.driftAmount })}, adviser=${JSON.stringify({ status: adviserRow?.status, drift: adviserRow?.driftAmount })}`,
     );
   }
@@ -1389,7 +1399,7 @@ async function test11_concurrentSettleRace(opts: {
   }
   if (successful.length === 0) {
     fail(
-      "11. concurrent settle race posts exactly once",
+      "concurrent settle race posts exactly once",
       `both racers errored: ${errors.map((e) => (e as Error).message).join(" / ")}`,
     );
     return;
@@ -1401,7 +1411,7 @@ async function test11_concurrentSettleRace(opts: {
     .where(eq(adviserFeeDeductions.id, opts.deductionId));
   if (after?.status !== "settled" || !after.settledTransactionId) {
     fail(
-      "11. concurrent settle race posts exactly once",
+      "concurrent settle race posts exactly once",
       `expected settled, got status='${after?.status}' settledTransactionId=${after?.settledTransactionId}`,
     );
     return;
@@ -1426,12 +1436,12 @@ async function test11_concurrentSettleRace(opts: {
     entryRows.length === 3
   ) {
     pass(
-      "11. concurrent settle race posts exactly once",
+      "concurrent settle race posts exactly once",
       `2 racers → 1 settled tx (#${after.settledTransactionId}), 1 receipt, 3 entries; ${successful.length} success / ${errors.length} race-error`,
     );
   } else {
     fail(
-      "11. concurrent settle race posts exactly once",
+      "concurrent settle race posts exactly once",
       `expected 1 tx + 1 receipt + 3 entries; got tx=${txRows.length}, receipts=${receiptRows.length}, entries=${entryRows.length}`,
     );
   }
@@ -1476,7 +1486,7 @@ async function test12_concurrentReverseRace(opts: {
   }
   if (successful.length === 0) {
     fail(
-      "12. concurrent reverse race reverses exactly once",
+      "concurrent reverse race reverses exactly once",
       `both racers errored: ${errors.map((e) => (e as Error).message).join(" / ")}`,
     );
     return;
@@ -1488,7 +1498,7 @@ async function test12_concurrentReverseRace(opts: {
     .where(eq(adviserFeeDeductions.id, opts.deductionId));
   if (after?.status !== "reversed" || !after.reversalTransactionId) {
     fail(
-      "12. concurrent reverse race reverses exactly once",
+      "concurrent reverse race reverses exactly once",
       `expected reversed, got status='${after?.status}' reversalTransactionId=${after?.reversalTransactionId}`,
     );
     return;
@@ -1518,12 +1528,12 @@ async function test12_concurrentReverseRace(opts: {
     entryRows.length === 3
   ) {
     pass(
-      "12. concurrent reverse race reverses exactly once",
+      "concurrent reverse race reverses exactly once",
       `2 racers → 1 reversal tx (#${after.reversalTransactionId}), 1 receipt, 3 entries; ${successful.length} success / ${errors.length} race-error`,
     );
   } else {
     fail(
-      "12. concurrent reverse race reverses exactly once",
+      "concurrent reverse race reverses exactly once",
       `expected 1 tx + 1 receipt + 3 entries; got tx=${txRows.length}, receipts=${receiptRows.length}, entries=${entryRows.length}`,
     );
   }
@@ -1555,7 +1565,7 @@ async function test13_postingReceiptInvariantHolds(): Promise<void> {
   const trackedTxIds = created.transactionIds;
   if (trackedTxIds.length === 0) {
     fail(
-      "13. posting-receipt invariant holds",
+      "posting-receipt invariant holds",
       "no transactions were tracked in this run — cannot validate scoped invariant",
     );
     return;
@@ -1583,12 +1593,12 @@ async function test13_postingReceiptInvariantHolds(): Promise<void> {
 
   if (scopedClean) {
     pass(
-      "13. posting-receipt invariant holds",
+      "posting-receipt invariant holds",
       `runPostingReceiptInvariantCheck() ran (global missingCount=${result.missingCount}); scoped to this run's ${trackedTxIds.length} tx: ${scopedTx} with entries == ${scopedReceipts} receipts.`,
     );
   } else {
     fail(
-      "13. posting-receipt invariant holds",
+      "posting-receipt invariant holds",
       `scoped: ${scopedTx} tx with entries vs ${scopedReceipts} receipts (global missingCount=${result.missingCount}, global missingSample=${JSON.stringify(result.missingSample)})`,
     );
   }
@@ -1844,25 +1854,54 @@ async function runAllTests(): Promise<void> {
   await test13_postingReceiptInvariantHolds();
 
   // -----------------------------------------------------------------------
-  // Print canonical-order summary.
+  // CANONICAL operator-facing report. The contract from the task spec is:
+  //   * one PASS|FAIL line per CANONICAL_ORDER entry, in that exact order
+  //   * PASS lines: `PASS <name>` only — NO appended details
+  //   * FAIL lines: `FAIL <name> — <details>`
+  //   * blank line, then the success banner OR a non-zero exit
+  // INTERNAL_EXTRAS (race tests + posting-receipt invariant) RUN, and
+  // failures still abort the script with a FAIL line printed below the
+  // canonical block, but they do NOT appear in the canonical block.
   // -----------------------------------------------------------------------
   console.log("");
+  let canonicalFailed = false;
+  let canonicalMissing = 0;
   for (const name of CANONICAL_ORDER) {
     const r = results.get(name);
     if (!r) {
       console.log(`MISSING ${name} — assertion was not recorded`);
+      canonicalMissing += 1;
       continue;
     }
-    const tag = r.passed ? "PASS" : "FAIL";
-    console.log(`${tag} ${name} — ${r.details}`);
+    if (r.passed) {
+      console.log(`PASS ${name}`);
+    } else {
+      console.log(`FAIL ${name} — ${r.details}`);
+      canonicalFailed = true;
+    }
   }
 
-  const failedCount = Array.from(results.values()).filter((r) => !r.passed)
-    .length;
-  const missingCount = CANONICAL_ORDER.filter((n) => !results.has(n)).length;
-  if (failedCount > 0 || missingCount > 0) {
+  // INTERNAL_EXTRAS: only print FAIL lines (never PASS) so the canonical
+  // operator output is unchanged on the green path.
+  let extrasFailed = false;
+  for (const name of INTERNAL_EXTRAS) {
+    const r = results.get(name);
+    if (!r) {
+      console.log(`MISSING (internal) ${name} — assertion was not recorded`);
+      extrasFailed = true;
+      continue;
+    }
+    if (!r.passed) {
+      console.log(`FAIL (internal) ${name} — ${r.details}`);
+      extrasFailed = true;
+    }
+  }
+
+  if (canonicalFailed || canonicalMissing > 0 || extrasFailed) {
+    const failedCount = Array.from(results.values()).filter((r) => !r.passed)
+      .length;
     console.error(
-      `\n${failedCount} fail(s), ${missingCount} missing assertion(s) in Gate B verification roll-up.`,
+      `\n${failedCount} fail(s), ${canonicalMissing} missing canonical assertion(s) in Gate B verification roll-up.`,
     );
     process.exit(1);
   }
