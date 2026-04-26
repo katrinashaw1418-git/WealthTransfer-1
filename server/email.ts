@@ -202,3 +202,155 @@ export async function sendInviteEmail(
     return { sent: false, error: msg };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Insufficient-funds notification (Task #64)
+//
+// Sent to a client when the daily sweep retries an `insufficient_funds` adviser
+// fee deduction and finds the wallet balance is still short. The body shows
+// the required total and the current available balance so the client can top
+// up by a known amount.
+//
+// Returns a structured result instead of throwing so the sweep cron can:
+//   - record `clientNotifiedAt` only when the dispatch actually succeeded, and
+//   - keep iterating across remaining deductions even if one email fails
+//     (e.g. a single bad recipient address shouldn't kill the whole sweep).
+//
+// When SMTP is not configured (dev / preview) we log a one-line summary and
+// return `{ sent: false }` — the sweep still updates the tracking columns so
+// the admin UI can show "notification was attempted (logs only)".
+// ---------------------------------------------------------------------------
+function formatMoney(amount: number | string, currency: string): string {
+  const n = typeof amount === "string" ? Number(amount) : amount;
+  if (!Number.isFinite(n)) return `${amount} ${currency}`;
+  try {
+    return new Intl.NumberFormat("en-AU", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(n);
+  } catch {
+    return `${n.toFixed(2)} ${currency}`;
+  }
+}
+
+export async function sendInsufficientFundsEmail(args: {
+  to: string;
+  firstName: string;
+  deductionId: number;
+  required: number | string;
+  available: number | string;
+  currency: string;
+  shortfall: number | string;
+  periodStart: Date;
+  periodEnd: Date;
+}): Promise<{ sent: boolean; error?: string }> {
+  const {
+    to,
+    firstName,
+    deductionId,
+    required,
+    available,
+    currency,
+    shortfall,
+    periodStart,
+    periodEnd,
+  } = args;
+
+  const requiredStr = formatMoney(required, currency);
+  const availableStr = formatMoney(available, currency);
+  const shortfallStr = formatMoney(shortfall, currency);
+  const periodStr = `${periodStart.toLocaleDateString("en-AU", { dateStyle: "medium" })} – ${periodEnd.toLocaleDateString("en-AU", { dateStyle: "medium" })}`;
+
+  if (!emailConfigured) {
+    // No PII / token in this line so it is safe to log.
+    console.log(
+      `[email] Insufficient-funds notice NOT sent to ${to} — SMTP not configured ` +
+        `(deduction #${deductionId}, required=${requiredStr}, available=${availableStr})`,
+    );
+    return {
+      sent: false,
+      error: "SMTP not configured (GMAIL_USER / GMAIL_APP_PASSWORD missing)",
+    };
+  }
+
+  const transport = createTransport()!;
+  try {
+    await transport.sendMail({
+      from: FROM_HEADER,
+      replyTo: REPLY_TO,
+      to,
+      subject: `Action required: top up to cover your AMAX Wealth adviser fee`,
+      html: `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 20px">
+    <tr><td align="center">
+      <table width="540" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:16px;border:1px solid #334155;overflow:hidden">
+        <tr><td style="padding:32px 40px 0;text-align:center">
+          <span style="font-size:22px;font-weight:700;color:#fff;letter-spacing:2px">AMAX WEALTH</span>
+        </td></tr>
+        <tr><td style="padding:24px 40px">
+          <h1 style="color:#fff;font-size:20px;font-weight:700;margin:0 0 12px">Your adviser fee couldn't be deducted</h1>
+          <p style="color:#94a3b8;font-size:15px;line-height:1.6;margin:0 0 20px">
+            Hi ${firstName}, we tried to settle your adviser fee for the period
+            <strong style="color:#e2e8f0">${periodStr}</strong> but your wallet balance
+            is currently short. We'll keep retrying daily — no action is required immediately,
+            but topping up will let the deduction settle on the next attempt.
+          </p>
+          <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;border:1px solid #334155;border-radius:12px;margin:0 0 24px">
+            <tr><td style="padding:16px 20px;border-bottom:1px solid #1f2937">
+              <span style="color:#64748b;font-size:12px;text-transform:uppercase;letter-spacing:1px">Required</span><br>
+              <span style="color:#fff;font-size:18px;font-weight:700">${requiredStr}</span>
+            </td></tr>
+            <tr><td style="padding:16px 20px;border-bottom:1px solid #1f2937">
+              <span style="color:#64748b;font-size:12px;text-transform:uppercase;letter-spacing:1px">Available now</span><br>
+              <span style="color:#fff;font-size:18px;font-weight:700">${availableStr}</span>
+            </td></tr>
+            <tr><td style="padding:16px 20px">
+              <span style="color:#fb923c;font-size:12px;text-transform:uppercase;letter-spacing:1px">Top up at least</span><br>
+              <span style="color:#fb923c;font-size:20px;font-weight:800">${shortfallStr}</span>
+            </td></tr>
+          </table>
+          <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin:0 0 8px">
+            Reference: deduction #${deductionId}
+          </p>
+          <p style="color:#64748b;font-size:12px;margin:0">
+            If you believe this is in error, reply to this email and our team will look into it.
+          </p>
+        </td></tr>
+        <tr><td style="padding:20px 40px;border-top:1px solid #334155;text-align:center">
+          <p style="color:#475569;font-size:11px;margin:0">
+            AMAX GLOBAL Pty Ltd &nbsp;·&nbsp; ABN 54 690 827 608 &nbsp;·&nbsp; AUSTRAC Registered<br>
+            Level 2, 8-12 King Street, Rockdale NSW 2216 &nbsp;·&nbsp; +61 2 8320 1908
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+      text:
+        `Hi ${firstName},\n\n` +
+        `We tried to settle your AMAX Wealth adviser fee for ${periodStr} but your ` +
+        `wallet balance is currently short. We'll keep retrying daily.\n\n` +
+        `  Required:      ${requiredStr}\n` +
+        `  Available now: ${availableStr}\n` +
+        `  Top up at least: ${shortfallStr}\n\n` +
+        `Reference: deduction #${deductionId}\n\n` +
+        `If you believe this is in error, reply to this email and our team will look into it.\n\n` +
+        `AMAX GLOBAL Pty Ltd`,
+    });
+    return { sent: true };
+  } catch (err: any) {
+    const msg = err?.message || String(err) || "SMTP send failed";
+    console.error(
+      `[email] Insufficient-funds SMTP send FAILED for ${to} (deduction #${deductionId}):`,
+      msg,
+    );
+    return { sent: false, error: msg };
+  }
+}

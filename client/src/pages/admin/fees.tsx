@@ -166,6 +166,11 @@ interface FeeDeductionRow {
   reversedByUserId: number | null;
   reversedReason: string | null;
   reversalTransactionId: number | null;
+  // Task #64 — sweep + client-notification tracking. Populated by the daily
+  // insufficient-funds sweep cron, NULL/0 on rows it has never visited.
+  lastRecheckedAt: string | null;
+  clientNotifiedAt: string | null;
+  clientNotificationCount: number;
   createdAt: string;
 }
 
@@ -1116,15 +1121,59 @@ export default function AdminFeesPage() {
                               </div>
                             </div>
                           ) : d.failureReason ? (
-                            <span
-                              className="text-red-600"
-                              title={d.failureReason}
-                              data-testid={`text-failure-${d.id}`}
-                            >
-                              {d.status === "insufficient_funds"
-                                ? "Insufficient client balance"
-                                : "Last attempt failed"}
-                            </span>
+                            <div data-testid={`text-failure-${d.id}`}>
+                              <span
+                                className="text-red-600"
+                                title={d.failureReason}
+                              >
+                                {d.status === "insufficient_funds"
+                                  ? "Insufficient client balance"
+                                  : "Last attempt failed"}
+                              </span>
+                              {d.status === "insufficient_funds" && (
+                                <div
+                                  className="text-muted-foreground mt-1 leading-snug"
+                                  data-testid={`text-recheck-${d.id}`}
+                                >
+                                  <div>
+                                    Last re-checked:{" "}
+                                    {d.lastRecheckedAt ? (
+                                      <span title={d.lastRecheckedAt}>
+                                        {formatRelative(d.lastRecheckedAt)}
+                                      </span>
+                                    ) : (
+                                      <span className="italic">
+                                        not yet (next sweep within 24h)
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div>
+                                    Client notified:{" "}
+                                    {d.clientNotifiedAt ? (
+                                      <span
+                                        title={d.clientNotifiedAt}
+                                        data-testid={`text-notified-${d.id}`}
+                                      >
+                                        {formatRelative(d.clientNotifiedAt)}
+                                        {d.clientNotificationCount > 1 && (
+                                          <>
+                                            {" "}
+                                            (×{d.clientNotificationCount})
+                                          </>
+                                        )}
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className="italic"
+                                        data-testid={`text-notified-${d.id}`}
+                                      >
+                                        not yet
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           ) : (
                             "—"
                           )}

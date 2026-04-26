@@ -1834,6 +1834,27 @@ export const adviserFeeDeductions = pgTable(
       () => transactions.id,
     ),
 
+    // Task #64 — automated sweep + client-notification tracking for the
+    // `insufficient_funds` status (Task #34).
+    //   - lastRecheckedAt: bumped by the daily sweep cron every time it
+    //     re-attempted settlement for this deduction (regardless of outcome:
+    //     settled, still-insufficient, or unrelated error). Lets admins see
+    //     when the system last looked at this row without grepping logs.
+    //   - clientNotifiedAt: bumped only when the cron actually dispatched a
+    //     "your fee couldn't be deducted" notification to the client. The
+    //     sweep debounces re-sends (default 7 days) so a long-held insufficient
+    //     row doesn't spam the client daily.
+    //   - clientNotificationCount: monotonic counter across all re-sends so
+    //     the admin UI can render "client has been pinged N time(s)" without
+    //     joining a separate notification log table.
+    // All three are nullable / zero on rows that have never been touched by
+    // the sweep — settled rows from before Task #64 stay at NULL/0.
+    lastRecheckedAt: timestamp("last_rechecked_at"),
+    clientNotifiedAt: timestamp("client_notified_at"),
+    clientNotificationCount: integer("client_notification_count")
+      .notNull()
+      .default(0),
+
     createdAt: timestamp("created_at").defaultNow(),
   },
   (table) => ({
@@ -1881,6 +1902,11 @@ export const insertAdviserFeeDeductionSchema = createInsertSchema(adviserFeeDedu
   reversedByUserId: true,
   reversedReason: true,
   reversalTransactionId: true,
+  // Task #64 — sweep + notification tracking is set only by the daily cron,
+  // never by callers inserting a fresh deduction.
+  lastRecheckedAt: true,
+  clientNotifiedAt: true,
+  clientNotificationCount: true,
   createdAt: true,
 });
 export type AdviserFeeDeduction = typeof adviserFeeDeductions.$inferSelect;

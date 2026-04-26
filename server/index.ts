@@ -409,6 +409,48 @@ app.use((req, res, next) => {
     setInterval(runOperatorAlertsPruneWatchdog, 24 * 60 * 60 * 1000);
   }, 300 * 1000);
 
+  // ---------------------------------------------------------------------------
+  // Task #64 — Daily insufficient-funds re-check + client notification sweep
+  // ---------------------------------------------------------------------------
+  // Walks every adviser fee deduction parked in `insufficient_funds` (Task
+  // #34) and re-attempts settlement against the current ledger balance. Rows
+  // whose client has since topped up settle on this pass; rows still short
+  // trigger a debounced "your fee couldn't be deducted" notification so the
+  // client can act without waiting for an adviser to chase them.
+  //
+  // Idempotency is inherited from settleApprovedDeduction's deterministic
+  // idempotency key (`fee_deduction_<id>`) — the cron and an admin's manual
+  // approve click cannot double-post even if they race. Per-row failures are
+  // caught inside the sweep so one bad deduction never aborts the rest.
+  //
+  // Staggered 360s after start so it lands AFTER all five other daily crons
+  // (wallet recon, ledger recon, adviser-task automation, fee accruals, the
+  // operator-alerts prune at 240s, and the prune-watchdog at 300s introduced
+  // by Task #60). We deliberately want this to run AFTER the fee-accruals
+  // cron so any deduction that flipped to insufficient_funds in the morning
+  // settle pass has had its tracking columns initialised before the sweep
+  // visits it.
+  // ---------------------------------------------------------------------------
+  const { runInsufficientFundsSweep } = await import(
+    "./services/insufficient-funds-sweep"
+  );
+
+  async function runInsufficientFundsSweepCron() {
+    try {
+      // Output line + audit logs are written by the service itself; the cron
+      // wrapper only needs to swallow errors so a single failure doesn't
+      // crash the server.
+      await runInsufficientFundsSweep();
+    } catch (e) {
+      console.error("[insufficient-funds-sweep] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runInsufficientFundsSweepCron();
+    setInterval(runInsufficientFundsSweepCron, 24 * 60 * 60 * 1000);
+  }, 360 * 1000);
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.
