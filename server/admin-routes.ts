@@ -22,7 +22,7 @@
 
 import type { Express, Request } from "express";
 import { z } from "zod";
-import { and, asc, desc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import {
@@ -51,6 +51,8 @@ import {
   walletLedgerReconciliations,
   // Session 27 (Task #23) — fee accrual run log
   feeAccrualRuns,
+  // Task #36 — operator alert audit log
+  operatorAlerts,
 } from "@shared/schema";
 import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 import { requireAuth, requireRole, hashPassword } from "./auth";
@@ -1274,6 +1276,89 @@ export function registerAdminRoutes(app: Express): void {
       const total = Number(((totalResult as any).rows ?? [{ count: 0 }])[0]?.count ?? 0);
 
       return { items, page, limit, total };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // TASK #36 — Operator alert audit log viewer
+  // -------------------------------------------------------------------------
+  // Read-only history of every alert dispatched by `notifyOperator`. One row
+  // per dispatch attempt, including which channels were tried and the
+  // per-channel outcome.
+  //
+  // Filters (all optional, all narrowed against an allow-list before being
+  // bound as parameters — never concatenated into SQL):
+  //   - source   : exact match on the originating job id
+  //               (e.g. "wallet-ledger-reconciliation")
+  //   - severity : one of info | warning | alert | critical
+  //
+  // Pagination matches the audit-logs endpoint (page + limit, capped at 200)
+  // so the admin shell can reuse the same paging controls.
+  //
+  // Strictly read-only — this endpoint cannot mutate the alert log; rows are
+  // only ever inserted by `notifyOperator` itself.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/operator-alerts",
+    adminRoute(async (req) => {
+      const sourceRaw = typeof req.query.source === "string" ? req.query.source.trim() : "";
+      const severityRaw = typeof req.query.severity === "string" ? req.query.severity.trim() : "";
+      // Allow-list severity to the four supported values so a typo can never
+      // reach the DB and a malicious client can never inject an arbitrary
+      // value past the filter.
+      const validSeverity =
+        severityRaw === "info" ||
+        severityRaw === "warning" ||
+        severityRaw === "alert" ||
+        severityRaw === "critical"
+          ? severityRaw
+          : null;
+      // Bound source length so we don't index a 1MB query string.
+      const validSource = sourceRaw.length > 0 && sourceRaw.length <= 128 ? sourceRaw : null;
+
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+
+      const conditions: SQL[] = [];
+      if (validSource) conditions.push(eq(operatorAlerts.source, validSource));
+      if (validSeverity) conditions.push(eq(operatorAlerts.severity, validSeverity));
+      const where: SQL | undefined =
+        conditions.length === 0
+          ? undefined
+          : conditions.length === 1
+            ? conditions[0]
+            : and(...conditions);
+
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select({
+            id: operatorAlerts.id,
+            source: operatorAlerts.source,
+            severity: operatorAlerts.severity,
+            title: operatorAlerts.title,
+            details: operatorAlerts.details,
+            channelsAttempted: operatorAlerts.channelsAttempted,
+            channelOutcomes: operatorAlerts.channelOutcomes,
+            createdAt: operatorAlerts.createdAt,
+          })
+          .from(operatorAlerts)
+          .where(where)
+          .orderBy(desc(operatorAlerts.createdAt), desc(operatorAlerts.id))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(operatorAlerts)
+          .where(where),
+      ]);
+
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+      };
     }),
   );
 

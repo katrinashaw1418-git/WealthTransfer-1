@@ -1808,3 +1808,71 @@ export const insertFeeAccrualRunSchema = createInsertSchema(feeAccrualRuns).omit
 });
 export type FeeAccrualRun = typeof feeAccrualRuns.$inferSelect;
 export type InsertFeeAccrualRun = z.infer<typeof insertFeeAccrualRunSchema>;
+
+// ---------------------------------------------------------------------------
+// Task #36 — Operator alert audit log
+// ---------------------------------------------------------------------------
+// Durable record of every alert dispatched by `notifyOperator` (currently the
+// daily wallet ↔ ledger reconciliation cron, future callers can reuse). For
+// compliance and incident review, ops needs a queryable history that survives
+// log-rotation and webhook-receiver outages — e.g. "prove we paged within
+// 24h of detecting drift".
+//
+// One row per `notifyOperator` invocation. We store WHICH channels were
+// attempted and the per-channel outcome (success / http_error / timeout /
+// error) so an investigator can see at a glance whether the alert reached
+// its destination — not just whether we tried.
+//
+// This table is intentionally separate from `audit_logs`: audit_logs is the
+// who-did-what trail of admin state changes, whereas this is the operational
+// record of automated paging events.
+// ---------------------------------------------------------------------------
+export const operatorAlerts = pgTable(
+  "operator_alerts",
+  {
+    id: serial("id").primaryKey(),
+    // Originating job, e.g. "wallet-ledger-reconciliation". Used as a filter
+    // on the admin viewer so operators can isolate one job's alert stream.
+    source: text("source").notNull(),
+    // info | warning | alert | critical — mirrors OperatorAlertSeverity in
+    // server/services/operator-alerts.ts.
+    severity: text("severity").notNull(),
+    // Short human-readable summary surfaced in the UI list view.
+    title: text("title").notNull(),
+    // Full structured payload as supplied to notifyOperator (e.g. userId,
+    // currency, drift amount). Empty object is allowed.
+    details: jsonb("details").notNull().default(sql`'{}'::jsonb`),
+    // Channels we tried to dispatch to, in dispatch order. e.g. ["log"] or
+    // ["log","webhook"]. Always includes "log" — the log channel is
+    // unconditional.
+    channelsAttempted: text("channels_attempted").array().notNull(),
+    // Per-channel outcome detail. Shape:
+    //   [{ channel, status, httpStatus?, error?, durationMs }]
+    // status ∈ "success" | "http_error" | "timeout" | "error".
+    // Stored as an array (not keyed object) so future re-dispatches of the
+    // same channel can be appended without overwriting prior attempts.
+    channelOutcomes: jsonb("channel_outcomes").notNull().default(sql`'[]'::jsonb`),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    // Most reads are "show me the most recent N alerts" — index createdAt.
+    createdAtIdx: index("operator_alerts_created_at_idx").on(table.createdAt),
+    // Filter-by-source and filter-by-severity are the two filters the admin
+    // viewer exposes; combine each with createdAt for ORDER BY pushdown.
+    sourceCreatedIdx: index("operator_alerts_source_created_idx").on(
+      table.source,
+      table.createdAt,
+    ),
+    severityCreatedIdx: index("operator_alerts_severity_created_idx").on(
+      table.severity,
+      table.createdAt,
+    ),
+  }),
+);
+
+export const insertOperatorAlertSchema = createInsertSchema(operatorAlerts).omit({
+  id: true,
+  createdAt: true,
+});
+export type OperatorAlertRecord = typeof operatorAlerts.$inferSelect;
+export type InsertOperatorAlertRecord = z.infer<typeof insertOperatorAlertSchema>;
