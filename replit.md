@@ -3,6 +3,26 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Build #3: Transaction lifecycle safety test
+
+A standalone test script that proves the integrity rails the deposit/withdraw money paths rely on, before any fee-engine money-movement work resumes. Hard-stop gate: if any of these fail, do not proceed to Gate B.
+
+**Script (`scripts/test-transaction-safety.ts`)** — runs end-to-end against a deterministic test user (`__txsafety_test_user__`); each run cleans the test user's prior data so it stays re-runnable. Exits with non-zero if any assertion fails. The 7 assertions:
+
+1. **deposit idempotency** — same Idempotency-Key submitted 3 times produces exactly one transaction (mirrors the production `checkIdempotency`/`saveIdempotentResponse` shape).
+2. **deposit idempotency payload-hash guard** — same key with a different payload would be detected as a hash mismatch (production returns 422).
+3. **pending no ledger impact** — a transaction in `status='pending'` has zero ledger entries.
+4. **settlement single ledger entry** — calling `postLedgerEntries` twice for the same transactionId throws `LedgerDoublePostError` (Task #22's same-tx posting guard) and the original balanced pair is the only one written.
+5. **failure no ledger impact** — a transaction in `status='failed'` has zero ledger entries.
+6. **reversal offset** — a reversal posts the OPPOSITE pair against a NEW transactionId (history is never edited); the user's ledger sum nets back to its original value.
+7. **reconciliation mismatch detection** — drifting the wallet cache by +50 surfaces in `wallet_ledger_reconciliations` as `status='mismatch'` with `driftAmount≈50`. Cleanup uses the sanctioned `refreshWalletCacheBalance` writer (not a manual UPDATE) — both correct and a reinforcement of the "ledger is the only writer of wallet cache" rule.
+
+**Run**: `npx tsx scripts/test-transaction-safety.ts`. The npm alias `test:transaction-safety` could not be added because `package.json` is environment-locked; ask to add it manually if desired.
+
+**Architect verdict**: PASS. Two recommendations applied inline (use `refreshWalletCacheBalance` for cache restore; add payload-hash sub-assertion). One follow-up captured: extract `checkIdempotency`/`saveIdempotentResponse` from `server/routes.ts` into `server/services/idempotency.ts` so the test exercises the production helper directly instead of mirroring it.
+
+**Scope unchanged**: no fee engine, no payouts, no external payments, no automatic settlement built in this step — just the verification gate.
+
 ## Recent Changes (April 2026) — Session 23A: Fee Engine Gate A scaffold
 
 Lays the rails for the 10C adviser fee engine: rule definition, daily accrual run, deduction roll-up, and admin approval flow — but **NO money moves**. Wallets, ledger and any transaction posting are not imported anywhere in this layer (enforced by file-level guard comment in `server/services/fee-engine.ts` and verified by ripgrep). Approval of a pending deduction is a status flip + audit row only. Adviser/client surfaces are strictly read-only.
