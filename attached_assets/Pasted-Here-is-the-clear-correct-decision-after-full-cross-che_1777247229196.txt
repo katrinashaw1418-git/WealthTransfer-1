@@ -1,0 +1,138 @@
+Here is the **clear, correct decision** after full cross-check.
+
+---
+
+# 🟢 DECISION
+
+## ✅ ACCEPT (with priority)
+
+```txt
+✔ Portfolio patch (items 1–8)
+✔ Pre-launch safety checklist
+✔ 30-min test script
+```
+
+---
+
+## ❌ REJECT (or IGNORE)
+
+```txt
+❌ “Phase 1 migration / Netwealth reset”
+❌ Removing adviceRecords / planner layer
+❌ Rebuilding system around feeConsents-only
+❌ Commission engine redesign
+```
+
+👉 That section is **outdated and conflicts with your current system** 
+
+---
+
+# 🧠 WHY (important)
+
+You already have:
+
+```txt
+✔ adviceRecords
+✔ wealth planner
+✔ audit logs
+✔ compliance lock
+✔ working lifecycle
+```
+
+So this part is WRONG for you:
+
+```txt
+“system is pre-Phase 2”
+“adviceRecords do not exist”
+```
+
+👉 You are already **beyond that phase**
+
+---
+
+# 🔥 WHAT YOU ACTUALLY DO NEXT
+
+## Phase 1 — Portfolio truth (START NOW)
+
+```txt
+1. Accept and implement:
+   - remove fake snapshot seeding
+   - fix monthly P&L (snapshot-based)
+   - fix history API (no projection)
+   - switch MemStorage → DatabaseStorage
+   - fix UI wording
+   - remove AI fake performance chart
+```
+
+👉 This is your **highest risk fix**
+
+---
+
+## Phase 2 — Safety (MANDATORY)
+
+```txt
+2. Accept:
+   - pre-launch safety verification script
+   - run checklist (idempotency, reconciliation, lifecycle)
+```
+
+---
+
+## Phase 3 — Validation
+
+```txt
+3. Run test scenarios:
+   - duplicate API calls
+   - webhook duplication
+   - custodian failure
+   - missing price
+   - reconciliation mismatch
+```
+
+---
+
+# ⛔ DO NOT ACCEPT
+
+```txt
+❌ Rebuild planner
+❌ Add adviserClients/feeConsents layer now
+❌ Commission engine
+❌ Payout batch system (yet)
+```
+
+---
+
+# 🎯 FINAL EXECUTION SEQUENCE
+
+```txt
+Step 1 → Apply portfolio patch
+Step 2 → Deploy + verify no fake data
+Step 3 → Run pre-launch safety script
+Step 4 → Run failure simulations
+Step 5 → READY TO LAUNCH
+```
+
+---
+
+# 🧾 FINAL ANSWER (simple)
+
+```txt
+ACCEPT:
+✔ Portfolio patch
+✔ Safety script
+
+REJECT:
+❌ Phase 1 migration / Netwealth reset
+
+NEXT:
+→ Fix data truth
+→ Validate money safety
+→ Then launch
+```
+
+---
+
+If you want next:
+I can now:
+👉 walk you through **applying the portfolio patch safely (step-by-step in your code)**
+👉 or generate the **exact test-prelaunch-safety.ts file ready to paste and run**

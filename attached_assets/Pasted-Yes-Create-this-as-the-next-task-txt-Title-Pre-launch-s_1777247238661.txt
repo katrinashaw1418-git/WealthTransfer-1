@@ -1,0 +1,89 @@
+Yes. Create this as the **next task**:
+
+```txt
+Title:
+Pre-launch safety verification script
+
+Purpose:
+Run a 30-minute launch-readiness test covering money movement, ledger integrity, idempotency, reconciliation, and data truthfulness.
+
+File:
+scripts/test-prelaunch-safety.ts
+```
+
+## Test sequence
+
+```txt
+1. Bootstrap test env
+   - load dotenv
+   - set JWT_SECRET
+   - seed test client/admin
+   - seed wallet/accounts/ledger
+
+2. Idempotency test
+   - submit same deposit/transfer 3 times with same Idempotency-Key
+   - expect 1 transaction only
+
+3. Ledger balance test
+   - reconstruct balance from ledger entries
+   - compare to wallet cache
+   - expect no drift
+
+4. Transaction lifecycle test
+   - create pending transaction
+   - settle it
+   - reverse/fail scenario
+   - expect valid state transitions only
+
+5. Custodian failure simulation
+   - mock failed custodian response
+   - expect transaction = failed
+   - expect no wallet/ledger drift
+
+6. Duplicate webhook test
+   - send same webhook twice
+   - expect processed once
+
+7. Missing price / valuation truth test
+   - asset without price
+   - expect UI/API marks unpriced or insufficient history
+   - no fake value
+
+8. Reconciliation mismatch test
+   - create deliberate wallet-vs-ledger drift
+   - expect alert/audit/reconciliation record
+
+9. Output result
+   - PASS only if all checks pass
+   - non-zero exit if any fail
+```
+
+## Acceptance criteria
+
+```txt
+- script exits 0 only on full pass
+- no production data touched
+- no external transfer initiated
+- no real custodian API call
+- all money effects isolated to test data
+- writes audit/reconciliation evidence
+```
+
+## Run command
+
+```bash
+npx tsx scripts/test-prelaunch-safety.ts
+```
+
+## Sequence
+
+```txt
+1. Create pre-launch safety verification script
+2. Run it locally
+3. Fix any failure
+4. Add npm script:
+   "test:prelaunch": "tsx scripts/test-prelaunch-safety.ts"
+5. Add CI gate later, not before it is stable
+```
+
+Do this **before** any launch, payout batch, or external payment-rail work.

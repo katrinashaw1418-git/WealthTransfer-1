@@ -1,0 +1,289 @@
+Good — this is the **right moment to reset direction cleanly**, because your latest doc mixes **three different systems**.
+
+I’ll **cross-check + separate them properly** and give you a **clean, correct next build sequence**.
+
+---
+
+# ✅ 1. CROSS-CHECK (what’s TRUE vs WRONG timing)
+
+## ✔ Wealth planner (what you just verified)
+
+```txt
+✔ COMPLETE
+✔ Production-grade
+✔ Do NOT touch anymore
+```
+
+---
+
+## ⚠️ Portfolio patch (first half of your doc)
+
+From your file:
+
+```txt
+REMOVE fake snapshot seeding
+FIX monthly P&L
+FIX history API
+SWITCH MemStorage → DatabaseStorage
+```
+
+👉 Verdict:
+
+```txt
+✔ 100% CORRECT
+✔ CRITICAL for credibility
+✔ NEXT SPRINT
+```
+
+This fixes:
+
+```txt
+❌ fake historical returns
+❌ modeled P&L
+❌ misleading charts
+```
+
+---
+
+## ⚠️ Fintech launch checklist (middle of doc)
+
+👉 Verdict:
+
+```txt
+✔ 100% CORRECT
+✔ MUST PASS before going live
+✔ NOT a build task — validation layer
+```
+
+---
+
+## ❌ “Phase 1 migration / Netwealth model” (last section)
+
+This part says:
+
+```txt
+❌ adviceRecords not exist
+❌ planner layer not real
+❌ revert to adviserClients + feeConsents
+```
+
+👉 This is **WRONG for your system now**
+
+Because you already have:
+
+```txt
+✔ adviceRecords
+✔ planner
+✔ audit logs
+✔ compliance lock
+```
+
+👉 So:
+
+```txt
+DO NOT FOLLOW THIS PART
+```
+
+---
+
+# 🔥 2. CORRECT NEXT BUILD PLAN (CLEAN)
+
+Now I give you the **real sequence**.
+
+---
+
+# 🟢 PHASE 1 — Portfolio truth layer (START NOW)
+
+## 1. Remove fake snapshot seeding
+
+```txt
+DELETE:
+backward projection logic (365 days)
+```
+
+```txt
+REPLACE:
+only save real daily snapshot
+```
+
+---
+
+## 2. Fix monthly P&L
+
+```txt
+DELETE:
+blendedMonthlyRate logic
+```
+
+```txt
+REPLACE:
+P&L = snapshot today - snapshot 30 days ago
+```
+
+Add:
+
+```txt
+monthlyPnlSource = "snapshots" | "insufficient_history"
+```
+
+---
+
+## 3. Fix history API
+
+```txt
+REMOVE:
+projection fallback
+```
+
+```txt
+USE:
+only stored snapshots
+```
+
+---
+
+## 4. Switch storage
+
+```txt
+MemStorage → DatabaseStorage
+```
+
+👉 This is critical:
+
+```txt
+Otherwise data disappears → not production safe
+```
+
+---
+
+## 5. Fix UI wording
+
+```txt
+"this month" → "last 30 days"
+"estimated" → "limited history"
+```
+
+---
+
+## 6. Remove fake AI performance chart
+
+Replace with:
+
+```txt
+"Performance unavailable until real data exists"
+```
+
+---
+
+# 🟡 PHASE 2 — Launch safety (MANDATORY BEFORE GO LIVE)
+
+Run checklist:
+
+### MUST PASS
+
+```txt
+✔ Idempotency (no duplicate transactions)
+✔ Ledger = source of truth
+✔ Transaction lifecycle (pending → settled)
+✔ Custodian reconciliation
+✔ Webhook verification
+✔ No fake valuations
+```
+
+---
+
+# 🟡 PHASE 3 — Validation tests (VERY IMPORTANT)
+
+Simulate:
+
+```txt
+1. Deposit retry → only 1 transaction
+2. Webhook twice → processed once
+3. Custodian fail → transaction = failed
+4. Missing price → UI shows "unpriced"
+5. Reconciliation mismatch → alert triggered
+```
+
+---
+
+# ⛔ 3. DO NOT DO
+
+```txt
+❌ DO NOT rebuild planner
+❌ DO NOT remove adviceRecords
+❌ DO NOT follow "Phase 1 migration" doc
+❌ DO NOT build commission engine
+❌ DO NOT build payout batch yet
+```
+
+---
+
+# 🧠 4. FINAL ARCHITECTURE (your REAL system)
+
+```txt
+Planner (DONE)
+→ audit logs
+→ compliance lock
+
+Portfolio (FIX NOW)
+→ real snapshots
+→ real P&L
+
+Ledger (VALIDATE)
+→ source of truth
+
+Custodian (VERIFY)
+→ settlement + reconciliation
+```
+
+---
+
+# 🎯 FINAL TO-DO LIST (EXECUTABLE)
+
+## NOW
+
+```txt
+1. Apply portfolio patch (all 8 changes)
+2. Deploy
+3. Verify:
+   - no fake data
+   - P&L based on snapshots
+   - charts reflect real history
+```
+
+---
+
+## THEN
+
+```txt
+4. Run launch checklist (MUST PASS)
+5. Run failure simulations
+```
+
+---
+
+## THEN
+
+```txt
+6. You are READY TO LAUNCH
+```
+
+---
+
+# 🔥 Bottom line
+
+```txt
+Planner sprint = DONE
+Next sprint = DATA TRUTH (portfolio)
+
+Your biggest remaining risk:
+❌ fake performance data
+```
+
+---
+
+# If you want next
+
+I can:
+👉 turn your checklist into a **30-minute executable test script**
+👉 or guide you step-by-step through **safe portfolio patch deployment without breaking anything**
