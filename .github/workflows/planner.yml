@@ -1,0 +1,42 @@
+# Wealth-planner compliance gate (Task #105).
+#
+# Runs scripts/test-planner.ts. Any non-zero exit (i.e. any failed
+# assertion or missing canonical PASS line) blocks the build.
+#
+# Gating: runs on every push and pull request. A non-zero exit blocks
+# the build. Per the task spec, the planner write surfaces (#95, #96,
+# #98) MUST close the gaps that this script's hard FAILs surface
+# before the gate goes green. Until they do, the gate stays red and
+# regressions to other planner invariants are caught immediately
+# alongside the known-open gaps.
+#
+# The script is self-contained — it boots dotenv, hard-fails on unset
+# JWT_SECRET, manages its own deterministic test fixtures and cleans
+# them up via PK-tracked deletes — so the job needs only Node + npm
+# install + the test:planner npm script.
+name: Planner verification
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  planner:
+    runs-on: ubuntu-latest
+    env:
+      # CI-only safety-belt defaults; mirror scripts/test-planner.ts.
+      NODE_ENV: test
+      JWT_SECRET: ci-planner-test-secret
+      # DATABASE_URL must be supplied via repository secrets so the script
+      # can reach a Postgres instance. The script never touches production
+      # data — its fixtures are scoped to the __planner_test_*__ prefix.
+      DATABASE_URL: ${{ secrets.PLANNER_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Planner verification
+        run: npm run test:planner
