@@ -913,6 +913,71 @@ export const insertAdviceAcknowledgementSchema = createInsertSchema(adviceAcknow
 export type AdviceAcknowledgement = typeof adviceAcknowledgements.$inferSelect;
 export type InsertAdviceAcknowledgement = z.infer<typeof insertAdviceAcknowledgementSchema>;
 
+// =============================================================================
+// SESSION 10B — Investment Instructions
+// -----------------------------------------------------------------------------
+// Lightweight per-instruction lifecycle table. Adviser creates a row in
+// status="pending_consent"; client transitions to "consented" or "rejected".
+// References (all nullable so an early MVP instruction can be created without
+// requiring a full SOA + fee consent stack):
+//   - adviceRecordId         -> the SOA/ROA that justifies this instruction
+//   - feeConsentId           -> the active DBFO fee consent covering this
+//   - executionAuthorisationId -> the formal RG 175 execution authorisation
+// In a later session, the "consented -> processing -> completed" transitions
+// will require all three references to be populated and live.
+// =============================================================================
+export const investmentInstructions = pgTable("investment_instructions", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  clientUserId: integer("client_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  productId: integer("product_id")
+    .references(() => investmentProducts.id)
+    .notNull(),
+
+  // buy | sell | switch
+  action: text("action").notNull(),
+
+  // Decimal AUD amount. Precision matches userInvestments.investedAmount.
+  amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
+
+  // pending_consent | consented | processing | completed | rejected | cancelled
+  status: text("status").notNull().default("pending_consent"),
+
+  // Optional compliance gate references — populated as the instruction matures.
+  adviceRecordId: integer("advice_record_id").references(() => adviceRecords.id),
+  feeConsentId: integer("fee_consent_id").references(() => feeConsents.id),
+  executionAuthorisationId: integer("execution_authorisation_id").references(
+    () => executionAuthorisations.id,
+  ),
+
+  notes: text("notes"),
+  rejectionReason: text("rejection_reason"),
+
+  consentedAt: timestamp("consented_at"),
+  rejectedAt: timestamp("rejected_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertInvestmentInstructionSchema = createInsertSchema(investmentInstructions).omit({
+  id: true,
+  status: true, // server-controlled — adviser cannot bypass pending_consent
+  consentedAt: true,
+  rejectedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InvestmentInstruction = typeof investmentInstructions.$inferSelect;
+export type InsertInvestmentInstruction = z.infer<typeof insertInvestmentInstructionSchema>;
+
 export const insertExecutionAuthorisationSchema = createInsertSchema(executionAuthorisations).omit({
   id: true,
   retentionUntil: true,

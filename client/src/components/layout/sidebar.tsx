@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Users,
   ClipboardList,
+  ClipboardCheck,
   FileText,
   type LucideIcon,
 } from "lucide-react";
@@ -52,6 +53,7 @@ const adviserNav: NavItem[] = [
   { name: "Dashboard", href: "/adviser/dashboard", icon: Home },
   { name: "Clients", href: "/adviser/clients", icon: Users },
   { name: "Investment Products", href: "/adviser/products", icon: Building2 },
+  { name: "Instructions", href: "/adviser/instructions", icon: ClipboardCheck },
   { name: "Tasks", href: "/adviser/tasks", icon: ClipboardList },
   { name: "Reports", href: "/adviser/reports", icon: FileText },
   { name: "Legal & Compliance", href: "/legal", icon: Scale },

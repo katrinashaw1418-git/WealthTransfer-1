@@ -1,0 +1,637 @@
+My advice: do not only redesign the pages. The UI is the heart, but the app’s “blood/electricity” is:
+
+data model
+permissions
+client-adviser linkage
+product catalogue
+consent status
+tasks
+reports
+audit trail
+
+Without those, the adviser portal looks good but is not alive.
+
+What I recommend
+
+Build in this order:
+
+1. Keep existing B2C app alive
+2. Add adviser landing + adviser login
+3. Add users.role
+4. Add adviserClients
+5. Add adviser dashboard using real linked-client data
+6. Add adviser client detail tabs
+7. Add read-only transactions / holdings
+8. Add investmentProducts
+9. Add investmentInstructions as pending_consent only
+10. Add feeConsents tracking only
+The “electricity” you need first
+1. Role routing
+client → existing dashboard
+adviser → adviser dashboard
+admin → admin controls
+2. Adviser-client permissioning
+adviserClients = who can see whom
+
+This is the most important table. Without it, the adviser portal is unsafe.
+
+3. Real backend APIs
+/api/adviser/dashboard
+/api/adviser/clients
+/api/adviser/clients/:id
+/api/adviser/products
+/api/adviser/tasks
+/api/adviser/reports
+4. Read-only data first
+
+Adviser can view:
+
+client profile
+KYC status
+portfolio
+holdings
+transactions
+reports
+
+But cannot:
+
+move money
+edit balances
+execute transactions
+bypass KYC
+What not to build yet
+automatic fee deduction
+full SOA engine
+managed account rebalancing
+adviser-executed trades
+complex commission engine
+My practical recommendation
+
+Do not start with cosmetic redesign. Start with this:
+
+Session A — Adviser Foundation
+- users.role
+- adviserClients
+- adviser dashboard API
+- adviser clients API
+- role-based routing
+
+Then:
+
+Session B — Adviser Client Detail
+- Overview tab
+- Portfolio tab
+- Holdings tab
+- Transactions tab read-only
+
+Then:
+
+Session C — Product Layer
+- investmentProducts
+- adviser products page
+- product detail page
+
+Then:
+
+Session D — Consent Layer
+- investmentInstructions
+- pending_consent only
+- client approve/reject page
+
+Then:
+
+Session E — Fee Consent Tracking
+- feeConsents
+- expiry tracking
+- no deduction yet
+
+Bottom line:
+
+Design gives the app a face.
+Permissions and data flow keep it alive.
+Consent keeps it compliant.
+Products and fees make it commercial.
+
+So yes — change the heart of the design, but wire the electricity first.
+
+THE APP IS OLD THEREFORE WE NEED TO CHANGE THE HEART AND INJECT MORE NEW INSPIRING IDEAS TO KEEP IT ALIVE. NOW REFER TO NETWEALTH.COM.AU TO GIVE ME YOUR ADVICE
+
+You’re thinking about this exactly the right way — and Netwealth is the best reference point because it’s not just a UI… it’s a living operating system for advisers.
+
+I’m going to give you real advice (not surface-level) based on how Netwealth actually works.
+
+🧠 THE REAL INSIGHT (FROM NETWEALTH)
+
+Netwealth is NOT a product.
+It is:
+
+Operating System for Financial Advisers
+
+Everything is built around:
+
+Adviser → Client → Portfolio → Workflow → Reporting → Revenue
+
+Not:
+
+User → App → Features
+🔥 WHAT MAKES NETWEALTH “ALIVE”
+
+From their actual platform:
+
+1. Everything revolves around the adviser business
+KPI dashboards
+Revenue reporting
+Client segmentation
+Workflow tasks
+👉 It literally runs the adviser’s business
+2. Workflow is central (NOT optional)
+Tasks
+Alerts
+Pending client approvals
+Status tracking
+
+👉 Advisers operate from a workflow engine, not pages
+
+3. Data is connected everywhere
+Portfolio
+Transactions
+Tax
+Fees
+Reports
+
+👉 Everything feeds everything (this is the “electricity”)
+
+4. Reporting is a core product (not a feature)
+20+ report types
+Branded reports
+Bulk generation
+
+👉 Advisers “sell the story”, not the transaction
+
+5. Client portal = engagement engine
+Real-time holdings
+Performance charts
+Transactions
+👉 Improves transparency + trust
+6. Product layer is deep and flexible
+300+ funds
+managed accounts
+wrap accounts
+SMSF
+
+👉 Choice = control = adviser value
+
+⚠️ YOUR CURRENT GAP (HONEST DIAGNOSIS)
+
+Right now your app is:
+
+UI + Pages + Partial Data
+
+But Netwealth is:
+
+Connected System + Adviser Operating Model
+
+You are missing:
+
+❌ System thinking
+❌ Workflow engine
+❌ Business intelligence layer
+❌ Adviser monetisation layer
+🧬 HOW TO “CHANGE THE HEART” PROPERLY
+
+Not redesign.
+
+You need to re-architect the soul of the product:
+
+🧱 NEW CORE ARCHITECTURE (INSPIRED BY NETWEALTH)
+1. Adviser OS Layer (NEW HEART)
+
+Create this layer:
+
+AdviserOS
+
+Modules:
+
+Clients
+Portfolio
+Tasks (workflow)
+Reports
+Products
+Fees (view only for now)
+
+👉 This becomes the center of your platform
+
+2. Workflow Engine (THIS IS THE ELECTRICITY)
+
+You are missing this completely.
+
+Add:
+
+adviserTasks
+status = pending | waiting_client | completed
+linked_to = client / report / instruction
+
+Why:
+
+👉 Netwealth lets advisers “run their day” from workflow
+👉 Not from navigation menus
+
+3. Business Dashboard (NOT JUST UI)
+
+Upgrade dashboard to:
+
+FUM
+Revenue (future)
+Client segmentation
+Pending actions
+Alerts
+
+👉 This is what keeps advisers logging in daily
+
+4. Reporting Engine (CRITICAL UPGRADE)
+
+You must elevate reports from:
+
+PDF export
+
+to:
+
+Storytelling engine
+
+Add:
+
+Portfolio narrative
+Performance drivers
+Allocation visuals
+Client-ready format
+
+👉 Netwealth literally sells “investment stories”
+
+5. Client Detail = Command Center
+
+Rebuild as:
+
+Client OS
+
+Tabs:
+
+Overview
+Portfolio
+Transactions (read-only)
+Reports
+Activity (workflow)
+
+👉 Not just data — context + history + actions
+
+6. Product Layer (VERY IMPORTANT)
+
+Netwealth wins because:
+
+Choice = adviser power
+
+You need:
+
+investmentProducts
+product categories
+risk levels
+asset class tagging
+
+Even if static at first.
+
+7. Data Connectivity (THE REAL “BLOOD”)
+
+This is what you must enforce:
+
+Client
+→ Portfolio
+→ Transactions
+→ Reports
+→ Tasks
+→ (future: Instructions)
+
+Everything must connect.
+
+🚫 WHAT YOU MUST NOT DO
+
+If you want to truly compete:
+
+❌ Don’t just copy UI
+❌ Don’t just add pages
+❌ Don’t build isolated features
+
+Because Netwealth’s power is:
+
+Integration, not features
+💡 THE REAL STRATEGIC MOVE
+
+You are NOT building:
+
+a fintech app
+
+You are building:
+
+an adviser distribution platform
+
+That means:
+
+Your real customer = adviser
+Not retail client
+🧠 FINAL ADVICE (THIS IS THE TRUTH)
+
+If you want to “inject life”:
+
+Step 1 (NOW)
+Build AdviserOS layer
+Add workflow engine
+Upgrade dashboard
+Fix client detail structure
+Step 2
+Connect all data (portfolio ↔ transactions ↔ reports)
+Step 3
+Add instruction + consent layer (later)
+🔥 ONE SENTENCE STRATEGY
+Stop building pages.
+Start building a system that advisers run their business on.
+
+If you want, next step I can:
+
+✅ Map this into your exact AMAX-V2 repo (folders + APIs + DB schema)
+✅ Or design the AdviserOS dashboard + workflow UI properly (Netwealth-level)
+
+✅ Or design the AdviserOS dashboard + workflow UI properly (Netwealth-level)
+
+Yes. Design AdviserOS as the new heart.
+
+AdviserOS main structure
+/adviser/dashboard       Daily command centre
+/adviser/clients         Client book
+/adviser/clients/:id     Client command centre
+/adviser/workflow        Tasks, approvals, alerts
+/adviser/products        AMAX product shelf
+/adviser/reports         Client reporting engine
+/adviser/business        FUM, revenue, segmentation
+1. AdviserOS dashboard
+
+Purpose: adviser opens this every morning.
+
+Sections:
+
+Top metrics:
+- FUM under advice
+- Linked clients
+- Open workflow items
+- Fee consents expiring
+- Reports generated
+- Clients pending KYC
+
+Main panels:
+
+Today’s Priorities
+- KYC follow-ups
+- Fee consent renewals
+- Portfolio reviews
+- Pending client approvals
+
+Client Book Snapshot
+- Top clients by FUM
+- Recently active clients
+- Clients needing review
+
+Business Health
+- FUM trend
+- Revenue estimate
+- Client segmentation
+
+Primary CTA:
+
+Review Workflow
+View Clients
+Generate Report
+2. Workflow page
+
+This is the Netwealth-style “electricity”.
+
+/adviser/workflow
+
+Columns:
+
+Overdue
+Due Today
+Waiting on Client
+Completed
+
+Task types:
+
+KYC pending
+Fee consent expiring
+Portfolio review due
+Client report requested
+Instruction awaiting consent
+Document missing
+
+Each workflow card:
+
+Client name
+Task type
+Due date
+Priority
+Linked action
+
+Example:
+
+Jane Lee
+Fee consent expiring
+Due: 2 May 2026
+Priority: Critical
+[Review consent]
+3. Clients page
+/adviser/clients
+
+Table columns:
+
+Client
+Status
+KYC
+Portfolio value
+Fee consent
+Last activity
+Next review
+Actions
+
+Filters:
+
+All
+Active
+Pending KYC
+Consent expiring
+Needs review
+High value
+4. Client command centre
+/adviser/clients/:id
+
+Tabs:
+
+Overview
+Portfolio
+Transactions
+Fees & Consent
+Reports
+Activity
+Documents
+
+Overview cards:
+
+Portfolio value
+KYC status
+Fee consent status
+Next review
+Risk profile status
+
+Portfolio tab:
+
+Asset allocation
+Holdings
+Cash balance
+Product exposure
+Performance only if real history exists
+
+Transactions tab:
+
+Read-only transaction history
+No action buttons
+No fund movement
+
+Activity tab:
+
+Timeline:
+- Client onboarded
+- KYC submitted
+- Report generated
+- Fee consent issued
+- Instruction created
+5. Investment products page
+/adviser/products
+
+Product cards/table:
+
+Product name
+Category
+Risk rating
+Minimum investment
+Management fee
+Status
+PDS / IM link
+
+Categories:
+
+Managed portfolios
+Fixed income
+FX strategies
+Multi-asset
+Private opportunities
+Cash / yield
+
+Actions:
+
+View product
+Create client instruction later
+
+Keep this controlled:
+
+Only AMAX/admin can create products.
+Adviser can only view/recommend.
+6. Reports page
+/adviser/reports
+
+Report types:
+
+Client portfolio report
+Client activity report
+Fee consent report
+Product exposure report
+Adviser book report
+
+Report builder:
+
+Select client
+Select report type
+Select date range
+Generate PDF
+
+Rule:
+
+No fake performance.
+If insufficient history → show “Insufficient history”.
+7. Business page
+/adviser/business
+
+This is later, but important.
+
+Metrics:
+
+Total FUM
+FUM by client segment
+Revenue estimate
+Fee consents active / expiring
+Clients added this month
+Reports generated
+UI style
+
+Use existing AMAX premium style:
+
+Dark navy background
+Champagne gold highlights
+Clean tables
+Status badges
+Workflow cards
+Left sidebar
+Top search bar
+
+Sidebar:
+
+Dashboard
+Clients
+Workflow
+Products
+Reports
+Business
+Settings
+Critical UX rule
+
+Everything should lead back to:
+
+Client → Workflow → Report → Review
+
+Not random pages.
+
+Best next Replit instruction
+Redesign adviser portal into AdviserOS.
+
+Keep existing client app unchanged.
+
+Create adviser layout with:
+- left sidebar
+- top search
+- role badge
+- dashboard cards
+- workflow priority panel
+- client book snapshot
+
+Add pages:
+- /adviser/dashboard
+- /adviser/workflow
+- /adviser/clients
+- /adviser/clients/:id
+- /adviser/products
+- /adviser/reports
+- /adviser/business
+
+Use dark navy + champagne gold AMAX adviser theme.
+
+Make adviser pages read-only for client money.
+No fund movement.
+No execution.
+No fee deduction.
+No commission engine.
+
+This is UI/UX + workflow structure only.

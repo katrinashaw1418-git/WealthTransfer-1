@@ -14,6 +14,77 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 10B (Investment Instruction Flow + Client Consent Gate)
+
+User authorised Phase 1 (transactions tab on the adviser's client-detail view) and Phase 2 (10B — investment instructions with a hard client-consent gate). Phase 3 (10C — fee engine, real money movement) **remains gated** and requires explicit go-ahead. No cash leaves a client wallet in 10B; `consented` is the terminal state for this session.
+
+### Phase 1 — Transactions tab on `client-detail`
+
+- **Backend service** — `getAdviserClientTransactions(adviserUserId, clientUserId)` in `server/services/adviser-access.ts`. Calls `assertAdviserClientLink` first (403 on unlinked).
+- **Backend route** — `GET /api/adviser/clients/:id/transactions` in `server/adviser-routes.ts` (adviser-gated).
+- **Frontend** — `client/src/pages/adviser/client-detail.tsx` refactored from a flat layout to `Tabs` (Overview / Transactions / Advice & Fees). Each tab uses the segmented-`queryKey` + explicit `queryFn` pattern fixed in 10A. The "View Holdings" button is preserved next to the KYC/tier badges.
+
+### Phase 2 (10B) — Investment instruction flow
+
+The adviser proposes a buy/sell/switch; the linked client must explicitly approve it from their own portal before anything else happens. This is the RG 175 / RG 245 chokepoint enforced in code, not in policy docs.
+
+#### Schema decision — Option A (new table), not Option B (reuse)
+
+Created a dedicated `investmentInstructions` table in `shared/schema.ts` (lines 919–982) **rather than** overloading the existing `executionAuthorisations` (binary, not a state machine) or `adviceRecords` (too heavyweight, document-centric). The new table has the right granularity and the right state vocabulary for an instruction lifecycle.
+
+Columns:
+- `id`, `adviserUserId`, `clientUserId`, `productId`
+- `action` (`buy` | `sell` | `switch`)
+- `amount` (`decimal(15,2)` — using `decimal` per project rule, never `numeric`)
+- `status` (default `pending_consent`; vocabulary: `pending_consent`, `consented`, `processing`, `completed`, `rejected`, `cancelled`) — **omitted from `insertSchema` so the server controls it**
+- Nullable FKs to `adviceRecords`, `feeConsents`, `executionAuthorisations` for future linkage
+- `notes`, `rejectionReason`, `consentedAt`, `rejectedAt`, `createdAt`, `updatedAt`
+
+Pushed via `npm run db:push --force` (no destructive ALTERs — additive only).
+
+#### Adviser write surface (`server/adviser-routes.ts` + `server/services/adviser-access.ts`)
+- `GET /api/adviser/instructions` — adviser sees only instructions where `adviserUserId === auth.userId`, joined to product + client name/email for the UI.
+- `POST /api/adviser/instructions` — Zod-validated body (`createInstructionSchema`). Defence-in-depth in the service layer: `assertAdviserClientLink` (link), product exists + `isActive`, optional `adviceRecordId.clientId === clientUserId`, optional `feeConsentId.clientId === clientUserId` + `renewalStatus === active`. Status is **server-set to `pending_consent`** regardless of input. Audit log on every create.
+
+#### Client consent surface — **new file** `server/client-routes.ts`
+A dedicated file because the client-facing routes have a different authorization rule (`instruction.clientUserId === auth.userId`, NOT adviser-link logic). Wired via `registerClientRoutes(app)` in `server/routes.ts` immediately after `registerAdviserRoutes`.
+- `GET /api/client/instructions/pending` — only `pending_consent` rows owned by the caller, joined with product + adviser name for the UI card.
+- `POST /api/client/instructions/:id/consent` — strict state machine: only `pending_consent → consented`. Any other transition returns **400** with the current status in the error message. Sets `consentedAt`. Audit log.
+- `POST /api/client/instructions/:id/reject` — `pending_consent → rejected`, optional `reason` body. Sets `rejectedAt` + `rejectionReason`. Audit log.
+- Cross-user attempts return **403 "Forbidden — not your instruction"**.
+
+#### Hard gate locked in (no money movement in 10B)
+- `consented` is **terminal** for this session. There is no code path from `consented` → `processing` → cash debit. That work is 10C.
+- The adviser's create UI explicitly tells the adviser the instruction is "pending consent — no funds will be moved by this submission."
+- The client's pending UI explicitly tells the client "approving here records your consent — no funds move automatically yet."
+
+#### Frontend pages
+- **`client/src/pages/adviser/instructions.tsx` (NEW)** — list view with status badges, "New instruction" dialog (client picker, product picker filtered to `isActive`, action select, AUD amount input with regex validation, optional notes textarea, amber compliance reminder above the submit button). Cache invalidates `["/api/adviser/instructions"]` on success.
+- **`client/src/pages/client-instructions.tsx` (NEW)** — pending list as cards with Approve / Reject buttons. Reject opens a dialog for an optional reason. Sky-coloured info banner reinforces client agency.
+- **Sidebar** — added "Instructions" entry to `adviserNav` with `ClipboardCheck` icon (between "Investment Products" and "Tasks").
+- **Router** — registered `/adviser/instructions` and `/client/instructions` in `client/src/App.tsx`.
+
+#### Smoke test — full state-machine pass (demoadviser → wiseinvestor)
+1. `GET /api/adviser/instructions` empty list → 200 `[]`
+2. `GET /api/adviser/clients/1/transactions` → 200
+3. `GET /api/adviser/clients/999/transactions` → **403 "Forbidden — you are not linked to this client"**
+4. `POST /api/adviser/instructions` (linked client 1, product 4, buy AUD 5,000.00) → 201 with `status: "pending_consent"`
+5. `POST /api/adviser/instructions` (unlinked client 999) → **403**
+6. Client login (wiseinvestor) → token issued
+7. `GET /api/client/instructions/pending` → 200 with the new row joined to product + adviser name
+8. `POST /api/client/instructions/1/consent` → 200, `status: "consented"`, `consentedAt` populated
+9. `POST /api/client/instructions/1/consent` again → **400 "Cannot consent — instruction is in status \"consented\""**
+10. Adviser tries to consent the same instruction → **403 "Forbidden — not your instruction"**
+11. Pending list re-fetched → 200 `[]`
+
+#### What is **explicitly out of scope** (10C — gated)
+- `adviserFeeRules` + `adviserFeeDeductions` schema, accrual job, deduction stub.
+- Wiring the `consented` → `processing` → wallet-debit path. This is the real-money commitment and needs reviewer sign-off before any cash-wallet code lands.
+- Visual re-skin (navy/gold per the React mockup — purely cosmetic).
+- Admin shell, `/adviser/business`, `/adviser/register`.
+
+---
+
 ## Recent Changes (April 2026) — Session 10A (Adviser Product Shelf + Client Holdings — Retail AFSL Reframe)
 
 User confirmed AMAX is a **retail AFSL** platform (not wholesale Path B), with external financial planners / Authorised Representatives accessing the platform under the Netwealth model. Session 10A is the first slice of the adviser-layer expansion: pure additive, read-only visibility — no money movement, no execution, no new tables.

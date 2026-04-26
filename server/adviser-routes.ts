@@ -30,6 +30,9 @@ import {
   getAdviserDashboardSummary,
   listAdviserProducts,
   getAdviserClientHoldings,
+  getAdviserClientTransactions,
+  listAdviserInstructions,
+  createAdviserInstruction,
 } from "./services/adviser-access";
 import { insertAdviserTaskSchema, insertReportRequestSchema } from "@shared/schema";
 
@@ -112,6 +115,22 @@ const createReportSchema = insertReportRequestSchema
     reportType: z.enum(REPORT_TYPES),
     format: z.enum(["pdf"]).optional(),
   });
+
+const INSTRUCTION_ACTIONS = ["buy", "sell", "switch"] as const;
+
+const createInstructionSchema = z.object({
+  clientUserId: z.number().int().positive(),
+  productId: z.number().int().positive(),
+  action: z.enum(INSTRUCTION_ACTIONS),
+  // Decimal AUD amount as string (preserves precision). Must be > 0.
+  amount: z
+    .string()
+    .regex(/^\d+(\.\d{1,2})?$/, "amount must be a non-negative decimal with up to 2 dp")
+    .refine((v) => Number(v) > 0, "amount must be greater than 0"),
+  notes: z.string().max(2000).optional().nullable(),
+  adviceRecordId: z.number().int().positive().optional().nullable(),
+  feeConsentId: z.number().int().positive().optional().nullable(),
+});
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -216,6 +235,65 @@ export function registerAdviserRoutes(app: Express): void {
         throw Object.assign(new Error("Invalid client id"), { status: 400 });
       }
       return getAdviserClientHoldings(auth.userId, clientId);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 10A.5 — GET /api/adviser/clients/:id/transactions
+  // Read-only client transaction history. Link enforcement runs inside service.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/clients/:id/transactions",
+    adviserRoute(async (req, auth) => {
+      const clientId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(clientId)) {
+        throw Object.assign(new Error("Invalid client id"), { status: 400 });
+      }
+      const limit = req.query.limit
+        ? Math.min(500, Math.max(1, parseInt(String(req.query.limit), 10) || 100))
+        : 100;
+      return getAdviserClientTransactions(auth.userId, clientId, limit);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 10B — Investment Instructions
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/instructions",
+    adviserRoute(async (_req, auth) => {
+      return listAdviserInstructions(auth.userId);
+    }),
+  );
+
+  app.post(
+    "/api/adviser/instructions",
+    adviserRoute(async (req, auth) => {
+      const parsed = createInstructionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error(
+            "Invalid instruction payload: " +
+              parsed.error.issues.map((i) => i.message).join("; "),
+          ),
+          { status: 400 },
+        );
+      }
+      const instruction = await createAdviserInstruction(auth.userId, parsed.data);
+      await audit(
+        auth.userId,
+        "adviser_instruction_created",
+        "investment_instruction",
+        String(instruction.id),
+        {
+          clientUserId: instruction.clientUserId,
+          productId: instruction.productId,
+          action: instruction.action,
+          amount: instruction.amount,
+        },
+        (req as Request).ip || null,
+      );
+      return instruction;
     }),
   );
 

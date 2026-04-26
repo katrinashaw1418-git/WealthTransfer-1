@@ -35,6 +35,7 @@ import {
   type AuthPayload,
 } from "./auth";
 import { registerAdviserRoutes } from "./adviser-routes";
+import { registerClientRoutes } from "./client-routes";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -566,6 +567,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mounted FIRST so its specific /api/adviser/* paths are matched before
   // any future generic /api/* fallback handlers.
   registerAdviserRoutes(app);
+  registerClientRoutes(app);
 
   // Ensure crypto + GBP FX rates exist (seed missing rows, reset sequence first)
   {

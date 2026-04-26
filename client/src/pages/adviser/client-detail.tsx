@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -13,7 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, FileText, ClipboardList, Briefcase } from "lucide-react";
+import { ArrowLeft, FileText, ClipboardList, Briefcase, ArrowLeftRight } from "lucide-react";
 
 interface ClientDetail {
   client: {
@@ -53,6 +54,18 @@ interface PortfolioPayload {
   }>;
 }
 
+interface TransactionRow {
+  id: number;
+  type: string;
+  fromCurrency: string | null;
+  toCurrency: string | null;
+  amount: string;
+  fee: string;
+  status: string;
+  description: string;
+  createdAt: string | null;
+}
+
 function formatAud(value: string | null | undefined): string {
   if (value == null) return "—";
   const n = Number(value);
@@ -77,6 +90,14 @@ function formatDate(value: string | null | undefined): string {
   }
 }
 
+function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
+  const s = status.toLowerCase();
+  if (s.includes("complet") || s.includes("settled") || s === "active") return "default";
+  if (s.includes("pending") || s.includes("processing")) return "secondary";
+  if (s.includes("fail") || s.includes("cancel") || s.includes("reject")) return "destructive";
+  return "outline";
+}
+
 export default function AdviserClientDetail() {
   const [, params] = useRoute<{ id: string }>("/adviser/clients/:id");
   const clientId = params?.id;
@@ -97,6 +118,14 @@ export default function AdviserClientDetail() {
     enabled: !!clientId,
     queryFn: async () => {
       const res = await apiFetch(`/api/adviser/clients/${clientId}/portfolio`);
+      return res.json();
+    },
+  });
+  const txs = useQuery<TransactionRow[]>({
+    queryKey: ["/api/adviser/clients", clientId, "transactions"],
+    enabled: !!clientId,
+    queryFn: async () => {
+      const res = await apiFetch(`/api/adviser/clients/${clientId}/transactions`);
       return res.json();
     },
   });
@@ -164,122 +193,195 @@ export default function AdviserClientDetail() {
         </div>
       </div>
 
-      {/* Portfolio summary (read-only) */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Portfolio (read-only)</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {portfolio.isLoading ? (
-            <Skeleton className="h-16 w-full" />
-          ) : (
-            <div className="space-y-3">
-              <div>
-                <div className="text-xs uppercase text-gray-500">Total value</div>
-                <div className="text-2xl font-bold tabular-nums" data-testid="text-portfolio-total">
-                  {formatAud(portfolio.data?.portfolio?.totalValue)}
-                </div>
-              </div>
-              {portfolio.data?.wallets && portfolio.data.wallets.length > 0 && (
-                <div>
-                  <div className="text-xs uppercase text-gray-500 mb-1">Wallets</div>
-                  <div className="flex flex-wrap gap-2">
-                    {portfolio.data.wallets.map((w) => (
-                      <Badge key={w.id} variant="outline" className="tabular-nums">
-                        {w.currency}: {Number(w.balance).toLocaleString("en-AU")}
-                      </Badge>
-                    ))}
+      <Tabs defaultValue="overview" className="space-y-4" data-testid="tabs-client-detail">
+        <TabsList>
+          <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
+          <TabsTrigger value="transactions" data-testid="tab-transactions">Transactions</TabsTrigger>
+          <TabsTrigger value="advice" data-testid="tab-advice">Advice & Fees</TabsTrigger>
+        </TabsList>
+
+        {/* OVERVIEW TAB */}
+        <TabsContent value="overview" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Portfolio (read-only)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {portfolio.isLoading ? (
+                <Skeleton className="h-16 w-full" />
+              ) : (
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-xs uppercase text-gray-500">Total value</div>
+                    <div
+                      className="text-2xl font-bold tabular-nums"
+                      data-testid="text-portfolio-total"
+                    >
+                      {formatAud(portfolio.data?.portfolio?.totalValue)}
+                    </div>
                   </div>
+                  {portfolio.data?.wallets && portfolio.data.wallets.length > 0 && (
+                    <div>
+                      <div className="text-xs uppercase text-gray-500 mb-1">Wallets</div>
+                      <div className="flex flex-wrap gap-2">
+                        {portfolio.data.wallets.map((w) => (
+                          <Badge key={w.id} variant="outline" className="tabular-nums">
+                            {w.currency}: {Number(w.balance).toLocaleString("en-AU")}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-      {/* Fee consents */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <FileText className="h-4 w-4 text-violet-500" />
-            Fee consents
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {feeConsents.length === 0 ? (
-            <p className="text-sm text-gray-500">No fee consents on file.</p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Amount</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {feeConsents.map((fc) => (
-                  <TableRow key={fc.id} data-testid={`row-fee-${fc.id}`}>
-                    <TableCell className="capitalize text-sm">
-                      {fc.feeType.replace(/_/g, " ")}
-                    </TableCell>
-                    <TableCell className="text-sm tabular-nums">
-                      {fc.amountType === "percentage" ? `${fc.amount}%` : formatAud(fc.amount)}
-                    </TableCell>
-                    <TableCell className="text-sm">{formatDate(fc.consentExpiryDate)}</TableCell>
-                    <TableCell>
-                      <Badge variant={fc.renewalStatus === "active" ? "default" : "secondary"}>
-                        {fc.renewalStatus}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+        {/* TRANSACTIONS TAB */}
+        <TabsContent value="transactions" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <ArrowLeftRight className="h-4 w-4 text-sky-500" />
+                Cash & transactions (read-only)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {txs.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : txs.isError ? (
+                <p className="text-sm text-red-600">Unable to load transactions.</p>
+              ) : !txs.data || txs.data.length === 0 ? (
+                <p className="text-sm text-gray-500" data-testid="text-no-transactions">
+                  No transactions on file for this client.
+                </p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Description</TableHead>
+                      <TableHead className="text-right">Amount</TableHead>
+                      <TableHead className="text-right">Fee</TableHead>
+                      <TableHead>Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {txs.data.map((t) => (
+                      <TableRow key={t.id} data-testid={`row-tx-${t.id}`}>
+                        <TableCell className="text-sm">{formatDate(t.createdAt)}</TableCell>
+                        <TableCell className="text-sm capitalize">
+                          {t.type.replace(/_/g, " ")}
+                        </TableCell>
+                        <TableCell className="text-sm text-gray-600">{t.description}</TableCell>
+                        <TableCell className="text-sm tabular-nums text-right">
+                          {Number(t.amount).toLocaleString("en-AU", { maximumFractionDigits: 8 })}
+                          {t.toCurrency ? ` ${t.toCurrency}` : t.fromCurrency ? ` ${t.fromCurrency}` : ""}
+                        </TableCell>
+                        <TableCell className="text-sm tabular-nums text-right text-gray-500">
+                          {Number(t.fee) > 0 ? Number(t.fee).toLocaleString("en-AU", { maximumFractionDigits: 8 }) : "—"}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={statusBadgeVariant(t.status)} className="capitalize">
+                            {t.status}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-      {/* Recent advice */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <ClipboardList className="h-4 w-4 text-emerald-500" />
-            Recent advice records
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {adviceRecords.length === 0 ? (
-            <p className="text-sm text-gray-500">No advice records on file.</p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {adviceRecords.map((ar) => (
-                  <TableRow key={ar.id} data-testid={`row-advice-${ar.id}`}>
-                    <TableCell className="capitalize text-sm">
-                      {ar.adviceType.replace(/_/g, " ")}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="capitalize">
-                        {ar.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm">{formatDate(ar.createdAt)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+        {/* ADVICE & FEES TAB */}
+        <TabsContent value="advice" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <FileText className="h-4 w-4 text-violet-500" />
+                Fee consents
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {feeConsents.length === 0 ? (
+                <p className="text-sm text-gray-500">No fee consents on file.</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Expires</TableHead>
+                      <TableHead>Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {feeConsents.map((fc) => (
+                      <TableRow key={fc.id} data-testid={`row-fee-${fc.id}`}>
+                        <TableCell className="capitalize text-sm">
+                          {fc.feeType.replace(/_/g, " ")}
+                        </TableCell>
+                        <TableCell className="text-sm tabular-nums">
+                          {fc.amountType === "percentage" ? `${fc.amount}%` : formatAud(fc.amount)}
+                        </TableCell>
+                        <TableCell className="text-sm">{formatDate(fc.consentExpiryDate)}</TableCell>
+                        <TableCell>
+                          <Badge variant={fc.renewalStatus === "active" ? "default" : "secondary"}>
+                            {fc.renewalStatus}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <ClipboardList className="h-4 w-4 text-emerald-500" />
+                Recent advice records
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {adviceRecords.length === 0 ? (
+                <p className="text-sm text-gray-500">No advice records on file.</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Created</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {adviceRecords.map((ar) => (
+                      <TableRow key={ar.id} data-testid={`row-advice-${ar.id}`}>
+                        <TableCell className="capitalize text-sm">
+                          {ar.adviceType.replace(/_/g, " ")}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="capitalize">
+                            {ar.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm">{formatDate(ar.createdAt)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

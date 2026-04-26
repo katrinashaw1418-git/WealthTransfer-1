@@ -32,6 +32,8 @@ import AdviserClientHoldings from "@/pages/adviser/client-holdings";
 import AdviserTasks from "@/pages/adviser/tasks";
 import AdviserReports from "@/pages/adviser/reports";
 import AdviserProducts from "@/pages/adviser/products";
+import AdviserInstructions from "@/pages/adviser/instructions";
+import ClientInstructions from "@/pages/client-instructions";
 import { Loader2 } from "lucide-react";
 
 function ProtectedApp() {
@@ -78,8 +80,10 @@ function ProtectedApp() {
         <Route path="/adviser/clients/:id/holdings" component={AdviserClientHoldings} />
         <Route path="/adviser/clients/:id" component={AdviserClientDetail} />
         <Route path="/adviser/products" component={AdviserProducts} />
+        <Route path="/adviser/instructions" component={AdviserInstructions} />
         <Route path="/adviser/tasks" component={AdviserTasks} />
         <Route path="/adviser/reports" component={AdviserReports} />
+        <Route path="/client/instructions" component={ClientInstructions} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

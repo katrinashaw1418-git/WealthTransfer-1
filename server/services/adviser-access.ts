@@ -28,11 +28,15 @@ import {
   wallets,
   investmentProducts,
   userInvestments,
+  transactions,
+  investmentInstructions,
+  executionAuthorisations,
   type AdviserTask,
   type InsertAdviserTask,
   type ReportRequest,
   type InsertReportRequest,
   type InvestmentProduct,
+  type InvestmentInstruction,
 } from "@shared/schema";
 import { and, eq, desc, lte, gte, sql, inArray } from "drizzle-orm";
 
@@ -295,6 +299,307 @@ export async function getAdviserClientHoldings(
     .innerJoin(investmentProducts, eq(investmentProducts.id, userInvestments.productId))
     .where(eq(userInvestments.userId, clientUserId))
     .orderBy(desc(userInvestments.investmentDate));
+}
+
+// -----------------------------------------------------------------------------
+// SESSION 10A.5 — Client transactions (read-only).
+//
+// Returns the client's transaction history (existing `transactions` table).
+// This is the same data the client sees on their own dashboard, exposed to
+// linked advisers in read-only form. Link enforcement runs first.
+// -----------------------------------------------------------------------------
+export interface AdviserClientTransactionRow {
+  id: number;
+  type: string;
+  fromCurrency: string | null;
+  toCurrency: string | null;
+  amount: string;
+  fee: string;
+  status: string;
+  description: string;
+  createdAt: Date | null;
+}
+
+export async function getAdviserClientTransactions(
+  adviserUserId: number,
+  clientUserId: number,
+  limit: number = 100,
+): Promise<AdviserClientTransactionRow[]> {
+  await assertAdviserClientLink(adviserUserId, clientUserId);
+  return db
+    .select({
+      id: transactions.id,
+      type: transactions.type,
+      fromCurrency: transactions.fromCurrency,
+      toCurrency: transactions.toCurrency,
+      amount: transactions.amount,
+      fee: transactions.fee,
+      status: transactions.status,
+      description: transactions.description,
+      createdAt: transactions.createdAt,
+    })
+    .from(transactions)
+    .where(eq(transactions.userId, clientUserId))
+    .orderBy(desc(transactions.createdAt))
+    .limit(limit);
+}
+
+// -----------------------------------------------------------------------------
+// SESSION 10B — Investment instructions (adviser write surface).
+//
+// Hard rules:
+//   - Status defaults to "pending_consent" — adviser cannot bypass.
+//   - createAdviserInstruction always validates assertAdviserClientLink before
+//     insert (defence in depth).
+//   - Product must be active (isActive=true) to be referenced.
+//   - The route layer audits every create.
+//   - There is NO execution path here — instructions in "consented" state are
+//     terminal in this session. Cash movement is a separate later session.
+// -----------------------------------------------------------------------------
+export interface AdviserInstructionRow extends InvestmentInstruction {
+  clientFirstName: string;
+  clientLastName: string;
+  clientEmail: string;
+  productName: string;
+  productCategory: string;
+}
+
+export async function listAdviserInstructions(
+  adviserUserId: number,
+): Promise<AdviserInstructionRow[]> {
+  return db
+    .select({
+      id: investmentInstructions.id,
+      adviserUserId: investmentInstructions.adviserUserId,
+      clientUserId: investmentInstructions.clientUserId,
+      productId: investmentInstructions.productId,
+      action: investmentInstructions.action,
+      amount: investmentInstructions.amount,
+      status: investmentInstructions.status,
+      adviceRecordId: investmentInstructions.adviceRecordId,
+      feeConsentId: investmentInstructions.feeConsentId,
+      executionAuthorisationId: investmentInstructions.executionAuthorisationId,
+      notes: investmentInstructions.notes,
+      rejectionReason: investmentInstructions.rejectionReason,
+      consentedAt: investmentInstructions.consentedAt,
+      rejectedAt: investmentInstructions.rejectedAt,
+      createdAt: investmentInstructions.createdAt,
+      updatedAt: investmentInstructions.updatedAt,
+      clientFirstName: users.firstName,
+      clientLastName: users.lastName,
+      clientEmail: users.email,
+      productName: investmentProducts.name,
+      productCategory: investmentProducts.category,
+    })
+    .from(investmentInstructions)
+    .innerJoin(users, eq(users.id, investmentInstructions.clientUserId))
+    .innerJoin(
+      investmentProducts,
+      eq(investmentProducts.id, investmentInstructions.productId),
+    )
+    .where(eq(investmentInstructions.adviserUserId, adviserUserId))
+    .orderBy(desc(investmentInstructions.createdAt));
+}
+
+export interface CreateAdviserInstructionInput {
+  clientUserId: number;
+  productId: number;
+  action: "buy" | "sell" | "switch";
+  amount: string; // decimal as string
+  notes?: string | null;
+  adviceRecordId?: number | null;
+  feeConsentId?: number | null;
+}
+
+export async function createAdviserInstruction(
+  adviserUserId: number,
+  input: CreateAdviserInstructionInput,
+): Promise<InvestmentInstruction> {
+  // Defence in depth: assert link even though the route already requires it.
+  await assertAdviserClientLink(adviserUserId, input.clientUserId);
+
+  // Validate the product is on the active AMAX shelf.
+  const [product] = await db
+    .select({ id: investmentProducts.id, isActive: investmentProducts.isActive })
+    .from(investmentProducts)
+    .where(eq(investmentProducts.id, input.productId))
+    .limit(1);
+  if (!product) {
+    throw Object.assign(new Error("Product not found"), { status: 404 });
+  }
+  if (!product.isActive) {
+    throw Object.assign(new Error("Product is not active and cannot be referenced"), { status: 400 });
+  }
+
+  // If adviceRecordId provided, it must belong to the same client.
+  if (input.adviceRecordId != null) {
+    const [ar] = await db
+      .select({ id: adviceRecords.id, clientId: adviceRecords.clientId })
+      .from(adviceRecords)
+      .where(eq(adviceRecords.id, input.adviceRecordId))
+      .limit(1);
+    if (!ar || ar.clientId !== input.clientUserId) {
+      throw Object.assign(new Error("Advice record not valid for this client"), { status: 400 });
+    }
+  }
+
+  // If feeConsentId provided, it must belong to the same client and be active.
+  if (input.feeConsentId != null) {
+    const [fc] = await db
+      .select({ id: feeConsents.id, clientId: feeConsents.clientId, renewalStatus: feeConsents.renewalStatus })
+      .from(feeConsents)
+      .where(eq(feeConsents.id, input.feeConsentId))
+      .limit(1);
+    if (!fc || fc.clientId !== input.clientUserId) {
+      throw Object.assign(new Error("Fee consent not valid for this client"), { status: 400 });
+    }
+    if (fc.renewalStatus !== "active") {
+      throw Object.assign(new Error("Fee consent is not active"), { status: 400 });
+    }
+  }
+
+  const [row] = await db
+    .insert(investmentInstructions)
+    .values({
+      adviserUserId,
+      clientUserId: input.clientUserId,
+      productId: input.productId,
+      action: input.action,
+      amount: input.amount,
+      // Hard-coded — adviser cannot set status; everything starts pending.
+      status: "pending_consent",
+      adviceRecordId: input.adviceRecordId ?? null,
+      feeConsentId: input.feeConsentId ?? null,
+      notes: input.notes ?? null,
+    })
+    .returning();
+  return row;
+}
+
+// -----------------------------------------------------------------------------
+// SESSION 10B — Client-side instruction reads + state transitions.
+//
+// These functions are called from the CLIENT route layer (NOT adviser).
+// Authorisation: the caller MUST be the client referenced on the instruction.
+// State machine:
+//   pending_consent -> consented   (client-only)
+//   pending_consent -> rejected    (client-only)
+//   any other transition -> 400
+// No execution side-effect is performed here. "consented" is terminal in this
+// session; downstream cash movement is a later session.
+// -----------------------------------------------------------------------------
+export interface ClientPendingInstructionRow extends InvestmentInstruction {
+  productName: string;
+  productCategory: string;
+  productSubCategory: string;
+  adviserFirstName: string | null;
+  adviserLastName: string | null;
+}
+
+export async function listClientPendingInstructions(
+  clientUserId: number,
+): Promise<ClientPendingInstructionRow[]> {
+  return db
+    .select({
+      id: investmentInstructions.id,
+      adviserUserId: investmentInstructions.adviserUserId,
+      clientUserId: investmentInstructions.clientUserId,
+      productId: investmentInstructions.productId,
+      action: investmentInstructions.action,
+      amount: investmentInstructions.amount,
+      status: investmentInstructions.status,
+      adviceRecordId: investmentInstructions.adviceRecordId,
+      feeConsentId: investmentInstructions.feeConsentId,
+      executionAuthorisationId: investmentInstructions.executionAuthorisationId,
+      notes: investmentInstructions.notes,
+      rejectionReason: investmentInstructions.rejectionReason,
+      consentedAt: investmentInstructions.consentedAt,
+      rejectedAt: investmentInstructions.rejectedAt,
+      createdAt: investmentInstructions.createdAt,
+      updatedAt: investmentInstructions.updatedAt,
+      productName: investmentProducts.name,
+      productCategory: investmentProducts.category,
+      productSubCategory: investmentProducts.subCategory,
+      adviserFirstName: users.firstName,
+      adviserLastName: users.lastName,
+    })
+    .from(investmentInstructions)
+    .innerJoin(
+      investmentProducts,
+      eq(investmentProducts.id, investmentInstructions.productId),
+    )
+    .leftJoin(users, eq(users.id, investmentInstructions.adviserUserId))
+    .where(
+      and(
+        eq(investmentInstructions.clientUserId, clientUserId),
+        eq(investmentInstructions.status, "pending_consent"),
+      ),
+    )
+    .orderBy(desc(investmentInstructions.createdAt));
+}
+
+async function loadClientInstruction(
+  clientUserId: number,
+  instructionId: number,
+): Promise<InvestmentInstruction> {
+  const [row] = await db
+    .select()
+    .from(investmentInstructions)
+    .where(eq(investmentInstructions.id, instructionId))
+    .limit(1);
+  if (!row) {
+    throw Object.assign(new Error("Instruction not found"), { status: 404 });
+  }
+  if (row.clientUserId !== clientUserId) {
+    throw Object.assign(new Error("Forbidden — not your instruction"), { status: 403 });
+  }
+  return row;
+}
+
+export async function consentClientInstruction(
+  clientUserId: number,
+  instructionId: number,
+): Promise<InvestmentInstruction> {
+  const existing = await loadClientInstruction(clientUserId, instructionId);
+  if (existing.status !== "pending_consent") {
+    throw Object.assign(
+      new Error(`Cannot consent — instruction is in status "${existing.status}"`),
+      { status: 400 },
+    );
+  }
+  const now = new Date();
+  const [row] = await db
+    .update(investmentInstructions)
+    .set({ status: "consented", consentedAt: now, updatedAt: now })
+    .where(eq(investmentInstructions.id, instructionId))
+    .returning();
+  return row;
+}
+
+export async function rejectClientInstruction(
+  clientUserId: number,
+  instructionId: number,
+  reason?: string | null,
+): Promise<InvestmentInstruction> {
+  const existing = await loadClientInstruction(clientUserId, instructionId);
+  if (existing.status !== "pending_consent") {
+    throw Object.assign(
+      new Error(`Cannot reject — instruction is in status "${existing.status}"`),
+      { status: 400 },
+    );
+  }
+  const now = new Date();
+  const [row] = await db
+    .update(investmentInstructions)
+    .set({
+      status: "rejected",
+      rejectedAt: now,
+      rejectionReason: reason ?? null,
+      updatedAt: now,
+    })
+    .where(eq(investmentInstructions.id, instructionId))
+    .returning();
+  return row;
 }
 
 // -----------------------------------------------------------------------------

@@ -1,0 +1,119 @@
+Use this as the UI → API → DB flow map.
+
+Adviser portal flow
+/adviser/dashboard
+→ GET /api/adviser/dashboard
+→ adviserClients, users, feeConsents, adviserTasks
+/adviser/clients
+→ GET /api/adviser/clients
+→ adviserClients + users
+/adviser/clients/:id
+→ GET /api/adviser/clients/:id
+→ adviserClients permission check
+→ users + wallets + transactions + clientProductHoldings
+/adviser/products
+→ GET /api/adviser/products
+→ investmentProducts
+/adviser/instructions
+→ GET /api/adviser/instructions
+→ investmentInstructions
+Create Instruction button
+→ POST /api/adviser/instructions
+→ investmentInstructions
+→ status = pending_consent
+/adviser/fees
+→ GET /api/adviser/fees
+→ feeConsents + adviserFeeRules + adviserFeeDeductions
+/adviser/tasks
+→ GET /api/adviser/tasks
+→ adviserTasks
+/adviser/reports
+→ POST /api/adviser/reports/client-portfolio
+→ reportRequests
+→ PDF generator later
+Client consent flow
+/client/instructions
+→ GET /api/client/instructions/pending
+→ investmentInstructions where clientUserId = current user
+Approve instruction
+→ POST /api/client/instructions/:id/consent
+→ status = consented
+→ audit log
+Reject instruction
+→ POST /api/client/instructions/:id/reject
+→ status = rejected
+→ audit log
+Core permission rule
+
+Every adviser client API must run:
+
+await adviserCanAccessClient(adviserUserId, clientUserId)
+
+If false:
+
+return res.status(403).json({ error: "Client not linked to adviser" });
+Backend route map
+GET  /api/adviser/dashboard
+GET  /api/adviser/clients
+GET  /api/adviser/clients/:id
+GET  /api/adviser/products
+GET  /api/adviser/clients/:id/holdings
+GET  /api/adviser/instructions
+POST /api/adviser/instructions
+GET  /api/adviser/fees
+GET  /api/adviser/tasks
+PATCH /api/adviser/tasks/:id
+POST /api/adviser/reports/client-portfolio
+
+GET  /api/client/instructions/pending
+POST /api/client/instructions/:id/consent
+POST /api/client/instructions/:id/reject
+Database map
+users.role
+adviserClients
+investmentProducts
+clientProductHoldings
+investmentInstructions
+feeConsents
+adviserFeeRules
+adviserFeeDeductions
+adviserTasks
+reportRequests
+auditLogs
+End-to-end business flow
+1. Adviser logs in
+2. System detects role = adviser
+3. Redirect to /adviser/dashboard
+4. Adviser views linked clients only
+5. Adviser opens client detail
+6. Adviser reviews portfolio and products
+7. Adviser creates investment instruction
+8. Client receives pending instruction
+9. Client approves/rejects
+10. If approved, system processes
+11. Fee consent checked before deduction
+12. Reports generated from real data only
+Replit instruction
+Map the adviser UI screens to backend APIs.
+
+Add API routes for:
+- adviser dashboard
+- adviser clients
+- adviser client detail
+- adviser products
+- adviser instructions
+- adviser fees
+- adviser tasks
+- adviser reports
+- client pending instructions
+- client instruction consent/reject
+
+All adviser client routes must verify adviserClients linkage.
+
+Do not allow advisers to:
+- move funds
+- execute transactions directly
+- access unlinked clients
+- edit balances
+
+Instructions must be created as pending_consent and require client approval before processin
