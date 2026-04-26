@@ -25,10 +25,12 @@ import {
   adviserFeeAccruals,
   adviserFeeDeductions,
   adviserFeeRules,
+  feeAccrualRuns,
   feeConsents,
   type AdviserFeeAccrual,
   type AdviserFeeDeduction,
   type AdviserFeeRule,
+  type FeeAccrualRun,
   type InsertAdviserFeeRule,
 } from "@shared/schema";
 
@@ -429,3 +431,65 @@ export async function approvePendingDeduction(opts: {
 // Re-export accrual type for convenience in route handlers that just need
 // the select shape.
 export type { AdviserFeeAccrual };
+
+// ---------------------------------------------------------------------------
+// 6. runDailyAccrualsAndRecord — wraps `runDailyAccruals` and writes one row
+//    to `fee_accrual_runs` per invocation so admins can see the latest run
+//    in the UI without scanning server logs.
+//
+// The recording happens whether the underlying run succeeded OR threw:
+//   - On success: counts populated, errorMessage NULL, finishedAt set.
+//   - On failure: counts all 0, errorMessage = err.message, finishedAt set,
+//     and the original error is re-thrown so the caller's existing error
+//     handling / logging continues to work.
+//
+// This is a thin wrapper on top of the gated CRUD primitive — it does not
+// move money, schedule itself, or interact with wallets / ledger.
+// ---------------------------------------------------------------------------
+export async function runDailyAccrualsAndRecord(opts: {
+  accrualDate: Date;
+  trigger: "cron" | "manual";
+  triggeredByUserId: number | null;
+}): Promise<{
+  run: FeeAccrualRun;
+  inserted: number;
+  skipped: number;
+  duplicates: number;
+  byGateReason: Record<string, number>;
+}> {
+  const accrualDate = startOfUtcDay(opts.accrualDate);
+  try {
+    const summary = await runDailyAccruals({ accrualDate });
+    const [row] = await db
+      .insert(feeAccrualRuns)
+      .values({
+        accrualDate,
+        trigger: opts.trigger,
+        triggeredByUserId: opts.triggeredByUserId,
+        inserted: summary.inserted,
+        skipped: summary.skipped,
+        duplicates: summary.duplicates,
+        byGateReason: summary.byGateReason as any,
+        errorMessage: null,
+        finishedAt: new Date(),
+      })
+      .returning();
+    return { run: row, ...summary };
+  } catch (err: any) {
+    // Best-effort record of the failure. If THIS insert also fails we let it
+    // bubble up alongside the original error — silent failure here would
+    // defeat the whole point of the table.
+    await db.insert(feeAccrualRuns).values({
+      accrualDate,
+      trigger: opts.trigger,
+      triggeredByUserId: opts.triggeredByUserId,
+      inserted: 0,
+      skipped: 0,
+      duplicates: 0,
+      byGateReason: {} as any,
+      errorMessage: String(err?.message ?? err),
+      finishedAt: new Date(),
+    });
+    throw err;
+  }
+}

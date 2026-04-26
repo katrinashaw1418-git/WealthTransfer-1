@@ -1731,3 +1731,56 @@ export const insertAdviserFeeDeductionSchema = createInsertSchema(adviserFeeDedu
 });
 export type AdviserFeeDeduction = typeof adviserFeeDeductions.$inferSelect;
 export type InsertAdviserFeeDeduction = z.infer<typeof insertAdviserFeeDeductionSchema>;
+
+// ---------------------------------------------------------------------------
+// Session 27 (Task #23) — Fee accrual run log
+// ---------------------------------------------------------------------------
+// Each invocation of `runDailyAccruals` (whether by the daily cron in
+// server/index.ts or by an admin pressing "Run today's accruals") writes one
+// row to this table so admins can see at a glance — without scanning server
+// logs — when accruals last ran, what date they covered, what was inserted /
+// gated / duplicated, and whether the run errored out.
+//
+// This is intentionally a SEPARATE table from `audit_logs`: audit_logs is the
+// who-did-what trail (one row per state change), whereas this is the
+// operational health log (one row per scheduled or manual job invocation,
+// including failures). Keeping them separate means we can index/query the
+// latter without polluting the former.
+// ---------------------------------------------------------------------------
+export const feeAccrualRuns = pgTable(
+  "fee_accrual_runs",
+  {
+    id: serial("id").primaryKey(),
+    // Calendar date the run targeted (NOT when the row was inserted — see
+    // startedAt for that). Stored as timestamp for portability with the rest
+    // of the schema.
+    accrualDate: timestamp("accrual_date").notNull(),
+    // "cron" = daily background job; "manual" = admin POSTed
+    // /api/admin/fee-accruals/run.
+    trigger: text("trigger").notNull(),
+    // null when trigger='cron'; admin user id when trigger='manual'.
+    triggeredByUserId: integer("triggered_by_user_id").references(() => users.id),
+    inserted: integer("inserted").notNull().default(0),
+    skipped: integer("skipped").notNull().default(0),
+    duplicates: integer("duplicates").notNull().default(0),
+    // { consent_missing: 1, rule_paused: 2, ... } — empty object on a clean run.
+    byGateReason: jsonb("by_gate_reason").notNull().default(sql`'{}'::jsonb`),
+    // Populated only when the run threw. The summary counts will be 0 in that
+    // case so an admin can distinguish "ran cleanly, nothing to do" from
+    // "ran and crashed".
+    errorMessage: text("error_message"),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    finishedAt: timestamp("finished_at"),
+  },
+  (table) => ({
+    // We almost always want "the most recent run" — index on startedAt DESC.
+    startedAtIdx: index("fee_accrual_runs_started_at_idx").on(table.startedAt),
+  }),
+);
+
+export const insertFeeAccrualRunSchema = createInsertSchema(feeAccrualRuns).omit({
+  id: true,
+  startedAt: true,
+});
+export type FeeAccrualRun = typeof feeAccrualRuns.$inferSelect;
+export type InsertFeeAccrualRun = z.infer<typeof insertFeeAccrualRunSchema>;

@@ -174,12 +174,20 @@ app.use((req, res, next) => {
   // Staggered 180s after start so the four daily crons (wallet recon, ledger
   // recon, adviser-task automation, fee accruals) don't pile up on first boot.
   // ---------------------------------------------------------------------------
-  const { runDailyAccruals } = await import("./services/fee-engine");
+  const { runDailyAccrualsAndRecord } = await import("./services/fee-engine");
 
   async function runDailyFeeAccrualsCron() {
     const accrualDate = new Date();
     try {
-      const s = await runDailyAccruals({ accrualDate });
+      // Session 27 (Task #23): use the recording wrapper so each cron run
+      // also writes one row to `fee_accrual_runs` with trigger='cron'. The
+      // admin fees page surfaces the latest such row so operators don't have
+      // to grep the server logs to confirm the job ran.
+      const s = await runDailyAccrualsAndRecord({
+        accrualDate,
+        trigger: "cron",
+        triggeredByUserId: null,
+      });
       const gateBreakdown = Object.entries(s.byGateReason)
         .map(([k, v]) => `${k}=${v}`)
         .join(",") || "none";

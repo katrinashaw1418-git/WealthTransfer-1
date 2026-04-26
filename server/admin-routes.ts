@@ -49,10 +49,8 @@ import {
   insertInvestmentProductSchema,
   // Session 25 (Task #17) — wallet-vs-ledger drift visibility
   walletLedgerReconciliations,
-  // Session 23A — Fee Engine Gate A
-  adviserFeeRules,
-  adviserFeeAccruals,
-  adviserFeeDeductions,
+  // Session 27 (Task #23) — fee accrual run log
+  feeAccrualRuns,
 } from "@shared/schema";
 import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
 import { getUserNameMap } from "./services/user-name-map";
@@ -2116,17 +2114,60 @@ export function registerAdminRoutes(app: Express): void {
       // The service inserts each row in its own write — that's intentional so
       // a single bad row doesn't block the others. We audit the run as one
       // event with the summary outcome.
-      const { runDailyAccruals } = await import("./services/fee-engine");
-      const summary = await runDailyAccruals({ accrualDate });
+      //
+      // Session 27 (Task #23): use the recording wrapper so this manual run
+      // ALSO writes one row to `fee_accrual_runs` with trigger='manual' and
+      // the admin's user id, so the "last run" card on the admin fees page
+      // works identically for cron and manual runs.
+      const { runDailyAccrualsAndRecord } = await import("./services/fee-engine");
+      const { run, ...summary } = await runDailyAccrualsAndRecord({
+        accrualDate,
+        trigger: "manual",
+        triggeredByUserId: auth.userId,
+      });
       await db.insert(auditLogs).values({
         userId: auth.userId,
         action: "fee_accruals_run",
         entityType: "adviser_fee_accruals",
         entityId: null,
-        metadata: { accrualDate: accrualDate.toISOString(), ...summary } as any,
+        metadata: {
+          accrualDate: accrualDate.toISOString(),
+          feeAccrualRunId: run.id,
+          ...summary,
+        } as any,
         ipAddress: req.ip ?? null,
       });
-      return { accrualDate: accrualDate.toISOString(), ...summary };
+      return { accrualDate: accrualDate.toISOString(), feeAccrualRunId: run.id, ...summary };
+    }),
+  );
+
+  // Session 27 (Task #23) — Latest accrual run summary for admins.
+  // Returns the most recent row from `fee_accrual_runs` (or null if the table
+  // is empty, e.g. on a fresh install before the cron has fired). Used by the
+  // admin fees page to surface "last run" status without scanning logs.
+  app.get(
+    "/api/admin/fee-accrual-runs/latest",
+    adminRoute(async () => {
+      const [row] = await db
+        .select({
+          id: feeAccrualRuns.id,
+          accrualDate: feeAccrualRuns.accrualDate,
+          trigger: feeAccrualRuns.trigger,
+          triggeredByUserId: feeAccrualRuns.triggeredByUserId,
+          triggeredByUsername: users.username,
+          inserted: feeAccrualRuns.inserted,
+          skipped: feeAccrualRuns.skipped,
+          duplicates: feeAccrualRuns.duplicates,
+          byGateReason: feeAccrualRuns.byGateReason,
+          errorMessage: feeAccrualRuns.errorMessage,
+          startedAt: feeAccrualRuns.startedAt,
+          finishedAt: feeAccrualRuns.finishedAt,
+        })
+        .from(feeAccrualRuns)
+        .leftJoin(users, eq(users.id, feeAccrualRuns.triggeredByUserId))
+        .orderBy(desc(feeAccrualRuns.startedAt))
+        .limit(1);
+      return { run: row ?? null };
     }),
   );
 

@@ -35,7 +35,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2 } from "lucide-react";
+import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2, Clock, AlertCircle } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
@@ -104,8 +104,106 @@ interface Paginated<T> {
   users?: UsersMap;
 }
 
+// Session 27 (Task #23) — Latest fee accrual run summary surfaced near the
+// "Run today's accruals" button so admins don't have to grep server logs to
+// confirm the cron actually ran.
+interface FeeAccrualRunSummary {
+  id: number;
+  accrualDate: string;
+  trigger: "cron" | "manual";
+  triggeredByUserId: number | null;
+  triggeredByUsername: string | null;
+  inserted: number;
+  skipped: number;
+  duplicates: number;
+  byGateReason: Record<string, number>;
+  errorMessage: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const sec = Math.max(1, Math.floor((now - then) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function LatestRunSummary({ run }: { run: FeeAccrualRunSummary }) {
+  const gateEntries = Object.entries(run.byGateReason ?? {});
+  const startedAtLocal = new Date(run.startedAt).toLocaleString();
+  return (
+    <div className="space-y-2 text-sm" data-testid="latest-run-summary">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge
+          variant={run.trigger === "cron" ? "outline" : "secondary"}
+          data-testid="badge-trigger"
+        >
+          {run.trigger}
+        </Badge>
+        {run.errorMessage ? (
+          <Badge variant="destructive" data-testid="badge-status">
+            <AlertCircle className="h-3 w-3 mr-1" /> error
+          </Badge>
+        ) : (
+          <Badge variant="outline" data-testid="badge-status">
+            <CheckCircle2 className="h-3 w-3 mr-1" /> ok
+          </Badge>
+        )}
+        <span className="text-muted-foreground">
+          covered <strong data-testid="text-accrual-date">{run.accrualDate.slice(0, 10)}</strong>
+        </span>
+        <span className="text-muted-foreground">
+          · ran <span data-testid="text-relative">{formatRelative(run.startedAt)}</span>{" "}
+          (<span data-testid="text-started-at">{startedAtLocal}</span>)
+        </span>
+        {run.trigger === "manual" && run.triggeredByUsername && (
+          <span className="text-muted-foreground" data-testid="text-triggered-by">
+            · by <strong>{run.triggeredByUsername}</strong>
+          </span>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-3 text-sm">
+        <span data-testid="text-inserted">
+          <strong>{run.inserted}</strong> inserted
+        </span>
+        <span data-testid="text-skipped">
+          <strong>{run.skipped}</strong> gated
+        </span>
+        <span data-testid="text-duplicates">
+          <strong>{run.duplicates}</strong> duplicate
+        </span>
+      </div>
+      {gateEntries.length > 0 && (
+        <div className="flex flex-wrap gap-1" data-testid="gate-reasons">
+          {gateEntries.map(([reason, count]) => (
+            <Badge key={reason} variant="destructive" className="text-xs">
+              {reason}: {count}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {run.errorMessage && (
+        <Alert variant="destructive" data-testid="alert-error">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Run failed</AlertTitle>
+          <AlertDescription className="font-mono text-xs">
+            {run.errorMessage}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  );
 }
 
 function bpsLabel(bps: number) {
@@ -206,6 +304,9 @@ export default function AdminFeesPage() {
         description: `Inserted: ${j.inserted}, Skipped: ${j.skipped}`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-accruals"] });
+      // Refresh the "Last accrual run" card immediately rather than waiting
+      // for the 30s poll interval — keeps the UI snappy after a manual run.
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-accrual-runs/latest"] });
     } catch (err: any) {
       toast({ title: "Run failed", description: err?.message ?? String(err), variant: "destructive" });
     }
@@ -257,6 +358,13 @@ export default function AdminFeesPage() {
 
   const accrualsQ = useQuery<Paginated<FeeAccrualRow>>({
     queryKey: ["/api/admin/fee-accruals"],
+  });
+  // Session 27 (Task #23): poll the latest run summary every 30s so the
+  // displayed timestamp doesn't go stale once the page is open. The query is
+  // cheap (LIMIT 1 on an indexed column) so this is fine.
+  const latestRunQ = useQuery<{ run: FeeAccrualRunSummary | null }>({
+    queryKey: ["/api/admin/fee-accrual-runs/latest"],
+    refetchInterval: 30_000,
   });
   const deductionsQ = useQuery<Paginated<FeeDeductionRow>>({
     queryKey: ["/api/admin/fee-deductions"],
@@ -473,6 +581,38 @@ export default function AdminFeesPage() {
 
         {/* ---- ACCRUALS TAB ---- */}
         <TabsContent value="accruals" className="space-y-4">
+          <Card data-testid="card-latest-run">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Clock className="h-4 w-4" /> Last accrual run
+              </CardTitle>
+              <CardDescription>
+                Surfaced from <code>fee_accrual_runs</code> — covers both the daily{" "}
+                <strong>cron</strong> and admin <strong>manual</strong> runs.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {latestRunQ.isLoading ? (
+                <Skeleton className="h-16 w-full" />
+              ) : latestRunQ.isError ? (
+                <Alert variant="destructive" data-testid="alert-latest-run-error">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertTitle>Couldn't load the last accrual run</AlertTitle>
+                  <AlertDescription className="font-mono text-xs">
+                    {(latestRunQ.error as Error)?.message ?? "Unknown error"}
+                  </AlertDescription>
+                </Alert>
+              ) : latestRunQ.data?.run ? (
+                <LatestRunSummary run={latestRunQ.data.run} />
+              ) : (
+                <p className="text-sm text-muted-foreground" data-testid="text-no-runs">
+                  No accrual run has been recorded yet. The daily cron starts ~3 minutes
+                  after the server boots; you can also press <strong>Run</strong> below.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Run daily accruals</CardTitle>
