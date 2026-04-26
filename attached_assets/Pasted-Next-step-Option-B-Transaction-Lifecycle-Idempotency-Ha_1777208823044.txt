@@ -1,0 +1,197 @@
+Next step:
+
+Option B — Transaction Lifecycle + Idempotency Hardening
+Replit prompt
+Proceed with Option B — Transaction Lifecycle + Idempotency Hardening.
+
+Purpose:
+Prevent duplicate transactions and ensure money-impacting events move through a safe lifecycle before settlement.
+
+Build:
+1. idempotency key enforcement on all money endpoints
+2. transaction status transition guard
+3. settled-only ledger impact
+4. failed/reversed handling
+5. duplicate webhook / retry protection
+
+Do not build:
+- fee engine
+- payouts
+- reconciliation UI
+- external payments
+Code patches
+1. shared/schema.ts
+
+Patch transactions:
+
+idempotencyKey: text("idempotency_key"),
+externalReference: text("external_reference"),
+settledAt: timestamp("settled_at"),
+failedAt: timestamp("failed_at"),
+reversedAt: timestamp("reversed_at"),
+failureReason: text("failure_reason"),
+
+Add unique index:
+
+uniqueIndex("transactions_idempotency_key_uidx")
+  .on(transactions.userId, transactions.idempotencyKey)
+
+Optional for custodian/webhooks:
+
+uniqueIndex("transactions_external_reference_uidx")
+  .on(transactions.externalReference)
+2. Add lifecycle helper
+
+Create:
+
+server/services/transaction-lifecycle.ts
+const ALLOWED_TRANSITIONS: Record<string, string[]> = {
+  pending: ["settled", "failed"],
+  settled: ["reversed"],
+  failed: [],
+  reversed: [],
+};
+
+export function assertTransactionTransition(from: string, to: string) {
+  if (!ALLOWED_TRANSITIONS[from]?.includes(to)) {
+    throw new Error(`Invalid transaction transition: ${from} → ${to}`);
+  }
+}
+3. Add idempotency helper
+export async function findOrCreateIdempotentTransaction({
+  userId,
+  idempotencyKey,
+  create,
+}: {
+  userId: number;
+  idempotencyKey: string;
+  create: () => Promise<any>;
+}) {
+  const existing = await db
+    .select()
+    .from(transactions)
+    .where(and(
+      eq(transactions.userId, userId),
+      eq(transactions.idempotencyKey, idempotencyKey)
+    ));
+
+  if (existing.length > 0) {
+    return { transaction: existing[0], idempotentReplay: true };
+  }
+
+  const transaction = await create();
+  return { transaction, idempotentReplay: false };
+}
+4. Patch money endpoints
+
+Require header:
+
+Idempotency-Key
+
+Example:
+
+const idempotencyKey = req.header("Idempotency-Key");
+
+if (!idempotencyKey) {
+  return res.status(400).json({ error: "Idempotency-Key header is required" });
+}
+
+Use:
+
+const result = await findOrCreateIdempotentTransaction({
+  userId,
+  idempotencyKey,
+  create: async () => {
+    const [tx] = await db.insert(transactions).values({
+      userId,
+      type: "deposit",
+      amount,
+      currency,
+      status: "pending",
+      idempotencyKey,
+    }).returning();
+
+    return tx;
+  },
+});
+
+Return:
+
+res.json({
+  transaction: result.transaction,
+  idempotentReplay: result.idempotentReplay,
+});
+5. Settlement patch
+
+Only settlement creates ledger entry:
+
+assertTransactionTransition(transaction.status, "settled");
+
+await db.transaction(async (tx) => {
+  const [updated] = await tx.update(transactions)
+    .set({
+      status: "settled",
+      settledAt: new Date(),
+    })
+    .where(eq(transactions.id, transaction.id))
+    .returning();
+
+  await tx.insert(ledgerEntries).values({
+    userId: updated.userId,
+    currency: updated.currency,
+    amount: updated.amount,
+    direction: updated.type === "deposit" ? "credit" : "debit",
+    entryType: `${updated.type}_settlement`,
+    referenceType: "transaction",
+    referenceId: String(updated.id),
+  }).onConflictDoNothing();
+});
+6. Failure patch
+assertTransactionTransition(transaction.status, "failed");
+
+await db.update(transactions)
+  .set({
+    status: "failed",
+    failedAt: new Date(),
+    failureReason,
+  })
+  .where(eq(transactions.id, transaction.id));
+
+No ledger entry.
+
+7. Reversal patch
+assertTransactionTransition(transaction.status, "reversed");
+
+await db.transaction(async (tx) => {
+  const [updated] = await tx.update(transactions)
+    .set({
+      status: "reversed",
+      reversedAt: new Date(),
+    })
+    .where(eq(transactions.id, transaction.id))
+    .returning();
+
+  await tx.insert(ledgerEntries).values({
+    userId: updated.userId,
+    currency: updated.currency,
+    amount: updated.amount,
+    direction: updated.type === "deposit" ? "debit" : "credit",
+    entryType: "transaction_reversal",
+    referenceType: "transaction",
+    referenceId: `${updated.id}:reversal`,
+  }).onConflictDoNothing();
+});
+Verification checklist
+1. Same Idempotency-Key submitted twice → one transaction only.
+2. pending → settled works.
+3. pending → failed works.
+4. settled → reversed works.
+5. failed → settled blocked.
+6. reversed → settled blocked.
+7. pending transaction has no ledger entry.
+8. settled transaction has exactly one ledger entry.
+9. retry settlement creates no duplicate ledger entry.
+
+After Option B passes:
+
+Option C — Reconciliation Engine + Admin UI
