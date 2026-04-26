@@ -1,0 +1,110 @@
+Next build:
+
+Build #3 — Transaction Lifecycle Test Script + Failure Simulation
+
+Only start this after Task #22 ledger safeguards has merged.
+
+Replit prompt
+Proceed with Build #3 — Transaction Lifecycle Test Script + Failure Simulation.
+
+Purpose:
+Verify ledger safeguards, idempotency, transaction lifecycle states, settlement retry safety, reversal logic and reconciliation mismatch detection before fee engine work resumes.
+
+Add:
+1. scripts/test-transaction-safety.ts
+2. npm script: test:transaction-safety
+3. PASS/FAIL terminal output
+4. non-zero exit code if any test fails
+
+Tests:
+1. Same Idempotency-Key submitted 3 times → one transaction only
+2. Pending transaction → no ledger entry
+3. Settlement retried twice → one ledger entry only
+4. Failed transaction → no ledger entry
+5. Reversal → offsetting ledger entry
+6. Artificial wallet/ledger drift → reconciliation detects mismatch
+
+Do not build:
+- fee engine
+- payouts
+- external payments
+- automatic settlement
+Code patches
+1. scripts/test-transaction-safety.ts
+type TestResult = {
+  name: string;
+  passed: boolean;
+  details?: string;
+};
+
+const results: TestResult[] = [];
+
+function pass(name: string, details?: string) {
+  results.push({ name, passed: true, details });
+}
+
+function fail(name: string, details?: string) {
+  results.push({ name, passed: false, details });
+}
+
+async function run() {
+  // 1. deposit idempotency
+  // create same money request 3 times with same Idempotency-Key
+  // assert only one transaction exists
+
+  // 2. pending no ledger
+  // create pending transaction
+  // assert zero ledger entries for transaction
+
+  // 3. settlement retry
+  // settle same transaction twice
+  // assert exactly one ledger entry
+
+  // 4. failed no ledger
+  // fail pending transaction
+  // assert zero ledger entries
+
+  // 5. reversal offset
+  // reverse settled transaction
+  // assert one opposite-direction ledger entry
+
+  // 6. reconciliation mismatch
+  // create artificial cached wallet mismatch
+  // run reconciliation
+  // assert status = mismatch
+
+  for (const r of results) {
+    console.log(`${r.passed ? "PASS" : "FAIL"} ${r.name}${r.details ? ` — ${r.details}` : ""}`);
+  }
+
+  const failed = results.filter(r => !r.passed);
+
+  if (failed.length > 0) {
+    console.error(`\n${failed.length} transaction safety test(s) failed.`);
+    process.exit(1);
+  }
+
+  console.log("\nALL TRANSACTION SAFETY TESTS PASSED ✅");
+}
+
+run().catch((err) => {
+  console.error("Transaction safety test crashed:", err);
+  process.exit(1);
+});
+2. package.json
+{
+  "scripts": {
+    "test:transaction-safety": "tsx scripts/test-transaction-safety.ts"
+  }
+}
+Required final output
+PASS deposit idempotency
+PASS pending no ledger impact
+PASS settlement single ledger entry
+PASS failure no ledger impact
+PASS reversal offset
+PASS reconciliation mismatch detection
+
+ALL TRANSACTION SAFETY TESTS PASSED ✅
+Hard stop
+If any test fails, do not proceed to fee engine.
