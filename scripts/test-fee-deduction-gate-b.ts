@@ -82,6 +82,7 @@
 //   npx tsx scripts/test-fee-deduction-gate-b.ts
 // =============================================================================
 
+import "./_bootstrap-test-env";
 import type { Express, Request } from "express";
 import { and, eq, sql, inArray } from "drizzle-orm";
 import { db } from "../server/db";
@@ -143,6 +144,8 @@ const CANONICAL_ORDER: string[] = [
   "8. reversal ledger credit created",
   "9. wallet balance not directly mutated",
   "10. reconciliation clean after post/reversal",
+  "11. concurrent settle race posts exactly once",
+  "12. concurrent reverse race reverses exactly once",
 ];
 const results = new Map<string, TestResult>();
 
@@ -586,17 +589,21 @@ async function test1_nonAdminCannotDeduct(opts: {
     .from(adviserFeeDeductions)
     .where(eq(adviserFeeDeductions.id, opts.deductionId));
 
-  const isForbidden = result.statusCode === 401 || result.statusCode === 403;
+  // Strict: must be 403 (role guard rejected), NOT 401 (token rejected). The
+  // JWT we just signed is valid against the same JWT_SECRET the auth
+  // middleware uses, so a 401 here would mean the token verification path
+  // regressed and the test would silently pass on an unrelated failure mode.
+  const isRoleForbidden = result.statusCode === 403;
   const stillPending = after?.status === "pending_approval";
-  if (isForbidden && stillPending) {
+  if (isRoleForbidden && stillPending) {
     pass(
       "1. non-admin cannot deduct",
-      `route returned ${result.statusCode}, deduction still status='${after.status}'`,
+      `route returned 403 (role guard), deduction still status='${after.status}'`,
     );
   } else {
     fail(
       "1. non-admin cannot deduct",
-      `expected 401/403 + status='pending_approval', got status=${result.statusCode}, dedStatus='${after?.status}'`,
+      `expected 403 (role guard) + status='pending_approval', got status=${result.statusCode}, dedStatus='${after?.status}'`,
     );
   }
 }
@@ -1104,6 +1111,191 @@ async function test10_reconciliationClean(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Test 11 — concurrent settle race posts exactly once.
+// ---------------------------------------------------------------------------
+// Two parallel settleApprovedDeduction() calls on the same pending deduction
+// row must collapse to a single posting. The fee-engine's safety stack is:
+//   - SELECT ... FOR UPDATE on the deduction row inside db.transaction()
+//   - UNIQUE constraint on transactions.idempotency_key (`fee_deduction_<id>`)
+//   - PRIMARY KEY on ledger_postings.transaction_id (Task #37 receipt table)
+// Together they guarantee that even with two concurrent winners racing, the
+// SECOND caller either: (a) waits on the row lock and enters the idempotent
+// fast-path, or (b) hits the unique-key violation on the transactions row
+// and surfaces a deterministic error WITHOUT writing duplicate ledger rows.
+// PASS condition: exactly 1 transactions row, exactly 1 ledger_postings
+// receipt, exactly 3 ledger_entries (the balanced triple), and final
+// deduction status='settled' with a single settledTransactionId.
+// ---------------------------------------------------------------------------
+async function test11_concurrentSettleRace(opts: {
+  deductionId: number;
+  approverUserId: number;
+}): Promise<void> {
+  const settled1Promise = settleApprovedDeduction({
+    deductionId: opts.deductionId,
+    approverUserId: opts.approverUserId,
+  }).catch((err: unknown) => ({ raceError: err }));
+  const settled2Promise = settleApprovedDeduction({
+    deductionId: opts.deductionId,
+    approverUserId: opts.approverUserId,
+  }).catch((err: unknown) => ({ raceError: err }));
+
+  const [r1, r2] = await Promise.all([settled1Promise, settled2Promise]);
+
+  // At least one of the two callers MUST have produced a successful settled
+  // row. The other is allowed to either return the same settled row (lock
+  // fast-path) or surface a deterministic LedgerDoublePostError /
+  // unique-key error (race lost on the receipt or transactions row).
+  const successful: any[] = [];
+  const errors: unknown[] = [];
+  for (const r of [r1, r2]) {
+    if (r && typeof r === "object" && "raceError" in r) {
+      errors.push((r as any).raceError);
+    } else {
+      successful.push(r);
+    }
+  }
+  if (successful.length === 0) {
+    fail(
+      "11. concurrent settle race posts exactly once",
+      `both racers errored: ${errors.map((e) => (e as Error).message).join(" / ")}`,
+    );
+    return;
+  }
+
+  const [after] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, opts.deductionId));
+  if (after?.status !== "settled" || !after.settledTransactionId) {
+    fail(
+      "11. concurrent settle race posts exactly once",
+      `expected settled, got status='${after?.status}' settledTransactionId=${after?.settledTransactionId}`,
+    );
+    return;
+  }
+
+  const txRows = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, `fee_deduction_${opts.deductionId}`));
+  const receiptRows = await db
+    .select({ transactionId: ledgerPostings.transactionId })
+    .from(ledgerPostings)
+    .where(eq(ledgerPostings.transactionId, after.settledTransactionId));
+  const entryRows = await db
+    .select({ id: ledgerEntries.id })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, after.settledTransactionId));
+
+  if (
+    txRows.length === 1 &&
+    receiptRows.length === 1 &&
+    entryRows.length === 3
+  ) {
+    pass(
+      "11. concurrent settle race posts exactly once",
+      `2 racers → 1 settled tx (#${after.settledTransactionId}), 1 receipt, 3 entries; ${successful.length} success / ${errors.length} race-error`,
+    );
+  } else {
+    fail(
+      "11. concurrent settle race posts exactly once",
+      `expected 1 tx + 1 receipt + 3 entries; got tx=${txRows.length}, receipts=${receiptRows.length}, entries=${entryRows.length}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 12 — concurrent reverse race reverses exactly once.
+// ---------------------------------------------------------------------------
+// Same shape as test 11, applied to reverseSettledDeduction. The reversal
+// path uses the deterministic key `fee_deduction_<id>_reversal`. Two
+// parallel reverse calls on the same settled deduction must collapse to a
+// single reversal transaction with one balanced opposite triple.
+// PASS condition: exactly 1 reversal transaction, 1 receipt, 3 entries;
+// deduction.status='reversed' with reversalTransactionId set.
+// ---------------------------------------------------------------------------
+async function test12_concurrentReverseRace(opts: {
+  deductionId: number;
+  reverserUserId: number;
+}): Promise<void> {
+  const reverse1Promise = reverseSettledDeduction({
+    deductionId: opts.deductionId,
+    reverserUserId: opts.reverserUserId,
+    reason: "concurrent reverse race test",
+  }).catch((err: unknown) => ({ raceError: err }));
+  const reverse2Promise = reverseSettledDeduction({
+    deductionId: opts.deductionId,
+    reverserUserId: opts.reverserUserId,
+    reason: "concurrent reverse race test",
+  }).catch((err: unknown) => ({ raceError: err }));
+
+  const [r1, r2] = await Promise.all([reverse1Promise, reverse2Promise]);
+
+  const successful: any[] = [];
+  const errors: unknown[] = [];
+  for (const r of [r1, r2]) {
+    if (r && typeof r === "object" && "raceError" in r) {
+      errors.push((r as any).raceError);
+    } else {
+      successful.push(r);
+    }
+  }
+  if (successful.length === 0) {
+    fail(
+      "12. concurrent reverse race reverses exactly once",
+      `both racers errored: ${errors.map((e) => (e as Error).message).join(" / ")}`,
+    );
+    return;
+  }
+
+  const [after] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, opts.deductionId));
+  if (after?.status !== "reversed" || !after.reversalTransactionId) {
+    fail(
+      "12. concurrent reverse race reverses exactly once",
+      `expected reversed, got status='${after?.status}' reversalTransactionId=${after?.reversalTransactionId}`,
+    );
+    return;
+  }
+
+  const txRows = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(
+      eq(
+        transactions.idempotencyKey,
+        `fee_deduction_${opts.deductionId}_reversal`,
+      ),
+    );
+  const receiptRows = await db
+    .select({ transactionId: ledgerPostings.transactionId })
+    .from(ledgerPostings)
+    .where(eq(ledgerPostings.transactionId, after.reversalTransactionId));
+  const entryRows = await db
+    .select({ id: ledgerEntries.id })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, after.reversalTransactionId));
+
+  if (
+    txRows.length === 1 &&
+    receiptRows.length === 1 &&
+    entryRows.length === 3
+  ) {
+    pass(
+      "12. concurrent reverse race reverses exactly once",
+      `2 racers → 1 reversal tx (#${after.reversalTransactionId}), 1 receipt, 3 entries; ${successful.length} success / ${errors.length} race-error`,
+    );
+  } else {
+    fail(
+      "12. concurrent reverse race reverses exactly once",
+      `expected 1 tx + 1 receipt + 3 entries; got tx=${txRows.length}, receipts=${receiptRows.length}, entries=${entryRows.length}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
@@ -1282,7 +1474,30 @@ async function main(): Promise<void> {
   ]);
 
   // -----------------------------------------------------------------------
-  // Test 10 — full reconciliation pass leaves both sides clean.
+  // Tests 11 + 12 — concurrency races. Use a fresh deduction (B) so we
+  // don't disturb deduction A's already-asserted state. Top up enough to
+  // cover B's settle (deduction A was reversed so the balance is back
+  // around 500, but be defensive — top up a known-good buffer).
+  // -----------------------------------------------------------------------
+  await topUpClient(clientUserId, "200.00");
+  const deductionBId = await insertPendingDeduction({
+    clientUserId,
+    adviserUserId,
+    totalAccrued: "50.0000",
+    adviserShare: "40.0000",
+  });
+  await test11_concurrentSettleRace({
+    deductionId: deductionBId,
+    approverUserId,
+  });
+  await test12_concurrentReverseRace({
+    deductionId: deductionBId,
+    reverserUserId: approverUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 10 — full reconciliation pass leaves both sides clean. Runs LAST
+  // so the recon also covers tests 11 + 12's tx rows.
   // -----------------------------------------------------------------------
   await test10_reconciliationClean({ clientUserId, adviserUserId });
 

@@ -1,0 +1,340 @@
+Below is the **#94 API/controller patch** — integrated with existing `adviceRecords`, no duplicate planner system.
+
+## Task #94 API routes
+
+```ts
+// server/routes/adviser-planner.ts
+
+import { Router } from "express";
+import { db } from "../db";
+import {
+  adviceRecords,
+  clientObjectives,
+  clientDocuments,
+  adviserNotes,
+} from "../../shared/schema";
+import { eq, and, desc } from "drizzle-orm";
+import { requireAuth } from "../middleware/auth";
+import { writeWithVersioning } from "../services/adviceVersioning";
+
+const router = Router();
+
+function requireAdviser(req: any) {
+  if (req.user?.role !== "adviser") {
+    const err: any = new Error("ADVISER_REQUIRED");
+    err.status = 403;
+    throw err;
+  }
+}
+
+async function loadOwnedAdviceRecord(adviceRecordId: number, adviserUserId: number) {
+  const record = await db.query.adviceRecords.findFirst({
+    where: and(
+      eq(adviceRecords.id, adviceRecordId),
+      eq(adviceRecords.adviserId, adviserUserId),
+    ),
+  });
+
+  if (!record) {
+    const err: any = new Error("ADVICE_RECORD_NOT_FOUND_OR_ACCESS_DENIED");
+    err.status = 404;
+    throw err;
+  }
+
+  return record;
+}
+
+function assertNotReviewPending(record: any) {
+  if (record.status === "review_pending") {
+    const err: any = new Error("RECORD_LOCKED_UNDER_REVIEW");
+    err.status = 423;
+    throw err;
+  }
+}
+```
+
+## 1. Get planner record
+
+```ts
+router.get(
+  "/api/adviser/planner/:adviceRecordId",
+  requireAuth,
+  async (req: any, res, next) => {
+    try {
+      requireAdviser(req);
+
+      const adviceRecordId = Number(req.params.adviceRecordId);
+      const record = await loadOwnedAdviceRecord(adviceRecordId, req.user.id);
+
+      const objectives = await db.query.clientObjectives.findMany({
+        where: eq(clientObjectives.adviceRecordId, adviceRecordId),
+        orderBy: desc(clientObjectives.createdAt),
+      });
+
+      const documents = await db.query.clientDocuments.findMany({
+        where: eq(clientDocuments.adviceRecordId, adviceRecordId),
+        orderBy: desc(clientDocuments.uploadedAt),
+      });
+
+      const notes = await db.query.adviserNotes.findMany({
+        where: eq(adviserNotes.adviceRecordId, adviceRecordId),
+        orderBy: desc(adviserNotes.createdAt),
+      });
+
+      res.json({
+        adviceRecord: record,
+        objectives,
+        documents,
+        notes,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+```
+
+## 2. Add / supersede objective
+
+```ts
+router.post(
+  "/api/adviser/planner/:adviceRecordId/objectives",
+  requireAuth,
+  async (req: any, res, next) => {
+    try {
+      requireAdviser(req);
+
+      const adviceRecordId = Number(req.params.adviceRecordId);
+      const record = await loadOwnedAdviceRecord(adviceRecordId, req.user.id);
+      assertNotReviewPending(record);
+
+      const {
+        objectiveType,
+        description,
+        targetAmount,
+        targetDate,
+        priority,
+        supersedesObjectiveId,
+      } = req.body;
+
+      let insertedObjective: any;
+
+      await writeWithVersioning(
+        db,
+        adviceRecordId,
+        req.user.id,
+        "client_objective_added",
+        async (tx: any) => {
+          const [created] = await tx.insert(clientObjectives).values({
+            clientUserId: record.clientId,
+            adviceRecordId,
+            objectiveType,
+            description,
+            targetAmount,
+            targetDate,
+            priority: priority || "primary",
+            createdBy: req.user.id,
+          }).returning();
+
+          insertedObjective = created;
+
+          if (supersedesObjectiveId) {
+            await tx.update(clientObjectives)
+              .set({
+                supersededAt: new Date(),
+                supersededBy: created.id,
+              })
+              .where(and(
+                eq(clientObjectives.id, supersedesObjectiveId),
+                eq(clientObjectives.adviceRecordId, adviceRecordId),
+              ));
+          }
+        }
+      );
+
+      res.status(201).json(insertedObjective);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+```
+
+## 3. Add adviser note
+
+```ts
+router.post(
+  "/api/adviser/planner/:adviceRecordId/notes",
+  requireAuth,
+  async (req: any, res, next) => {
+    try {
+      requireAdviser(req);
+
+      const adviceRecordId = Number(req.params.adviceRecordId);
+      const record = await loadOwnedAdviceRecord(adviceRecordId, req.user.id);
+
+      const { noteText, noteType, visibility, previousNoteId } = req.body;
+
+      let insertedNote: any;
+
+      await writeWithVersioning(
+        db,
+        adviceRecordId,
+        req.user.id,
+        "adviser_note_added",
+        async (tx: any) => {
+          if (previousNoteId) {
+            const priorNote = await tx.query.adviserNotes.findFirst({
+              where: and(
+                eq(adviserNotes.id, previousNoteId),
+                eq(adviserNotes.adviceRecordId, adviceRecordId),
+              ),
+            });
+
+            if (!priorNote) {
+              throw new Error("PREVIOUS_NOTE_NOT_FOUND");
+            }
+          }
+
+          const [created] = await tx.insert(adviserNotes).values({
+            adviceRecordId,
+            previousNoteId: previousNoteId || null,
+            noteText,
+            noteType: noteType || "general",
+            visibility: visibility || "adviser_only",
+            createdBy: req.user.id,
+          }).returning();
+
+          insertedNote = created;
+        }
+      );
+
+      res.status(201).json(insertedNote);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+```
+
+## 4. Add client document record
+
+```ts
+router.post(
+  "/api/adviser/planner/:adviceRecordId/documents",
+  requireAuth,
+  async (req: any, res, next) => {
+    try {
+      requireAdviser(req);
+
+      const adviceRecordId = Number(req.params.adviceRecordId);
+      const record = await loadOwnedAdviceRecord(adviceRecordId, req.user.id);
+      assertNotReviewPending(record);
+
+      const {
+        documentType,
+        fileName,
+        storageKey,
+        fileSizeBytes,
+        mimeType,
+      } = req.body;
+
+      let insertedDocument: any;
+
+      await writeWithVersioning(
+        db,
+        adviceRecordId,
+        req.user.id,
+        "client_document_added",
+        async (tx: any) => {
+          const [created] = await tx.insert(clientDocuments).values({
+            clientUserId: record.clientId,
+            adviceRecordId,
+            documentType,
+            fileName,
+            storageKey,
+            fileSizeBytes,
+            mimeType,
+            uploadedBy: req.user.id,
+          }).returning();
+
+          insertedDocument = created;
+        }
+      );
+
+      res.status(201).json(insertedDocument);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+```
+
+## 5. Client read-only planner view
+
+```ts
+router.get(
+  "/api/client/planner",
+  requireAuth,
+  async (req: any, res, next) => {
+    try {
+      if (req.user?.role !== "client") {
+        return res.status(403).json({ code: "CLIENT_REQUIRED" });
+      }
+
+      const record = await db.query.adviceRecords.findFirst({
+        where: eq(adviceRecords.clientId, req.user.id),
+        orderBy: desc(adviceRecords.createdAt),
+      });
+
+      if (!record) {
+        return res.status(404).json({ code: "ADVICE_RECORD_NOT_FOUND" });
+      }
+
+      const objectives = await db.query.clientObjectives.findMany({
+        where: eq(clientObjectives.adviceRecordId, record.id),
+        orderBy: desc(clientObjectives.createdAt),
+      });
+
+      const sharedNotes = await db.query.adviserNotes.findMany({
+        where: and(
+          eq(adviserNotes.adviceRecordId, record.id),
+          eq(adviserNotes.visibility, "shared_with_client"),
+        ),
+        orderBy: desc(adviserNotes.createdAt),
+      });
+
+      res.json({
+        adviceRecord: record,
+        objectives,
+        notes: sharedNotes,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+```
+
+## 6. Mount route
+
+```ts
+// server/routes.ts or server/index.ts
+
+import adviserPlannerRoutes from "./routes/adviser-planner";
+
+app.use(adviserPlannerRoutes);
+```
+
+## Must keep out
+
+```txt
+No wealthPlans table.
+No wealthPlanRecommendations table.
+No duplicate acknowledgements.
+No ledger writes.
+No wallet.balance mutation.
+No execution / invest / rebalance endpoint.
+```
+
+This is the correct #94 implementation shape.
