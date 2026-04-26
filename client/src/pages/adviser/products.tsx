@@ -39,6 +39,26 @@ function categoryLabel(category: string): string {
   return category.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Lower number = shown first. Crypto/digital-asset strategies are a specialist sleeve and
+// always render last for credibility on a wealth-platform shelf.
+const CATEGORY_PRIORITY: Record<string, number> = {
+  corporate_credit: 1,
+  real_estate: 2,
+  cash_deposit: 3,
+  venture_capital: 4,
+  digital_assets: 99,
+};
+
+function categoryRank(category: string): number {
+  return CATEGORY_PRIORITY[category] ?? 50;
+}
+
+// Some seed values already include a "%" suffix (e.g. "9.8–11.0%"). Avoid rendering "%%".
+function formatTargetReturn(value: string | null | undefined): string {
+  if (!value) return "—";
+  return value.includes("%") ? value : `${value}%`;
+}
+
 function riskBadgeVariant(profile: string | null): "default" | "secondary" | "outline" {
   if (!profile) return "outline";
   const p = profile.toLowerCase();
@@ -80,7 +100,11 @@ export default function AdviserProducts() {
     );
   }
 
-  const list = products.data ?? [];
+  const list = [...(products.data ?? [])].sort((a, b) => {
+    const rankDiff = categoryRank(a.category) - categoryRank(b.category);
+    if (rankDiff !== 0) return rankDiff;
+    return a.name.localeCompare(b.name);
+  });
 
   return (
     <div className="p-6 space-y-6" data-testid="page-adviser-products">
@@ -148,7 +172,7 @@ export default function AdviserProducts() {
                   <div>
                     <dt className="text-xs uppercase text-gray-500">Target Net IRR (illustrative)</dt>
                     <dd className="font-semibold tabular-nums" data-testid={`text-irr-${p.id}`}>
-                      {p.targetNetIrr ? `${p.targetNetIrr}%` : "—"}
+                      {formatTargetReturn(p.targetNetIrr)}
                     </dd>
                   </div>
                   <div>

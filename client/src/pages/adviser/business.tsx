@@ -298,10 +298,12 @@ export default function AdviserBusiness() {
         </CardHeader>
         <CardContent className="text-xs text-slate-500 space-y-1">
           <p>
-            All figures are read-only snapshots. AMAX Wealth holds the AFSL and acts as product
-            issuer; you act as the client's Authorised Representative. No revenue or fee deduction
-            shown here represents settled income — refer to your firm's reconciliation reports for
-            final amounts.
+            All figures are read-only snapshots. AMAX Wealth operates as a platform and authorised
+            representative under the relevant AFSL arrangement. Adviser access, client visibility,
+            fee consent and product access are subject to AMAX approval, client permissioning and
+            the applicable AFSL holder's authorisation. No revenue or fee deduction shown here
+            represents settled income — refer to your firm's reconciliation reports for final
+            amounts.
           </p>
         </CardContent>
       </Card>
