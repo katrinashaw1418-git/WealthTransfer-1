@@ -3,6 +3,33 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Tasks #107 + #108: Adviser-side lock indicator UI + audit log on every blocked write
+
+These two tasks complete the admin-visibility layer started by Task #96 (the review-pending lock). #96 added the server-side gate that 423s adviser writes into a record under compliance review; what was missing was (a) any signal to the adviser BEFORE they tried, and (b) any record that the attempt happened.
+
+**Task #107 — Lock indicator UI for advisers** (`client/src/components/adviser/wealth-planner-panel.tsx`, `client/src/pages/adviser/client-detail.tsx`):
+- Exported a small reusable `AdviceStatusBadge` from the panel: for `status='review_pending'` it renders a destructive badge with a `Lock` icon and "Under review" label plus an explanatory tooltip; everything else falls through to the existing outline badge. Used in the "Recent advice records" table on the client detail page.
+- Inside `ObjectiveDialog` and `DocumentDialog` (the two gated child writes), the advice-record dropdown items render a small lock icon for any `review_pending` option and the trailing status text becomes "under review".
+- Both dialogs `form.watch("adviceRecordId")`, look up the selected record's status, and render an inline `LockedRecordWarning` (red banner with `Lock` + explanatory copy + the record id) plus disable the submit button with a helpful `title=` and a "Locked — under review" label. NoteDialog deliberately untouched — notes are append-only and not gated server-side, so showing a lock there would mislead.
+- Single source of truth: the `isAdviceRecordLocked(status)` and `REVIEW_PENDING_STATUS` exports keep the lock condition out of inline string comparisons.
+
+**Task #108 — Audit log on every blocked write** (`server/services/advice-write-gate.ts`, `server/services/wealth-planner.ts`):
+- Extended `requireAdviceRecordWritable(id, executor, block?)` with an optional `AdviceWriteBlockContext = { actorUserId, attemptedAction, ipAddress? }`. When the gate decides to throw (locked OR not-found) AND `block` was passed, it writes an audit row via the standardised `writeAuditLog` BEFORE throwing.
+- Audit row shape: `action='advice_record.write_blocked'`, `entityType='advice_record'`, `entityId=String(adviceRecordId)`, `userId=actorUserId`, `before=null`, `after=null`, `extra={ reason, attemptedAction, adviceRecordStatus }`. `reason` is the same machine-readable code already returned to the wire (`record_locked_under_review` or `advice_record_not_found`).
+- Critical detail: the audit insert deliberately uses the un-wrapped top-level `db` handle, NOT the caller's `executor`. Because the very next statement throws, any surrounding transaction the caller is in would roll the audit row back too — defeating the whole point. The audit insert is wrapped in try/catch with `console.error` on failure so audit problems don't mask the original 423/404 to the route caller.
+- All three call sites in `wealth-planner.ts` now pass actor info: `createClientObjective` ("client_objective.create"), `createClientDocument` ("client_document.create"), `uploadClientDocument` ("client_document.upload"). The two paths that don't have an actor (admin replays, sweeps) pass no `block` — the audit logging is opt-in.
+
+**Verification** (`scripts/test-wealth-planner-compliance.ts`):
+- New test 13 — "blocked-write audit row recorded by the gate for every gated child write" — flips the test advice record into `review_pending`, calls the three gated services directly (bypassing the route layer so a hypothetical try/catch swallow can't hide a missing audit), and asserts: each call throws 423 with the right reason; exactly 3 fresh audit rows landed (snapshotted by max-id-before); each row has the correct userId/entityType/entityId; metadata before/after are null; metadata.reason is correct; metadata.adviceRecordStatus is `review_pending`; the three `attemptedAction` values exactly cover the three gated verbs.
+- Verification gate is now **13/13 PASS** (was 12/12 before this session). Re-run with `npx tsx scripts/test-wealth-planner-compliance.ts`.
+
+**Files**:
+- `server/services/advice-write-gate.ts` — extended.
+- `server/services/wealth-planner.ts` — three call sites updated.
+- `client/src/components/adviser/wealth-planner-panel.tsx` — lock helpers + dropdown/banner/disable wiring.
+- `client/src/pages/adviser/client-detail.tsx` — uses `AdviceStatusBadge` in the records list.
+- `scripts/test-wealth-planner-compliance.ts` — new test 13 + canonical-order entry.
+
 ## Recent Changes (April 2026) — Task #109: Before/after diff viewer in admin audit log
 
 The admin audit-log page (`/admin/audit-logs`) previously rendered the `metadata` JSONB column as a single stringified blob, which made it nearly impossible to see *what actually changed* on entries written through the standardised `{ before, after, ...extra }` shape from Task #95. This change adds a structured field-level diff that surfaces directly in the existing table without any backend or schema work.

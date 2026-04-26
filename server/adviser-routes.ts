@@ -76,7 +76,6 @@ import {
   transitionAdviceStatus,
   // Task #96 — review-pending lock guard. Notes are deliberately exempt:
   // compliance reviewers must be able to add notes on a record under review.
-  assertAdviceRecordNotUnderReview,
   REVIEW_LOCK_REASON,
 } from "./services/wealth-planner";
 import { adviceRecords } from "@shared/schema";
@@ -1055,7 +1054,10 @@ export function registerAdviserRoutes(app: Express): void {
       // Task #96 — block all structured writes against an advice record that
       // is currently under compliance review. Notes are exempt (separate
       // route below). Throws 423 + reason='record_locked_under_review'.
-      await assertAdviceRecordNotUnderReview(parsed.data.adviceRecordId);
+      // Task #108 — the gate now lives INSIDE createClientObjective() and
+      // additionally writes a blocked-write audit row before throwing. The
+      // route-level pre-check that used to live here was removed because
+      // it short-circuited the throw and the audit row never landed.
       const row = await createClientObjective(auth.userId, parsed.data);
       audit(
         auth.userId,
@@ -1114,9 +1116,9 @@ export function registerAdviserRoutes(app: Express): void {
       // record, that record must not be under compliance review. Documents
       // uploaded with no adviceRecordId (general client file storage) are
       // not gated, since they aren't part of the artefact under review.
-      if (parsed.data.adviceRecordId != null) {
-        await assertAdviceRecordNotUnderReview(parsed.data.adviceRecordId);
-      }
+      // Task #108 — gate now lives inside createClientDocument() and writes
+      // a blocked-write audit row before throwing; route-level pre-check
+      // removed for the same reason as the objective route above.
       const row = await createClientDocument(auth.userId, parsed.data);
       audit(
         auth.userId,

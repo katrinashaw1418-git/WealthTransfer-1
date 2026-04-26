@@ -97,9 +97,14 @@ import { signToken } from "../server/auth";
 import { registerAdviserRoutes } from "../server/adviser-routes";
 import { registerClientRoutes } from "../server/client-routes";
 // Task #99 — round-trip verification of the real upload + download path.
+// Task #108 — direct service calls into the three gated paths so we can
+// observe the audit row written before the throw without depending on a
+// route layer.
 import {
   uploadClientDocument,
   getClientDocumentForOwner,
+  createClientObjective,
+  createClientDocument,
 } from "../server/services/wealth-planner";
 import {
   getObjectBytes,
@@ -133,6 +138,7 @@ const CANONICAL_ORDER: string[] = [
   "10. risk-profile and adviceType immutable via transition; snapshots written; no ledger drift",
   "11. review_pending blocks objective/document/transition writes; notes still allowed",
   "12. client-document upload+download round-trip via real object storage with cross-client gate",
+  "13. blocked-write audit row recorded by the gate for every gated child write",
 ];
 const results = new Map<string, TestResult>();
 
@@ -1573,6 +1579,276 @@ async function test12_uploadDownloadRoundTrip(opts: {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Test 13 — Task #108: blocked-write audit row recorded by the gate
+//
+// Drives the three gated service functions directly while the advice record
+// is in `review_pending` and asserts that, for each block, a row of the
+// agreed shape lands in `auditLogs`. Calling the services directly rather
+// than via the routes keeps the assertion focused on the gate behaviour
+// and removes any chance that a route-layer try/catch swallowed something.
+//
+// Asserted shape per row (matches server/services/advice-write-gate.ts):
+//   - action          === 'advice_record.write_blocked'
+//   - entityType      === 'advice_record'
+//   - entityId        === String(adviceRecordId)
+//   - userId          === adviser whose write was blocked
+//   - metadata.before === null
+//   - metadata.after  === null
+//   - metadata.reason === 'record_locked_under_review'
+//   - metadata.attemptedAction in {'client_objective.create',
+//                                 'client_document.create',
+//                                 'client_document.upload'}
+//   - metadata.adviceRecordStatus === 'review_pending'
+//
+// Audit-row count must be exactly 3 — one per gated call site. Snapshotting
+// the max id BEFORE flipping status ensures we only count rows produced by
+// THIS test, not historical or test-11 rows.
+// ---------------------------------------------------------------------------
+async function test13_blockedWriteAuditRow(opts: {
+  adviserUserId: number;
+  clientUserId: number;
+  adviceRecordId: number;
+}): Promise<void> {
+  const NAME =
+    "13. blocked-write audit row recorded by the gate for every gated child write";
+
+  const [origRow] = await db
+    .select({ status: adviceRecords.status })
+    .from(adviceRecords)
+    .where(eq(adviceRecords.id, opts.adviceRecordId));
+
+  const [maxBefore] = await db
+    .select({ maxId: sql<number>`coalesce(max(${auditLogs.id}), 0)` })
+    .from(auditLogs);
+  const baselineId = Number(maxBefore?.maxId ?? 0);
+
+  // Flip the live row into review_pending so all three gated services trip.
+  await db
+    .update(adviceRecords)
+    .set({ status: "review_pending" })
+    .where(eq(adviceRecords.id, opts.adviceRecordId));
+
+  type Probe = {
+    label: string;
+    expectedAction: string;
+    fired: boolean;
+    status?: number;
+    reason?: string;
+  };
+  // Five probes: TWO route-level (the production HTTP path that an adviser
+  // actually hits) plus THREE service-level (defence in depth — guarantees
+  // that any future caller of these services, route or otherwise, is also
+  // gated and audited). The route-level probes specifically guard against
+  // a regression where someone re-introduces a route-layer pre-check that
+  // throws BEFORE the audited service-level gate runs.
+  const probes: Probe[] = [
+    {
+      label: "route.objective",
+      expectedAction: "client_objective.create",
+      fired: false,
+    },
+    {
+      label: "route.document.create",
+      expectedAction: "client_document.create",
+      fired: false,
+    },
+    {
+      label: "service.objective",
+      expectedAction: "client_objective.create",
+      fired: false,
+    },
+    {
+      label: "service.document.create",
+      expectedAction: "client_document.create",
+      fired: false,
+    },
+    {
+      label: "service.document.upload",
+      expectedAction: "client_document.upload",
+      fired: false,
+    },
+  ];
+
+  // Mint a real adviser JWT so the route handlers' auth middleware passes
+  // and we exercise the production handleError path that maps thrown
+  // {status, reason} into a 423 JSON envelope.
+  const routeToken = signToken({
+    userId: opts.adviserUserId,
+    username: ADVISER_USERNAME,
+    email: "wpc-adviser@test.invalid",
+    role: "adviser",
+  });
+
+  // Probe 1 — POST /api/adviser/client-objectives (route level)
+  const routeObj = captured.get("POST /api/adviser/client-objectives")!;
+  const r1 = makeMockReqRes({
+    token: routeToken,
+    body: {
+      clientId: opts.clientUserId,
+      adviceRecordId: opts.adviceRecordId,
+      objectiveType: "income",
+      label: "test 13 route — should be blocked",
+    },
+  });
+  await routeObj(r1.req, r1.res);
+  probes[0].fired = r1.result.statusCode !== 200;
+  probes[0].status = r1.result.statusCode;
+  probes[0].reason =
+    typeof (r1.result.body as any)?.reason === "string"
+      ? ((r1.result.body as any).reason as string)
+      : undefined;
+
+  // Probe 2 — POST /api/adviser/client-documents (route level)
+  const routeDoc = captured.get("POST /api/adviser/client-documents")!;
+  const r2 = makeMockReqRes({
+    token: routeToken,
+    body: {
+      clientId: opts.clientUserId,
+      adviceRecordId: opts.adviceRecordId,
+      documentType: "fact_find",
+      fileName: "test13-route.pdf",
+      storageKey: "wpc-test13-route-key",
+    },
+  });
+  await routeDoc(r2.req, r2.res);
+  probes[1].fired = r2.result.statusCode !== 200;
+  probes[1].status = r2.result.statusCode;
+  probes[1].reason =
+    typeof (r2.result.body as any)?.reason === "string"
+      ? ((r2.result.body as any).reason as string)
+      : undefined;
+
+  // Probe 3 — createClientObjective (service level, no route)
+  try {
+    await createClientObjective(opts.adviserUserId, {
+      clientId: opts.clientUserId,
+      adviceRecordId: opts.adviceRecordId,
+      objectiveType: "income",
+      label: "test 13 svc — should be blocked",
+    });
+  } catch (err: any) {
+    probes[2].fired = true;
+    probes[2].status = typeof err?.status === "number" ? err.status : undefined;
+    probes[2].reason = typeof err?.reason === "string" ? err.reason : undefined;
+  }
+
+  // Probe 4 — createClientDocument (service level, no route)
+  try {
+    await createClientDocument(opts.adviserUserId, {
+      clientId: opts.clientUserId,
+      adviceRecordId: opts.adviceRecordId,
+      documentType: "fact_find",
+      fileName: "test13-create.pdf",
+      storageKey: "wpc-test13-create-key",
+    });
+  } catch (err: any) {
+    probes[3].fired = true;
+    probes[3].status = typeof err?.status === "number" ? err.status : undefined;
+    probes[3].reason = typeof err?.reason === "string" ? err.reason : undefined;
+  }
+
+  // Probe 5 — uploadClientDocument (no JSON route; service is the contract)
+  try {
+    await uploadClientDocument(
+      opts.adviserUserId,
+      {
+        clientId: opts.clientUserId,
+        adviceRecordId: opts.adviceRecordId,
+        documentType: "fact_find",
+        fileName: "test13-upload.bin",
+      },
+      Buffer.from("test13 upload bytes", "utf8"),
+    );
+  } catch (err: any) {
+    probes[4].fired = true;
+    probes[4].status = typeof err?.status === "number" ? err.status : undefined;
+    probes[4].reason = typeof err?.reason === "string" ? err.reason : undefined;
+  }
+
+  // Restore original status so reruns and downstream assertions stay clean.
+  await db
+    .update(adviceRecords)
+    .set({ status: origRow?.status ?? "draft" })
+    .where(eq(adviceRecords.id, opts.adviceRecordId));
+
+  // Pull every blocked-write audit row produced AFTER the snapshot id, for
+  // THIS advice record. Filtering on entityId AND id-after-baseline keeps
+  // the assertion robust even if other test runs interleave.
+  const rows = await db
+    .select({
+      id: auditLogs.id,
+      userId: auditLogs.userId,
+      action: auditLogs.action,
+      entityType: auditLogs.entityType,
+      entityId: auditLogs.entityId,
+      metadata: auditLogs.metadata,
+    })
+    .from(auditLogs)
+    .where(
+      and(
+        sql`${auditLogs.id} > ${baselineId}`,
+        eq(auditLogs.action, "advice_record.write_blocked"),
+        eq(auditLogs.entityType, "advice_record"),
+        eq(auditLogs.entityId, String(opts.adviceRecordId)),
+      ),
+    );
+
+  const allThrew = probes.every(
+    (p) => p.fired && p.status === 423 && p.reason === "record_locked_under_review",
+  );
+
+  // Three unique attemptedAction values across five probes (route + service
+  // for objective and document.create both report the same attemptedAction;
+  // upload only has a service caller).
+  const expectedActions = new Set(probes.map((p) => p.expectedAction));
+  const seenActions = new Set<string>();
+  // Also tally per-action counts so we can prove the route-level rows
+  // landed (not just the service-level ones).
+  const actionCounts = new Map<string, number>();
+  let shapeOk = rows.length > 0;
+  for (const r of rows) {
+    const md = (r.metadata ?? {}) as Record<string, unknown>;
+    const actionOk =
+      typeof md.attemptedAction === "string" &&
+      expectedActions.has(md.attemptedAction);
+    const reasonOk = md.reason === "record_locked_under_review";
+    const beforeOk = md.before === null;
+    const afterOk = md.after === null;
+    const statusOk = md.adviceRecordStatus === "review_pending";
+    const userOk = r.userId === opts.adviserUserId;
+    if (!(actionOk && reasonOk && beforeOk && afterOk && statusOk && userOk)) {
+      shapeOk = false;
+      break;
+    }
+    const a = md.attemptedAction as string;
+    seenActions.add(a);
+    actionCounts.set(a, (actionCounts.get(a) ?? 0) + 1);
+  }
+  // 5 rows: 2 × objective.create (route + service), 2 × document.create
+  // (route + service), 1 × document.upload (service only).
+  const countOk = rows.length === 5;
+  const coverageOk =
+    seenActions.size === expectedActions.size &&
+    Array.from(expectedActions).every((a) => seenActions.has(a));
+  const perActionOk =
+    (actionCounts.get("client_objective.create") ?? 0) === 2 &&
+    (actionCounts.get("client_document.create") ?? 0) === 2 &&
+    (actionCounts.get("client_document.upload") ?? 0) === 1;
+
+  if (allThrew && countOk && shapeOk && coverageOk && perActionOk) {
+    pass(
+      NAME,
+      `5/5 probes (2 route + 3 service) threw 423 with reason='record_locked_under_review'; 5 audit rows written with action='advice_record.write_blocked', entityId='${opts.adviceRecordId}', userId=${opts.adviserUserId}, before/after=null, adviceRecordStatus='review_pending'; per-action counts = {client_objective.create:2, client_document.create:2, client_document.upload:1}`,
+    );
+  } else {
+    fail(
+      NAME,
+      `allThrew=${allThrew} (${probes.map((p) => `${p.label}:fired=${p.fired},status=${p.status},reason=${p.reason}`).join(" | ")}); auditRowCount=${rows.length} (expected=5); shapeOk=${shapeOk}; coverageOk=${coverageOk} (seen={${Array.from(seenActions).sort().join(", ")}}, expected={${Array.from(expectedActions).sort().join(", ")}}); perActionOk=${perActionOk} (counts={${Array.from(actionCounts.entries()).map(([a, n]) => `${a}:${n}`).join(", ")}})`,
+    );
+  }
+}
+
 // Streaming mock response — supports the .pipe(res) path used by the
 // download route. Captures status, headers, JSON bodies, and any bytes
 // piped via `write()` / `end()`. Resolves `done` when the response signals
@@ -1781,6 +2057,17 @@ async function main(): Promise<void> {
     adviserUserId,
     clientUserId,
     otherClientUserId,
+  });
+  // Test 13 (Task #108 audit-log on blocked write) runs after test 12. It
+  // re-flips status into review_pending, calls the gated services directly
+  // and asserts an audit row landed for each, then restores status. It
+  // touches no money tables and writes no objective/document/version rows
+  // (every call is gated), so the leakage and money-isolation invariants
+  // from earlier tests still hold.
+  await test13_blockedWriteAuditRow({
+    adviserUserId,
+    clientUserId,
+    adviceRecordId,
   });
 
   console.log("");

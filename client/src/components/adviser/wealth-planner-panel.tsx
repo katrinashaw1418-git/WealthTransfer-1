@@ -62,8 +62,83 @@ import {
   CornerUpRight,
   FileText,
   AlertCircle,
+  Lock,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+
+// =============================================================================
+// Task #107 — Lock indicator UI for advisers
+// =============================================================================
+// Whenever an advice record is `status='review_pending'`, the server-side
+// gate (server/services/advice-write-gate.ts) blocks adviser writes into its
+// children (objectives, pinned documents) with a 423. Before this task,
+// advisers had no visual cue and only learned about the lock when their
+// submit failed. These helpers surface the lock status everywhere the
+// adviser sees an advice record:
+//
+//   - `AdviceStatusBadge` renders a destructive badge with a Lock icon for
+//     review_pending records and falls through to a neutral outline badge
+//     for everything else. It is exported for reuse in client-detail.tsx.
+//   - `isAdviceRecordLocked` is the single source of truth for the lock
+//     condition so callers don't open-code the string comparison.
+//   - `LockedRecordWarning` is the inline alert shown inside dialogs when
+//     the adviser has selected a locked record — it explains what's
+//     happening and why the submit is disabled.
+// =============================================================================
+
+export const REVIEW_PENDING_STATUS = "review_pending";
+
+export function isAdviceRecordLocked(
+  status: string | null | undefined,
+): boolean {
+  return status === REVIEW_PENDING_STATUS;
+}
+
+export function AdviceStatusBadge({ status }: { status: string }) {
+  if (isAdviceRecordLocked(status)) {
+    return (
+      <Badge
+        variant="destructive"
+        className="capitalize flex items-center gap-1 w-fit"
+        data-testid={`badge-advice-status-${status}`}
+        title="This record is under compliance review — adviser writes are blocked"
+      >
+        <Lock className="h-3 w-3" />
+        Under review
+      </Badge>
+    );
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="capitalize"
+      data-testid={`badge-advice-status-${status}`}
+    >
+      {status.replace(/_/g, " ")}
+    </Badge>
+  );
+}
+
+function LockedRecordWarning({ adviceRecordId }: { adviceRecordId: number }) {
+  return (
+    <div
+      className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 flex items-start gap-2"
+      data-testid={`warning-locked-advice-${adviceRecordId}`}
+      role="alert"
+    >
+      <Lock className="h-4 w-4 mt-0.5 flex-shrink-0" />
+      <div>
+        <div className="font-medium">
+          Advice record #{adviceRecordId} is under compliance review
+        </div>
+        <p className="text-xs mt-1">
+          Adviser writes are blocked until compliance lifts the lock. Pick a
+          different record, or wait for the review to be resolved.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 const OBJECTIVE_TYPES = [
   "retirement",
@@ -213,6 +288,16 @@ function ObjectiveDialog({
     },
   });
 
+  // Task #107 — watch the selected advice record so we can render the lock
+  // banner and disable the submit button without waiting for the server 423.
+  const selectedAdviceRecordIdStr = form.watch("adviceRecordId");
+  const selectedAdviceRecord = selectedAdviceRecordIdStr
+    ? adviceRecords.find((ar) => String(ar.id) === selectedAdviceRecordIdStr)
+    : undefined;
+  const selectedRecordLocked = isAdviceRecordLocked(
+    selectedAdviceRecord?.status,
+  );
+
   const create = useMutation({
     mutationFn: async (values: ObjectiveForm) => {
       const payload: Record<string, unknown> = {
@@ -287,18 +372,40 @@ function ObjectiveDialog({
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        {adviceRecords.map((ar) => (
-                          <SelectItem key={ar.id} value={String(ar.id)}>
-                            #{ar.id} · {ar.adviceType.replace(/_/g, " ")} ·{" "}
-                            {ar.status}
-                          </SelectItem>
-                        ))}
+                        {adviceRecords.map((ar) => {
+                          const locked = isAdviceRecordLocked(ar.status);
+                          return (
+                            <SelectItem
+                              key={ar.id}
+                              value={String(ar.id)}
+                              data-testid={`option-objective-advice-${ar.id}`}
+                            >
+                              <span className="inline-flex items-center gap-2">
+                                {locked ? (
+                                  <Lock
+                                    className="h-3 w-3 text-red-600"
+                                    aria-label="Under compliance review"
+                                  />
+                                ) : null}
+                                <span>
+                                  #{ar.id} · {ar.adviceType.replace(/_/g, " ")} ·{" "}
+                                  {locked ? "under review" : ar.status}
+                                </span>
+                              </span>
+                            </SelectItem>
+                          );
+                        })}
                       </SelectContent>
                     </Select>
                     <FormMessage />
                   </FormItem>
                 )}
               />
+              {selectedRecordLocked && selectedAdviceRecord ? (
+                <LockedRecordWarning
+                  adviceRecordId={selectedAdviceRecord.id}
+                />
+              ) : null}
               <div className="grid grid-cols-2 gap-3">
                 <FormField
                   control={form.control}
@@ -447,10 +554,19 @@ function ObjectiveDialog({
                 </Button>
                 <Button
                   type="submit"
-                  disabled={create.isPending}
+                  disabled={create.isPending || selectedRecordLocked}
                   data-testid="button-submit-objective"
+                  title={
+                    selectedRecordLocked
+                      ? "This advice record is under compliance review — adviser writes are blocked"
+                      : undefined
+                  }
                 >
-                  {create.isPending ? "Saving…" : "Save objective"}
+                  {create.isPending
+                    ? "Saving…"
+                    : selectedRecordLocked
+                      ? "Locked — under review"
+                      : "Save objective"}
                 </Button>
               </DialogFooter>
             </form>
@@ -500,6 +616,17 @@ function DocumentDialog({
       description: "",
     },
   });
+
+  // Task #107 — same lock-watch pattern as ObjectiveDialog. Documents may be
+  // unpinned ("none") in which case the lock never applies.
+  const selectedAdviceRecordIdStr = form.watch("adviceRecordId");
+  const selectedAdviceRecord =
+    selectedAdviceRecordIdStr && selectedAdviceRecordIdStr !== "none"
+      ? adviceRecords.find((ar) => String(ar.id) === selectedAdviceRecordIdStr)
+      : undefined;
+  const selectedRecordLocked = isAdviceRecordLocked(
+    selectedAdviceRecord?.status,
+  );
 
   const create = useMutation({
     mutationFn: async (values: DocumentForm) => {
@@ -600,11 +727,30 @@ function DocumentDialog({
                       </FormControl>
                       <SelectContent>
                         <SelectItem value="none">Not pinned</SelectItem>
-                        {adviceRecords.map((ar) => (
-                          <SelectItem key={ar.id} value={String(ar.id)}>
-                            #{ar.id} · {ar.adviceType.replace(/_/g, " ")}
-                          </SelectItem>
-                        ))}
+                        {adviceRecords.map((ar) => {
+                          const locked = isAdviceRecordLocked(ar.status);
+                          return (
+                            <SelectItem
+                              key={ar.id}
+                              value={String(ar.id)}
+                              data-testid={`option-document-advice-${ar.id}`}
+                            >
+                              <span className="inline-flex items-center gap-2">
+                                {locked ? (
+                                  <Lock
+                                    className="h-3 w-3 text-red-600"
+                                    aria-label="Under compliance review"
+                                  />
+                                ) : null}
+                                <span>
+                                  #{ar.id} ·{" "}
+                                  {ar.adviceType.replace(/_/g, " ")}
+                                  {locked ? " · under review" : ""}
+                                </span>
+                              </span>
+                            </SelectItem>
+                          );
+                        })}
                       </SelectContent>
                     </Select>
                     <FormDescription className="text-xs">
@@ -615,6 +761,11 @@ function DocumentDialog({
                 )}
               />
             </div>
+            {selectedRecordLocked && selectedAdviceRecord ? (
+              <LockedRecordWarning
+                adviceRecordId={selectedAdviceRecord.id}
+              />
+            ) : null}
             <FormField
               control={form.control}
               name="fileName"
@@ -714,10 +865,19 @@ function DocumentDialog({
               </Button>
               <Button
                 type="submit"
-                disabled={create.isPending}
+                disabled={create.isPending || selectedRecordLocked}
                 data-testid="button-submit-document"
+                title={
+                  selectedRecordLocked
+                    ? "This advice record is under compliance review — adviser writes are blocked"
+                    : undefined
+                }
               >
-                {create.isPending ? "Saving…" : "Save document"}
+                {create.isPending
+                  ? "Saving…"
+                  : selectedRecordLocked
+                    ? "Locked — under review"
+                    : "Save document"}
               </Button>
             </DialogFooter>
           </form>

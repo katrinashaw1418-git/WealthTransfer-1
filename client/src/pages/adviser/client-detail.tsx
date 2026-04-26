@@ -22,7 +22,10 @@ import {
   ArrowLeftRight,
   Target,
 } from "lucide-react";
-import { WealthPlannerPanel } from "@/components/adviser/wealth-planner-panel";
+import {
+  WealthPlannerPanel,
+  AdviceStatusBadge,
+} from "@/components/adviser/wealth-planner-panel";
 
 interface ClientDetail {
   client: {
@@ -380,9 +383,7 @@ export default function AdviserClientDetail() {
                           {ar.adviceType.replace(/_/g, " ")}
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline" className="capitalize">
-                            {ar.status}
-                          </Badge>
+                          <AdviceStatusBadge status={ar.status} />
                         </TableCell>
                         <TableCell className="text-sm">{formatDate(ar.createdAt)}</TableCell>
                       </TableRow>

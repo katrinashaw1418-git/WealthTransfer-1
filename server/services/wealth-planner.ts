@@ -162,27 +162,15 @@ export async function requireAcknowledgedAdvice(
 // ---------------------------------------------------------------------------
 export const REVIEW_LOCK_REASON = "record_locked_under_review";
 
-export async function assertAdviceRecordNotUnderReview(
-  adviceRecordId: number,
-  executor: Executor = db,
-): Promise<void> {
-  const [advice] = await executor
-    .select({ id: adviceRecords.id, status: adviceRecords.status })
-    .from(adviceRecords)
-    .where(eq(adviceRecords.id, adviceRecordId))
-    .limit(1);
-  if (!advice) {
-    // Surface as 404 — distinct from the lock so callers don't conflate
-    // "missing record" with "record locked under review".
-    throw Object.assign(new Error("Advice record not found"), { status: 404 });
-  }
-  if (advice.status === "review_pending") {
-    throw Object.assign(
-      new Error("Advice record is locked while under compliance review"),
-      { status: 423, reason: REVIEW_LOCK_REASON },
-    );
-  }
-}
+// NOTE — Task #108 (April 2026): the previous `assertAdviceRecordNotUnderReview`
+// helper was deleted. It duplicated `requireAdviceRecordWritable` (in
+// server/services/advice-write-gate.ts) and, when called from the route layer
+// before the service, short-circuited the throw so the audited gate inside
+// the service never ran and no `advice_record.write_blocked` audit row was
+// recorded. The single source of truth for "is this record writable?" is now
+// `requireAdviceRecordWritable(id, executor, { actorUserId, attemptedAction,
+// ipAddress })`, called from inside each gated service. The transition route
+// still needs `REVIEW_LOCK_REASON` (kept above) to label its own 423.
 
 // ---------------------------------------------------------------------------
 // Advice-record version snapshot hook
@@ -350,7 +338,12 @@ export async function createClientObjective(
   // Task #96 — block child writes while a compliance review is in progress.
   // Objectives are an advice-record child by design (the FK is NOT NULL on
   // clientObjectives.adviceRecordId), so the guard always fires here.
-  await requireAdviceRecordWritable(input.adviceRecordId);
+  // Task #108 — pass actor + verb so the gate records an audit row when it
+  // decides to throw, even though no DB state actually changes.
+  await requireAdviceRecordWritable(input.adviceRecordId, db, {
+    actorUserId: adviserUserId,
+    attemptedAction: "client_objective.create",
+  });
 
   const [row] = await db
     .insert(clientObjectives)
@@ -439,7 +432,11 @@ export async function createClientDocument(
     // currently under review), respect the same write lock as objectives.
     // Documents uploaded WITHOUT an adviceRecordId are general client
     // documents and are not gated.
-    await requireAdviceRecordWritable(input.adviceRecordId);
+    // Task #108 — record an audit row when this gate blocks a write.
+    await requireAdviceRecordWritable(input.adviceRecordId, db, {
+      actorUserId: adviserUserId,
+      attemptedAction: "client_document.create",
+    });
   }
 
   const [row] = await db
@@ -517,7 +514,11 @@ export async function uploadClientDocument(
   await assertAdviserClientLink(adviserUserId, input.clientId);
 
   if (input.adviceRecordId != null) {
-    await requireAdviceRecordWritable(input.adviceRecordId);
+    // Task #108 — record an audit row when this gate blocks a write.
+    await requireAdviceRecordWritable(input.adviceRecordId, db, {
+      actorUserId: adviserUserId,
+      attemptedAction: "client_document.upload",
+    });
     const [advice] = await db
       .select({ id: adviceRecords.id, clientId: adviceRecords.clientId })
       .from(adviceRecords)
