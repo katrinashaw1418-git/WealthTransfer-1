@@ -1,0 +1,208 @@
+// =============================================================================
+// SESSION 23A — CLIENT FEE TRANSPARENCY PAGE (READ-ONLY)
+// -----------------------------------------------------------------------------
+// Single combined view at /client/fees. Reads from /api/client/fees which
+// returns { rules, recentAccruals, pendingDeductions } scoped to the caller.
+// =============================================================================
+
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { ShieldAlert, Receipt } from "lucide-react";
+
+interface ClientFeesPayload {
+  rules: Array<{
+    id: number;
+    feeConsentId: number;
+    feeType: string;
+    amountType: string;
+    rateBps: number | null;
+    fixedAmount: string | null;
+    currency: string;
+    status: string;
+    pausedReason: string | null;
+    createdAt: string;
+  }>;
+  recentAccruals: Array<{
+    id: number;
+    feeRuleId: number;
+    accrualDate: string;
+    accrualAmount: string;
+    currency: string;
+    gateReason: string | null;
+  }>;
+  pendingDeductions: Array<{
+    id: number;
+    periodStart: string;
+    periodEnd: string;
+    totalAccrued: string;
+    currency: string;
+    status: string;
+  }>;
+}
+
+export default function ClientFeesPage() {
+  const q = useQuery<ClientFeesPayload>({ queryKey: ["/api/client/fees"] });
+
+  return (
+    <div className="space-y-6 p-6" data-testid="page-client-fees">
+      <div className="flex items-center gap-2">
+        <Receipt className="h-6 w-6 text-primary" />
+        <h1 className="text-2xl font-semibold">Your fees</h1>
+      </div>
+
+      <Alert variant="default" data-testid="alert-gate-a">
+        <ShieldAlert className="h-4 w-4" />
+        <AlertTitle>Nothing has been deducted yet</AlertTitle>
+        <AlertDescription>
+          This page shows what your adviser would deduct based on your signed
+          fee consents. <strong>No money has actually moved.</strong> Any
+          future deduction will require an additional, explicit step that is
+          recorded against your account.
+        </AlertDescription>
+      </Alert>
+
+      {q.isLoading ? (
+        <Skeleton className="h-64 w-full" />
+      ) : (
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Fee rules linked to you</CardTitle>
+              <CardDescription>
+                Each rule is anchored to a fee consent you signed. If a rule is
+                paused, the reason is shown.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {q.data && q.data.rules.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Paused reason</TableHead>
+                      <TableHead>Consent ID</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {q.data.rules.map((r) => (
+                      <TableRow key={r.id} data-testid={`row-rule-${r.id}`}>
+                        <TableCell>{r.feeType}</TableCell>
+                        <TableCell>
+                          {r.amountType === "fixed"
+                            ? `${r.fixedAmount} ${r.currency} / month`
+                            : `${(Number(r.rateBps ?? 0) / 100).toFixed(2)}% p.a.`}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={r.status === "active" ? "outline" : "secondary"}>
+                            {r.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {r.pausedReason ?? "—"}
+                        </TableCell>
+                        <TableCell>{r.feeConsentId}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <p className="text-sm text-muted-foreground">No fee rules.</p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Recent fee activity (last 90 days)</CardTitle>
+              <CardDescription>
+                These rows show what would have been accrued each day. Skipped
+                rows include the reason (e.g. consent expired).
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {q.data && q.data.recentAccruals.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Rule</TableHead>
+                      <TableHead>Would accrue</TableHead>
+                      <TableHead>Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {q.data.recentAccruals.map((a) => (
+                      <TableRow key={a.id} data-testid={`row-accrual-${a.id}`}>
+                        <TableCell>{a.accrualDate.slice(0, 10)}</TableCell>
+                        <TableCell>{a.feeRuleId}</TableCell>
+                        <TableCell>{a.accrualAmount} {a.currency}</TableCell>
+                        <TableCell>
+                          {a.gateReason ? (
+                            <Badge variant="destructive">{a.gateReason}</Badge>
+                          ) : (
+                            <Badge variant="outline">accrued</Badge>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <p className="text-sm text-muted-foreground">No activity in the last 90 days.</p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Pending deduction batches</CardTitle>
+              <CardDescription>
+                These are awaiting licensee approval. Even after approval, no
+                money will be moved until the next gate is opened.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {q.data && q.data.pendingDeductions.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>ID</TableHead>
+                      <TableHead>Period</TableHead>
+                      <TableHead>Total</TableHead>
+                      <TableHead>Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {q.data.pendingDeductions.map((d) => (
+                      <TableRow key={d.id} data-testid={`row-deduction-${d.id}`}>
+                        <TableCell>{d.id}</TableCell>
+                        <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
+                        <TableCell>{d.totalAccrued} {d.currency}</TableCell>
+                        <TableCell><Badge variant="secondary">{d.status}</Badge></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <p className="text-sm text-muted-foreground">No pending deductions.</p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}

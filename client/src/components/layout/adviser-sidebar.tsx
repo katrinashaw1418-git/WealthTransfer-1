@@ -53,6 +53,7 @@ const adviserSections: NavSection[] = [
       { name: "Investment products", href: "/adviser/products", icon: Building2 },
       { name: "Instructions", href: "/adviser/instructions", icon: ClipboardCheck },
       { name: "Fee consents", href: "/adviser/fee-consents", icon: HandCoins, hint: "DBFO requests + signed" },
+      { name: "Fee engine", href: "/adviser/fees", icon: HandCoins, hint: "Read-only — Gate A" },
     ],
   },
   {

@@ -1,0 +1,490 @@
+This third file confirms something important: you’ve now locked the correct direction. I’ll keep this tight and practical.
+
+✅ 1. FINAL VERIFICATION (NO AMBIGUITY)
+
+This patch set is:
+
+✔ Correct
+✔ Consistent with previous version
+✔ Production-appropriate
+✔ MUST be applied before any further build
+
+And again, the critical changes are:
+
+❌ Remove fake snapshot seeding
+❌ Remove modeled P&L
+❌ Remove projection fallback
+✔ Use real snapshot-only history
+✔ Switch MemStorage → DatabaseStorage
+
+👉 There is no disagreement here — this is the right baseline.
+
+🔴 2. YOU ARE NOW AT A HARD ARCHITECTURE CHECKPOINT
+
+You are no longer in:
+
+feature building mode
+
+You are now in:
+
+system integrity mode
+
+And your own checklist correctly states:
+
+❌ Wallet balance ≠ ledger → DO NOT LAUNCH
+❌ No reconciliation → DO NOT LAUNCH
+❌ Duplicate transactions possible → DO NOT LAUNCH
+
+⚠️ 3. MOST IMPORTANT CORRECTION (YOU KEEP TRYING TO SKIP THIS)
+
+You keep asking:
+
+next build and code patches
+
+But here’s the reality:
+
+👉 You are NOT ready for:
+
+❌ fee engine
+❌ payout system
+❌ external payment recording
+
+Because:
+
+Ledger is not enforced
+Reconciliation does not exist
+Transaction lifecycle not hardened
+✅ 4. REAL NEXT BUILD (THIS TIME LOCK IT)
+👉 Session: Ledger Enforcement + Reconciliation (MANDATORY)
+🧩 5. EXACT REPLIT INSTRUCTION
+
+Copy this:
+
+Proceed with Ledger Enforcement + Reconciliation Layer.
+
+Purpose:
+Make ledger the single source of truth before enabling any financial automation.
+
+Build:
+1. enforce ledger-based balance (no direct wallet mutation)
+2. reconciliationReports table
+3. reconciliation job (internal vs ledger)
+4. drift detection
+5. admin reconciliation UI
+
+Do not build:
+- fee deduction
+- payouts
+- external payments
+🧱 6. CODE PATCHES (WHAT ACTUALLY MATTERS)
+1. Kill direct balance mutation (critical)
+
+Search entire repo:
+
+wallet.balance +=
+wallet.balance -=
+
+Replace with:
+
+await createLedgerEntry(...)
+
+Balance must always be:
+
+const balance = await sumLedgerEntries(userId);
+2. Add reconciliation table
+export const reconciliationReports = pgTable("reconciliation_reports", {
+  id: serial("id").primaryKey(),
+
+  userId: integer("user_id"),
+
+  ledgerBalance: decimal("ledger_balance"),
+  systemBalance: decimal("system_balance"),
+
+  driftAmount: decimal("drift_amount"),
+
+  status: text("status"), // matched | mismatch
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+3. Reconciliation job
+const ledgerBalance = await getLedgerBalance(userId);
+const systemBalance = await getWalletBalance(userId);
+
+const drift = ledgerBalance - systemBalance;
+
+await db.insert(reconciliationReports).values({
+  userId,
+  ledgerBalance,
+  systemBalance,
+  driftAmount: drift,
+  status: Math.abs(drift) < 0.01 ? "matched" : "mismatch",
+});
+4. Admin UI
+
+Add:
+
+/admin/reconciliation
+
+Columns:
+
+User
+Ledger balance
+System balance
+Drift
+Status
+🚨 7. HARD STOP BEFORE YOU PROCEED
+
+You cannot move forward until ALL are true:
+
+✔ Ledger = source of truth
+✔ No direct balance edits
+✔ Reconciliation runs
+✔ Drift = 0
+✔ Transactions idempotent
+✔ Transaction states complete
+🧭 8. CORRECT BUILD ORDER (FINAL, DO NOT DEVIATE)
+1. ✅ Remove fake data (DONE)
+2. 🔴 Ledger enforcement (NOW)
+3. 🔴 Reconciliation (NOW)
+4. 🔴 Transaction lifecycle hardening
+5. THEN:
+   → Fee consent (already done)
+   → Fee accrual (23A)
+   → Gate B deduction
+   → Payouts
+🧠 9. MOST IMPORTANT INSIGHT (YOU FINALLY HIT IT)
+
+Your doc says:
+
+“Build only what your schema supports”
+
+That is exactly right.
+
+Before:
+
+❌ designing ahead of reality
+
+Now:
+
+✔ building on actual data structures
+▶️ NEXT (YOUR CHOICE)
+
+I can now give you:
+
+Option A (recommended)
+
+👉 Full ledger enforcement patch across routes + services (exact diff)
+
+Option B
+
+👉 Reconciliation cron + alert system (production-ready)
+
+Option C
+
+👉 Transaction lifecycle audit (deposit → settle → reverse)
+
+Don’t jump back to payouts.
+You’re one step away from making this a real financial system — finish the foundation.
+
+next step and code patches
+
+Next step:
+
+Session 24 — Ledger Enforcement + Reconciliation
+
+This must happen before any more fee deduction / payout work.
+
+Replit prompt
+Proceed with Session 24 — Ledger Enforcement + Reconciliation.
+
+Purpose:
+Make the ledger the source of truth and add reconciliation before any real money movement.
+
+Build:
+1. Audit all direct wallet balance mutations
+2. Add ledger-derived balance helper
+3. Add reconciliationReports table
+4. Add reconciliation service/job
+5. Add admin reconciliation API
+6. Add /admin/reconciliation UI
+
+Do not build:
+- fee deduction
+- payouts
+- external payments
+- automatic settlement
+Code patches
+1. shared/schema.ts
+
+Add:
+
+export const reconciliationReports = pgTable("reconciliation_reports", {
+  id: serial("id").primaryKey(),
+
+  userId: integer("user_id").references(() => users.id),
+  currency: text("currency").notNull().default("AUD"),
+
+  ledgerBalance: decimal("ledger_balance", { precision: 15, scale: 2 }).notNull(),
+  walletBalance: decimal("wallet_balance", { precision: 15, scale: 2 }).notNull(),
+  driftAmount: decimal("drift_amount", { precision: 15, scale: 2 }).notNull(),
+
+  status: text("status").notNull(),
+  // matched | mismatch
+
+  checkedAt: timestamp("checked_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+2. server/services/ledger.ts
+
+Add:
+
+export async function getLedgerBalance(userId: number, currency: string) {
+  const entries = await db
+    .select()
+    .from(ledgerEntries)
+    .where(and(
+      eq(ledgerEntries.userId, userId),
+      eq(ledgerEntries.currency, currency)
+    ));
+
+  return entries.reduce((sum, e) => {
+    const amount = Number(e.amount);
+    return e.direction === "credit" ? sum + amount : sum - amount;
+  }, 0);
+}
+3. server/services/reconciliation.ts
+
+Add:
+
+export async function runUserReconciliation(userId: number, currency = "AUD") {
+  const ledgerBalance = await getLedgerBalance(userId, currency);
+
+  const [wallet] = await db
+    .select()
+    .from(wallets)
+    .where(and(
+      eq(wallets.userId, userId),
+      eq(wallets.currency, currency)
+    ));
+
+  const walletBalance = wallet ? Number(wallet.balance) : 0;
+  const driftAmount = ledgerBalance - walletBalance;
+
+  const [report] = await db.insert(reconciliationReports).values({
+    userId,
+    currency,
+    ledgerBalance: ledgerBalance.toFixed(2),
+    walletBalance: walletBalance.toFixed(2),
+    driftAmount: driftAmount.toFixed(2),
+    status: Math.abs(driftAmount) < 0.01 ? "matched" : "mismatch",
+  }).returning();
+
+  return report;
+}
+4. server/routes.ts
+
+Add admin APIs:
+
+POST /api/admin/reconciliation/run
+GET  /api/admin/reconciliation
+
+Rules:
+
+admin/compliance_admin only
+run reconciliation for all users with wallets
+audit log every run
+5. UI
+
+Add:
+
+/admin/reconciliation
+
+Table:
+
+User
+Currency
+Ledger balance
+Wallet balance
+Drift
+Status
+Checked at
+
+Status badges:
+
+matched = green
+mismatch = red
+Hard stop
+Do not auto-correct drift.
+Do not silently edit wallet balances.
+Any mismatch must remain visible until resolved through a proper transaction.
+Pasted text(109).txt
+Document
+
+Good — this is now the most complete and grounded state you’ve shared. I’ll give you exactly what you asked:
+
+👉 Next step + code patches (correct, not overbuilt, aligned with your actual system)
+
+✅ FINAL VERDICT (SHORT)
+
+Your current state is now:
+
+✔ Fake data removed
+✔ Snapshot logic corrected
+✔ Fee consent layer exists
+✔ Adviser structure defined
+✔ Architecture simplified (correctly)
+
+BUT:
+
+🔴 Ledger enforcement still not guaranteed
+🔴 Reconciliation not implemented
+🔴 Transaction safety not proven
+
+So the next build is NOT features.
+
+🚨 NEXT STEP (LOCK THIS IN)
+👉 Session: Ledger Enforcement + Transaction Safety
+
+This comes before everything else.
+
+🧩 REPLIT PROMPT
+
+Copy this exactly:
+
+Proceed with Ledger Enforcement + Transaction Safety.
+
+Purpose:
+Ensure balances are always derived from ledger entries and transactions are safe before enabling financial automation.
+
+Build:
+1. enforce ledger-only balance calculation
+2. remove ALL direct wallet balance mutations
+3. enforce transaction lifecycle states
+4. add idempotency protection to all money endpoints
+5. add ledger-backed balance helper
+6. add transaction status enforcement
+
+Do not build:
+- fee engine
+- payouts
+- reconciliation UI (next step)
+- external payments
+🧱 CODE PATCHES
+1. 🔴 Kill direct balance mutation (CRITICAL)
+
+Search entire codebase:
+
+wallet.balance +=
+wallet.balance -=
+wallet.balance =
+Replace with:
+await createLedgerEntry({
+  userId,
+  amount,
+  direction: "credit" | "debit",
+  currency,
+  referenceId,
+  type: "deposit" | "withdrawal" | "fee",
+});
+2. Add ledger balance helper
+server/services/ledger.ts
+export async function getLedgerBalance(userId: number, currency: string) {
+  const entries = await db
+    .select()
+    .from(ledgerEntries)
+    .where(and(
+      eq(ledgerEntries.userId, userId),
+      eq(ledgerEntries.currency, currency)
+    ));
+
+  return entries.reduce((sum, e) => {
+    const amount = Number(e.amount);
+    return e.direction === "credit" ? sum + amount : sum - amount;
+  }, 0);
+}
+3. Enforce wallet read-only balance
+
+Wherever you return wallet:
+
+const balance = await getLedgerBalance(userId, "AUD");
+
+return {
+  ...wallet,
+  balance: balance.toFixed(2),
+};
+
+👉 Wallet table becomes display only, not source of truth.
+
+4. Add transaction lifecycle
+REQUIRED states:
+status: "pending" | "settled" | "failed" | "reversed"
+Patch logic:
+if (status === "pending") {
+  // no ledger impact
+}
+
+if (status === "settled") {
+  await createLedgerEntry(...)
+}
+
+if (status === "failed") {
+  // no ledger entry
+}
+5. Add idempotency protection (VERY IMPORTANT)
+
+For ALL money endpoints:
+
+const existing = await db
+  .select()
+  .from(transactions)
+  .where(eq(transactions.idempotencyKey, key));
+
+if (existing.length > 0) {
+  return existing[0]; // prevent duplicate
+}
+6. Prevent duplicate ledger entries
+
+Add constraint:
+
+uniqueIndex("ledger_reference_unique")
+  .on(ledgerEntries.referenceId)
+🔴 HARD STOP CONDITIONS
+
+You cannot proceed until ALL true:
+
+✔ No wallet += anywhere
+✔ Ledger drives balances
+✔ Transactions have full lifecycle
+✔ Idempotency implemented
+✔ Duplicate prevention in place
+🧭 AFTER THIS (REAL NEXT STEP)
+
+Only after this:
+
+Session 25 — Reconciliation Layer
+
+Then:
+
+→ Fee engine (23A)
+→ Gate B (real deduction)
+→ Payout system
+🧠 MOST IMPORTANT INSIGHT
+
+You’ve now shifted from:
+
+❌ UI-driven fintech
+
+to:
+
+✔ ledger-driven financial system
+
+That’s the difference between:
+
+demo app vs real platform
+▶️ If you want next (high value)
+
+I can now give you:
+
+Option A (recommended)
+
+👉 Full ledger enforcement diff across routes.ts (line-by-line)

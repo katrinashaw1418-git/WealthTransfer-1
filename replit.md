@@ -3,6 +3,62 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Session 23A: Fee Engine Gate A scaffold
+
+Lays the rails for the 10C adviser fee engine: rule definition, daily accrual run, deduction roll-up, and admin approval flow — but **NO money moves**. Wallets, ledger and any transaction posting are not imported anywhere in this layer (enforced by file-level guard comment in `server/services/fee-engine.ts` and verified by ripgrep). Approval of a pending deduction is a status flip + audit row only. Adviser/client surfaces are strictly read-only.
+
+**Schema (`shared/schema.ts`)** — three new tables:
+- `adviserFeeRules` — anchored to a signed `feeConsents` row (FK + create-time validation). DB CHECK constraint `adviser_fee_rules_splits_total_chk` enforces `adviser_split_bps + platform_split_bps = 10000` (10000 bps = 100%). Range CHECK ensures each split is in `[0, 10000]`. Status state machine: `active | paused`.
+- `adviserFeeAccruals` — one row per (rule, accrualDate). Idempotency: `uniqueIndex adviser_fee_accruals_rule_date_uniq ON (feeRuleId, accrualDate)`. Failed gates insert a zero-amount row with `gateReason ∈ {consent_missing, consent_withdrawn, consent_expired, link_inactive, rule_paused, splits_invalid}` so the skip is auditable rather than invisible.
+- `adviserFeeDeductions` — per-(client, adviser) batch rolled up from non-skipped accruals in a window. `accrualIds JSONB` stores the list rolled up so a re-run never double-rolls; status state machine: `pending_approval | approved | rejected`. Approval sets `approvedByUserId` + `approvedAt` and **does nothing else**.
+- `npm run db:push` migrated cleanly.
+
+**Service (`server/services/fee-engine.ts`)** — pure, no scheduler, no money imports, hard-stop comment at the top:
+- `createFeeRule` — verifies `feeConsents` exists, matches the (client, adviser) pair, is not withdrawn, and that fixed/percentage payload aligns with `amountType`.
+- `pauseFeeRule` — flips status to `paused`, idempotent.
+- `runDailyAccruals({accrualDate})` — for every rule, evaluates the gate ladder (consent → adviser-client link → rule status → splits invariant) and inserts exactly one accrual row per (rule, date). Catches Postgres `23505` to make re-runs no-ops. Returns `{inserted, skipped, byGateReason}`.
+- `generatePendingDeductions({periodStart, periodEnd})` — pulls existing `accrualIds` from prior deductions into a `Set` and **skips** any accrual already rolled up; groups remaining by (clientUserId, adviserUserId, currency); inserts one `pending_approval` batch per group.
+- `approvePendingDeduction` — conditional `UPDATE ... WHERE status='pending_approval'`; loser sees `409`.
+
+**Backend (`server/admin-routes.ts`)** — 7 endpoints, all wrapped in `db.transaction` + `auditTx` in the same tx:
+- `POST /api/admin/fee-rules` — full create-time validation. DB CHECK violations (code `23514` or named constraint match) are mapped to a `400` with a useful message instead of a generic `500`.
+- `GET  /api/admin/fee-rules` — paginated list, optional `?status=` filter.
+- `PATCH /api/admin/fee-rules/:id/pause` — idempotent pause + audit `fee_rule_paused`.
+- `POST /api/admin/fee-accruals/run` — admin-triggered only. Audits the run as one summary event with `inserted`, `skipped`, `byGateReason`.
+- `GET  /api/admin/fee-accruals` — paginated, filterable by `ruleId`, `adviserUserId`, `clientUserId`.
+- `POST /api/admin/fee-deductions/generate` — windowed roll-up, audits `fee_deductions_generated`.
+- `GET  /api/admin/fee-deductions` — paginated, filterable by `?status=`.
+- `POST /api/admin/fee-deductions/:id/approve` — race-safe status flip; audit metadata explicitly notes "Gate A: status flip only — no money was moved."
+
+**Backend (`server/adviser-routes.ts`)** — 3 strictly read-only endpoints scoped to `auth.userId` (`adviserUserId` always pinned). Optional `?clientUserId=` filter goes through `assertAdviserClientLink` so an adviser cannot peek at other advisers' clients:
+- `GET /api/adviser/fee-rules`, `GET /api/adviser/fee-accruals`, `GET /api/adviser/fee-deductions`.
+
+**Backend (`server/client-routes.ts`)** — 1 combined read-only endpoint, scoped to `auth.userId` via `clientUserId`:
+- `GET /api/client/fees` returns `{ rules, recentAccruals (last 90 days), pendingDeductions }`.
+
+**Frontend** — 3 new pages, all TanStack Query v5 object-form, shadcn/ui:
+- `client/src/pages/admin/fees.tsx` — Tabs: Rules (full table with per-row inline `Pause` action + Create form for fixed/percentage with split bps inputs), Accruals (date input + Run button + recent table; gate reasons surfaced as red badges), Deductions (period picker + Generate button + per-row Approve action). All toasts surface server errors.
+- `client/src/pages/adviser/fees.tsx` — Read-only Tabs: Rules / Accruals / Deductions for the logged-in adviser only.
+- `client/src/pages/fees.tsx` (mounted at `/client/fees`) — Single combined view: rules linked to me, last-90-days accruals, pending deductions. Each section carries the explicit Gate A banner: *"Nothing has been deducted yet."*
+- `client/src/App.tsx` — 3 new routes wired (`/admin/fees`, `/adviser/fees`, `/client/fees`).
+- All 3 sidebars updated with one nav entry each (HandCoins icon for admin/adviser, Receipt icon for client).
+
+**Smoke test (verified live)**:
+1. Create rule (consent #2, fixed AUD 150/mo, 80/20 split) → `200 OK`, rule id returned.
+2. Bad splits (`7000+2000`) → `400 "Splits must sum to 10000bps (100%) and each be in [0,10000]"` (DB CHECK mapped).
+3. Run accruals 2026-04-26 → `inserted:2, skipped:0`.
+4. Re-run same date → `inserted:0, skipped:0` (idempotent via unique index).
+5. Generate deductions Apr 1–30 → `batches:1, rolledUpAccruals:2, total: AUD 10.0000 (8/2 split)`.
+6. Approve deduction #1 → `status:"approved"`.
+7. Re-approve → `409`.
+8. Audit row present with metadata `{ note: "Gate A: status flip only — no money was moved.", totalAccrued, adviserShareAmount, platformShareAmount }`.
+9. Pause rule + run next-day accruals → `inserted:2, skipped:1, byGateReason:{rule_paused:1}` (zero-amount audit row, gate reason recorded).
+10. Adviser GET sees own rules with paused status + reason; client GET sees combined payload with same row visible.
+
+**Architect verdict**: PASS. Gate A scaffold meets all hard rules — no money movement, idempotent accruals, race-safe approval, scoped reads, audit-on-write. One Major UX gap (admin Rules tab listed via accruals only) was fixed inline by adding a real rule-list table with inline Pause action. Minor findings (per-accrual audit detail, client-side Number conversion of decimal strings) deferred to Gate B.
+
+**Hard rules unchanged**: 10C fee engine STILL GATED — Gate A only models accrual + deduction state. The next gate (Gate B) is what wires actual wallet debit, ledger posting, and adviser credit, and is **not** built in this session. Demo creds unchanged: wise/wise888 (admin), wiseadviser/wise888, wiseinvestor/wise888.
+
 ## Recent Changes (April 2026) — Session 20: Live Fee Consents (DBFO request → sign → admin oversight)
 
 Implements the full DBFO (Deduction-Based Fee Order) consent lifecycle so an adviser can REQUEST a fee consent from a linked client, the client can SIGN or DECLINE, and admin gets read-only oversight of both the in-flight request log and the executed consent log. **No money is moved by this flow** — AMAX still requires separate admin-approved deduction controls (still gated). The 10C fee engine remains DISABLED.

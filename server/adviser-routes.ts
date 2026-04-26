@@ -23,6 +23,10 @@ import {
   feeConsentRequests,
   feeConsents,
   insertFeeConsentRequestSchema,
+  // Session 23A — fee engine Gate A (read-only adviser views)
+  adviserFeeRules,
+  adviserFeeAccruals,
+  adviserFeeDeductions,
 } from "@shared/schema";
 import { requireAuth, requireRole } from "./auth";
 import { generateReportPdf, REPORTS_DIR } from "./services/reports";
@@ -851,4 +855,79 @@ export function registerAdviserRoutes(app: Express): void {
       }
     },
   );
+
+  // ===========================================================================
+  // SESSION 23A — FEE ENGINE GATE A (adviser READ-ONLY views)
+  // ---------------------------------------------------------------------------
+  // The adviser sees ONLY rules / accruals / deductions for clients they are
+  // currently linked to. There are NO write endpoints in this file for the
+  // fee engine — all writes are admin-only.
+  // ===========================================================================
+
+  app.get("/api/adviser/fee-rules", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      requireRole(auth, "adviser");
+      const clientIdQ = Number(req.query.clientUserId);
+      const filters: any[] = [eq(adviserFeeRules.adviserUserId, auth.userId)];
+      if (Number.isInteger(clientIdQ) && clientIdQ > 0) {
+        await assertAdviserClientLink(auth.userId, clientIdQ);
+        filters.push(eq(adviserFeeRules.clientUserId, clientIdQ));
+      }
+      const rows = await db
+        .select()
+        .from(adviserFeeRules)
+        .where(and(...filters))
+        .orderBy(desc(adviserFeeRules.createdAt));
+      res.json(rows);
+    } catch (error: any) {
+      handleError(res, error, "Failed to list fee rules");
+    }
+  });
+
+  app.get("/api/adviser/fee-accruals", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      requireRole(auth, "adviser");
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const clientIdQ = Number(req.query.clientUserId);
+      const filters: any[] = [eq(adviserFeeAccruals.adviserUserId, auth.userId)];
+      if (Number.isInteger(clientIdQ) && clientIdQ > 0) {
+        await assertAdviserClientLink(auth.userId, clientIdQ);
+        filters.push(eq(adviserFeeAccruals.clientUserId, clientIdQ));
+      }
+      const rows = await db
+        .select()
+        .from(adviserFeeAccruals)
+        .where(and(...filters))
+        .orderBy(desc(adviserFeeAccruals.accrualDate), desc(adviserFeeAccruals.id))
+        .limit(limit);
+      res.json(rows);
+    } catch (error: any) {
+      handleError(res, error, "Failed to list fee accruals");
+    }
+  });
+
+  app.get("/api/adviser/fee-deductions", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      requireRole(auth, "adviser");
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const clientIdQ = Number(req.query.clientUserId);
+      const filters: any[] = [eq(adviserFeeDeductions.adviserUserId, auth.userId)];
+      if (status) filters.push(eq(adviserFeeDeductions.status, status));
+      if (Number.isInteger(clientIdQ) && clientIdQ > 0) {
+        await assertAdviserClientLink(auth.userId, clientIdQ);
+        filters.push(eq(adviserFeeDeductions.clientUserId, clientIdQ));
+      }
+      const rows = await db
+        .select()
+        .from(adviserFeeDeductions)
+        .where(and(...filters))
+        .orderBy(desc(adviserFeeDeductions.createdAt));
+      res.json(rows);
+    } catch (error: any) {
+      handleError(res, error, "Failed to list fee deductions");
+    }
+  });
 }

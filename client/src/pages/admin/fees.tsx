@@ -1,0 +1,582 @@
+// =============================================================================
+// SESSION 23A — ADMIN FEE ENGINE PAGE
+// -----------------------------------------------------------------------------
+// Three sections:
+//   1. Rules — paginated list, "create rule" form, "pause" action.
+//   2. Accruals — paginated list, "run today's accruals" action.
+//   3. Deductions — pending list, "generate" action, per-row "approve" action.
+//
+// Visible Gate A banner so anyone clicking around the admin shell is reminded
+// that NO money moves here yet.
+// =============================================================================
+
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2 } from "lucide-react";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+
+interface FeeRuleRow {
+  id: number;
+  feeConsentId: number;
+  clientUserId: number;
+  adviserUserId: number;
+  feeType: string;
+  amountType: string;
+  rateBps: number | null;
+  fixedAmount: string | null;
+  currency: string;
+  adviserSplitBps: number;
+  platformSplitBps: number;
+  status: string;
+  pausedAt: string | null;
+  pausedReason: string | null;
+  createdAt: string;
+}
+
+interface FeeAccrualRow {
+  id: number;
+  feeRuleId: number;
+  clientUserId: number;
+  adviserUserId: number;
+  accrualDate: string;
+  accrualAmount: string;
+  adviserShareAmount: string;
+  platformShareAmount: string;
+  currency: string;
+  gateReason: string | null;
+  createdAt: string;
+}
+
+interface FeeDeductionRow {
+  id: number;
+  clientUserId: number;
+  adviserUserId: number;
+  periodStart: string;
+  periodEnd: string;
+  totalAccrued: string;
+  adviserShareAmount: string;
+  platformShareAmount: string;
+  currency: string;
+  accrualIds: number[];
+  status: string;
+  approvedByUserId: number | null;
+  approvedAt: string | null;
+  rejectedReason: string | null;
+  createdAt: string;
+}
+
+interface Paginated<T> { items: T[]; page: number; limit: number; total: number; }
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function bpsLabel(bps: number) {
+  return `${(bps / 100).toFixed(2)}%`;
+}
+
+export default function AdminFeesPage() {
+  const { toast } = useToast();
+  const [tab, setTab] = useState("rules");
+
+  // -------- Create rule form --------
+  const [form, setForm] = useState({
+    feeConsentId: "",
+    clientUserId: "",
+    adviserUserId: "",
+    feeType: "ongoing_service_fee",
+    amountType: "fixed" as "fixed" | "percentage",
+    fixedAmount: "",
+    rateBps: "",
+    currency: "AUD",
+    adviserSplitBps: "8000",
+    platformSplitBps: "2000",
+  });
+
+  async function submitCreateRule() {
+    try {
+      const payload: any = {
+        feeConsentId: Number(form.feeConsentId),
+        clientUserId: Number(form.clientUserId),
+        adviserUserId: Number(form.adviserUserId),
+        feeType: form.feeType,
+        amountType: form.amountType,
+        currency: form.currency,
+        adviserSplitBps: Number(form.adviserSplitBps),
+        platformSplitBps: Number(form.platformSplitBps),
+      };
+      if (form.amountType === "fixed") payload.fixedAmount = form.fixedAmount;
+      if (form.amountType === "percentage") payload.rateBps = Number(form.rateBps);
+      await apiRequest("POST", "/api/admin/fee-rules", payload);
+      toast({ title: "Fee rule created" });
+      setForm({
+        ...form,
+        feeConsentId: "",
+        clientUserId: "",
+        adviserUserId: "",
+        fixedAmount: "",
+        rateBps: "",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-rules"] });
+    } catch (err: any) {
+      toast({ title: "Create failed", description: err?.message ?? String(err), variant: "destructive" });
+    }
+  }
+
+  // -------- Run accruals --------
+  const [accrualDate, setAccrualDate] = useState(todayIso());
+  async function runAccruals() {
+    try {
+      const r = await apiRequest("POST", "/api/admin/fee-accruals/run", { accrualDate });
+      const j = await r.json();
+      toast({
+        title: "Accrual run complete",
+        description: `Inserted: ${j.inserted}, Skipped: ${j.skipped}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-accruals"] });
+    } catch (err: any) {
+      toast({ title: "Run failed", description: err?.message ?? String(err), variant: "destructive" });
+    }
+  }
+
+  // -------- Generate deductions --------
+  const [period, setPeriod] = useState({ start: todayIso(), end: todayIso() });
+  async function generateDeductions() {
+    try {
+      const r = await apiRequest("POST", "/api/admin/fee-deductions/generate", {
+        periodStart: period.start,
+        periodEnd: period.end,
+      });
+      const j = await r.json();
+      toast({
+        title: "Deductions generated",
+        description: `Batches: ${j.batches}, Accruals rolled: ${j.rolledUpAccruals}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
+    } catch (err: any) {
+      toast({ title: "Generate failed", description: err?.message ?? String(err), variant: "destructive" });
+    }
+  }
+
+  // -------- Pause / approve --------
+  async function pauseRule(id: number) {
+    try {
+      await apiRequest("PATCH", `/api/admin/fee-rules/${id}/pause`, { reason: "manual pause from admin UI" });
+      toast({ title: "Rule paused" });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-rules"] });
+    } catch (err: any) {
+      toast({ title: "Pause failed", description: err?.message ?? String(err), variant: "destructive" });
+    }
+  }
+  async function approveDeduction(id: number) {
+    try {
+      await apiRequest("POST", `/api/admin/fee-deductions/${id}/approve`, {});
+      toast({ title: "Deduction approved", description: "Status flipped only — no money moved (Gate A)." });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
+    } catch (err: any) {
+      toast({ title: "Approve failed", description: err?.message ?? String(err), variant: "destructive" });
+    }
+  }
+
+  // -------- Queries --------
+  const rulesQ = useQuery<Paginated<FeeRuleRow>>({
+    queryKey: ["/api/admin/fee-rules"],
+  });
+
+  const accrualsQ = useQuery<Paginated<FeeAccrualRow>>({
+    queryKey: ["/api/admin/fee-accruals"],
+  });
+  const deductionsQ = useQuery<Paginated<FeeDeductionRow>>({
+    queryKey: ["/api/admin/fee-deductions"],
+  });
+
+  return (
+    <div className="space-y-6 p-6" data-testid="page-admin-fees">
+      <div className="flex items-center gap-2">
+        <HandCoins className="h-6 w-6 text-primary" />
+        <h1 className="text-2xl font-semibold">Adviser fee engine</h1>
+      </div>
+
+      <Alert variant="default" data-testid="alert-gate-a">
+        <ShieldAlert className="h-4 w-4" />
+        <AlertTitle>Gate A — scaffold only</AlertTitle>
+        <AlertDescription>
+          Rules, accruals and deductions are visible and auditable, but{" "}
+          <strong>no money moves</strong>. Approving a deduction in this screen flips its
+          status and writes an audit row only.
+        </AlertDescription>
+      </Alert>
+
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList>
+          <TabsTrigger value="rules" data-testid="tab-rules">Rules</TabsTrigger>
+          <TabsTrigger value="accruals" data-testid="tab-accruals">Accruals</TabsTrigger>
+          <TabsTrigger value="deductions" data-testid="tab-deductions">Deductions</TabsTrigger>
+        </TabsList>
+
+        {/* ---- RULES TAB ---- */}
+        <TabsContent value="rules" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Create a new fee rule</CardTitle>
+              <CardDescription>
+                The fee consent must already be signed and not withdrawn. Splits must sum to 10000 bps (100%).
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <div>
+                <Label>Fee consent ID</Label>
+                <Input
+                  data-testid="input-consent-id"
+                  value={form.feeConsentId}
+                  onChange={(e) => setForm({ ...form, feeConsentId: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Client user ID</Label>
+                <Input
+                  data-testid="input-client-id"
+                  value={form.clientUserId}
+                  onChange={(e) => setForm({ ...form, clientUserId: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Adviser user ID</Label>
+                <Input
+                  data-testid="input-adviser-id"
+                  value={form.adviserUserId}
+                  onChange={(e) => setForm({ ...form, adviserUserId: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Fee type</Label>
+                <Select value={form.feeType} onValueChange={(v) => setForm({ ...form, feeType: v })}>
+                  <SelectTrigger data-testid="select-fee-type"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ongoing_service_fee">Ongoing service fee</SelectItem>
+                    <SelectItem value="advice_fee">Advice fee</SelectItem>
+                    <SelectItem value="platform_fee">Platform fee</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Amount type</Label>
+                <Select
+                  value={form.amountType}
+                  onValueChange={(v) => setForm({ ...form, amountType: v as any })}
+                >
+                  <SelectTrigger data-testid="select-amount-type"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="fixed">Fixed (monthly amount)</SelectItem>
+                    <SelectItem value="percentage">Percentage (bps)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {form.amountType === "fixed" ? (
+                <div>
+                  <Label>Fixed monthly amount</Label>
+                  <Input
+                    data-testid="input-fixed-amount"
+                    value={form.fixedAmount}
+                    onChange={(e) => setForm({ ...form, fixedAmount: e.target.value })}
+                    placeholder="e.g. 150.0000"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <Label>Rate (bps, 1bp = 0.01%)</Label>
+                  <Input
+                    data-testid="input-rate-bps"
+                    value={form.rateBps}
+                    onChange={(e) => setForm({ ...form, rateBps: e.target.value })}
+                    placeholder="e.g. 75 for 0.75%"
+                  />
+                </div>
+              )}
+              <div>
+                <Label>Adviser split (bps)</Label>
+                <Input
+                  data-testid="input-adviser-split"
+                  value={form.adviserSplitBps}
+                  onChange={(e) => setForm({ ...form, adviserSplitBps: e.target.value })}
+                />
+              </div>
+              <div>
+                <Label>Platform split (bps)</Label>
+                <Input
+                  data-testid="input-platform-split"
+                  value={form.platformSplitBps}
+                  onChange={(e) => setForm({ ...form, platformSplitBps: e.target.value })}
+                />
+              </div>
+              <div className="sm:col-span-2 lg:col-span-3">
+                <Button
+                  onClick={submitCreateRule}
+                  data-testid="button-create-rule"
+                >
+                  <Plus className="h-4 w-4 mr-1" /> Create rule
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">All rules</CardTitle>
+              <CardDescription>
+                Active rules accrue daily. Paused rules still emit a zero-amount audit row
+                with reason <code>rule_paused</code>.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {rulesQ.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : rulesQ.data && rulesQ.data.items.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>ID</TableHead>
+                      <TableHead>Consent</TableHead>
+                      <TableHead>Client</TableHead>
+                      <TableHead>Adviser</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Splits (adv/plat)</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rulesQ.data.items.map((r) => (
+                      <TableRow key={r.id} data-testid={`row-rule-${r.id}`}>
+                        <TableCell>{r.id}</TableCell>
+                        <TableCell>{r.feeConsentId}</TableCell>
+                        <TableCell>{r.clientUserId}</TableCell>
+                        <TableCell>{r.adviserUserId}</TableCell>
+                        <TableCell>{r.feeType}</TableCell>
+                        <TableCell>
+                          {r.amountType === "fixed"
+                            ? `${r.fixedAmount} ${r.currency} / month`
+                            : `${(Number(r.rateBps ?? 0) / 100).toFixed(2)}% p.a.`}
+                        </TableCell>
+                        <TableCell>
+                          {bpsLabel(r.adviserSplitBps)} / {bpsLabel(r.platformSplitBps)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={r.status === "active" ? "outline" : "secondary"}>
+                            {r.status}
+                          </Badge>
+                          {r.pausedReason && (
+                            <span className="block text-xs text-muted-foreground mt-1">
+                              {r.pausedReason}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {r.status === "active" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => pauseRule(r.id)}
+                              data-testid={`button-pause-${r.id}`}
+                            >
+                              <Pause className="h-4 w-4 mr-1" /> Pause
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <p className="text-sm text-muted-foreground">No fee rules yet.</p>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ---- ACCRUALS TAB ---- */}
+        <TabsContent value="accruals" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Run daily accruals</CardTitle>
+              <CardDescription>
+                Idempotent — re-running for the same date is a no-op. Failed gates insert a
+                zero-amount row with a gate reason.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex gap-2 items-end">
+              <div>
+                <Label>Accrual date</Label>
+                <Input
+                  type="date"
+                  value={accrualDate}
+                  onChange={(e) => setAccrualDate(e.target.value)}
+                  data-testid="input-accrual-date"
+                />
+              </div>
+              <Button onClick={runAccruals} data-testid="button-run-accruals">
+                <Play className="h-4 w-4 mr-1" /> Run
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle className="text-base">Recent accruals</CardTitle></CardHeader>
+            <CardContent>
+              {accrualsQ.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>ID</TableHead>
+                      <TableHead>Rule</TableHead>
+                      <TableHead>Client</TableHead>
+                      <TableHead>Adviser</TableHead>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Adviser share</TableHead>
+                      <TableHead>Gate reason</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {accrualsQ.data?.items.map((a) => (
+                      <TableRow key={a.id} data-testid={`row-accrual-${a.id}`}>
+                        <TableCell>{a.id}</TableCell>
+                        <TableCell>{a.feeRuleId}</TableCell>
+                        <TableCell>{a.clientUserId}</TableCell>
+                        <TableCell>{a.adviserUserId}</TableCell>
+                        <TableCell>{a.accrualDate.slice(0, 10)}</TableCell>
+                        <TableCell>{a.accrualAmount} {a.currency}</TableCell>
+                        <TableCell>{a.adviserShareAmount}</TableCell>
+                        <TableCell>
+                          {a.gateReason ? (
+                            <Badge variant="destructive">{a.gateReason}</Badge>
+                          ) : (
+                            <Badge variant="outline">accrued</Badge>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ---- DEDUCTIONS TAB ---- */}
+        <TabsContent value="deductions" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Generate pending deductions</CardTitle>
+              <CardDescription>
+                Roll up non-skipped accruals in a window into per-(client, adviser) batches.
+                Approval is a status flip + audit row only — Gate A.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex gap-2 items-end">
+              <div>
+                <Label>Period start</Label>
+                <Input
+                  type="date"
+                  value={period.start}
+                  onChange={(e) => setPeriod({ ...period, start: e.target.value })}
+                  data-testid="input-period-start"
+                />
+              </div>
+              <div>
+                <Label>Period end</Label>
+                <Input
+                  type="date"
+                  value={period.end}
+                  onChange={(e) => setPeriod({ ...period, end: e.target.value })}
+                  data-testid="input-period-end"
+                />
+              </div>
+              <Button onClick={generateDeductions} data-testid="button-generate-deductions">
+                <Play className="h-4 w-4 mr-1" /> Generate
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle className="text-base">Deductions</CardTitle></CardHeader>
+            <CardContent>
+              {deductionsQ.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>ID</TableHead>
+                      <TableHead>Client</TableHead>
+                      <TableHead>Adviser</TableHead>
+                      <TableHead>Period</TableHead>
+                      <TableHead>Total</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {deductionsQ.data?.items.map((d) => (
+                      <TableRow key={d.id} data-testid={`row-deduction-${d.id}`}>
+                        <TableCell>{d.id}</TableCell>
+                        <TableCell>{d.clientUserId}</TableCell>
+                        <TableCell>{d.adviserUserId}</TableCell>
+                        <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
+                        <TableCell>{d.totalAccrued} {d.currency}</TableCell>
+                        <TableCell>
+                          <Badge variant={d.status === "pending_approval" ? "secondary" : "outline"}>
+                            {d.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          {d.status === "pending_approval" && (
+                            <Button
+                              size="sm"
+                              variant="default"
+                              onClick={() => approveDeduction(d.id)}
+                              data-testid={`button-approve-${d.id}`}
+                            >
+                              <CheckCircle2 className="h-4 w-4 mr-1" /> Approve
+                            </Button>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}

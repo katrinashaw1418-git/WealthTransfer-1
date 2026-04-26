@@ -38,6 +38,11 @@ import {
   reportRequests,
   adminReviewNotes,
   feeConsents,
+  // Session 23A — fee engine Gate A
+  adviserFeeRules,
+  adviserFeeAccruals,
+  adviserFeeDeductions,
+  insertAdviserFeeRuleSchema,
   feeConsentRequests,
   adviceRecords,
   adviceAcknowledgements,
@@ -1816,6 +1821,360 @@ export function registerAdminRoutes(app: Express): void {
         expiringFeeConsents,
         recentComplianceAudit,
       };
+    }),
+  );
+
+  // ===========================================================================
+  // SESSION 23A — FEE ENGINE GATE A (admin write surface)
+  // ---------------------------------------------------------------------------
+  // SCAFFOLD ONLY — no money moves. Approval = status flip + audit row only.
+  // Reads + service helpers live in server/services/fee-engine.ts.
+  // ===========================================================================
+
+  app.post(
+    "/api/admin/fee-rules",
+    adminRoute(async (req, auth) => {
+      const parsed = insertAdviserFeeRuleSchema.parse(req.body);
+      const created = await db.transaction(async (tx) => {
+        // We can't easily run createFeeRule (which uses `db.`) inside this tx,
+        // so re-validate the consent linkage here against the same tx.
+        const [consent] = await tx
+          .select()
+          .from(feeConsents)
+          .where(eq(feeConsents.id, parsed.feeConsentId))
+          .limit(1);
+        if (!consent) {
+          throw Object.assign(new Error("Fee consent not found"), { status: 404 });
+        }
+        if (consent.clientId !== parsed.clientUserId) {
+          throw Object.assign(
+            new Error("Consent client does not match rule clientUserId"),
+            { status: 400 },
+          );
+        }
+        if (consent.adviserId !== null && consent.adviserId !== parsed.adviserUserId) {
+          throw Object.assign(
+            new Error("Consent adviser does not match rule adviserUserId"),
+            { status: 400 },
+          );
+        }
+        if (consent.withdrawnAt) {
+          throw Object.assign(
+            new Error("Cannot create rule on a withdrawn consent"),
+            { status: 400 },
+          );
+        }
+        if (parsed.amountType === "fixed") {
+          const v = Number(parsed.fixedAmount ?? 0);
+          if (!(v > 0)) {
+            throw Object.assign(
+              new Error("fixedAmount must be > 0 for amountType=fixed"),
+              { status: 400 },
+            );
+          }
+        } else if (parsed.amountType === "percentage") {
+          const v = Number(parsed.rateBps ?? 0);
+          if (!(v > 0 && v <= 10000)) {
+            throw Object.assign(
+              new Error("rateBps must be in (0, 10000] for amountType=percentage"),
+              { status: 400 },
+            );
+          }
+        } else {
+          throw Object.assign(
+            new Error(`Unsupported amountType '${parsed.amountType}'`),
+            { status: 400 },
+          );
+        }
+
+        let row;
+        try {
+          [row] = await tx
+            .insert(adviserFeeRules)
+            .values(parsed)
+            .returning();
+        } catch (err: any) {
+          // Map the DB-level CHECK violations (splits not summing to 10000,
+          // splits out of range) to a 400 with a useful message instead of a
+          // generic 500.
+          const msg = String(err?.message ?? "");
+          if (
+            err?.code === "23514" ||
+            /adviser_fee_rules_splits_total_chk/.test(msg) ||
+            /adviser_fee_rules_splits_range_chk/.test(msg)
+          ) {
+            throw Object.assign(
+              new Error(
+                "Splits must sum to 10000bps (100%) and each be in [0,10000]",
+              ),
+              { status: 400 },
+            );
+          }
+          throw err;
+        }
+        await auditTx(
+          tx,
+          auth.userId,
+          "fee_rule_created",
+          "adviser_fee_rule",
+          String(row.id),
+          {
+            feeConsentId: parsed.feeConsentId,
+            clientUserId: parsed.clientUserId,
+            adviserUserId: parsed.adviserUserId,
+            feeType: parsed.feeType,
+            amountType: parsed.amountType,
+            adviserSplitBps: parsed.adviserSplitBps,
+            platformSplitBps: parsed.platformSplitBps,
+          },
+          req.ip ?? null,
+        );
+        return row;
+      });
+      return created;
+    }),
+  );
+
+  app.get(
+    "/api/admin/fee-rules",
+    adminRoute(async (req) => {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const filters: any[] = [];
+      if (status) filters.push(eq(adviserFeeRules.status, status));
+      const where = filters.length ? and(...filters) : undefined;
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select()
+          .from(adviserFeeRules)
+          .where(where as any)
+          .orderBy(desc(adviserFeeRules.createdAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(adviserFeeRules)
+          .where(where as any),
+      ]);
+      return { items: rows, page, limit, total: Number(totalRow[0]?.count ?? 0) };
+    }),
+  );
+
+  app.patch(
+    "/api/admin/fee-rules/:id/pause",
+    adminRoute(async (req, auth) => {
+      const ruleId = Number(req.params.id);
+      if (!Number.isInteger(ruleId) || ruleId <= 0) {
+        throw Object.assign(new Error("Invalid rule id"), { status: 400 });
+      }
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : null;
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(adviserFeeRules)
+          .set({
+            status: "paused",
+            pausedAt: new Date(),
+            pausedReason: reason,
+            updatedAt: new Date(),
+          })
+          .where(eq(adviserFeeRules.id, ruleId))
+          .returning();
+        if (!row) {
+          throw Object.assign(new Error("Fee rule not found"), { status: 404 });
+        }
+        await auditTx(
+          tx,
+          auth.userId,
+          "fee_rule_paused",
+          "adviser_fee_rule",
+          String(ruleId),
+          { reason },
+          req.ip ?? null,
+        );
+        return row;
+      });
+      return updated;
+    }),
+  );
+
+  app.post(
+    "/api/admin/fee-accruals/run",
+    adminRoute(async (req, auth) => {
+      const dateRaw = typeof req.body?.accrualDate === "string"
+        ? req.body.accrualDate
+        : new Date().toISOString();
+      const accrualDate = new Date(dateRaw);
+      if (Number.isNaN(accrualDate.getTime())) {
+        throw Object.assign(new Error("Invalid accrualDate"), { status: 400 });
+      }
+      // The service inserts each row in its own write — that's intentional so
+      // a single bad row doesn't block the others. We audit the run as one
+      // event with the summary outcome.
+      const { runDailyAccruals } = await import("./services/fee-engine");
+      const summary = await runDailyAccruals({ accrualDate });
+      await db.insert(auditLogs).values({
+        userId: auth.userId,
+        action: "fee_accruals_run",
+        entityType: "adviser_fee_accruals",
+        entityId: null,
+        metadata: { accrualDate: accrualDate.toISOString(), ...summary } as any,
+        ipAddress: req.ip ?? null,
+      });
+      return { accrualDate: accrualDate.toISOString(), ...summary };
+    }),
+  );
+
+  app.get(
+    "/api/admin/fee-accruals",
+    adminRoute(async (req) => {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+      const ruleId = Number(req.query.ruleId);
+      const adviserId = Number(req.query.adviserUserId);
+      const clientId = Number(req.query.clientUserId);
+      const filters: any[] = [];
+      if (Number.isInteger(ruleId) && ruleId > 0) filters.push(eq(adviserFeeAccruals.feeRuleId, ruleId));
+      if (Number.isInteger(adviserId) && adviserId > 0) filters.push(eq(adviserFeeAccruals.adviserUserId, adviserId));
+      if (Number.isInteger(clientId) && clientId > 0) filters.push(eq(adviserFeeAccruals.clientUserId, clientId));
+      const where = filters.length ? and(...filters) : undefined;
+
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select()
+          .from(adviserFeeAccruals)
+          .where(where as any)
+          .orderBy(desc(adviserFeeAccruals.accrualDate), desc(adviserFeeAccruals.id))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(adviserFeeAccruals)
+          .where(where as any),
+      ]);
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+      };
+    }),
+  );
+
+  app.post(
+    "/api/admin/fee-deductions/generate",
+    adminRoute(async (req, auth) => {
+      const startRaw = typeof req.body?.periodStart === "string" ? req.body.periodStart : "";
+      const endRaw = typeof req.body?.periodEnd === "string" ? req.body.periodEnd : "";
+      const periodStart = new Date(startRaw);
+      const periodEnd = new Date(endRaw);
+      if (Number.isNaN(periodStart.getTime()) || Number.isNaN(periodEnd.getTime())) {
+        throw Object.assign(new Error("Invalid periodStart / periodEnd"), { status: 400 });
+      }
+      const { generatePendingDeductions } = await import("./services/fee-engine");
+      const summary = await generatePendingDeductions({ periodStart, periodEnd });
+      await db.insert(auditLogs).values({
+        userId: auth.userId,
+        action: "fee_deductions_generated",
+        entityType: "adviser_fee_deductions",
+        entityId: null,
+        metadata: {
+          periodStart: periodStart.toISOString(),
+          periodEnd: periodEnd.toISOString(),
+          ...summary,
+        } as any,
+        ipAddress: req.ip ?? null,
+      });
+      return {
+        periodStart: periodStart.toISOString(),
+        periodEnd: periodEnd.toISOString(),
+        ...summary,
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/fee-deductions",
+    adminRoute(async (req) => {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const filters: any[] = [];
+      if (status) filters.push(eq(adviserFeeDeductions.status, status));
+      const where = filters.length ? and(...filters) : undefined;
+
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select()
+          .from(adviserFeeDeductions)
+          .where(where as any)
+          .orderBy(desc(adviserFeeDeductions.createdAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(adviserFeeDeductions)
+          .where(where as any),
+      ]);
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+      };
+    }),
+  );
+
+  app.post(
+    "/api/admin/fee-deductions/:id/approve",
+    adminRoute(async (req, auth) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid deduction id"), { status: 400 });
+      }
+      const updated = await db.transaction(async (tx) => {
+        // Conditional UPDATE so we only flip a row that's still pending. If
+        // it was already approved/rejected, returning() is empty -> 409.
+        const rows = await tx
+          .update(adviserFeeDeductions)
+          .set({
+            status: "approved",
+            approvedByUserId: auth.userId,
+            approvedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(adviserFeeDeductions.id, id),
+              eq(adviserFeeDeductions.status, "pending_approval"),
+            ),
+          )
+          .returning();
+        if (!rows[0]) {
+          throw Object.assign(
+            new Error("Deduction not found or not in pending_approval"),
+            { status: 409 },
+          );
+        }
+        await auditTx(
+          tx,
+          auth.userId,
+          "fee_deduction_approved",
+          "adviser_fee_deduction",
+          String(id),
+          {
+            note: "Gate A: status flip only — no money was moved.",
+            totalAccrued: rows[0].totalAccrued,
+            adviserShareAmount: rows[0].adviserShareAmount,
+            platformShareAmount: rows[0].platformShareAmount,
+          },
+          req.ip ?? null,
+        );
+        return rows[0];
+      });
+      return updated;
     }),
   );
 }

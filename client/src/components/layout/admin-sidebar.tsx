@@ -32,6 +32,7 @@ const NAV_ITEMS = [
   { to: "/admin/instructions", label: "Instructions", icon: ListChecks },
   { to: "/admin/reports", label: "Report Requests", icon: FileText },
   { to: "/admin/fee-consents", label: "Fee Consents", icon: HandCoins },
+  { to: "/admin/fees", label: "Fee Engine (Gate A)", icon: HandCoins },
   { to: "/admin/compliance", label: "Compliance", icon: ShieldCheck },
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
 ] as const;

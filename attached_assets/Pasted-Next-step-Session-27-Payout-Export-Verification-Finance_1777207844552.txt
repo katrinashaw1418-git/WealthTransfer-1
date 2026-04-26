@@ -1,0 +1,185 @@
+Next step:
+
+Session 27 — Payout Export Verification + Finance Sign-off
+
+Purpose:
+
+Add a final control layer after export, so AMAX can record that finance reviewed the payout pack before external payment is processed outside the platform.
+Replit prompt
+Proceed with Session 27 — Payout Export Verification + Finance Sign-off.
+
+Purpose:
+Allow AMAX admin/finance to verify exported adviser payout batches and record finance sign-off.
+
+Build:
+1. finance verification fields on adviserPayoutBatches
+2. verify payout batch endpoint
+3. reject exported payout batch endpoint
+4. finance sign-off UI
+5. audit trail entries
+
+Do not build:
+- bank transfer
+- payment execution
+- external payout API
+- wallet movement
+- automatic settlement
+Code patches
+1. shared/schema.ts
+
+Patch adviserPayoutBatches:
+
+financeVerifiedAt: timestamp("finance_verified_at"),
+financeVerifiedBy: integer("finance_verified_by").references(() => users.id),
+financeVerificationStatus: text("finance_verification_status").default("not_verified"),
+// not_verified | verified | rejected
+financeVerificationNotes: text("finance_verification_notes"),
+2. server/routes.ts
+
+Add APIs:
+
+POST /api/admin/adviser-payout-batches/:id/verify
+POST /api/admin/adviser-payout-batches/:id/reject-export
+3. Verify logic
+
+Rules:
+
+admin/compliance_admin only
+batch must be approved
+batch must be exported
+status must not already be paid_later
+set financeVerificationStatus = verified
+set financeVerifiedBy
+set financeVerifiedAt
+set notes
+audit: payout_batch_finance_verified
+4. Reject export logic
+
+Rules:
+
+admin/compliance_admin only
+batch must be exported
+requires reason
+set financeVerificationStatus = rejected
+set financeVerificationNotes
+audit: payout_batch_export_rejected
+5. UI patch
+
+Add to:
+
+/admin/fees → Payout Batches tab
+
+For exported batches show:
+
+Finance Verification
+- Not verified
+- Verified
+- Rejected
+
+Actions:
+
+Verify export pack
+Reject export pack
+View verification notes
+Hard stop
+Still no bank transfer.
+Still no payment execution.
+This only records finance sign-off.
+next step and code patches
+
+Next step:
+
+Session 28 — External Payment Recording
+
+Purpose:
+
+Record that finance paid the approved adviser payout outside AMAX.
+No bank API.
+No automatic transfer.
+Evidence + audit only.
+Replit prompt
+Proceed with Session 28 — External Payment Recording.
+
+Purpose:
+Allow AMAX finance/admin to record external payment completion for verified adviser payout batches.
+
+Build:
+1. external payment fields on adviserPayoutBatches
+2. record external payment endpoint
+3. upload/reference payment evidence
+4. payment status UI
+5. audit log entries
+
+Do not build:
+- bank transfer
+- payment API
+- automatic payout
+- wallet movement
+Code patches
+1. shared/schema.ts
+
+Patch adviserPayoutBatches:
+
+externalPaymentStatus: text("external_payment_status").default("not_paid"),
+// not_paid | paid | failed | cancelled
+
+externalPaymentReference: text("external_payment_reference"),
+externalPaidAt: timestamp("external_paid_at"),
+externalPaidBy: integer("external_paid_by").references(() => users.id),
+externalPaymentNotes: text("external_payment_notes"),
+externalPaymentEvidenceUrl: text("external_payment_evidence_url"),
+2. server/routes.ts
+
+Add APIs:
+
+POST /api/admin/adviser-payout-batches/:id/record-payment
+POST /api/admin/adviser-payout-batches/:id/record-payment-failure
+3. Record payment logic
+
+Rules:
+
+admin/compliance_admin only
+batch must be approved
+batch must be exported
+financeVerificationStatus must be verified
+externalPaymentStatus must be not_paid
+payment reference required
+set externalPaymentStatus = paid
+set externalPaymentReference
+set externalPaidAt
+set externalPaidBy
+set externalPaymentNotes
+audit: adviser_payout_external_payment_recorded
+4. Failure logic
+
+Rules:
+
+admin/compliance_admin only
+requires failure reason
+set externalPaymentStatus = failed
+set externalPaymentNotes
+audit: adviser_payout_external_payment_failed
+5. UI patch
+
+Add to:
+
+/admin/fees → Payout Batches tab
+
+Show:
+
+External Payment Status
+Payment Reference
+Paid At
+Paid By
+Evidence
+Notes
+
+Actions:
+
+Record external payment
+Record payment failure
+Hard stop
+No actual bank transfer.
+No external payment API.
+No wallet movement.
+This records finance evidence only.

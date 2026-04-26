@@ -24,6 +24,10 @@ import {
   auditLogs,
   feeConsentRequests,
   feeConsents,
+  // Session 23A — fee engine Gate A (read-only client view)
+  adviserFeeRules,
+  adviserFeeAccruals,
+  adviserFeeDeductions,
 } from "@shared/schema";
 import { requireAuth } from "./auth";
 import {
@@ -402,6 +406,55 @@ export function registerClientRoutes(app: Express): void {
       res.json(rows);
     } catch (error: any) {
       handleError(res, error, "Failed to list fee consents");
+    }
+  });
+
+  // ===========================================================================
+  // SESSION 23A — FEE ENGINE GATE A (client READ-ONLY combined view)
+  // ---------------------------------------------------------------------------
+  // GET /api/client/fees — single payload for the client fees page.
+  //   - rules: ALL fee rules attached to me (active + paused so the client
+  //            can see if a fee was paused).
+  //   - recentAccruals: last 90 days of accrual rows touching me.
+  //   - pendingDeductions: status=pending_approval batches for me.
+  // ===========================================================================
+  app.get("/api/client/fees", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+      const [rules, recentAccruals, pendingDeductions] = await Promise.all([
+        db
+          .select()
+          .from(adviserFeeRules)
+          .where(eq(adviserFeeRules.clientUserId, auth.userId))
+          .orderBy(desc(adviserFeeRules.createdAt)),
+        db
+          .select()
+          .from(adviserFeeAccruals)
+          .where(
+            and(
+              eq(adviserFeeAccruals.clientUserId, auth.userId),
+              sql`${adviserFeeAccruals.accrualDate} >= ${ninetyDaysAgo}`,
+            ),
+          )
+          .orderBy(desc(adviserFeeAccruals.accrualDate))
+          .limit(200),
+        db
+          .select()
+          .from(adviserFeeDeductions)
+          .where(
+            and(
+              eq(adviserFeeDeductions.clientUserId, auth.userId),
+              eq(adviserFeeDeductions.status, "pending_approval"),
+            ),
+          )
+          .orderBy(desc(adviserFeeDeductions.createdAt)),
+      ]);
+
+      res.json({ rules, recentAccruals, pendingDeductions });
+    } catch (error: any) {
+      handleError(res, error, "Failed to load client fees");
     }
   });
 }

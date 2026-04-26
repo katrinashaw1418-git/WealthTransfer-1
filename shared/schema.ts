@@ -1471,3 +1471,219 @@ export const insertAdminReviewNoteSchema = createInsertSchema(adminReviewNotes).
 });
 export type AdminReviewNote = typeof adminReviewNotes.$inferSelect;
 export type InsertAdminReviewNote = z.infer<typeof insertAdminReviewNoteSchema>;
+
+// =============================================================================
+// SESSION 23A — 10C ADVISER FEE ENGINE — GATE A SCAFFOLD
+// -----------------------------------------------------------------------------
+// THREE TABLES that model fee rules, daily accruals, and pending deductions.
+// THIS IS A SCAFFOLD ONLY:
+//   - No wallet debit, no adviser credit, no ledger posting, no reversal,
+//     no investment execution, and no automatic/scheduled fee processing.
+//   - Admin "approval" of a pending deduction is a status flip + audit only.
+//   - Adviser & client surfaces over these tables are STRICTLY READ-ONLY.
+// =============================================================================
+
+export const adviserFeeRules = pgTable(
+  "adviser_fee_rules",
+  {
+    id: serial("id").primaryKey(),
+
+    // Every rule attaches to a SIGNED feeConsents row — this is the legal
+    // basis for any future deduction. Without a consent, no rule can exist.
+    feeConsentId: integer("fee_consent_id")
+      .references(() => feeConsents.id)
+      .notNull(),
+
+    clientUserId: integer("client_user_id")
+      .references(() => users.id)
+      .notNull(),
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+
+    feeType: text("fee_type").notNull(),
+    // ongoing_service_fee | advice_fee | platform_fee
+    amountType: text("amount_type").notNull(),
+    // fixed | percentage
+
+    // Mutually exclusive payload depending on amountType. Validated at the
+    // service boundary (see server/services/fee-engine.ts).
+    rateBps: integer("rate_bps"), // basis points (1bp = 0.01%) when amountType=percentage
+    fixedAmount: decimal("fixed_amount", { precision: 14, scale: 4 }), // when amountType=fixed
+    currency: text("currency").notNull().default("AUD"),
+
+    // 10000 bps = 100% — splits MUST sum to 10000 (DB CHECK below).
+    adviserSplitBps: integer("adviser_split_bps").notNull(),
+    platformSplitBps: integer("platform_split_bps").notNull(),
+
+    status: text("status").notNull().default("active"),
+    // active | paused
+
+    pausedAt: timestamp("paused_at"),
+    pausedReason: text("paused_reason"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    adviserStatusIdx: index("adviser_fee_rules_adviser_status_idx").on(
+      table.adviserUserId,
+      table.status,
+    ),
+    clientStatusIdx: index("adviser_fee_rules_client_status_idx").on(
+      table.clientUserId,
+      table.status,
+    ),
+    consentIdx: index("adviser_fee_rules_consent_idx").on(table.feeConsentId),
+    // The 10C invariant: adviser + platform = 100% (10000 bps). Anything else
+    // means the rule cannot be safely accrued; the DB rejects it outright.
+    splitsTotalChk: check(
+      "adviser_fee_rules_splits_total_chk",
+      sql`adviser_split_bps + platform_split_bps = 10000`,
+    ),
+    // Bps must be in [0, 10000].
+    splitsRangeChk: check(
+      "adviser_fee_rules_splits_range_chk",
+      sql`adviser_split_bps BETWEEN 0 AND 10000 AND platform_split_bps BETWEEN 0 AND 10000`,
+    ),
+  }),
+);
+
+export const adviserFeeAccruals = pgTable(
+  "adviser_fee_accruals",
+  {
+    id: serial("id").primaryKey(),
+
+    feeRuleId: integer("fee_rule_id")
+      .references(() => adviserFeeRules.id)
+      .notNull(),
+    clientUserId: integer("client_user_id")
+      .references(() => users.id)
+      .notNull(),
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+
+    // Calendar date the accrual is for (NOT the time the row was inserted).
+    // We store as timestamp for portability with the rest of the schema.
+    accrualDate: timestamp("accrual_date").notNull(),
+
+    // When a gate fails, accrualAmount = 0 and gateReason is populated so the
+    // skip is visible and auditable. Otherwise > 0.
+    accrualAmount: decimal("accrual_amount", { precision: 14, scale: 4 })
+      .notNull()
+      .default("0"),
+    adviserShareAmount: decimal("adviser_share_amount", { precision: 14, scale: 4 })
+      .notNull()
+      .default("0"),
+    platformShareAmount: decimal("platform_share_amount", { precision: 14, scale: 4 })
+      .notNull()
+      .default("0"),
+    currency: text("currency").notNull().default("AUD"),
+
+    // Populated when the row is a "skipped" accrual: e.g. consent_expired,
+    // consent_withdrawn, link_inactive, rule_paused, splits_invalid.
+    gateReason: text("gate_reason"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    // Idempotency: re-running runDailyAccruals for the same date is a no-op
+    // because the (rule, date) tuple is unique.
+    ruleDateUniq: uniqueIndex("adviser_fee_accruals_rule_date_uniq").on(
+      table.feeRuleId,
+      table.accrualDate,
+    ),
+    clientDateIdx: index("adviser_fee_accruals_client_date_idx").on(
+      table.clientUserId,
+      table.accrualDate,
+    ),
+    adviserDateIdx: index("adviser_fee_accruals_adviser_date_idx").on(
+      table.adviserUserId,
+      table.accrualDate,
+    ),
+  }),
+);
+
+export const adviserFeeDeductions = pgTable(
+  "adviser_fee_deductions",
+  {
+    id: serial("id").primaryKey(),
+
+    clientUserId: integer("client_user_id")
+      .references(() => users.id)
+      .notNull(),
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+
+    periodStart: timestamp("period_start").notNull(),
+    periodEnd: timestamp("period_end").notNull(),
+
+    totalAccrued: decimal("total_accrued", { precision: 14, scale: 4 })
+      .notNull()
+      .default("0"),
+    adviserShareAmount: decimal("adviser_share_amount", { precision: 14, scale: 4 })
+      .notNull()
+      .default("0"),
+    platformShareAmount: decimal("platform_share_amount", { precision: 14, scale: 4 })
+      .notNull()
+      .default("0"),
+    currency: text("currency").notNull().default("AUD"),
+
+    // List of accrual ids rolled up into this deduction batch. Stored as a
+    // JSON array of integers so future reconciliation can walk back to the
+    // contributing rows without an extra join table.
+    accrualIds: jsonb("accrual_ids").notNull().default(sql`'[]'::jsonb`),
+
+    status: text("status").notNull().default("pending_approval"),
+    // pending_approval | approved | rejected
+    //
+    // GATE A INVARIANT: status flips only — no money is moved on approve.
+    approvedByUserId: integer("approved_by_user_id").references(() => users.id),
+    approvedAt: timestamp("approved_at"),
+    rejectedReason: text("rejected_reason"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    statusIdx: index("adviser_fee_deductions_status_idx").on(table.status),
+    adviserPeriodIdx: index("adviser_fee_deductions_adviser_period_idx").on(
+      table.adviserUserId,
+      table.periodStart,
+    ),
+    clientPeriodIdx: index("adviser_fee_deductions_client_period_idx").on(
+      table.clientUserId,
+      table.periodStart,
+    ),
+  }),
+);
+
+export const insertAdviserFeeRuleSchema = createInsertSchema(adviserFeeRules).omit({
+  id: true,
+  status: true,
+  pausedAt: true,
+  pausedReason: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type AdviserFeeRule = typeof adviserFeeRules.$inferSelect;
+export type InsertAdviserFeeRule = z.infer<typeof insertAdviserFeeRuleSchema>;
+
+export const insertAdviserFeeAccrualSchema = createInsertSchema(adviserFeeAccruals).omit({
+  id: true,
+  createdAt: true,
+});
+export type AdviserFeeAccrual = typeof adviserFeeAccruals.$inferSelect;
+export type InsertAdviserFeeAccrual = z.infer<typeof insertAdviserFeeAccrualSchema>;
+
+export const insertAdviserFeeDeductionSchema = createInsertSchema(adviserFeeDeductions).omit({
+  id: true,
+  status: true,
+  approvedByUserId: true,
+  approvedAt: true,
+  rejectedReason: true,
+  createdAt: true,
+});
+export type AdviserFeeDeduction = typeof adviserFeeDeductions.$inferSelect;
+export type InsertAdviserFeeDeduction = z.infer<typeof insertAdviserFeeDeductionSchema>;

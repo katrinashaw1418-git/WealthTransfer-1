@@ -48,6 +48,7 @@ const clientNav: NavItem[] = [
   { name: "Activity", href: "/transactions", icon: History },
   { name: "KYC", href: "/compliance", icon: Shield },
   { name: "Fee Consents", href: "/client/fee-consents", icon: Receipt },
+  { name: "Your Fees", href: "/client/fees", icon: Receipt },
   { name: "Legal & Compliance", href: "/legal", icon: Scale },
 ];
 
