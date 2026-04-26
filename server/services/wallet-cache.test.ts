@@ -32,6 +32,7 @@ import { db } from "../db";
 import {
   accounts,
   ledgerEntries,
+  ledgerPostings,
   transactions,
   users,
   wallets,
@@ -187,6 +188,11 @@ afterAll(async () => {
     await db
       .delete(ledgerEntries)
       .where(inArray(ledgerEntries.transactionId, createdTxIds));
+    // Task #37 — drop the matching ledger_postings receipts so the FK from
+    // ledger_postings.transaction_id doesn't block the transactions delete.
+    await db
+      .delete(ledgerPostings)
+      .where(inArray(ledgerPostings.transactionId, createdTxIds));
     await db.delete(transactions).where(inArray(transactions.id, createdTxIds));
   }
   if (testUserId !== undefined) {
@@ -316,5 +322,250 @@ describe("refreshWalletCacheBalance — wallet cache stays in sync (Task #42)", 
     );
     // And critically, NOT the drifted value.
     expect(Number(resynced.balance)).not.toBeCloseTo(Number(DRIFT_AMOUNT), 8);
+  });
+});
+
+// =============================================================================
+// Task #50 — wallet cache refresh participates in the settlement transaction
+// =============================================================================
+// Task #42 above only exercises refreshWalletCacheBalance() against the global
+// `db` handle. In production, every settlement caller (handleDeposit and
+// handleWithdraw in server/routes.ts) runs the entire pattern inside a
+// `db.transaction(async tx => { postLedgerEntries(..., tx);
+// refreshWalletCacheBalance(tx, ...); })` block. The cache write MUST commit
+// or roll back atomically with the ledger insert — if a refactor ever broke
+// that atomicity, the wallet cache could survive a rolled-back ledger post (or
+// vice versa) and silently desync the source of truth from its display copy.
+//
+// These cases pin that contract at the function-level seam:
+//   1. A successful outer tx that posts a balanced pair via `tx` and refreshes
+//      the cache via `tx` results in BOTH the ledger sum and the cached
+//      wallet row reflecting the new amount after the outer commit.
+//   2. An outer tx that does the same posting + refresh and then throws (so
+//      the transaction rolls back) leaves NO surviving ledger entries for
+//      that transactionId AND leaves the wallet cache untouched — proving
+//      both sides participate in the same atomic boundary.
+// =============================================================================
+
+const IN_TX_AMOUNT = "125.00000000";
+const ROLLBACK_AMOUNT = "777.00000000";
+
+describe("refreshWalletCacheBalance — atomic with the settlement tx (Task #50)", () => {
+  it("commits the cache update together with the ledger post inside an outer tx", async () => {
+    const ledgerSumBefore = await getUserCurrencyBalance(
+      testUserId,
+      TEST_CURRENCY,
+    );
+
+    let committedTxId: number | null = null;
+
+    await db.transaction(async (tx) => {
+      // Insert the parent transaction row inside the outer tx, mirroring
+      // handleDeposit in server/routes.ts. If the tx rolled back, this row
+      // would vanish too — which is exactly the behaviour the second case
+      // below relies on.
+      const [txRow] = await tx
+        .insert(transactions)
+        .values({
+          userId: testUserId,
+          type: "deposit",
+          fromCurrency: null,
+          toCurrency: TEST_CURRENCY,
+          amount: IN_TX_AMOUNT,
+          fee: "0.00000000",
+          exchangeRate: null,
+          status: "completed",
+          settlementStatus: "internal_only",
+          description: "Task #50 in-tx commit case",
+        })
+        .returning({ id: transactions.id });
+      committedTxId = txRow.id;
+
+      const clientAcct = await getOrCreateClientAccount(
+        testUserId,
+        TEST_CURRENCY,
+        tx,
+      );
+      const suspenseAcct = await resolveSuspenseAccount(tx);
+
+      await postLedgerEntries(
+        committedTxId,
+        balancedPair(
+          IN_TX_AMOUNT,
+          clientAcct.id,
+          testUserId,
+          suspenseAcct.id,
+          suspenseAcct.userId,
+        ),
+        tx,
+      );
+
+      const refreshed = await refreshWalletCacheBalance(
+        tx,
+        testUserId,
+        TEST_CURRENCY,
+      );
+      expect(refreshed).not.toBeNull();
+    });
+
+    // The outer tx has now committed. Track for cleanup.
+    expect(committedTxId).not.toBeNull();
+    createdTxIds.push(committedTxId!);
+
+    const ledgerSumAfter = await getUserCurrencyBalance(
+      testUserId,
+      TEST_CURRENCY,
+    );
+    expect(Number(ledgerSumAfter)).toBeCloseTo(
+      Number(ledgerSumBefore) + Number(IN_TX_AMOUNT),
+      8,
+    );
+
+    const [walletRow] = await db
+      .select({
+        balance: wallets.balance,
+        availableBalance: wallets.availableBalance,
+      })
+      .from(wallets)
+      .where(
+        and(
+          eq(wallets.userId, testUserId),
+          eq(wallets.currency, TEST_CURRENCY),
+        ),
+      );
+    expect(walletRow).toBeDefined();
+    expect(Number(walletRow.balance)).toBeCloseTo(Number(ledgerSumAfter), 8);
+    expect(Number(walletRow.availableBalance)).toBeCloseTo(
+      Number(ledgerSumAfter),
+      8,
+    );
+
+    // And the ledger entries for this txId really exist.
+    const postedEntries = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, committedTxId!));
+    expect(postedEntries.length).toBe(2);
+  });
+
+  it("rolls back both the ledger post and the cache refresh when the outer tx aborts", async () => {
+    const ledgerSumBefore = await getUserCurrencyBalance(
+      testUserId,
+      TEST_CURRENCY,
+    );
+    const [walletBefore] = await db
+      .select({
+        balance: wallets.balance,
+        availableBalance: wallets.availableBalance,
+      })
+      .from(wallets)
+      .where(
+        and(
+          eq(wallets.userId, testUserId),
+          eq(wallets.currency, TEST_CURRENCY),
+        ),
+      );
+    expect(walletBefore).toBeDefined();
+
+    let attemptedTxId: number | null = null;
+
+    await expect(
+      db.transaction(async (tx) => {
+        const [txRow] = await tx
+          .insert(transactions)
+          .values({
+            userId: testUserId,
+            type: "deposit",
+            fromCurrency: null,
+            toCurrency: TEST_CURRENCY,
+            amount: ROLLBACK_AMOUNT,
+            fee: "0.00000000",
+            exchangeRate: null,
+            status: "completed",
+            settlementStatus: "internal_only",
+            description: "Task #50 in-tx rollback case",
+          })
+          .returning({ id: transactions.id });
+        attemptedTxId = txRow.id;
+
+        const clientAcct = await getOrCreateClientAccount(
+          testUserId,
+          TEST_CURRENCY,
+          tx,
+        );
+        const suspenseAcct = await resolveSuspenseAccount(tx);
+
+        await postLedgerEntries(
+          attemptedTxId,
+          balancedPair(
+            ROLLBACK_AMOUNT,
+            clientAcct.id,
+            testUserId,
+            suspenseAcct.id,
+            suspenseAcct.userId,
+          ),
+          tx,
+        );
+
+        const refreshed = await refreshWalletCacheBalance(
+          tx,
+          testUserId,
+          TEST_CURRENCY,
+        );
+        // Inside the tx, the cache row WOULD reflect the new sum — but we
+        // are about to throw, so this in-flight write must be rolled back
+        // by Postgres along with the ledger insert above.
+        expect(refreshed).not.toBeNull();
+        expect(Number(refreshed!.balance)).toBeCloseTo(
+          Number(ledgerSumBefore) + Number(ROLLBACK_AMOUNT),
+          8,
+        );
+
+        throw new Error("force rollback for Task #50 atomicity test");
+      }),
+    ).rejects.toThrow("force rollback for Task #50 atomicity test");
+
+    expect(attemptedTxId).not.toBeNull();
+
+    // The transactions row inserted inside the rolled-back tx must be gone.
+    const txSurvivors = await db
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(eq(transactions.id, attemptedTxId!));
+    expect(txSurvivors.length).toBe(0);
+
+    // No ledger entries should survive for the aborted txId.
+    const ledgerSurvivors = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, attemptedTxId!));
+    expect(ledgerSurvivors.length).toBe(0);
+
+    // The user's ledger sum must be exactly what it was before the aborted
+    // tx — no partial double-entry leaked through.
+    const ledgerSumAfter = await getUserCurrencyBalance(
+      testUserId,
+      TEST_CURRENCY,
+    );
+    expect(ledgerSumAfter).toBe(ledgerSumBefore);
+
+    // And critically, the wallet cache row was NOT moved by the in-tx
+    // refreshWalletCacheBalance() call — proving the cache write
+    // participates in the same atomic boundary as the ledger insert.
+    const [walletAfter] = await db
+      .select({
+        balance: wallets.balance,
+        availableBalance: wallets.availableBalance,
+      })
+      .from(wallets)
+      .where(
+        and(
+          eq(wallets.userId, testUserId),
+          eq(wallets.currency, TEST_CURRENCY),
+        ),
+      );
+    expect(walletAfter).toBeDefined();
+    expect(walletAfter.balance).toBe(walletBefore.balance);
+    expect(walletAfter.availableBalance).toBe(walletBefore.availableBalance);
   });
 });
