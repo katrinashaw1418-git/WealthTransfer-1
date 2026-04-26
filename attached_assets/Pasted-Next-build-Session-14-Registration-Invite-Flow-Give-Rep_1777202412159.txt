@@ -1,0 +1,405 @@
+Next build:
+
+Session 14 — Registration Invite Flow
+
+Give Replit this:
+
+Proceed with Session 14 — Registration Invite Flow.
+
+Build the approved-user activation path:
+1. registrationInvites table
+2. POST /api/admin/registration-invites
+3. GET /api/auth/registration-invites/validate
+4. POST /api/auth/registration-invites/complete
+5. /register/invite page
+6. App route
+7. audit logs for created/viewed/activated
+
+Rules:
+- use “invite” wording, not “token”
+- store invite hash only
+- raw invite appears only in invite link
+- one-time use
+- expires after 48 hours
+- email locked from invite
+- role locked from invite
+- block duplicate email
+- adviser → /adviser/dashboard
+- client → /dashboard
+- if role=client and adviserUserId exists, create adviserClients link
+
+Do not touch:
+- fee engine
+- SoA generator
+- investment execution
+- wallet movement
+- commission engine
+
+After Session 14:
+
+Notifications → Admin shell → Visual re-skin → DBFO fee consents → SoA → 10C fee engine
+design the exact API + DB schema + React flow
+
+Use this as the exact Session 14 build spec.
+
+1. DB schema
+
+Add to shared/schema.ts:
+
+export const registrationInvites = pgTable("registration_invites", {
+  id: serial("id").primaryKey(),
+
+  email: text("email").notNull(),
+  role: text("role").notNull(), // client | adviser | admin
+
+  relatedEntityType: text("related_entity_type"),
+  relatedEntityId: integer("related_entity_id"),
+
+  adviserUserId: integer("adviser_user_id").references(() => users.id),
+
+  inviteHash: text("invite_hash").notNull().unique(),
+
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+
+  createdBy: integer("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type RegistrationInvite = typeof registrationInvites.$inferSelect;
+export type InsertRegistrationInvite = typeof registrationInvites.$inferInsert;
+2. API endpoints
+POST /api/admin/registration-invites
+GET  /api/auth/registration-invites/validate?invite=...
+POST /api/auth/registration-invites/complete
+Create invite
+
+Admin-only. Creates raw invite, stores hash only.
+
+import crypto from "crypto";
+
+function createRawInvite() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function hashInvite(raw: string) {
+  return crypto.createHash("sha256").update(raw).digest("hex");
+}
+app.post("/api/admin/registration-invites", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (!["admin", "compliance_admin"].includes(role)) {
+    return res.status(403).json({ error: "Admin access required" });
+  }
+
+  const { email, role: inviteRole, relatedEntityType, relatedEntityId, adviserUserId } = req.body;
+
+  if (!email || !["client", "adviser", "admin"].includes(inviteRole)) {
+    return res.status(400).json({ error: "Invalid invite details" });
+  }
+
+  const existing = await storage.getUserByEmail(email.toLowerCase());
+  if (existing) {
+    return res.status(409).json({ error: "A user with this email already exists" });
+  }
+
+  const rawInvite = createRawInvite();
+  const inviteHash = hashInvite(rawInvite);
+
+  const [invite] = await db.insert(registrationInvites).values({
+    email: email.toLowerCase(),
+    role: inviteRole,
+    relatedEntityType,
+    relatedEntityId,
+    adviserUserId,
+    inviteHash,
+    expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+    createdBy: userId,
+  }).returning();
+
+  await writeAuditLog(userId, "registration_invite_created", "registration_invites", String(invite.id), {
+    email,
+    role: inviteRole,
+  }, req.ip || null);
+
+  const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+
+  res.json({
+    inviteLink: `${appUrl}/register/invite?invite=${rawInvite}`,
+  });
+});
+Validate invite
+app.get("/api/auth/registration-invites/validate", async (req, res) => {
+  const rawInvite = String(req.query.invite || "");
+  if (!rawInvite) return res.status(400).json({ error: "Invite is required" });
+
+  const inviteHash = hashInvite(rawInvite);
+
+  const [invite] = await db
+    .select()
+    .from(registrationInvites)
+    .where(eq(registrationInvites.inviteHash, inviteHash));
+
+  if (!invite) return res.status(404).json({ valid: false, error: "Invite not found" });
+  if (invite.usedAt) return res.status(410).json({ valid: false, error: "Invite already used" });
+  if (new Date() > new Date(invite.expiresAt)) return res.status(410).json({ valid: false, error: "Invite expired" });
+
+  const existing = await storage.getUserByEmail(invite.email);
+  if (existing) return res.status(409).json({ valid: false, error: "Account already exists" });
+
+  await writeAuditLog(null, "registration_invite_viewed", "registration_invites", String(invite.id), {
+    email: invite.email,
+    role: invite.role,
+  }, req.ip || null);
+
+  res.json({
+    valid: true,
+    email: invite.email,
+    role: invite.role,
+    expiresAt: invite.expiresAt,
+  });
+});
+Complete registration
+app.post("/api/auth/registration-invites/complete", async (req, res) => {
+  const { invite: rawInvite, password } = req.body;
+
+  if (!rawInvite || !password || password.length < 8) {
+    return res.status(400).json({ error: "Valid invite and password required" });
+  }
+
+  const inviteHash = hashInvite(rawInvite);
+
+  const [invite] = await db
+    .select()
+    .from(registrationInvites)
+    .where(eq(registrationInvites.inviteHash, inviteHash));
+
+  if (!invite || invite.usedAt || new Date() > new Date(invite.expiresAt)) {
+    return res.status(400).json({ error: "Invite is invalid or expired" });
+  }
+
+  const existing = await storage.getUserByEmail(invite.email);
+  if (existing) return res.status(409).json({ error: "A user with this email already exists" });
+
+  const hashedPassword = await hashPassword(password);
+
+  const user = await storage.createUser({
+    email: invite.email,
+    username: invite.email,
+    password: hashedPassword,
+    role: invite.role,
+    emailVerified: true,
+    kycStatus: invite.role === "client" ? "pending" : "not_required",
+    userTier: invite.role === "client" ? "standard" : "professional",
+  });
+
+  await db.update(registrationInvites)
+    .set({ usedAt: new Date() })
+    .where(eq(registrationInvites.id, invite.id));
+
+  if (invite.role === "client" && invite.adviserUserId) {
+    await db.insert(adviserClients).values({
+      adviserUserId: invite.adviserUserId,
+      clientUserId: user.id,
+      relationshipType: "servicing",
+      isActive: true,
+    });
+  }
+
+  await writeAuditLog(user.id, "registration_account_activated", "users", String(user.id), {
+    inviteId: invite.id,
+    role: invite.role,
+  }, req.ip || null);
+
+  const token = signToken({
+    userId: user.id,
+    username: user.username,
+    email: user.email,
+    role: invite.role,
+  });
+
+  res.json({
+    token,
+    user,
+    redirectTo:
+      invite.role === "adviser"
+        ? "/adviser/dashboard"
+        : invite.role === "admin"
+          ? "/admin"
+          : "/dashboard",
+  });
+});
+3. React page
+
+Create:
+
+client/src/pages/register-invite.tsx
+import { useEffect, useState } from "react";
+import { useLocation } from "wouter";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+export default function RegisterInvite() {
+  const [, navigate] = useLocation();
+  const invite = new URLSearchParams(window.location.search).get("invite") || "";
+
+  const [loading, setLoading] = useState(true);
+  const [inviteData, setInviteData] = useState<any>(null);
+  const [error, setError] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+
+  useEffect(() => {
+    async function validate() {
+      try {
+        const res = await fetch(`/api/auth/registration-invites/validate?invite=${encodeURIComponent(invite)}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Invalid invite");
+        setInviteData(data);
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    validate();
+  }, [invite]);
+
+  async function activate() {
+    setError("");
+
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+
+    if (password !== confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    const res = await fetch("/api/auth/registration-invites/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ invite, password }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      setError(data.error || "Activation failed");
+      return;
+    }
+
+    localStorage.setItem("amax_jwt", data.token);
+    navigate(data.redirectTo);
+  }
+
+  if (loading) {
+    return <div className="min-h-screen bg-slate-950 p-8 text-white">Validating invite...</div>;
+  }
+
+  if (error && !inviteData) {
+    return (
+      <div className="min-h-screen bg-slate-950 p-8 text-white">
+        <Card className="mx-auto max-w-md border-slate-800 bg-slate-900 text-white">
+          <CardHeader>
+            <CardTitle>Invite unavailable</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-red-400">{error}</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-950 p-8 text-white">
+      <Card className="mx-auto max-w-md border-slate-800 bg-slate-900 text-white">
+        <CardHeader>
+          <CardTitle>Activate your AMAX Wealth account</CardTitle>
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          <div className="rounded-lg bg-slate-800 p-4 text-sm">
+            <div>Email: {inviteData.email}</div>
+            <div>Role: {inviteData.role}</div>
+          </div>
+
+          <Input
+            type="password"
+            placeholder="Set password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+
+          <Input
+            type="password"
+            placeholder="Confirm password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+          />
+
+          {error && <p className="text-sm text-red-400">{error}</p>}
+
+          <Button className="w-full" onClick={activate}>
+            Activate Account
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+4. App route
+
+Add to client/src/App.tsx:
+
+import RegisterInvite from "@/pages/register-invite";
+<Route path="/register/invite" component={RegisterInvite} />
+5. Required security rules
+Use “invite” wording, not crypto/token wording.
+Store invite hash only.
+Raw invite appears only in the invite link.
+Invite expires after 48 hours.
+Invite is one-time use.
+Email is locked from invite.
+Role is locked from invite.
+Duplicate emails are blocked.
+Adviser role can only come from admin-created invite.
+Client invite with adviserUserId creates adviserClients link.
+Every lifecycle step writes audit log.
+6. Replit build prompt
+Build Session 14 — Registration Invite Flow.
+
+Add:
+1. registrationInvites table
+2. POST /api/admin/registration-invites
+3. GET /api/auth/registration-invites/validate
+4. POST /api/auth/registration-invites/complete
+5. client/src/pages/register-invite.tsx
+6. route /register/invite
+7. audit logs for invite created, viewed and activated
+
+Use invite wording, not token wording.
+
+Security:
+- store invite hash only
+- raw invite appears only in invite link
+- one-time use
+- 48-hour expiry
+- email locked
+- role locked
+- duplicate email blocked
+- adviser role only from admin invite
+- role-based redirect after activation
+- if role=client and adviserUserId exists, create adviserClients link
+
+Do not touch:
+- fee engine
+- SoA generator
+- investment execution
+- wallet movement
+- commission engine
