@@ -1478,16 +1478,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const historySource = dataPoints.some(d => d.source === 'historical_estimate')
         ? 'historical_estimate' : 'actual';
 
+      // Reviewer-mandated integrity rule: with only one snapshot, the live value
+      // and the start value are the same point — totalReturn would always be 0.
+      // Returning "0.00" would imply the user has measured "no return" over the
+      // period, which is a fabricated performance claim. Return null instead so
+      // the UI can show "Insufficient history" rather than a fake zero.
+      const hasSufficientHistory = dataPoints.length >= 2;
+
       res.json({
         timeframe,
         data: dataPoints,
         currentValue: currentTotalValue,
-        totalReturn: totalReturn.toFixed(2),
-        totalReturnPercent: totalReturnPercent.toFixed(2),
+        totalReturn: hasSufficientHistory ? totalReturn.toFixed(2) : null,
+        totalReturnPercent: hasSufficientHistory ? totalReturnPercent.toFixed(2) : null,
         startValue: startValue.toFixed(2),
         endValue: endValue.toFixed(2),
         historySource,
-        hasSufficientHistory: dataPoints.length >= 2,
+        hasSufficientHistory,
       });
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });

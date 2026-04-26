@@ -59,9 +59,13 @@ Not yet wired to any execution endpoint — there is no execution endpoint yet. 
 | 2 | Hardcoded `platformUserId = 1` is dangerous | Resolved via `process.env.PLATFORM_USER_ID` with hard validation (positive integer or throw) |
 | 3 | `SUM(ledger_entries)` will scale-fail without index | Three indexes on `ledger_entries` — `accountId`, `(userId, currency)`, `transactionId` |
 
-### Portfolio integrity patch — verified already complete
+### Portfolio integrity patch — verified already complete (with one reviewer follow-up)
 
-Cross-checked all 8 spec steps against the existing codebase; **no changes needed**:
+Cross-checked all 8 spec steps against the existing codebase; **no changes needed for the original 8 steps**.
+
+**Reviewer follow-up applied** (`server/routes.ts` `/api/portfolio/history`, ~line 1495): when only one snapshot exists for the period, `totalReturn` and `totalReturnPercent` now return `null` instead of `"0.00"`. Returning `"0.00"` would imply the user has measured "no return" over the period — a fabricated performance claim. The frontend does not render these fields today (verified via grep), so this is a forward-compatible API change with no UI breakage. `hasSufficientHistory: dataPoints.length >= 2` continues to be returned for any consumer that wants to show "Insufficient history" copy.
+
+The 8 spec steps remain in place:
 
 | Step | Spec | Existing state |
 |---|---|---|
