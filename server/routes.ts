@@ -35,6 +35,7 @@ import {
   type AuthPayload,
 } from "./auth";
 import { registerAdviserRoutes } from "./adviser-routes";
+import { registerAdminRoutes } from "./admin-routes";
 import { registerClientRoutes } from "./client-routes";
 
 // ---------------------------------------------------------------------------
@@ -567,6 +568,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mounted FIRST so its specific /api/adviser/* paths are matched before
   // any future generic /api/* fallback handlers.
   registerAdviserRoutes(app);
+  registerAdminRoutes(app);
   registerClientRoutes(app);
 
   // Ensure crypto + GBP FX rates exist (seed missing rows, reset sequence first)
@@ -681,6 +683,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     } catch (err) {
       console.warn("[seed] wiseinvestor demo account seed failed:", (err as Error).message);
+    }
+
+    // Seed the `admin` demo account (Session 13 — Admin shell).
+    // GATED to local dev only — the admin role can approve applications,
+    // create advisers, and link clients to advisers. Auto-seeding a known
+    // privileged credential in any shared/staging/production environment
+    // would be a privilege-escalation backdoor. In real environments the
+    // first admin must be provisioned manually.
+    if (isLocalDev) {
+      try {
+        const existing = await storage.getUserByUsername("admin");
+        const desiredHash = await hashPassword("admin888");
+        if (!existing) {
+          await storage.createUser({
+            username: "admin",
+            email: "admin@amaxglobal.com.au",
+            password: desiredHash,
+            firstName: "AMAX",
+            lastName: "Admin",
+            role: "admin",
+            kycStatus: "verified",
+            userTier: "professional",
+            emailVerified: true,
+          } as any);
+        } else {
+          const updates: any = {};
+          if (existing.role !== "admin") updates.role = "admin";
+          if (!existing.emailVerified) updates.emailVerified = true;
+          if (!(await verifyPassword("admin888", existing.password))) updates.password = desiredHash;
+          if (Object.keys(updates).length) await storage.updateUser(existing.id, updates);
+        }
+      } catch (err) {
+        console.warn("[seed] admin demo account seed failed:", (err as Error).message);
+      }
     }
   }
 

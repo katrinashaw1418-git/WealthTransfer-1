@@ -3,6 +3,38 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Session 13: Admin Shell (AFSL operations)
+
+### What admins do
+- Approve / reject account applications (with required reason on rejection)
+- Create new adviser users (issue temporary password)
+- Assign clients to advisers via `adviser_clients` links; deactivate / reactivate links
+- View the full audit log (paginated, filterable by action / entity / user)
+
+### Hard scope boundaries (preserved)
+- **No money movement** — admins do not touch wallets, transactions, FX, or any deposit/withdrawal route
+- **10C fee engine still gated** — admins cannot trigger any fee deduction; `feeConsents` flow remains on the adviser/client surface only
+- **No KYC bypass** — application approval only grants permission to register; the user still completes KYC under their own login
+- **Audit on every write (fail-closed)** — every admin state change runs inside a `db.transaction()` alongside its `audit_logs` insert; if the audit insert fails, the underlying write rolls back and the request returns 500
+
+### Backend
+- New `server/admin-routes.ts` mirroring the `adviser-routes.ts` shape, with an `adminRoute()` wrapper enforcing `requireAuth` + `requireRole("admin")` + try/catch envelope
+- All writes (approve, reject, create adviser, link/reactivate, toggle link) wrapped in `db.transaction(async (tx) => {...})` with `auditTx(tx, ...)` in the same transaction — true atomicity between business write and audit row
+- Endpoints: `/api/admin/dashboard`, `/api/admin/applications` + approve/reject, `/api/admin/advisers` + create, `/api/admin/clients`, `/api/admin/adviser-clients` + create + PATCH toggle, `/api/admin/audit-logs` (paginated)
+- Application approval enforces `emailVerified === true` (cannot approve someone who hasn't proven their email)
+
+### Frontend
+- New `AdminLayout` + `AdminSidebar` with violet accent (visually distinct from the dark adviser shell and the standard client shell)
+- 5 admin pages under `client/src/pages/admin/`: `dashboard`, `applications`, `advisers`, `adviser-clients`, `audit-logs`
+- `App.tsx` now picks one of three shells by `user.role` (`admin` → `AdminApp`, `adviser` → `AdviserApp`, else `ClientApp`) and enforces role-fenced redirects so each persona stays in its own portal; `/legal` is shared
+- Bare paths `/admin` and `/adviser` redirect to their respective dashboards (avoids 404 traps)
+
+### v1 limitation — no `users.isActive` column
+- The `users` table doesn't currently track an active flag. To "disable an adviser" in v1, an admin deactivates that adviser's `adviser_clients` links instead. This immediately revokes the adviser's read access to those clients (including historical reports). Adding a real `isActive` column on `users` is a future-session item.
+
+### Demo seeding
+- `admin / admin888` is seeded **only** when `isLocalDev` is true (NODE_ENV=development plus the explicit local-dev sentinel). In any shared/staging/production environment the first admin must be provisioned manually — auto-seeding a known privileged credential would be a backdoor.
+
 ## Regulated Application Flow (April 2026)
 
 ### Application → Approval → Account Creation

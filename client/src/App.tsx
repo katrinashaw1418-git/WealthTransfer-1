@@ -1,4 +1,4 @@
-import { Switch, Route, useLocation } from "wouter";
+import { Switch, Route, Redirect, useLocation } from "wouter";
 import { useEffect } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/auth";
 import Layout from "@/components/layout/layout";
 import AdviserLayout from "@/components/layout/adviser-layout";
+import AdminLayout from "@/components/layout/admin-layout";
 import Landing from "@/pages/landing";
 import Dashboard from "@/pages/dashboard";
 import WalletsNew from "@/pages/wallets-new";
@@ -36,6 +37,11 @@ import AdviserProducts from "@/pages/adviser/products";
 import AdviserInstructions from "@/pages/adviser/instructions";
 import AdviserWorkflow from "@/pages/adviser/workflow";
 import AdviserBusiness from "@/pages/adviser/business";
+import AdminDashboard from "@/pages/admin/dashboard";
+import AdminApplications from "@/pages/admin/applications";
+import AdminAdvisers from "@/pages/admin/advisers";
+import AdminAdviserClients from "@/pages/admin/adviser-clients";
+import AdminAuditLogs from "@/pages/admin/audit-logs";
 import ClientInstructions from "@/pages/client-instructions";
 import { Loader2 } from "lucide-react";
 
@@ -52,6 +58,8 @@ function AdviserApp() {
   return (
     <AdviserLayout>
       <Switch>
+        <Route path="/adviser"><Redirect to="/adviser/dashboard" /></Route>
+        <Route path="/adviser/"><Redirect to="/adviser/dashboard" /></Route>
         <Route path="/adviser/dashboard" component={AdviserDashboard} />
         <Route path="/adviser/workflow" component={AdviserWorkflow} />
         <Route path="/adviser/business" component={AdviserBusiness} />
@@ -66,6 +74,24 @@ function AdviserApp() {
         <Route component={NotFound} />
       </Switch>
     </AdviserLayout>
+  );
+}
+
+function AdminApp() {
+  return (
+    <AdminLayout>
+      <Switch>
+        <Route path="/admin"><Redirect to="/admin/dashboard" /></Route>
+        <Route path="/admin/"><Redirect to="/admin/dashboard" /></Route>
+        <Route path="/admin/dashboard" component={AdminDashboard} />
+        <Route path="/admin/applications" component={AdminApplications} />
+        <Route path="/admin/advisers" component={AdminAdvisers} />
+        <Route path="/admin/adviser-clients" component={AdminAdviserClients} />
+        <Route path="/admin/audit-logs" component={AdminAuditLogs} />
+        <Route path="/legal" component={Legal} />
+        <Route component={NotFound} />
+      </Switch>
+    </AdminLayout>
   );
 }
 
@@ -98,17 +124,30 @@ function ProtectedApp() {
     }
   }, [isLoading, isAuthenticated, token]);
 
-  // If the user is an adviser but the URL is a non-adviser path (e.g. they
-  // bookmarked /dashboard), bounce them to the adviser shell entry. Same in
-  // reverse for a client landing on /adviser/*.
+  // Role-based redirects: keep each persona inside their own shell.
+  // - admin   → /admin/*
+  // - adviser → /adviser/*
+  // - client  → /dashboard, /wallets, etc.
+  // /legal is shared, so it's allowed in any shell.
   useEffect(() => {
     if (!isAuthenticated || !user) return;
-    const isAdviser = user.role === "adviser";
-    if (isAdviser && !location.startsWith("/adviser") && !location.startsWith("/legal")) {
-      navigate("/adviser/dashboard", { replace: true });
+    const role = user.role;
+    const isLegal = location.startsWith("/legal");
+    if (role === "admin" && !location.startsWith("/admin") && !isLegal) {
+      navigate("/admin/dashboard", { replace: true });
+      return;
     }
-    if (!isAdviser && location.startsWith("/adviser")) {
-      navigate("/dashboard", { replace: true });
+    if (role === "adviser" && !location.startsWith("/adviser") && !isLegal) {
+      navigate("/adviser/dashboard", { replace: true });
+      return;
+    }
+    if (role !== "admin" && location.startsWith("/admin")) {
+      navigate(role === "adviser" ? "/adviser/dashboard" : "/dashboard", { replace: true });
+      return;
+    }
+    if (role !== "adviser" && location.startsWith("/adviser")) {
+      navigate(role === "admin" ? "/admin/dashboard" : "/dashboard", { replace: true });
+      return;
     }
   }, [isAuthenticated, user, location]);
 
@@ -120,7 +159,9 @@ function ProtectedApp() {
     );
   }
 
-  return user?.role === "adviser" ? <AdviserApp /> : <ClientApp />;
+  if (user?.role === "admin") return <AdminApp />;
+  if (user?.role === "adviser") return <AdviserApp />;
+  return <ClientApp />;
 }
 
 function Router() {
