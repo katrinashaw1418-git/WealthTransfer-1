@@ -47,3 +47,4 @@ integrations = ["javascript_websocket:1.0.0", "javascript_stripe:1.0.0", "javasc
 ALLOW_LOCAL_DEV_AUTH = "true"
 
 [userenv.shared]
+PLATFORM_USER_ID = "11"

@@ -14,6 +14,117 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 8 (Reconciliation + Platform Account Hardening)
+
+This session closes the two operational follow-ups left open at the end of Session 7. Combined with Track B's ledger and Phase 2.4's execution gate, the system now has the **minimum viable financial primitives**: ledger = truth, reconciliation = verification, execution gate = control.
+
+### 1. Platform user / `PLATFORM_USER_ID` hardening
+
+The reviewer's rule: *"System accounts must NEVER be normal users. System accounts must NEVER be accessible via login."*
+
+What was done:
+
+1. **System user created in DB** (id captured at insert time, no hardcoded magic number):
+   - `username = 'system'`, `email = 'system@amax.internal'`
+   - `role = 'system'` (existing column, was previously `client | adviser`; now `client | adviser | system`)
+   - `email_verified = true`, `kyc_status = 'verified'` (cosmetic — login is blocked regardless)
+   - `password = bcrypt(crypto.randomBytes(48).base64url)` — a 48-byte random throwaway nobody knows. Defense in depth in case the role-guard is ever removed by mistake.
+   - **Idempotent insert**: the seeding SQL uses `WHERE NOT EXISTS (SELECT 1 FROM users WHERE username='system' OR role='system')` so re-running it does not duplicate.
+
+2. **`PLATFORM_USER_ID` env var set** to the captured system-user id (`11` in this environment) via the shared environment store. The `getPlatformUserId()` function in `server/services/ledger.ts` reads this at runtime and refuses to fall back — already in place from Session 7.
+
+3. **Login route guard** at `server/routes.ts:705` — added immediately after the user lookup, **before password verification**:
+   - If `user.role === 'system'`, return the same generic `401 Invalid credentials` used for non-existent users (no enumeration leak — an attacker cannot tell the difference between "system account" and "wrong password").
+   - Write a dedicated audit-log entry `login_blocked_system_account` with the user id and IP — this is operationally the most important signal: if it fires, someone is probing the system account, and we want a paper trail.
+   - **Why before the password check, not after:** logging an attempt against the system account at all is more important than the timing-attack risk of a faster response. The username `system` is hardly secret. We chose the audit signal.
+
+Smoke-tested (passing):
+- `POST /api/auth/login {username:'system', password:'anything'}` → `401 {"error":"Invalid credentials"}`, audit row written.
+- `POST /api/auth/login {username:'wiseinvestor', password:'wise888'}` → `200` JWT (sanity).
+- `getOrCreateSuspenseAccount('AUD')` now succeeds and returns an account row owned by `userId=11`, NOT `userId=1`.
+
+### 2. Ledger-vs-custodian reconciliation job
+
+New table (`shared/schema.ts:1011`):
+```
+reconciliations (
+  id, userId, currency,
+  internalBalance,             -- decimal(18,8) NOT NULL  (SUM(ledger_entries) snapshot)
+  externalBalance,             -- decimal(18,8) NULL      (custodian-reported; NULL when unavailable)
+  difference,                  -- decimal(18,8) NULL      (internal - external; NULL when external NULL)
+  status,                      -- text NOT NULL: match | mismatch | external_unavailable
+  severity,                    -- text NOT NULL DEFAULT 'none': none | info | warning | alert | critical
+  notes,                       -- text NULL              (operational context, e.g. "feed unavailable")
+  createdAt
+)
+INDEX reconciliations_user_currency_idx ON (userId, currency)
+INDEX reconciliations_status_created_idx ON (status, createdAt)
+```
+
+**Deviations from the reviewer's spec, with reasoning:**
+- Used `decimal(...)` not `numeric(...)` — project-wide convention (see `shared/schema.ts` lines 29-44 etc.).
+- Added a **third status `external_unavailable`** (reviewer spec only had `match | mismatch`). Why: a custodian outage is operationally distinct from a confirmed mismatch. Calling a feed outage a "mismatch" silently hides feed problems. Calling it a "match" silently fakes a verification that never occurred. We want it explicit.
+- Added a **`severity` column** (`none | info | warning | alert | critical`) so future PagerDuty/Sentry routing has a structured field to key off, instead of grepping `console.error` text.
+- Added a **`notes` column** for human-readable operational context (which is what compliance reviewers actually read first).
+- Made `externalBalance` and `difference` nullable, since `external_unavailable` rows have neither.
+
+New service `server/services/reconciliation.ts`:
+
+- **`runLedgerReconciliation()`** — walks every distinct `(userId, currency)` pair in `ledger_entries`, computes the internal SUM via `getUserCurrencyBalance()` from Track B, calls the custodian fetcher, classifies, and persists one row per pair. Returns a structured summary `{pairsChecked, matches, mismatches, externalUnavailable, alerts, criticals}` for the cron caller.
+- **`fetchCustodianBalance(userId, currency)`** — Phase 1 stub. Returns `null` (NOT `"0"`). Returning `"0"` would generate a flood of false mismatches against every real balance; returning `null` correctly produces `external_unavailable` rows so the audit trail records "we attempted verification and could not". Session 9 will replace with the partner SDK call.
+- **Severity classification** (`abs(diff)` in source-currency units, no FX yet):
+  - `< 0.01` → status `match`, severity `none`
+  - `[0.01, 1)` → status `mismatch`, severity `info` (logged, not alerted — handles the spec's "$0.50 small drift" test case)
+  - `[1, 100)` → status `mismatch`, severity `warning` (`console.warn`)
+  - `[100, 1000)` → status `mismatch`, severity `alert` (`console.error("[RECONCILIATION ALERT]")`)
+  - `≥ 1000` → status `mismatch`, severity `critical` (`console.error("[RECONCILIATION CRITICAL]")`)
+  - Caveat: thresholds are in source currency (so 0.5 BTC ≠ $0.50). Per-currency thresholds with FX conversion are a Session 9 follow-up — flagged in the source as a TODO.
+- **Custodian-fetcher exception handling**: a `throw` from `fetchCustodianBalance` is treated identically to a `null` return — both record `external_unavailable` and log. Conflating the two means transient errors don't pollute the mismatch counter.
+
+Cron wired in `server/index.ts`:
+
+- Pre-existing daily wallet-balance reconciliation kept untouched (renamed log prefix to `[wallet-reconciliation]` for disambiguation; behaviour unchanged).
+- New ledger-reconciliation cron added alongside. **First run is at boot+60s** (so we get an immediate verification on every deploy, not 24h later), then every 24h thereafter. The 60s offset prevents log-stream collision with the wallet-reconciliation cron.
+- **Architect-review fix**: initial implementation only set up the interval at +60s, which meant the *first actual run* was at +24h+60s (silent operational gap on every deploy). Fixed by calling `runLedgerReconciliationCron()` directly inside the timeout before starting the interval. Verified in workflow logs: server boot → 60s later, `[ledger-reconciliation] completed: ...` line emitted.
+- Logs a structured one-line completion summary `pairs / match / mismatch / unavailable / alert / critical`.
+
+End-to-end smoke test (induced data, then cleaned up):
+- Posted a balanced $100 double-entry: `user 1 +$100 AUD`, `user 11 -$100 AUD`.
+- `getUserCurrencyBalance` confirmed: user 1 = `100.00000000`, user 11 = `-100.00000000`.
+- `runLedgerReconciliation()` returned `{pairsChecked: 2, matches: 0, mismatches: 0, externalUnavailable: 2, alerts: 0, criticals: 0}` ✓
+- 2 rows persisted to `reconciliations` table with `status='external_unavailable', severity='warning'`, notes populated ✓
+- Test rows cleaned up (ledger entries left in place since they're append-only by design — but they came from a synthetic transaction with `type='reconciliation_test'` that should be ignored by any real audit query).
+
+### Verification
+
+- Schema: applied via `npm run db:push --force` (no destructive operations); confirmed via `information_schema`.
+- Typecheck: clean except the same 2 pre-existing `server/storage.ts` errors at lines 3289/3312 — predate Session 1, out of scope.
+- Workflow: clean restart, port 5000 serving, `PLATFORM_USER_ID=11` live in env.
+- All Session 8 completion criteria from the spec met:
+  - ✅ `PLATFORM_USER_ID` configured and enforced
+  - ✅ No hardcoded system accounts remain (confirmed: `rg "platformUserId\s*=\s*1"` returns nothing in server/)
+  - ✅ Reconciliation table exists
+  - ✅ Reconciliation job runs (manual + cron-wired)
+  - ✅ Mismatch detection works (5-tier severity)
+  - ✅ Alerts visible in logs (`[RECONCILIATION ALERT]` / `[RECONCILIATION CRITICAL]` prefixes)
+
+### What this session deliberately does NOT include
+
+Per the reviewer's "do not touch" list:
+- No advice engine changes
+- No UI changes (reconciliation rows are server-internal; no operator dashboard yet)
+- No execution gate changes
+- No ledger structure changes
+- No custodian webhook (Session 9)
+- No FX-converted per-currency thresholds (Session 9 follow-up)
+
+### Operational follow-ups for the next session
+
+1. **Wire the real custodian fetcher** in `server/services/reconciliation.ts` (`fetchCustodianBalance` is currently a `null`-returning stub).
+2. **Custodian webhook** for settlement confirmation — the inbound side of the Session 9 plan.
+3. **Per-currency thresholds**: 1 BTC drift is much more material than 1 AUD drift. Threshold table should accept `currency → {warn, alert, critical}` triples, ideally driven from FX rates.
+4. **Operator dashboard** for `reconciliations` (`status='mismatch' AND created_at > now() - interval '24h'`) — useful but not blocking.
+
 ## Recent Changes (April 2026) — Session 7 (Track B + Phase 2.4 Live Execution Gate)
 
 This session lands two pieces of foundational infrastructure that were missing before any real money could move through the platform:

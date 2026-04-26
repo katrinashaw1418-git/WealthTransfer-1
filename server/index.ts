@@ -42,27 +42,69 @@ app.use((req, res, next) => {
 (async () => {
   const server = await registerRoutes(app);
 
-  // Cron-based ledger reconciliation — runs every 24 hours for all users.
+  // ---------------------------------------------------------------------------
+  // Daily wallet-balance reconciliation (PRE-EXISTING, internal-only)
+  // ---------------------------------------------------------------------------
+  // Compares each user's cached wallet display balance against the sum of
+  // their transactions. Catches drift between the legacy wallet-balance cache
+  // and the transaction history. Internal-only — does not touch external
+  // custodian feeds.
+  // ---------------------------------------------------------------------------
   const { db: cronDb } = await import("./db");
   const { users: usersTable } = await import("@shared/schema");
   const { reconcileWalletBalances } = await import("./routes");
 
-  async function runReconciliation() {
+  async function runWalletReconciliation() {
     try {
       const allUsers = await cronDb.select({ id: usersTable.id }).from(usersTable);
       for (const user of allUsers) {
         await reconcileWalletBalances(user.id, new Date()).catch((e: any) =>
-          console.error(`[reconciliation] failed for userId=${user.id}`, e)
+          console.error(`[wallet-reconciliation] failed for userId=${user.id}`, e)
         );
       }
-      log(`[reconciliation] completed for ${allUsers.length} user(s)`);
+      log(`[wallet-reconciliation] completed for ${allUsers.length} user(s)`);
     } catch (e) {
-      console.error("[reconciliation] cron error", e);
+      console.error("[wallet-reconciliation] cron error", e);
     }
   }
 
-  // Schedule 24-hour reconciliation
-  setInterval(runReconciliation, 24 * 60 * 60 * 1000);
+  setInterval(runWalletReconciliation, 24 * 60 * 60 * 1000);
+
+  // ---------------------------------------------------------------------------
+  // SESSION 8 — Daily ledger-vs-custodian reconciliation
+  // ---------------------------------------------------------------------------
+  // The other half of the verification picture: compares internal ledger
+  // balances (SUM(ledger_entries) per user/currency) against external
+  // custodian balances. Currently the custodian fetcher is a Phase 1 stub
+  // that returns null, so every (user, currency) pair will be recorded as
+  // "external_unavailable" — the "verification could not be performed"
+  // status — until Session 9 wires the partner SDK. This is the *correct*
+  // Phase 1 behaviour: we want the audit trail to show that we ATTEMPTED
+  // verification and could not, rather than silently producing false matches.
+  //
+  // Staggered 60s after wallet reconciliation so the log streams are easy to
+  // disambiguate when both run.
+  // ---------------------------------------------------------------------------
+  const { runLedgerReconciliation } = await import("./services/reconciliation");
+
+  async function runLedgerReconciliationCron() {
+    try {
+      const summary = await runLedgerReconciliation();
+      log(
+        `[ledger-reconciliation] completed: ${summary.pairsChecked} pair(s), ` +
+          `${summary.matches} match, ${summary.mismatches} mismatch, ` +
+          `${summary.externalUnavailable} unavailable, ` +
+          `${summary.alerts} alert, ${summary.criticals} critical`
+      );
+    } catch (e) {
+      console.error("[ledger-reconciliation] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runLedgerReconciliationCron();
+    setInterval(runLedgerReconciliationCron, 24 * 60 * 60 * 1000);
+  }, 60 * 1000);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

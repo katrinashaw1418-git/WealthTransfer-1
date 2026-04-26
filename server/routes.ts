@@ -691,6 +691,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!user) {
         return res.status(401).json({ error: "Invalid credentials" });
       }
+      // Session 8 hardening: system accounts are infrastructure, not users.
+      // They own platform-side ledger accounts (suspense, fees, adjustments)
+      // and must NEVER be reachable via the login flow — even with a correct
+      // password. We respond with the same generic 401 used for invalid
+      // credentials to avoid leaking which usernames are system accounts via
+      // response-message enumeration. We do, however, write a dedicated audit
+      // entry: any attempt to log into a system account is itself a signal
+      // worth alerting on.
+      if (user.role === "system") {
+        await writeAuditLog(
+          user.id,
+          "login_blocked_system_account",
+          "user",
+          String(user.id),
+          { username },
+          req.ip || null
+        );
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
       const valid = await verifyPassword(password, user.password);
       if (!valid) {
         await writeAuditLog(user.id, "login_failed", "user", String(user.id), { username }, req.ip || null);

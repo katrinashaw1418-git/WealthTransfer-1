@@ -992,3 +992,50 @@ export const insertLedgerEntrySchema = createInsertSchema(ledgerEntries).omit({
 });
 export type LedgerEntry = typeof ledgerEntries.$inferSelect;
 export type InsertLedgerEntry = z.infer<typeof insertLedgerEntrySchema>;
+
+// =============================================================================
+// SESSION 8 — RECONCILIATION
+// =============================================================================
+// Periodic verification that internal ledger balances match external custodian
+// balances. Each row is a point-in-time snapshot of (internal vs external)
+// for a single (userId, currency) pair, plus the computed difference.
+//
+// Why a table (not just logs):
+//   - Auditors need a queryable history of every reconciliation outcome
+//   - Trends (recurring drift on the same (user, currency) pair) need analysis
+//   - "When did this match last go red?" is a forensic question we must answer
+// =============================================================================
+export const reconciliations = pgTable("reconciliations", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  currency: text("currency").notNull(),
+  // Internal = SUM(ledger_entries) for this (user, currency). External = whatever
+  // the custodian reports. Both stored as decimal strings to preserve precision.
+  internalBalance: decimal("internal_balance", { precision: 18, scale: 8 }).notNull(),
+  externalBalance: decimal("external_balance", { precision: 18, scale: 8 }),
+  difference: decimal("difference", { precision: 18, scale: 8 }),
+  // match | mismatch | external_unavailable
+  // We added a third state because "no custodian data" is operationally distinct
+  // from "data shows mismatch" — the former means our verification *failed*,
+  // not that we found a discrepancy. Conflating the two would silently hide
+  // outages of the custodian feed.
+  status: text("status").notNull(),
+  // info | warning | alert | critical | none — drives PagerDuty/Sentry routing
+  // when we wire alerting. "none" for matches; informational severities for
+  // small drift; harder severities for larger gaps.
+  severity: text("severity").notNull().default("none"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  // Lookup the latest reconciliation for a (user, currency) pair
+  userCurrencyIdx: index("reconciliations_user_currency_idx").on(table.userId, table.currency),
+  // "Show me all mismatches in the last 24h" — common ops query
+  statusCreatedIdx: index("reconciliations_status_created_idx").on(table.status, table.createdAt),
+}));
+
+export const insertReconciliationSchema = createInsertSchema(reconciliations).omit({
+  id: true,
+  createdAt: true,
+});
+export type Reconciliation = typeof reconciliations.$inferSelect;
+export type InsertReconciliation = z.infer<typeof insertReconciliationSchema>;

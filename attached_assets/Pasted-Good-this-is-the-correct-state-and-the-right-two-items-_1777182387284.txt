@@ -1,0 +1,275 @@
+Good — this is the correct state and the right two items to focus on next.
+
+Here’s the **clean next session scope**. No drift, no mixing.
+
+---
+
+# ▶️ Session 8 — Reconciliation + Platform Account Fix
+
+## Scope (only these two)
+
+```text
+1. PLATFORM_USER_ID (system account hardening)
+2. Reconciliation job (ledger vs custodian)
+```
+
+Do NOT touch:
+
+```text
+❌ advice engine
+❌ UI
+❌ execution gate
+❌ ledger structure (already done)
+```
+
+---
+
+# 🔐 1. PLATFORM_USER_ID (must fix before real funds)
+
+## Problem (current)
+
+```text
+platformUserId = 1 ❌
+```
+
+This is unsafe.
+
+---
+
+## Required implementation
+
+### A. Create system user (one-time)
+
+```sql
+INSERT INTO users (id, email, role)
+VALUES (999999, 'system@amax.internal', 'system');
+```
+
+(Or let DB auto-generate and capture ID)
+
+---
+
+### B. Set environment variable
+
+```env
+PLATFORM_USER_ID=999999
+```
+
+---
+
+### C. Enforce in code
+
+```ts
+const platformUserId = Number(process.env.PLATFORM_USER_ID);
+
+if (!platformUserId) {
+  throw new Error("PLATFORM_USER_ID not configured");
+}
+```
+
+---
+
+### D. Rule
+
+```text
+System accounts must NEVER be normal users
+System accounts must NEVER be accessible via login
+```
+
+---
+
+# 🔍 2. Reconciliation Job (minimum viable)
+
+## Purpose
+
+```text
+Ensure:
+ledger_entries == custodian balances
+```
+
+---
+
+## A. New table
+
+```ts
+export const reconciliations = pgTable("reconciliations", {
+  id: serial("id").primaryKey(),
+
+  userId: integer("user_id"),
+  currency: text("currency"),
+
+  internalBalance: numeric("internal_balance", { precision: 18, scale: 8 }),
+  externalBalance: numeric("external_balance", { precision: 18, scale: 8 }),
+
+  difference: numeric("difference", { precision: 18, scale: 8 }),
+
+  status: text("status"), // match | mismatch
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+```
+
+---
+
+## B. Reconciliation service
+
+```ts
+export async function runReconciliation() {
+  const usersWithBalances = await db
+    .select({
+      userId: ledgerEntries.userId,
+      currency: ledgerEntries.currency,
+    })
+    .from(ledgerEntries)
+    .groupBy(ledgerEntries.userId, ledgerEntries.currency);
+
+  for (const row of usersWithBalances) {
+    const internalBalance = await getUserCurrencyBalance(
+      row.userId,
+      row.currency
+    );
+
+    // TODO: replace with real custodian API
+    const externalBalance = await fetchCustodianBalance(
+      row.userId,
+      row.currency
+    );
+
+    const diff =
+      Number(internalBalance) - Number(externalBalance);
+
+    await db.insert(reconciliations).values({
+      userId: row.userId,
+      currency: row.currency,
+      internalBalance,
+      externalBalance,
+      difference: diff.toFixed(8),
+      status: Math.abs(diff) < 0.01 ? "match" : "mismatch",
+    });
+
+    if (Math.abs(diff) > 100) {
+      console.error("RECONCILIATION ALERT", {
+        userId: row.userId,
+        currency: row.currency,
+        diff,
+      });
+    }
+  }
+}
+```
+
+---
+
+## C. Cron job
+
+Use simple interval (Phase 1):
+
+```ts
+setInterval(async () => {
+  try {
+    await runReconciliation();
+  } catch (err) {
+    console.error("Reconciliation failed:", err);
+  }
+}, 1000 * 60 * 60 * 24); // daily
+```
+
+Later → move to proper scheduler.
+
+---
+
+## D. Custodian stub (for now)
+
+```ts
+async function fetchCustodianBalance(userId: number, currency: string) {
+  return "0"; // placeholder until integration
+}
+```
+
+---
+
+# ⚠️ Alert thresholds
+
+```text
+difference < $1     → ignore
+difference > $1     → log
+difference > $100   → alert
+difference > $1000  → CRITICAL
+```
+
+---
+
+# 🧪 Required test cases
+
+## 1. Perfect match
+
+```text
+internal == external → status = match
+```
+
+---
+
+## 2. Small drift
+
+```text
+diff = $0.50 → logged, not alerted
+```
+
+---
+
+## 3. Large drift
+
+```text
+diff = $500 → alert triggered
+```
+
+---
+
+## 4. Missing custodian data
+
+```text
+external = null → log + fail safe
+```
+
+---
+
+# 🟢 Completion criteria
+
+Session 8 is complete when:
+
+```text
+✔ PLATFORM_USER_ID configured and enforced
+✔ No hardcoded system accounts remain
+✔ Reconciliation table exists
+✔ Reconciliation job runs
+✔ Mismatch detection works
+✔ Alerts visible in logs
+```
+
+---
+
+# 🧠 Final note
+
+At this point your system becomes:
+
+```text
+Ledger = truth
+Reconciliation = verification
+Execution gate = control
+```
+
+That is the **minimum viable financial system**.
+
+---
+
+# ▶️ After Session 8
+
+Next logical step:
+
+```text
+Session 9 → custodian webhook + settlement integration
+```
+
+---
+
+When ready, I’ll give you the exact webhook + settlement flow.
