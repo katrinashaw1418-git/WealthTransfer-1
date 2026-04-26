@@ -46,7 +46,9 @@ import {
   getOrCreateSuspenseAccount,
   postLedgerEntries,
   refreshWalletCacheBalance,
+  getUserLedgerSumsByCurrency,
 } from "./services/ledger";
+import { MATCH_EPSILON } from "./services/reconciliation";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -2432,11 +2434,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get user wallets
+  //
+  // Task #22 — balance transparency.
+  // Each wallet object carries:
+  //   - balanceSource: "ledger"  — every cached balance returned here is
+  //     ultimately derived from the double-entry ledger (refreshed inside
+  //     each settlement transaction), so the consumer can label it for a
+  //     support agent or compliance review.
+  //   - hasDrift: true when |cached - SUM(ledger_entries)| >= MATCH_EPSILON
+  //     (the SAME tolerance the daily wallet-vs-ledger reconciliation uses).
+  //   - driftAmount: signed decimal string (`cached - ledgerSum`), present
+  //     ONLY when hasDrift is true. Omitted otherwise to keep the clean
+  //     case visually quiet on the wire.
+  // We deliberately do NOT auto-correct the cache here — surfacing drift is
+  // informational only; resolution is an admin workflow (see roadmap).
   app.get("/api/wallets", async (req, res) => {
     try {
       const { userId } = requireAuth(req);
-      const wallets = await storage.getWallets(userId);
-      res.json(wallets);
+      const walletRows = await storage.getWallets(userId);
+      const ledgerSums = await getUserLedgerSumsByCurrency(userId);
+      const enriched = walletRows.map((w: any) => annotateWalletWithDrift(w, ledgerSums));
+      res.json(enriched);
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to get wallets" });
@@ -2487,6 +2505,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get FX rates
   // Stale threshold — refresh runs every 15 min; if two cycles miss we flag as stale
   const FX_STALE_THRESHOLD_MS = 30 * 60 * 1000;
+
+  // -------------------------------------------------------------------------
+  // Task #22 — wallet balance transparency annotator
+  // -------------------------------------------------------------------------
+  // Pure function: takes a wallet row and the precomputed map of
+  // currency → SUM(ledger_entries) for the user, and returns the same row
+  // augmented with `balanceSource`, `hasDrift`, and (when hasDrift) the
+  // signed `driftAmount` decimal string. Lives at the route layer because
+  // the drift threshold is defined by the reconciliation service, and we
+  // want the same tolerance enforced everywhere — not duplicated.
+  // -------------------------------------------------------------------------
+  function annotateWalletWithDrift(
+    wallet: any,
+    ledgerSumsByCurrency: Map<string, string>,
+  ) {
+    const currency = String(wallet?.currency ?? "").toUpperCase();
+    const ledgerSumStr = ledgerSumsByCurrency.get(currency) ?? "0";
+    const cachedNum = Number(wallet?.balance ?? 0);
+    const ledgerNum = Number(ledgerSumStr);
+    const drift = cachedNum - ledgerNum;
+    const hasDrift = Math.abs(drift) >= MATCH_EPSILON;
+    const annotated: any = {
+      ...wallet,
+      balanceSource: "ledger" as const,
+      hasDrift,
+    };
+    if (hasDrift) annotated.driftAmount = drift.toFixed(8);
+    return annotated;
+  }
 
   function withStaleness(rate: any) {
     const updatedAt = rate.updatedAt ? new Date(rate.updatedAt) : null;

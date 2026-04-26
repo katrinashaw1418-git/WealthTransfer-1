@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useWallets } from "@/hooks/use-portfolio";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 
 const currencyConfig = {
   USD: { name: "US Dollar", symbol: "$", color: "bg-green-500" },
@@ -107,6 +108,26 @@ export default function CurrencyBalances() {
                       : `${config?.symbol || '$'}${balance.toLocaleString()}`
                     }
                   </p>
+                  {/* Task #22 — balance-source affordance.
+                     Mirrors the wording used on the Wallets page. */}
+                  <div className="mt-1 flex justify-end">
+                    {wallet.hasDrift ? (
+                      <Badge
+                        variant="destructive"
+                        className="text-[10px] px-1.5 py-0 leading-tight font-normal"
+                        data-testid={`badge-reconciliation-pending-${wallet.currency}`}
+                      >
+                        Reconciliation pending
+                      </Badge>
+                    ) : (
+                      <span
+                        className="text-[10px] text-muted-foreground"
+                        data-testid={`tag-balance-source-${wallet.currency}`}
+                      >
+                        Source: Ledger
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             );

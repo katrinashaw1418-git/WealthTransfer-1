@@ -44,7 +44,11 @@ import { getUserCurrencyBalance } from "./ledger";
 // (BTC/ETH) this is the native unit. A 0.01 BTC drift is materially larger
 // than a $0.01 AUD drift — Session 9 will introduce per-currency thresholds.
 // ---------------------------------------------------------------------------
-const MATCH_EPSILON = 0.01;          // below this: status = match
+// Exported so the wallet/balance API surface (Task #22) can reuse the SAME
+// drift tolerance the cron-driven wallet-vs-ledger reconciliation uses.
+// Introducing a second tolerance constant elsewhere would silently let the UI
+// disagree with the reconciliation page about whether a wallet is "clean".
+export const MATCH_EPSILON = 0.01;   // below this: status = match
 const SEVERITY_WARN = 1;             // ≥ $1: log a warning
 const SEVERITY_ALERT = 100;          // ≥ $100: alert (console.error)
 const SEVERITY_CRITICAL = 1000;      // ≥ $1000: critical (console.error + emphasis)

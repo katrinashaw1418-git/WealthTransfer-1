@@ -20,6 +20,23 @@
 //   withdrawal, ...) MUST post ledger entries first, then call
 //   refreshWalletCacheBalance() in the same DB transaction. Direct
 //   `tx.update(wallets).set({ balance, availableBalance })` is forbidden.
+//
+// Task #22 — postLedgerEntries() CALL SITES (settlement-only audit):
+//   The lifecycle rule above ("ledger entries are POSTED ONLY at settlement
+//   confirmation") is enforced by code, not by convention. As of this task,
+//   the complete set of callers is:
+//     1. server/routes.ts — handleDeposit (deposit settlement transaction)
+//     2. server/routes.ts — handleWithdraw (withdrawal settlement transaction)
+//   Both run inside a `db.transaction(...)` and only on the synchronous,
+//   atomic completion path — neither code path can reach postLedgerEntries()
+//   from a `pending` or `failed` branch, because the transaction row is
+//   inserted with status `completed` in the same transaction handle that
+//   posts the ledger pair. If you add a new caller, it MUST also originate
+//   from the settlement transition (not pending/failed) and MUST run inside
+//   the same DB transaction handle that did/will refresh the wallet cache.
+//   The same-transaction posting guard in postLedgerEntries() additionally
+//   refuses to insert a second balanced pair against an existing
+//   transactionId — see LedgerDoublePostError below.
 // =============================================================================
 
 import { and, eq, sql } from "drizzle-orm";
@@ -215,6 +232,32 @@ export async function getUserCurrencyBalance(
 
 const EPSILON = 1e-8;
 
+/**
+ * Task #22 — thrown by postLedgerEntries() when a caller tries to post a
+ * second balanced pair for a transactionId that already has any ledger
+ * entries. This is the safeguard against accidental double-posting from a
+ * retry, race, or refactor — without it, the second post would silently
+ * duplicate the impact and only surface as drift on the next reconciliation
+ * run. The error is named so callers/tests can assert on its identity
+ * rather than string-matching the message.
+ */
+export class LedgerDoublePostError extends Error {
+  readonly transactionId: number;
+  readonly existingEntryCount: number;
+  constructor(transactionId: number, existingEntryCount: number) {
+    super(
+      `Refusing to post ledger entries for transactionId=${transactionId}: ` +
+        `${existingEntryCount} ledger entr${existingEntryCount === 1 ? "y" : "ies"} ` +
+        `already exist for this transaction. Each transactionId may only be ` +
+        `posted once. To reverse, post the OPPOSITE pair against a fresh ` +
+        `transaction row.`
+    );
+    this.name = "LedgerDoublePostError";
+    this.transactionId = transactionId;
+    this.existingEntryCount = existingEntryCount;
+  }
+}
+
 export async function postLedgerEntries(
   transactionId: number,
   entries: LedgerEntryInput[],
@@ -250,6 +293,46 @@ export async function postLedgerEntries(
     throw new Error(
       `Ledger entries are not balanced: credits=${totalCredits}, debits=${totalDebits}`
     );
+  }
+
+  // -----------------------------------------------------------------------
+  // Task #22 — same-transaction posting guard.
+  // We perform this check INSIDE the caller's transaction handle so the
+  // COUNT and the INSERT live in the same snapshot. We deliberately count
+  // rows for this transactionId rather than relying on a unique index,
+  // because the schema permits N entries per transaction (a balanced pair
+  // is two, future FX flows may be more) — uniqueness lives at the
+  // transactionId level, not the per-row level.
+  //
+  // SCOPE OF PROTECTION:
+  //   - Catches the realistic failure modes this task targets: a retry of
+  //     the same settlement step, a refactor that accidentally calls
+  //     postLedgerEntries twice for one transaction row, or a stray
+  //     reposting from a job/handler that already settled.
+  //   - Both current callers (handleDeposit, handleWithdraw in
+  //     server/routes.ts) wrap this call in `db.transaction(...)` and
+  //     create the parent `transactions` row inside the same tx, so a
+  //     concurrent second poster on a parallel connection would not yet
+  //     see — let alone target — the same transactionId.
+  //
+  // KNOWN LIMITATION:
+  //   - The default Postgres isolation level is READ COMMITTED. If a
+  //     future caller invokes postLedgerEntries from two concurrent
+  //     connections against the SAME pre-existing transactionId, there is
+  //     a TOCTOU window between this COUNT and the INSERT below where
+  //     both could pass the guard. To close that window properly, run the
+  //     caller's tx at SERIALIZABLE / REPEATABLE READ, or add a
+  //     DB-enforced unique constraint at the transactionId level (e.g. a
+  //     posting-receipt table with `UNIQUE(transaction_id)` written in
+  //     the same tx as the ledger inserts).
+  // -----------------------------------------------------------------------
+  const [existing] = await (handle as any)
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, transactionId));
+  const existingCount = Number(existing?.count ?? 0);
+  if (existingCount > 0) {
+    throw new LedgerDoublePostError(transactionId, existingCount);
   }
 
   await (handle as any).insert(ledgerEntries).values(
@@ -308,4 +391,47 @@ export async function refreshWalletCacheBalance(
 
   if (!updated) return null;
   return { balance: ledgerSum };
+}
+
+// ---------------------------------------------------------------------------
+// Task #22 — bulk ledger-sum reader for the wallet/balance API surface
+// ---------------------------------------------------------------------------
+// Used by /api/wallets (and any future endpoint returning a per-currency
+// wallet breakdown) to compute the AUTHORITATIVE per-currency balance for
+// every currency the user has any ledger activity in, in a single query.
+//
+// Why bulk: a per-wallet getUserCurrencyBalance() loop would issue N round
+// trips to Postgres for what is fundamentally one GROUP BY. The wallet list
+// endpoint is on the hot path of the dashboard and refetches every few
+// seconds, so the round-trip count matters.
+//
+// Why not derive from the cache: the whole point of the transparency fields
+// is to expose disagreement between the ledger and the cache. Reading the
+// cache here would defeat that.
+// ---------------------------------------------------------------------------
+export async function getUserLedgerSumsByCurrency(
+  userId: number,
+  handle: DbHandle = db,
+): Promise<Map<string, string>> {
+  const rows: Array<{ currency: string; balance: string }> = await (handle as any)
+    .select({
+      currency: ledgerEntries.currency,
+      balance: sql<string>`
+        COALESCE(SUM(
+          CASE
+            WHEN ${ledgerEntries.direction} = 'credit' THEN ${ledgerEntries.amount}
+            ELSE -${ledgerEntries.amount}
+          END
+        ), 0)
+      `,
+    })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.userId, userId))
+    .groupBy(ledgerEntries.currency);
+
+  const map = new Map<string, string>();
+  for (const row of rows) {
+    map.set(String(row.currency).toUpperCase(), String(row.balance ?? "0"));
+  }
+  return map;
 }

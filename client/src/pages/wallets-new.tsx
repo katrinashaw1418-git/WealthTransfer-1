@@ -50,6 +50,33 @@ function CurrencyInitial({ currency }: { currency: string }) {
   );
 }
 
+// Task #22 — small balance-source affordance.
+// `Source: Ledger` (muted) when the cached wallet balance agrees with the
+// ledger sum; `Reconciliation pending` (destructive) when drift was
+// detected. The badge is informational only — it does NOT block any
+// action. Same wording pattern reused on the dashboard wallet list.
+function BalanceSourceTag({ wallet }: { wallet: any }) {
+  if (wallet?.hasDrift) {
+    return (
+      <Badge
+        variant="destructive"
+        className="text-[10px] px-1.5 py-0 leading-tight font-normal"
+        data-testid={`badge-reconciliation-pending-${wallet?.currency}`}
+      >
+        Reconciliation pending
+      </Badge>
+    );
+  }
+  return (
+    <span
+      className="text-[10px] text-muted-foreground"
+      data-testid={`tag-balance-source-${wallet?.currency}`}
+    >
+      Source: Ledger
+    </span>
+  );
+}
+
 export default function Wallets() {
   const { data: wallets = [], isLoading } = useWallets();
   const [displayCurrency, setDisplayCurrency] = useState('AUD');
@@ -203,6 +230,9 @@ export default function Wallets() {
                         <p className="font-mono text-gray-900">
                           {wallet.config?.symbol}{parseFloat(wallet.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </p>
+                        <div className="mt-1 flex justify-end">
+                          <BalanceSourceTag wallet={wallet} />
+                        </div>
                       </td>
                       <td className="p-4 text-right">
                         <HoldingValueDisplay wallet={wallet} displayCurrency={displayCurrency} />
@@ -254,6 +284,9 @@ export default function Wallets() {
                         <p className="font-mono text-gray-900">
                           {parseFloat(wallet.balance).toFixed(6)}
                         </p>
+                        <div className="mt-1 flex justify-end">
+                          <BalanceSourceTag wallet={wallet} />
+                        </div>
                       </td>
                       <td className="p-4 text-right">
                         <HoldingValueDisplay wallet={wallet} displayCurrency={displayCurrency} />
@@ -305,6 +338,9 @@ export default function Wallets() {
                         <p className="font-mono text-gray-900">
                           {parseFloat(wallet.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </p>
+                        <div className="mt-1 flex justify-end">
+                          <BalanceSourceTag wallet={wallet} />
+                        </div>
                       </td>
                       <td className="p-4 text-right">
                         <HoldingValueDisplay wallet={wallet} displayCurrency={displayCurrency} />
