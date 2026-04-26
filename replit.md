@@ -3,6 +3,22 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Task #38: Vitest test runner for money-movement tests
+
+Money-movement coverage was being added one tsx script at a time (`scripts/test-transaction-safety.ts`, the now-removed `scripts/test-ledger-double-post.ts`). That doesn't scale as we add cases for balanced-pair enforcement, multi-currency rejection, wallet cache refresh, withdrawal fee handling, etc. This task wires up vitest as the project's real test runner.
+
+**Config (`vitest.config.ts`)** — picks up `server/**/*.test.ts` and `shared/**/*.test.ts`, runs in the `node` environment, uses `pool: "forks"` with `fileParallel: false` (safe for tests that touch the shared dev database), and aliases `@shared`/`@assets` so co-located tests can use the same imports as the rest of the server. Per-test/hook timeouts bumped to 30s for db-backed cases.
+
+**Migrated test (`server/services/ledger.test.ts`)** — the standalone `scripts/test-ledger-double-post.ts` was rewritten as a vitest suite with the same two subtests:
+1. `postLedgerEntries()` throws `LedgerDoublePostError` on a repeat post via the global `db` handle (and the row count is unchanged, proving the guard fires before the insert).
+2. The same guard fires when the second post happens inside an outer `db.transaction(async tx => ...)` — the shape `handleDeposit`/`handleWithdraw` use — and the outer transaction rolls back so neither the parent `transactions` row nor any ledger entries survive.
+
+Cleanup is idempotent: the suite tracks any test users, transactions, ledger rows and the platform suspense account it had to create, and removes them in `afterAll`. Reruns against the same dev database stay green.
+
+**How to run**: `npx vitest run` (one-shot) or `npx vitest` (watch mode). Requires `DATABASE_URL` and `PLATFORM_USER_ID` to be set — both are present in dev. The npm alias `test` could not be added because `package.json` is environment-locked; ask to add `"test": "vitest run"` manually if desired.
+
+**Adding new money-movement tests**: drop a `*.test.ts` file alongside the service it covers (e.g. `server/services/fee-engine.test.ts`), import from `@shared/schema` and the service module, and follow the cleanup pattern in `ledger.test.ts` (track every row you create, delete in `afterAll`, never call `pool.end()`).
+
 ## Recent Changes (April 2026) — Build #3: Transaction lifecycle safety test
 
 A standalone test script that proves the integrity rails the deposit/withdraw money paths rely on, before any fee-engine money-movement work resumes. Hard-stop gate: if any of these fail, do not proceed to Gate B.
