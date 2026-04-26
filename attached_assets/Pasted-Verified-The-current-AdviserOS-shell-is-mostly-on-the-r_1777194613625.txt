@@ -1,0 +1,241 @@
+Verified. The current AdviserOS shell is mostly on the right track, but there are several important corrections before you treat it as institution-grade.
+
+Verdict
+Architecture direction: ✅ correct
+Adviser portal shell: ✅ good progress
+Read-only controls: ✅ mostly correct
+Workflow/business pages: ✅ useful
+Investment instructions: ⚠️ needs hardening
+Fee consent wording: ⚠️ needs legal precision
+FSG/legal copy: ❌ needs correction before release
+Product shelf: ⚠️ too crypto-heavy for retail adviser positioning
+
+Your pasted design aligns with the B2B2C adviser-layer model in the Wealth Planner design document: AMAX platform + linked advisers + client consent + no adviser fund movement.
+
+What is good
+
+The dashboard now has the right operating structure:
+
+Linked clients
+Open tasks
+Fee consents expiring
+Pending report requests
+Workflow priority
+Client book
+Scope of adviser access
+
+That is much better than a static dashboard. The disclaimer that advisers cannot move money, edit balances, change KYC, or execute advice actions is exactly the right control language.
+
+The portal navigation is also right:
+
+Practice:
+- Dashboard
+- Workflow
+- Business
+
+Clients:
+- Client book
+- Investment products
+- Instructions
+
+Operations:
+- Reports
+- Legal & compliance
+
+This feels like a true adviser operating shell, not just a client app copy.
+
+Critical corrections
+1. FSG says AMAX Wealth holds AFSL — but your model says external retail AFSL partner
+
+Your text says:
+
+AMAX Wealth holds the AFSL
+AMAX Wealth Pty Ltd is an Authorised Representative under an AFSL
+
+Those are different legal positions. You must choose one.
+
+If your plan is to cooperate with a retail AFSL wealth management company, safer wording is:
+
+AMAX Wealth operates as a technology and platform provider. Financial product advice is provided by authorised representatives of the relevant AFSL holder. Adviser access is subject to approval, client permissioning, and the adviser’s licensing arrangements.
+
+Do not say AMAX holds the AFSL unless the entity actually holds one.
+
+2. “Wholesale investors only” conflicts with your retail-client adviser plan
+
+You wrote:
+
+personal advice to wholesale clients only
+all products are available to wholesale investors only
+
+But your current strategy is:
+
+external financial planners provide advice for retail clients
+
+That conflict must be fixed.
+
+Use either:
+
+Version A — wholesale-only platform
+
+or:
+
+Version B — retail clients through AFSL partner
+
+For your current plan, use:
+
+Retail clients may access investment products only where appropriate advice, disclosures, consent and platform approvals have been completed through the relevant AFSL holder.
+3. Fee consent must include DBFO fields
+
+Netwealth’s own fee consent guidance states the renewal period runs from 60 days before to 150 days after the reference day, and ongoing arrangements must include reference day and termination date; Netwealth’s DBFO note also states account numbers and services are required fields for ongoing fee consent.
+
+So your feeConsents / fee UI should include:
+
+account number
+reference day
+termination date
+eligible services
+consent signed date
+expiry / termination date
+renewal status
+withdrawn at
+
+Right now the UI says “Fee consents expiring ≤30d”, which is fine for dashboard alerts, but the actual fee page must track the full 60-before / 150-after DBFO window.
+
+4. Investment instruction status shows “Consented” but says no funds move — good, but harden it
+
+This is acceptable only if:
+
+consented = terminal holding status for now
+
+Do not allow:
+
+consented → processing
+processing → completed
+
+until you build the execution worker and approval controls.
+
+Add copy:
+
+Client consent has been recorded. This instruction has not been executed. Processing remains disabled until AMAX platform approval and execution controls are enabled.
+5. Product shelf is too crypto/digital-asset heavy
+
+Your listed products:
+
+Web3 Innovation Fund
+Ethereum Staking Fund
+Bitcoin Tracker Fund
+
+This makes the adviser portal look like a crypto platform, not a Netwealth-style wealth platform.
+
+For a retail AFSL planner channel, rebalance the product shelf:
+
+Core Income Portfolio
+Australian Property Income Fund
+Corporate Credit Fund
+Global Multi-Asset Portfolio
+Cash Plus / Treasury Portfolio
+Digital Assets Strategy — restricted / specialist only
+
+Digital assets should be a specialist sleeve, not the lead product category.
+
+6. Product return language is risky
+
+You show:
+
+Target Net IRR 25–35%
+Target Net IRR 15.0%
+
+That is dangerous on a product shelf unless supported by formal offer documents and risk disclosures.
+
+Better labels:
+
+Target return range
+Illustrative target only
+Not guaranteed
+See PDS/IM
+
+For retail-facing/adviser-facing display, add:
+
+Targets are not forecasts or guarantees. Actual returns may be materially lower and capital loss is possible.
+7. “AMAX does not hold client funds” conflicts with “AMAX holds cash custody”
+
+The Wealth Planner document says AMAX holds cash custody; other copy says AMAX does not hold client funds.
+
+You need one consistent model:
+
+Client funds are held with regulated banking, custody, fund or product counterparties. AMAX records platform entitlements and instructions but does not hold client money as beneficial owner.
+Page-by-page advice
+Dashboard
+
+Keep, but add:
+
+Pending client consents
+Reports due this week
+Fee renewal window
+Recently funded clients
+Workflow
+
+Good. Rename:
+
+Awaiting client consent
+
+to:
+
+Client consent required
+
+More action-oriented.
+
+Business
+
+Good, but change:
+
+revenue figures are estimates
+
+to:
+
+fee estimates are indicative only and subject to active client consent, platform approval, deduction processing and reconciliation.
+Clients
+
+Good. Add columns later:
+
+Last activity
+Next review
+Consent status
+Pending instructions
+Products
+
+Needs rebalancing. Lead with traditional wealth products, not crypto.
+
+Instructions
+
+Good shell. Add hard stop wording for consented-but-not-executed.
+
+Reports
+
+Good. Next improvement: show report types:
+
+Portfolio summary
+Client activity
+Fee consent
+Product exposure
+Legal & compliance
+
+Needs legal rewrite before any live use.
+
+Recommended next action
+
+Do not build fee deduction yet.
+
+Do this next:
+
+1. Fix FSG/legal wording to match actual AFSL partner model.
+2. Rebalance investment product shelf away from crypto-first positioning.
+3. Harden instruction status copy: consented ≠ executed.
+4. Add full DBFO fee consent fields.
+5. Add client activity timeline to client detail.
+
+Final advice:
+
+Your AdviserOS shell is alive now.
+Next job is not more UI.
+Next job is legal consistency + product shelf credibility + consent hardening.

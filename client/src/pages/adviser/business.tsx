@@ -107,8 +107,9 @@ export default function AdviserBusiness() {
         </h1>
         <p className="text-sm text-slate-500 mt-1 max-w-2xl">
           Read-only snapshot of your client book — assets under advice, tier mix, KYC and fee
-          consent coverage. All revenue figures are estimates derived from active fee consents and
-          do not represent settled income.
+          consent coverage. Fee estimates are indicative only and subject to active client
+          consent, AMAX platform approval, deduction processing and reconciliation. They do
+          not represent settled income.
         </p>
       </div>
 

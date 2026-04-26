@@ -99,7 +99,7 @@ type CreateInstructionForm = z.infer<typeof createInstructionFormSchema>;
 function statusBadge(status: string) {
   const map: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string }> = {
     pending_consent: { variant: "secondary", label: "Pending consent" },
-    consented: { variant: "default", label: "Consented" },
+    consented: { variant: "default", label: "Consent recorded" },
     processing: { variant: "secondary", label: "Processing" },
     completed: { variant: "default", label: "Completed" },
     rejected: { variant: "destructive", label: "Rejected" },
@@ -176,6 +176,18 @@ export default function AdviserInstructions() {
 
   return (
     <div className="p-6 space-y-6" data-testid="page-adviser-instructions">
+      <div
+        className="flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700"
+        data-testid="instructions-hardening-notice"
+      >
+        <ShieldAlert className="h-4 w-4 text-slate-600 flex-shrink-0 mt-0.5" />
+        <p>
+          <span className="font-medium">Consent recorded ≠ executed.</span> When a client approves
+          an instruction, AMAX records the consent and audit trail. The instruction is{" "}
+          <span className="font-medium">not</span> placed with the fund manager and no funds move
+          until AMAX platform approval and execution controls are enabled.
+        </p>
+      </div>
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">

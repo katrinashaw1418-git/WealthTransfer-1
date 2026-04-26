@@ -88,7 +88,21 @@ export default function AdviserProducts() {
         <h1 className="text-2xl font-bold text-gray-900">Investment Products</h1>
         <p className="text-sm text-gray-500 mt-1">
           AMAX-issued product shelf. Read-only — to allocate, raise an investment
-          instruction with the client (coming soon).
+          instruction with the client.
+        </p>
+      </div>
+
+      <div
+        className="flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700"
+        data-testid="products-disclaimer"
+      >
+        <AlertCircle className="h-4 w-4 text-slate-600 flex-shrink-0 mt-0.5" />
+        <p>
+          <span className="font-medium">Targets are illustrative, not forecasts.</span> Net IRR and
+          return ranges shown are target ranges only and are not guarantees. Actual returns may be
+          materially lower and capital loss is possible. See the relevant PDS / IM before
+          recommending. Digital-asset strategies are a specialist sleeve and require additional
+          suitability assessment.
         </p>
       </div>
 
@@ -132,7 +146,7 @@ export default function AdviserProducts() {
               <CardContent className="flex-1">
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
                   <div>
-                    <dt className="text-xs uppercase text-gray-500">Target Net IRR</dt>
+                    <dt className="text-xs uppercase text-gray-500">Target Net IRR (illustrative)</dt>
                     <dd className="font-semibold tabular-nums" data-testid={`text-irr-${p.id}`}>
                       {p.targetNetIrr ? `${p.targetNetIrr}%` : "—"}
                     </dd>

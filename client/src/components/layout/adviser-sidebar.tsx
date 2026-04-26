@@ -17,7 +17,7 @@ import {
   ChevronRight,
   type LucideIcon,
 } from "lucide-react";
-import amaxLogo from "@assets/AMAX_LOGO_BLUE_1776303944567.jpg";
+import amaxLogo from "@assets/DARK_BLUE_LOGO_1777194543796.jpg";
 
 interface AdviserSidebarProps {
   isOpen: boolean;
@@ -76,7 +76,7 @@ function SidebarBody() {
       {/* Brand */}
       <div className="px-6 py-5 border-b border-slate-800">
         <div className="flex items-center gap-3">
-          <img src={amaxLogo} alt="AMAX Wealth" className="w-11 h-11 rounded-md ring-1 ring-slate-700" />
+          <img src={amaxLogo} alt="AMAX Wealth" className="w-11 h-11 rounded-md" />
           <div>
             <h1 className="text-base font-bold tracking-wide text-white">AMAX WEALTH</h1>
             <p className="text-[11px] uppercase tracking-wider text-white/80">Adviser Portal</p>

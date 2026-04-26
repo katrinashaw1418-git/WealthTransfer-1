@@ -230,7 +230,7 @@ export default function AdviserDashboard() {
               <div className="flex items-center gap-2 mb-2">
                 <ClipboardCheck className="h-3.5 w-3.5 text-sky-500" />
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-                  Awaiting client consent
+                  Client consent required
                 </p>
                 <Badge variant="secondary" className="ml-auto">
                   {pendingInstructions.length}

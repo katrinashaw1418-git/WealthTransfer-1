@@ -139,8 +139,8 @@ export default function AdviserWorkflow() {
           Workflow
         </h1>
         <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-          Your live priority queue. Open tasks, instructions awaiting client consent, and the items
-          that need attention this week — in one place.
+          Your live priority queue. Open tasks, instructions requiring client consent, and the
+          items that need attention this week — in one place.
         </p>
       </div>
 
@@ -162,7 +162,7 @@ export default function AdviserWorkflow() {
         </Card>
         <Card className="border-sky-200 bg-sky-50/40">
           <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-600">Awaiting client consent</CardTitle>
+            <CardTitle className="text-sm font-medium text-slate-600">Client consent required</CardTitle>
             <ClipboardCheck className="h-4 w-4 text-sky-500" />
           </CardHeader>
           <CardContent>
@@ -211,7 +211,7 @@ export default function AdviserWorkflow() {
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="text-base flex items-center gap-2">
             <ClipboardCheck className="h-4 w-4 text-sky-500" />
-            Instructions awaiting client consent
+            Instructions requiring client consent
           </CardTitle>
           <Link href="/adviser/instructions">
             <Button variant="outline" size="sm" data-testid="button-view-all-instructions">

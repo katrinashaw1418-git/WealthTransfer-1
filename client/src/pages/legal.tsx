@@ -7,15 +7,15 @@ import { Download } from "lucide-react";
 const fsgSections = [
   {
     title: null,
-    text: "AMAX Wealth Pty Ltd (AMAX Wealth) operates as an Authorised Representative (AR Number: [AR Number]) under an Australian Financial Services Licence (AFSL Number: [AFSL Number]). AMAX Wealth provides financial product information and, where authorised, personal financial product advice to wholesale clients only as defined under the Corporations Act 2001 (Cth) s761G.",
+    text: "AMAX Wealth Pty Ltd (AMAX Wealth) operates as an Authorised Representative (AR Number: [AR Number]) under an Australian Financial Services Licence (AFSL Number: [AFSL Number]). AMAX Wealth provides financial product information and, where authorised, personal financial product advice to clients in accordance with the licensing arrangements of the relevant AFSL holder. Retail clients access advice through authorised representatives operating under that AFSL; wholesale client status is determined under the Corporations Act 2001 (Cth) s761G.",
   },
   {
     title: "Financial product advice",
-    text: "AMAX Wealth provides general financial product information and, following completion of a fact-find and preparation of a Statement of Advice (SOA), personal financial product advice. Personal advice is provided only to verified wholesale investors.",
+    text: "AMAX Wealth provides general financial product information and, following completion of a fact-find and preparation of a Statement of Advice (SOA), personal financial product advice. Personal advice is provided to clients onboarded under the relevant AFSL holder's authorisation, including wholesale investors and retail clients accessing the platform through authorised representatives.",
   },
   {
     title: "Investment product access",
-    text: "AMAX Wealth provides access to structured investment products including real estate equity funds, corporate credit funds, and digital asset strategies. All products are available to wholesale investors only. Investment instructions are executed by external fund managers — AMAX Wealth does not hold client funds.",
+    text: "AMAX Wealth provides access to structured investment products including real estate equity funds, corporate credit funds, and digital asset strategies. Product availability is subject to client classification, suitability and the licensing arrangements of the relevant AFSL holder; retail clients may access products only where appropriate advice, disclosures and consents have been completed through an authorised representative. Investment instructions are executed by external fund managers — AMAX Wealth does not hold client funds.",
   },
   {
     title: "FX exchange",
@@ -51,9 +51,9 @@ const privacySections = [
 ];
 
 const termsOfService = [
-  { num: 1, title: "Nature of services", text: "AMAX Wealth Pty Ltd operates as an Authorised Representative under an AFSL. Services are provided to wholesale clients only under the Corporations Act 2001 (Cth). General information on the platform does not constitute personal financial product advice." },
+  { num: 1, title: "Nature of services", text: "AMAX Wealth Pty Ltd operates as an Authorised Representative under an AFSL. Services are provided in accordance with the relevant AFSL holder's licensing arrangements, including to wholesale clients (Corporations Act 2001 (Cth) s761G) and to retail clients accessing the platform through authorised representatives. General information on the platform does not constitute personal financial product advice." },
   { num: 2, title: "No personal advice without SOA", text: "Personal financial product advice is only provided following a full fact-find and delivery of a Statement of Advice (SOA) by a licensed adviser. You must not act on any information on the platform as personal advice without a current SOA." },
-  { num: 3, title: "Wholesale investor status", text: "By accessing this platform you confirm you are a wholesale investor under s761G of the Corporations Act 2001 (Cth). You must notify AMAX Wealth immediately if your wholesale investor status changes." },
+  { num: 3, title: "Client classification", text: "Where applicable, by accessing this platform you confirm you are either a wholesale investor under s761G of the Corporations Act 2001 (Cth) or a retail client onboarded by an authorised representative operating under the relevant AFSL. You must notify AMAX Wealth immediately if your client classification changes." },
   { num: 4, title: "Investment risk", text: "All investments carry risk including possible loss of capital. Past performance is not a reliable indicator of future performance. Target returns are indicative only and are not guaranteed." },
   { num: 5, title: "Custody of assets", text: "AMAX Wealth does not hold client funds or assets. All investments are held with external regulated custodians or fund managers. AMAX Wealth provides instruction, reporting, and advisory services only." },
   { num: 6, title: "AI-generated content", text: "AI-generated market insights are general information only. They do not constitute regulated financial product advice and do not take into account your personal circumstances." },
@@ -64,7 +64,7 @@ const termsOfService = [
 const regulatoryRows = [
   { label: "AMAX Wealth Pty Ltd", value: "Authorised Representative under Australian Financial Services Licence" },
   { label: "AUSTRAC registration", value: "AMAX Global Pty Ltd — Digital currency exchange and remittance provider" },
-  { label: "Client classification", value: "Wholesale client — Corporations Act 2001 (Cth) s761G" },
+  { label: "Client classification", value: "Wholesale (s761G) and eligible retail clients onboarded via authorised representatives" },
   { label: "Dispute resolution", value: "AFCA member — Australian Financial Complaints Authority" },
   { label: "Record keeping", value: "s912A Corporations Act 2001 (Cth) — 7-year minimum retention" },
   { label: "Privacy", value: "Privacy Act 1988 (Cth) — Australian Privacy Principles apply" },
@@ -76,7 +76,7 @@ const riskItems = [
   { num: 3, title: "Liquidity risk", text: "Some investment products have lock-up periods or limited redemption windows. You may be unable to access your funds on short notice. Always ensure you maintain sufficient liquid reserves outside your AMAX Wealth investments." },
   { num: 4, title: "Credit risk", text: "Fixed-income products are subject to the credit risk of the issuer. A downgrade or default may result in partial or total loss of invested capital. Credit ratings are provided as guidance only and are not guarantees of performance." },
   { num: 5, title: "Concentration risk", text: "Concentrating investments in a single asset class, sector, or geography increases vulnerability to adverse events. A diversified portfolio aligned to your risk tolerance may reduce concentration exposure — discuss with your adviser." },
-  { num: 6, title: "Technology and digital asset risk", text: "Digital assets and crypto investments are subject to additional risks including regulatory uncertainty, technological failures, smart contract vulnerabilities, and extreme price volatility. These products are available to wholesale investors only and carry the possibility of total loss of capital." },
+  { num: 6, title: "Technology and digital asset risk", text: "Digital assets and crypto investments are subject to additional risks including regulatory uncertainty, technological failures, smart contract vulnerabilities, and extreme price volatility. These products are a specialist sleeve, are available only where the relevant AFSL authorisation and client suitability assessment permits, and carry the possibility of total loss of capital." },
   { num: 7, title: "AI-generated content limitations", text: "AI tools on this platform provide general information only. They do not constitute regulated financial product advice under the Corporations Act 2001 (Cth). Always consult a licensed financial adviser before making investment decisions based on AI-generated content." },
   { num: 8, title: "Regulatory risk", text: "Changes in law, tax treatment, or regulatory requirements may adversely affect your investments. AMAX Wealth monitors regulatory developments and will notify clients of material changes affecting their holdings." },
 ];
@@ -315,7 +315,7 @@ export default function Legal() {
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="font-semibold text-blue-900 mb-1">Need an Information Memorandum?</p>
-              <p className="text-sm text-blue-800">Product IMs are available to verified wholesale investors on request. Contact your adviser or submit a request via the platform.</p>
+              <p className="text-sm text-blue-800">Product IMs are available to verified clients on request. Contact your adviser or submit a request via the platform.</p>
             </div>
           </div>
         </TabsContent>
@@ -348,7 +348,7 @@ export default function Legal() {
           </div>
         </div>
         <div className="mt-6 pt-4 border-t border-gray-100 text-xs text-gray-400">
-          <p>© 2025 AMAX Wealth Pty Ltd. All rights reserved. Wholesale investors only —</p>
+          <p>© 2025 AMAX Wealth Pty Ltd. All rights reserved. Eligible clients only —</p>
           <p>Authorised Representative under an Australian Financial Services Licence arrangement.</p>
         </div>
       </footer>
