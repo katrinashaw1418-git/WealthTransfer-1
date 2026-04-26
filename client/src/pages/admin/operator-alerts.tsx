@@ -29,7 +29,8 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Siren, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { Siren, ChevronLeft, ChevronRight, X, Copy } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 type Severity = "info" | "warning" | "alert" | "critical";
 
@@ -103,7 +104,39 @@ function normalizeSeverity(raw: string | null): string {
   return SEVERITY_ANY;
 }
 
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.clipboard &&
+      typeof navigator.clipboard.writeText === "function"
+    ) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to the textarea fallback
+  }
+  if (typeof document === "undefined") return false;
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-1000px";
+    textarea.style.left = "-1000px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export default function AdminOperatorAlerts() {
+  const { toast } = useToast();
   // Read filters from the querystring once, on first render — the dashboard
   // tile links here with `?severity=critical` (etc.) so admins land on a
   // pre-filtered view. We deliberately don't subscribe to live querystring
@@ -172,6 +205,24 @@ export default function AdminOperatorAlerts() {
     : "";
   const selectedOutcomes = selectedAlert?.channelOutcomes ?? [];
   const selectedAttempted = selectedAlert?.channelsAttempted ?? [];
+
+  async function handleCopy(text: string, label: string) {
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      toast({
+        title: `${label} copied`,
+        description: "The text is now on your clipboard.",
+        duration: 2500,
+      });
+    } else {
+      toast({
+        title: `Couldn't copy ${label.toLowerCase()}`,
+        description: "Your browser blocked clipboard access. Try selecting and copying manually.",
+        variant: "destructive",
+        duration: 4000,
+      });
+    }
+  }
 
   return (
     <div className="space-y-4 max-w-7xl">
@@ -398,9 +449,29 @@ export default function AdminOperatorAlerts() {
               <ScrollArea className="flex-1">
                 <div className="px-6 py-4 space-y-6">
                   <section>
-                    <h3 className="text-sm font-semibold text-slate-900 mb-2">
-                      Details
-                    </h3>
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Details
+                      </h3>
+                      {selectedAlert.details !== null &&
+                        selectedAlert.details !== undefined && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs gap-1"
+                            onClick={() =>
+                              handleCopy(
+                                prettyJson(selectedAlert.details),
+                                "JSON",
+                              )
+                            }
+                            data-testid="button-copy-detail-payload"
+                          >
+                            <Copy className="h-3 w-3" />
+                            Copy JSON
+                          </Button>
+                        )}
+                    </div>
                     {selectedAlert.details === null ||
                     selectedAlert.details === undefined ? (
                       <p
@@ -481,7 +552,30 @@ export default function AdminOperatorAlerts() {
                                   className="font-mono text-slate-800 break-words whitespace-pre-wrap"
                                   data-testid={`outcome-error-${channelLabel}`}
                                 >
-                                  {outcome.error ? outcome.error : "—"}
+                                  {outcome.error ? (
+                                    <div className="flex items-start justify-between gap-2">
+                                      <span className="min-w-0 flex-1">
+                                        {outcome.error}
+                                      </span>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-6 w-6 p-0 shrink-0"
+                                        onClick={() =>
+                                          handleCopy(
+                                            outcome.error ?? "",
+                                            "Error",
+                                          )
+                                        }
+                                        title="Copy error"
+                                        data-testid={`button-copy-error-${channelLabel}`}
+                                      >
+                                        <Copy className="h-3 w-3" />
+                                      </Button>
+                                    </div>
+                                  ) : (
+                                    "—"
+                                  )}
                                 </dd>
                               </dl>
                             </div>
