@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/auth";
 import Layout from "@/components/layout/layout";
+import AdviserLayout from "@/components/layout/adviser-layout";
 import Landing from "@/pages/landing";
 import Dashboard from "@/pages/dashboard";
 import WalletsNew from "@/pages/wallets-new";
@@ -33,35 +34,42 @@ import AdviserTasks from "@/pages/adviser/tasks";
 import AdviserReports from "@/pages/adviser/reports";
 import AdviserProducts from "@/pages/adviser/products";
 import AdviserInstructions from "@/pages/adviser/instructions";
+import AdviserWorkflow from "@/pages/adviser/workflow";
+import AdviserBusiness from "@/pages/adviser/business";
 import ClientInstructions from "@/pages/client-instructions";
 import { Loader2 } from "lucide-react";
 
-function ProtectedApp() {
-  const { isAuthenticated, isLoading, token } = useAuth();
-  const [, navigate] = useLocation();
+// -----------------------------------------------------------------------------
+// Two distinct portals, picked by user role:
+//   - Advisers see <AdviserLayout> with the dark sidebar + top search shell and
+//     adviser-only routes registered.
+//   - Everyone else (regular clients) keeps the original <Layout> and the
+//     client-app routes — the existing client app stays untouched.
+// Shared `/legal` route is registered in both shells so each user sees it
+// inside their own portal chrome.
+// -----------------------------------------------------------------------------
+function AdviserApp() {
+  return (
+    <AdviserLayout>
+      <Switch>
+        <Route path="/adviser/dashboard" component={AdviserDashboard} />
+        <Route path="/adviser/workflow" component={AdviserWorkflow} />
+        <Route path="/adviser/business" component={AdviserBusiness} />
+        <Route path="/adviser/clients" component={AdviserClients} />
+        <Route path="/adviser/clients/:id/holdings" component={AdviserClientHoldings} />
+        <Route path="/adviser/clients/:id" component={AdviserClientDetail} />
+        <Route path="/adviser/products" component={AdviserProducts} />
+        <Route path="/adviser/instructions" component={AdviserInstructions} />
+        <Route path="/adviser/tasks" component={AdviserTasks} />
+        <Route path="/adviser/reports" component={AdviserReports} />
+        <Route path="/legal" component={Legal} />
+        <Route component={NotFound} />
+      </Switch>
+    </AdviserLayout>
+  );
+}
 
-  useEffect(() => {
-    if (!isLoading && !isAuthenticated && !token) {
-      navigate("/", { replace: true });
-    }
-  }, [isLoading, isAuthenticated, token]);
-
-  if (isLoading || (!isAuthenticated && token)) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
-        <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
-        <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
-      </div>
-    );
-  }
-
+function ClientApp() {
   return (
     <Layout>
       <Switch>
@@ -73,21 +81,46 @@ function ProtectedApp() {
         <Route path="/compliance" component={Compliance} />
         <Route path="/investments" component={Investments} />
         <Route path="/legal" component={Legal} />
-        {/* Session 9: adviser overlay routes. Backend enforces role gating; */}
-        {/* the sidebar is also role-aware so non-advisers won't see these. */}
-        <Route path="/adviser/dashboard" component={AdviserDashboard} />
-        <Route path="/adviser/clients" component={AdviserClients} />
-        <Route path="/adviser/clients/:id/holdings" component={AdviserClientHoldings} />
-        <Route path="/adviser/clients/:id" component={AdviserClientDetail} />
-        <Route path="/adviser/products" component={AdviserProducts} />
-        <Route path="/adviser/instructions" component={AdviserInstructions} />
-        <Route path="/adviser/tasks" component={AdviserTasks} />
-        <Route path="/adviser/reports" component={AdviserReports} />
         <Route path="/client/instructions" component={ClientInstructions} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
   );
+}
+
+function ProtectedApp() {
+  const { isAuthenticated, isLoading, token, user } = useAuth();
+  const [location, navigate] = useLocation();
+
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated && !token) {
+      navigate("/", { replace: true });
+    }
+  }, [isLoading, isAuthenticated, token]);
+
+  // If the user is an adviser but the URL is a non-adviser path (e.g. they
+  // bookmarked /dashboard), bounce them to the adviser shell entry. Same in
+  // reverse for a client landing on /adviser/*.
+  useEffect(() => {
+    if (!isAuthenticated || !user) return;
+    const isAdviser = user.role === "adviser";
+    if (isAdviser && !location.startsWith("/adviser") && !location.startsWith("/legal")) {
+      navigate("/adviser/dashboard", { replace: true });
+    }
+    if (!isAdviser && location.startsWith("/adviser")) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [isAuthenticated, user, location]);
+
+  if (isLoading || (!isAuthenticated && token) || !isAuthenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
+      </div>
+    );
+  }
+
+  return user?.role === "adviser" ? <AdviserApp /> : <ClientApp />;
 }
 
 function Router() {

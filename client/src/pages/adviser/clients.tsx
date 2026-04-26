@@ -1,5 +1,6 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -50,6 +51,23 @@ export default function AdviserClients() {
   const { data, isLoading } = useQuery<AdviserClientRow[]>({
     queryKey: ["/api/adviser/clients"],
   });
+  // useSearch subscribes to the live querystring; useLocation only tracks
+  // pathname, which would miss ?q= updates when only the query changes.
+  const searchString = useSearch();
+
+  const query = useMemo(() => {
+    const params = new URLSearchParams(searchString);
+    return (params.get("q") ?? "").toLowerCase().trim();
+  }, [searchString]);
+
+  const filtered = useMemo(() => {
+    const rows = data ?? [];
+    if (!query) return rows;
+    return rows.filter((r) => {
+      const hay = `${r.firstName} ${r.lastName} ${r.email}`.toLowerCase();
+      return hay.includes(query);
+    });
+  }, [data, query]);
 
   return (
     <div className="p-6 space-y-6" data-testid="page-adviser-clients">
@@ -57,6 +75,12 @@ export default function AdviserClients() {
         <h1 className="text-2xl font-bold text-gray-900">Linked Clients</h1>
         <p className="text-sm text-gray-500 mt-1">
           Read-only view. Click a row to see KYC, fee consents and recent advice records.
+          {query ? (
+            <>
+              {" "}Filtering by{" "}
+              <span className="font-medium text-slate-700">"{query}"</span>.
+            </>
+          ) : null}
         </p>
       </div>
 
@@ -64,7 +88,9 @@ export default function AdviserClients() {
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <Users className="h-4 w-4 text-sky-500" />
-            {isLoading ? "Loading…" : `${data?.length ?? 0} linked client${data?.length === 1 ? "" : "s"}`}
+            {isLoading
+              ? "Loading…"
+              : `${filtered.length} of ${data?.length ?? 0} linked client${data?.length === 1 ? "" : "s"}`}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -78,6 +104,10 @@ export default function AdviserClients() {
             <p className="text-sm text-gray-500" data-testid="text-no-clients">
               No clients are linked to your adviser account yet. The platform team links clients
               via the partner-AFSL onboarding flow.
+            </p>
+          ) : filtered.length === 0 ? (
+            <p className="text-sm text-gray-500" data-testid="text-no-search-results">
+              No clients match "{query}".
             </p>
           ) : (
             <Table>
@@ -93,7 +123,7 @@ export default function AdviserClients() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.map((row) => (
+                {filtered.map((row) => (
                   <TableRow key={row.userId} data-testid={`row-client-${row.userId}`}>
                     <TableCell>
                       <div className="font-medium text-gray-900">

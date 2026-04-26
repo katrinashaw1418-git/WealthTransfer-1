@@ -14,6 +14,33 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 10C-shell (Dedicated Adviser Portal Shell)
+
+Goal: Give advisers a distinct portal experience without touching the existing client app. Phase 3 (10C — fee engine, real money) remains gated.
+
+### Layout split by user role
+- New `client/src/components/layout/adviser-layout.tsx` — sticky topbar with search form (submits to `/adviser/clients?q=…`), "Authorised Representative" role badge, notifications bell, user pill, logout. Reads the live querystring via wouter's `useSearch()` so the field stays in sync when only `?q=` changes.
+- New `client/src/components/layout/adviser-sidebar.tsx` — slate-900/amber theme, sectioned navigation (Practice / Clients / Operations). Mobile sheet has a visually-hidden `SheetTitle` for a11y.
+- `client/src/App.tsx` rewritten: `ProtectedApp` picks `<AdviserApp>` when `user.role === "adviser"`, otherwise `<ClientApp>` (which keeps the original `<Layout>`). Bidirectional bounce: an adviser landing on a non-adviser path goes to `/adviser/dashboard`; a client landing on `/adviser/*` goes to `/dashboard`. `/legal` registered in BOTH shells so each role keeps their portal chrome.
+- Existing `client/src/components/layout/sidebar.tsx`, `layout.tsx`, and all client pages are unchanged.
+
+### New adviser pages
+- `client/src/pages/adviser/workflow.tsx` — priority strip (open tasks / awaiting consent / fee consents expiring ≤30d / pending reports) + pending-instructions table + open-tasks table sorted by priority with a complete-task action.
+- `client/src/pages/adviser/business.tsx` — book snapshot: total AUM, linked clients, KYC coverage, active fee consents, tier composition bars, top-5 clients by portfolio value. Read-only with disclosures.
+- `client/src/pages/adviser/dashboard.tsx` rewritten to add a workflow priority panel (top pending consents + top open tasks) and a client book snapshot (total AUM + top 5 portfolios). The "Open tasks" headline card now links to `/adviser/workflow`.
+- `client/src/pages/adviser/clients.tsx` reads `?q=` via `useSearch()` and filters its rows by name/email substring match.
+
+### Backend posture
+No new backend endpoints in this shell change. The new pages compose existing endpoints (`/api/adviser/{dashboard,clients,tasks,instructions}`) client-side. This keeps the surface area small and avoids regressions in the 10B-PASSed adviser/client API.
+
+### Hard-gate integrity preserved
+No money-movement code paths added. `/adviser/business` surfaces AUM and consent counts only — no fee deduction, wallet write, or execution path. 10C (fee engine) still requires explicit go-ahead.
+
+### NaN / numeric safety
+Both new pages use a local `safeNum()` helper that falls back to `0` for non-finite values, so malformed numeric strings can't poison sort order or `Intl.NumberFormat` output.
+
+---
+
 ## Recent Changes (April 2026) — Session 10B (Investment Instruction Flow + Client Consent Gate)
 
 User authorised Phase 1 (transactions tab on the adviser's client-detail view) and Phase 2 (10B — investment instructions with a hard client-consent gate). Phase 3 (10C — fee engine, real money movement) **remains gated** and requires explicit go-ahead. No cash leaves a client wallet in 10B; `consented` is the terminal state for this session.
