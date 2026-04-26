@@ -46,6 +46,7 @@ export interface IStorage {
   createAiRecommendation(recommendation: InsertAiRecommendation): Promise<AiRecommendation>;
   markRecommendationAsRead(id: number, userId: number): Promise<void>;
   clearAiRecommendations(userId: number): Promise<void>;
+  supersedeAiRecommendations(userId: number): Promise<void>;
 
   // Investment Products
   getInvestmentProducts(filters?: { category?: string; riskProfile?: string; liquidity?: string }): Promise<InvestmentProduct[]>;
@@ -2552,7 +2553,10 @@ export class MemStorage implements IStorage {
         isRead: false,
         createdAt: new Date(),
       },
-    ];
+    ].map(r => ({
+      ...r,
+      description: r.description + " — GENERAL ADVICE WARNING: This information is general advice only and does not consider your personal objectives, financial situation, or needs. Before acting, you must obtain a Statement of Advice (SOA) from a licensed adviser. AMAX Wealth does not authorise execution on any AI-generated insight without an issued SOA.",
+    }));
     this.aiRecommendations.set(1, demoRecommendations);
 
     // Create demo investment products
@@ -3152,6 +3156,12 @@ export class MemStorage implements IStorage {
     this.aiRecommendations.set(userId, []);
   }
 
+  async supersedeAiRecommendations(userId: number): Promise<void> {
+    const userRecommendations = this.aiRecommendations.get(userId) || [];
+    const updated = userRecommendations.map((r: AiRecommendation) => ({ ...r, isRead: true }));
+    this.aiRecommendations.set(userId, updated);
+  }
+
   // Investment Product methods
   async getInvestmentProducts(filters?: { category?: string; riskProfile?: string; liquidity?: string }): Promise<InvestmentProduct[]> {
     const products = Array.from(this.investmentProducts.values()).filter(product => product.isActive);
@@ -3428,6 +3438,12 @@ export class DatabaseStorage implements IStorage {
 
   async clearAiRecommendations(userId: number): Promise<void> {
     await db.delete(aiRecommendations).where(eq(aiRecommendations.userId, userId));
+  }
+
+  async supersedeAiRecommendations(userId: number): Promise<void> {
+    await db.update(aiRecommendations)
+      .set({ isRead: true })
+      .where(eq(aiRecommendations.userId, userId));
   }
 
   // Investment Products

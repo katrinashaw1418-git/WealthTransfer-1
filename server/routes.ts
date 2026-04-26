@@ -2052,7 +2052,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { riskTolerance, investmentHorizon, investmentGoal } = req.body;
       const { userId } = requireAuth(req);
-      
+      await requireKyc(userId, storage);
+
       // Get current portfolio allocation data
       const wallets = await storage.getWallets(userId);
       const investments = await storage.getUserInvestments(userId);
@@ -2329,17 +2330,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
       
-      // Clear existing recommendations and set new ones
-      await storage.clearAiRecommendations(userId);
-      for (const recommendation of recommendations) {
+      // Append mandatory general advice warning to every recommendation description
+      // (RG 244 — disclaimer alone does not make personal advice general; see compliance gate before execution)
+      const GENERAL_ADVICE_WARNING = " — GENERAL ADVICE WARNING: This information is general advice only and does not consider your personal objectives, financial situation, or needs. Before acting, you must obtain a Statement of Advice (SOA) from a licensed adviser. AMAX Wealth does not authorise execution on any AI-generated insight without an issued SOA.";
+      const decoratedRecommendations = recommendations.map(r => ({
+        ...r,
+        description: r.description + GENERAL_ADVICE_WARNING,
+      }));
+
+      // Supersede prior recommendations (mark as read) instead of deleting — preserves audit trail
+      await storage.supersedeAiRecommendations(userId);
+      for (const recommendation of decoratedRecommendations) {
         await storage.createAiRecommendation(recommendation);
       }
-      
-      res.json({ 
-        success: true, 
-        recommendations,
+
+      res.json({
+        success: true,
+        recommendations: decoratedRecommendations,
         rebalancingGap: +(rebalancingGap * 100).toFixed(1),
-        message: "AI recommendations generated successfully"
+        message: "AI recommendations generated successfully",
+        disclaimer: "General advice only. Execution requires a Statement of Advice issued by a licensed adviser.",
       });
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
@@ -2593,21 +2603,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Apply AI recommendation
+  // Apply AI recommendation — BLOCKED until SOA infrastructure is live (Session 1 lockdown)
+  // Personal advice execution requires an issued Statement of Advice (Corporations Act s946A).
+  // Re-enable only when advice_records / soa_documents / fee_consents tables and the
+  // execution compliance gate are deployed (see Session 3+).
+  // NOTE: Do NOT mutate recommendation state on a blocked execution attempt — that would
+  // conflate user-read with execution-attempted in the audit trail. Just refuse cleanly.
   app.post("/api/ai-recommendations/:id/apply", async (req, res) => {
     try {
-      const { userId } = requireAuth(req);
+      const { userId: _userId } = requireAuth(req);
       const id = parseInt(req.params.id);
       if (!Number.isFinite(id)) throw Object.assign(new Error("Invalid recommendation id"), { status: 400 });
-      await storage.markRecommendationAsRead(id, userId);
-      res.json({ 
-        success: true, 
-        message: "Recommendation applied successfully",
-        appliedAt: new Date().toISOString()
+      return res.status(403).json({
+        success: false,
+        error: "Execution unavailable",
+        message: "AI insights are general information only. To act on this insight, request a Statement of Advice from a licensed adviser. Execution will be authorised only after SOA delivery, advice acceptance, and valid fee consent.",
+        nextStep: "request_soa",
       });
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
-      res.status(500).json({ error: "Failed to apply recommendation" });
+      res.status(500).json({ error: "Failed to process recommendation" });
     }
   });
 

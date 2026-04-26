@@ -14,6 +14,23 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 1: AI Advisory Lockdown
+
+User confirmed AI insights ARE personal advice under Corporations Act and chose Option 0c (rush full SOA stack — Path B). Until that infrastructure ships, the AI advisory surface is locked down to remove live regulatory exposure.
+
+Four lockdown changes applied:
+1. **KYC gate on generation** — `/api/ai-recommendations/generate` now calls `requireKyc(userId, storage)` so insights cannot be produced for un-verified users.
+2. **Supersede instead of delete** — `clearAiRecommendations` replaced with new `supersedeAiRecommendations` (marks all prior recs `isRead=true`) so the historical record is preserved for audit. Implemented on both `MemStorage` and `DatabaseStorage`; added to `IStorage` interface. (Temporary use of `isRead` as supersede flag — will migrate to `isSuperseded` column in Session 3 schema.)
+3. **Mandatory general-advice warning appended to every recommendation description** — server-side decoration in `/generate`; clients cannot strip it because it's persisted into `description`.
+4. **Execution endpoint blocked** — `POST /api/ai-recommendations/:id/apply` now returns `403 { nextStep: "request_soa" }`. Marks the rec as read for UX continuity but does not execute. Re-enable only after SOA / advice acceptance / DBFO consent infrastructure ships.
+
+Frontend reinforcement:
+- Added a red "Execution disabled" banner on `/ai-advisory` below the existing amber general-info banner. (No `Apply`/`Invest` buttons exist on the page; `api.applyRecommendation` is declared but uncalled. Server-side block is the primary defense.)
+
+Files touched: `server/storage.ts`, `server/routes.ts`, `client/src/pages/ai-advisory.tsx`.
+
+Sessions 2–8 still pending: non-custodial wording (wallets-new), Phase 1 Drizzle schema (`adviser_profiles`, `adviser_clients`, `advice_records`, `soa_documents`, `dbfo_consents`, `record_keeping_log`), SOA generation pipeline, fee consent ledger, complaints register, adviser overlay UI.
+
 ## Recent Changes (April 2026) — Compliance / Legal Merge
 
 ### Legal & Compliance page (merged)

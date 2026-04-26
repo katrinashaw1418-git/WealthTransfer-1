@@ -1,0 +1,101 @@
+
+
+Confirmed — all 4 Session 1 fixes still need to be applied.
+
+Use this order:
+
+1. Session 1 — lock AI advisory risk
+2. Session 2 — non-custodial wording fixes
+3. Session 3 — Phase 1 Drizzle schema
+Key current-state confirmation:
+
+requireKyc exists ✅
+but missing on /api/ai-recommendations/generate ❌
+
+clearAiRecommendations still exists ❌
+
+disclaimer not appended ❌
+
+execution buttons not disabled ❌
+So yes — give Replit Session 1 exactly as written.
+
+
+Correct. That's the confirmed state. Nothing to add or change.
+
+Give Replit Session 1 exactly as written in the previous message. Once it confirms those 4 changes are deployed, come back here and I'll verify against the updated file before you move to Session 2.
+
+Yes. Proceed with Session 1 only.
+
+After Replit applies it, share the updated files/output and I’ll verify before Session 2.
+
+
+
+Pasted text(85).txt
+Document
+
+I’ve reviewed the uploaded file and full thread. Here is a clean verification of Session 1 status and readiness.
+
+✅ Session 1 — Status Verification (Authoritative)
+From your uploaded file:
+
+1. clearAiRecommendations still exists ❌
+Confirmed — not yet replaced.
+This must be changed.
+
+2. KYC gate on /api/ai-recommendations/generate ❌
+Confirmed missing at the generate route (even though requireKyc exists elsewhere).
+Must be added.
+
+3. Disclaimer not appended ❌
+No evidence of disclaimer being injected into recommendation descriptions.
+Must be added.
+
+4. Execution buttons not disabled ❌
+Frontend still allows action (Apply/Invest).
+Must be disabled.
+
+🔴 Conclusion
+Session 1 has NOT been applied yet.
+All 4 fixes are still required.
+This matches exactly what you and Replit already confirmed. 
+
+
+✅ Instruction (Final — No Changes)
+Proceed exactly as planned:
+
+👉 Give Replit Session 1 EXACTLY as written
+👉 Do NOT modify wording
+👉 Do NOT add extra scope
+👉 Do NOT start schema yet
+⚠️ One small implementation note (important but NOT for Session 1)
+You are using:
+
+.set({ isRead: true })
+as a temporary supersede flag.
+
+That is fine for now, but after Session 3 you must migrate to:
+
+.set({ isSuperseded: true })
+Do NOT change this yet — just note it for Phase 1 schema.
+
+✅ What I need next
+After Replit finishes Session 1, paste:
+
+1. routes.ts (generate route + recommendation creation section)
+2. routes.ts (old clearAiRecommendations replacement section)
+3. ai-advisory.tsx (button section)
+I will verify:
+
+✔ KYC gate correctly placed
+✔ no deletion of history
+✔ disclaimer correctly appended (no missing edge cases)
+✔ execution fully blocked
+👍 Final
+You are in the correct sequence.
+Do Session 1 now.
+Stop here after it completes.
+
+I’ll verify before you move to Session 2.
+
+
+
