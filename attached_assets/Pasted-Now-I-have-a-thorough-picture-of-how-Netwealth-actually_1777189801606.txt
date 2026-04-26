@@ -1,0 +1,262 @@
+Now I have a thorough picture of how Netwealth actually structures this. Let me give you the complete architecture and build plan.
+
+What you're actually building — the correct framing
+You are building a B2B2C wealth platform, exactly like Netwealth's model:
+
+AMAX = platform operator / product issuer / technology / custody / compliance gate
+External financial planners = authorised reps of your AFSL partner, accessing client accounts through your platform
+Retail clients = the end users, onboarded via B2C (existing app) OR via an adviser
+
+The key Netwealth reference points confirmed from their own documentation:
+Flexible fee options can be constructed at either licensee or adviser level, with tiered and/or fixed fees. Netwealth And member consent is received before any advice fees are deducted, with details of fees that have been deducted transparent to members, and member account balances not inappropriately eroded by advice fees. Netwealth
+Managed Accounts can make managing client investment portfolios more efficient because there is less time spent on ROAs, SOAs, and associated paperwork. An MDA licence does not need to be held by an adviser to initiate changes to client portfolios. Netwealth
+
+Full Architecture
+AMAX Platform
+│
+├── B2C Layer (existing — keep as-is)
+│   ├── Client registration / KYC
+│   ├── Wallets / FX
+│   ├── Portfolio
+│   └── AI advisory (compliance-gated)
+│
+└── B2B2C Adviser Layer (new — add on top)
+    │
+    ├── Investment Product Registry
+    │   ├── Products defined by AMAX
+    │   ├── Categories: managed funds, FX strategies, fixed income, multi-asset
+    │   └── Each product has: fee schedule, risk rating, min investment, PDS link
+    │
+    ├── Adviser Portal
+    │   ├── Adviser login (role = adviser)
+    │   ├── Linked client list
+    │   ├── Client detail: portfolio, KYC, holdings
+    │   ├── Product recommendations (SOA-lite: linked to client, requires consent)
+    │   ├── Fee consent management (DBFO compliant)
+    │   ├── Task workflow
+    │   └── Reports / FDS generation
+    │
+    ├── Fee Engine
+    │   ├── Platform fee → AMAX
+    │   ├── Advice fee → adviser (% of AUM, tiered, or fixed)
+    │   ├── Product fee → AMAX / product issuer
+    │   ├── Fee split rules set at licensee level, overridable at adviser level
+    │   ├── Calculated daily, deducted monthly (Netwealth's own model)
+    │   └── Client consent required before any deduction
+    │
+    └── Client Consent Layer
+        ├── Digital fee consent (client approves adviser fees)
+        ├── Investment instruction consent
+        └── Annual renewal (150-day rule under DBFO)
+
+Schema — complete additions needed
+This builds on the foundation already established (role, adviserClients, feeConsents, adviserTasks, reportRequests) and adds the investment product layer and fee engine.
+New tables
+1. Investment products — the AMAX product menu advisers can recommend
+typescriptexport const investmentProducts = pgTable("investment_products", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  code: text("code").notNull().unique(),        // e.g. "AMAX-FX-01"
+  category: text("category").notNull(),
+  // managed_fund | fx_strategy | fixed_income | multi_asset | cash
+  description: text("description"),
+  riskRating: integer("risk_rating"),           // 1–7 SRM scale
+  minimumInvestment: decimal("minimum_investment", { precision: 15, scale: 2 }),
+  currency: text("currency").notNull().default("AUD"),
+  managementFeePercent: decimal("management_fee_percent", { precision: 6, scale: 4 }),
+  performanceFeePercent: decimal("performance_fee_percent", { precision: 6, scale: 4 }),
+  pdsUrl: text("pds_url"),
+  isActive: boolean("is_active").notNull().default(true),
+  availableFrom: timestamp("available_from").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+2. Client product holdings — what a client holds in each product
+typescriptexport const clientProductHoldings = pgTable("client_product_holdings", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  productId: integer("product_id").references(() => investmentProducts.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id),
+  units: decimal("units", { precision: 20, scale: 8 }).notNull().default("0"),
+  avgEntryPrice: decimal("avg_entry_price", { precision: 15, scale: 6 }),
+  currentValue: decimal("current_value", { precision: 15, scale: 2 }),
+  currency: text("currency").notNull().default("AUD"),
+  status: text("status").notNull().default("active"),   // active | redeemed | suspended
+  openedAt: timestamp("opened_at").defaultNow(),
+  closedAt: timestamp("closed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+3. Adviser fee rules — the fee split engine
+typescriptexport const adviserFeeRules = pgTable("adviser_fee_rules", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id),
+  // null = applies to all clients of this adviser
+  feeType: text("fee_type").notNull(),
+  // ongoing_advice | initial_advice | product_specific
+  calculationBasis: text("calculation_basis").notNull(),
+  // percentage_aum | fixed_dollar | tiered_percentage
+  feePercent: decimal("fee_percent", { precision: 6, scale: 4 }),
+  fixedAmount: decimal("fixed_amount", { precision: 15, scale: 2 }),
+  tierBreakpoints: jsonb("tier_breakpoints"),
+  // [{ upTo: 100000, rate: 0.011 }, { upTo: 500000, rate: 0.0088 }]
+  platformSplitPercent: decimal("platform_split_percent", { precision: 6, scale: 4 }),
+  // AMAX's share of the fee
+  adviserSplitPercent: decimal("adviser_split_percent", { precision: 6, scale: 4 }),
+  // adviser's share of the fee
+  isActive: boolean("is_active").notNull().default(true),
+  effectiveFrom: timestamp("effective_from").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+4. Fee ledger — every fee deduction recorded
+typescriptexport const adviserFeeDeductions = pgTable("adviser_fee_deductions", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  feeRuleId: integer("fee_rule_id").references(() => adviserFeeRules.id),
+  periodStart: timestamp("period_start").notNull(),
+  periodEnd: timestamp("period_end").notNull(),
+  aumAtCalculation: decimal("aum_at_calculation", { precision: 15, scale: 2 }),
+  grossFeeAmount: decimal("gross_fee_amount", { precision: 15, scale: 2 }).notNull(),
+  platformAmount: decimal("platform_amount", { precision: 15, scale: 2 }).notNull(),
+  adviserAmount: decimal("adviser_amount", { precision: 15, scale: 2 }).notNull(),
+  status: text("status").notNull().default("pending"),
+  // pending | deducted | failed | reversed
+  deductedAt: timestamp("deducted_at"),
+  consentId: integer("consent_id").references(() => feeConsents.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+5. Investment instructions — adviser initiates, client approves
+typescriptexport const investmentInstructions = pgTable("investment_instructions", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  productId: integer("product_id").references(() => investmentProducts.id).notNull(),
+  instructionType: text("instruction_type").notNull(),
+  // buy | sell | switch | rebalance
+  amount: decimal("amount", { precision: 15, scale: 2 }),
+  units: decimal("units", { precision: 20, scale: 8 }),
+  status: text("status").notNull().default("pending_consent"),
+  // pending_consent | consented | processing | completed | cancelled | rejected
+  clientConsentAt: timestamp("client_consent_at"),
+  clientRejectedAt: timestamp("client_rejected_at"),
+  executedAt: timestamp("executed_at"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+Fee engine logic — mirroring Netwealth
+Percentage-based fees are calculated daily and deducted monthly in arrears from client cash accounts. Financial Newswire Your fee engine should follow this exactly:
+typescript// Daily fee accrual calculation
+async function calculateDailyFeeAccrual(clientUserId: number, adviserUserId: number) {
+  // 1. Get total AUM (sum of all active product holdings in AUD)
+  const holdings = await db.select()
+    .from(clientProductHoldings)
+    .where(and(
+      eq(clientProductHoldings.clientUserId, clientUserId),
+      eq(clientProductHoldings.status, "active")
+    ));
+  const totalAUM = holdings.reduce((sum, h) => sum + parseFloat(h.currentValue ?? "0"), 0);
+
+  // 2. Get applicable fee rule
+  const [rule] = await db.select().from(adviserFeeRules)
+    .where(and(
+      eq(adviserFeeRules.adviserUserId, adviserUserId),
+      eq(adviserFeeRules.clientUserId, clientUserId),
+      eq(adviserFeeRules.isActive, true)
+    ));
+  if (!rule) return null;
+
+  // 3. Calculate daily fee (annual rate / 365)
+  let annualRate = parseFloat(rule.feePercent ?? "0");
+  
+  // Tiered rate logic
+  if (rule.calculationBasis === "tiered_percentage" && rule.tierBreakpoints) {
+    const tiers = rule.tierBreakpoints as Array<{ upTo: number; rate: number }>;
+    annualRate = tiers.find(t => totalAUM <= t.upTo)?.rate 
+      ?? tiers[tiers.length - 1].rate;
+  }
+
+  const dailyFee = (totalAUM * annualRate) / 365;
+  const platformCut = dailyFee * parseFloat(rule.platformSplitPercent ?? "0.5");
+  const adviserCut = dailyFee * parseFloat(rule.adviserSplitPercent ?? "0.5");
+
+  return { totalAUM, dailyFee, platformCut, adviserCut, annualRate };
+}
+
+API routes to add
+GET  /api/adviser/products              — list available investment products
+GET  /api/adviser/clients/:id/holdings  — client's product holdings
+POST /api/adviser/instructions          — create investment instruction (pending client consent)
+GET  /api/adviser/instructions          — list adviser's instructions + status
+GET  /api/adviser/fee-rules             — adviser's fee rules
+POST /api/adviser/fee-rules             — create/update fee rule (admin approves)
+GET  /api/adviser/fee-deductions        — fee ledger for adviser
+
+GET  /api/client/instructions/pending   — client sees pending instructions for consent
+POST /api/client/instructions/:id/consent   — client approves
+POST /api/client/instructions/:id/reject    — client rejects
+
+Key permission rules (non-negotiable)
+These mirror Netwealth's own compliance model:
+
+Adviser initiates, client consents — no instruction executes without client digital approval
+Fee deduction requires active fee consent — linked to feeConsents table, auto-stops at expiry
+Adviser fee split set at licensee level — admin sets the AMAX/adviser split, adviser cannot override their own split
+All fee deductions logged — adviserFeeDeductions creates an immutable audit trail
+Product menu controlled by AMAX — advisers choose from investmentProducts only, cannot introduce external products
+
+
+What NOT to build yet
+
+Full SMA/managed account rebalancing engine (Netwealth's SMART technology — that's a Phase 3 project)
+Automated portfolio switching across all clients on a model change
+SOA/ROA document generation engine
+SMSF/super wrapper (requires different trustee structure)
+Wholesale-only products (requires wholesale client classification workflow)
+
+
+Correct Replit instruction
+Keep all existing AMAX client functions unchanged.
+
+Add investment product layer and fee engine to the adviser layer:
+
+New tables:
+1. investmentProducts — AMAX-defined product menu (managed funds, FX strategies etc.)
+2. clientProductHoldings — client allocations to products
+3. adviserFeeRules — fee split configuration (platform % vs adviser %)
+4. adviserFeeDeductions — immutable fee ledger
+5. investmentInstructions — adviser-initiated instructions pending client consent
+
+New adviser routes:
+- GET /api/adviser/products
+- GET /api/adviser/clients/:id/holdings
+- POST /api/adviser/instructions
+- GET /api/adviser/fee-rules
+- GET /api/adviser/fee-deductions
+
+New client-side routes:
+- GET /api/client/instructions/pending
+- POST /api/client/instructions/:id/consent
+- POST /api/client/instructions/:id/reject
+
+Fee engine rules:
+- Calculate daily (annual rate / 365), deduct monthly from client cash wallet
+- Tiered percentage OR fixed dollar OR flat percentage
+- Fee split: platformSplitPercent goes to AMAX, adviserSplitPercent to adviser
+- No deduction without active feeConsent record
+- All deductions written to adviserFeeDeductions as immutable ledger
+
+Permission rules:
+- Adviser can only access linked clients (adviserClients)
+- Adviser cannot move funds directly — only create instructions
+- Instructions require client digital consent before execution
+- Fee split percentages set by admin only, adviser cannot edit own split
+- Product menu controlled by AMAX admin only
+This gives you the full Netwealth B2B2C model — AMAX as platform/product operator, advisers as the advice layer, clients in control of consent — without overbuilding the SOA/rebalancing engine before you need it.You said: WE NEED TO ADD A LAYER ON LANDING PAGE FOR WEALTH PLANNERS AND SEPERATE DASH BOARD AND INVESTMENT PAGE AND OTHER PAGES TO SERVE FINANCIAL PLANNERS.WE NEED TO ADD A LAYER ON LANDING PAGE FOR WEALTH PLANNERS AND SEPERATE DASH BOARD AND INVESTMENT PAGE AND OTHER PAGES TO SERVE FINANCIAL PLANNERS. CHECK NETWEALTH TO FIND OUT https://www.netwealth.com.au/5:40 PMClaude responded: Good.Searched the webSearched the webGood. I now have the full Netwealth navigation and page structure. Let me read the AMAX-V2 zip to understand the current landing page before designing anything.Ran 5 commands, viewed a fileRan 5 commands, viewed a fileNow I have everything I need. Let me read the frontend design skill before building.Read frontend design skillRead frontend design skillNow I have everything. Let me build the complete deliverable — a full specification document plus the new adviser landing section and all adviser pages as React files.Good. Now I have everything. Let me build all the files.Created 5 files, ran a commandCreated 5 files, ran a commandNow let me show the architecture visually before presenting the files.
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widget
