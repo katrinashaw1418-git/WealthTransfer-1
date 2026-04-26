@@ -14,6 +14,47 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 11 (Adviser Notifications)
+
+Goal: Replace the inert bell icon in the adviser topbar with a real notifications popover backed by a single read-only aggregator. Phase 3 (10C — fee engine, real money) remains gated.
+
+### Backend
+- New `getAdviserNotifications(adviserUserId)` in `server/services/adviser-access.ts`. Five buckets:
+  - `pendingClientConsents` — `investmentInstructions` where status='pending_consent'
+  - `openHighUrgentTasks` — `adviserTasks` where status='open' AND priority IN (high,urgent)
+  - `feeConsentsExpiring` — `feeConsents` where renewalStatus='active' AND expiry within next 30 days
+  - `pendingReports` — `reportRequests` where status IN (requested, generating)
+  - `kycPending` — `users.kycStatus='pending'`
+- **All five buckets are intersected with `linkedClientIds` (active links only)**, including the three buckets that already filter by `adviserUserId`. Defense-in-depth: deactivating a link instantly removes that client's data from the bell, even from rows the adviser originally owned. Both row and count predicates use the identical intersected WHERE clause so counts cannot drift.
+- Hard short-circuit: if `linkedClientIds.length === 0`, the function returns the all-zero payload before any further DB calls.
+- Items list returns top 5 per bucket, sorted by severity (urgent → warning → info) then recency. Each item has `severity`, `type`, `title`, `description`, `deepLink`, `createdAt`.
+
+### Route
+- `GET /api/adviser/notifications` in `server/adviser-routes.ts` using the existing `adviserRoute()` wrapper (requireAuth + requireRole("adviser")). Read-only; no mutations or execution paths.
+
+### Frontend
+- New `client/src/components/notifications-popover.tsx` — shadcn `Popover` with bell trigger, red badge showing `totalCount`, scrollable item list with severity dots, deep-link `Link`s via wouter. Refetches every 60s and on window focus. `staleTime: 30_000` overrides the global `Infinity`.
+- `client/src/components/layout/adviser-layout.tsx` — replaced the previously-inert `<Button><Bell/></Button>` with `<NotificationsPopover />`.
+
+### Verification
+- Adviser → 200, payload correctly scoped to linked clients only.
+- Non-adviser → 403, no auth → 401.
+- Other adviser endpoints (/products /instructions /dashboard /tasks) still 200.
+- Architect re-review after the scoping fix: PASS, no new HIGH/MEDIUM findings.
+- Typecheck clean except the same two pre-existing `server/storage.ts` errors at lines 3289/3312.
+
+### Also in this session (polish)
+- Fixed product visibility: seeded 10 missing products via `scripts/seed-missing-products.ts` (15 active total). Products query now uses `staleTime: 30_000, refetchOnMount: "always"` to override the global `staleTime: Infinity`.
+- En-dash normalisation in DB (Web3 25–35%, Ethereum 6–8%).
+- Specialist banner on `digital_assets` product cards.
+- Hardened "approval ≠ execution" wording in 3 places on `instructions.tsx` (header + toast + modal).
+- "Draft — placeholder regulatory details" amber banner on `legal.tsx` and the landing footer.
+
+### Out of scope (deferred)
+- Phase 3 (10C): fee engine, accrual, deduction. Real-money commitment, still gated.
+- Visual re-skin (navy/gold per React mockup).
+- Admin shell, `/adviser/business` redesign.
+
 ## Recent Changes (April 2026) — Session 10C-shell (Dedicated Adviser Portal Shell)
 
 Goal: Give advisers a distinct portal experience without touching the existing client app. Phase 3 (10C — fee engine, real money) remains gated.

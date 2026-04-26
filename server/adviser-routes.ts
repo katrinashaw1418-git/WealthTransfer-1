@@ -28,6 +28,7 @@ import {
   listAdviserReportRequests,
   createReportRequest,
   getAdviserDashboardSummary,
+  getAdviserNotifications,
   listAdviserProducts,
   getAdviserClientHoldings,
   getAdviserClientTransactions,
@@ -161,6 +162,17 @@ export function registerAdviserRoutes(app: Express): void {
     "/api/adviser/dashboard",
     adviserRoute(async (_req, auth) => {
       return getAdviserDashboardSummary(auth.userId);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/adviser/notifications — bell-icon counters + recent items
+  // Read-only aggregator. No mutations, no execution paths.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/notifications",
+    adviserRoute(async (_req, auth) => {
+      return getAdviserNotifications(auth.userId);
     }),
   );
 

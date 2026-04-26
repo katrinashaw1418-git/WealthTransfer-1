@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/contexts/auth";
-import { Menu, Search, Shield, LogOut, Bell } from "lucide-react";
+import { Menu, Search, Shield, LogOut } from "lucide-react";
+import NotificationsPopover from "@/components/notifications-popover";
 
 interface AdviserLayoutProps {
   children: React.ReactNode;
@@ -90,15 +91,7 @@ export default function AdviserLayout({ children }: AdviserLayoutProps) {
                 Authorised Representative
               </Badge>
 
-              <Button
-                variant="ghost"
-                size="icon"
-                className="relative text-slate-500 hover:text-slate-900"
-                aria-label="Notifications"
-                data-testid="button-notifications"
-              >
-                <Bell className="h-5 w-5" />
-              </Button>
+              <NotificationsPopover />
 
               {/* User pill */}
               <div className="hidden sm:flex items-center gap-2 pl-3 border-l border-slate-200">
