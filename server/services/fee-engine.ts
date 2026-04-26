@@ -18,7 +18,7 @@
 //   - The single source of truth for "can this rule accrue today?"
 // =============================================================================
 
-import { and, eq, gt, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   adviserClients,
@@ -180,6 +180,18 @@ export async function pauseFeeRule(opts: {
 //    paused — paused still emits a zero/skip row so the audit trail is
 //    continuous), evaluate the gate ladder and insert exactly one accrual
 //    row per (rule, date). The unique index gives idempotency.
+//
+//    Atomicity (Task #24): the entire per-date sweep runs inside a single
+//    DB transaction so the call is "all or nothing" for the date. This
+//    matters for the auto-backfill cron, which uses the latest accrual
+//    date as its retry signal: if a date crashed mid-loop and left
+//    half-inserted rows, that date would otherwise become the new "latest"
+//    and would be silently skipped by the next tick.
+//
+//    Per-rule duplicates use ON CONFLICT DO NOTHING (vs. catching the
+//    23505 inside the loop) — catching unique violations inside an open
+//    transaction would abort the entire transaction, which is exactly the
+//    failure mode we're guarding against here.
 // ---------------------------------------------------------------------------
 export async function runDailyAccruals(opts: {
   accrualDate: Date;
@@ -191,105 +203,121 @@ export async function runDailyAccruals(opts: {
 }> {
   const accrualDate = startOfUtcDay(opts.accrualDate);
 
-  const rules = await db.select().from(adviserFeeRules);
-  let inserted = 0;
-  let skipped = 0;
-  let duplicates = 0;
-  const byGateReason: Record<string, number> = {};
+  return await db.transaction(async (tx) => {
+    const rules = await tx.select().from(adviserFeeRules);
+    let inserted = 0;
+    let skipped = 0;
+    let duplicates = 0;
+    const byGateReason: Record<string, number> = {};
 
-  for (const rule of rules) {
-    let gate: GateReason | null = null;
+    for (const rule of rules) {
+      let gate: GateReason | null = null;
 
-    // (a) Underlying consent.
-    const [consent] = await db
-      .select()
-      .from(feeConsents)
-      .where(eq(feeConsents.id, rule.feeConsentId))
-      .limit(1);
-    if (!consent) {
-      gate = "consent_missing";
-    } else if (consent.withdrawnAt) {
-      gate = "consent_withdrawn";
-    } else if (
-      consent.consentExpiryDate &&
-      new Date(consent.consentExpiryDate).getTime() <= accrualDate.getTime()
-    ) {
-      gate = "consent_expired";
-    }
-
-    // (b) Adviser-client link still active.
-    if (!gate) {
-      const [link] = await db
+      // (a) Underlying consent.
+      const [consent] = await tx
         .select()
-        .from(adviserClients)
-        .where(
-          and(
-            eq(adviserClients.adviserUserId, rule.adviserUserId),
-            eq(adviserClients.clientUserId, rule.clientUserId),
-            eq(adviserClients.isActive, true),
-          ),
-        )
+        .from(feeConsents)
+        .where(eq(feeConsents.id, rule.feeConsentId))
         .limit(1);
-      if (!link) gate = "link_inactive";
-    }
-
-    // (c) Rule itself active.
-    if (!gate && rule.status !== "active") gate = "rule_paused";
-
-    // (d) Splits sum to 10000 (DB CHECK already enforces this on create, but
-    //     belt-and-braces in case the constraint is ever relaxed).
-    if (
-      !gate &&
-      Number(rule.adviserSplitBps) + Number(rule.platformSplitBps) !== 10000
-    ) {
-      gate = "splits_invalid";
-    }
-
-    let accrualAmount = 0;
-    let adviserShare = 0;
-    let platformShare = 0;
-    if (!gate) {
-      const c = computeAccrualForRule(rule);
-      accrualAmount = c.accrualAmount;
-      adviserShare = c.adviserShare;
-      platformShare = c.platformShare;
-    }
-
-    try {
-      await db.insert(adviserFeeAccruals).values({
-        feeRuleId: rule.id,
-        clientUserId: rule.clientUserId,
-        adviserUserId: rule.adviserUserId,
-        accrualDate,
-        accrualAmount: toDecimalStr(accrualAmount),
-        adviserShareAmount: toDecimalStr(adviserShare),
-        platformShareAmount: toDecimalStr(platformShare),
-        currency: rule.currency,
-        gateReason: gate,
-      });
-      inserted++;
-      if (gate) {
-        skipped++;
-        byGateReason[gate] = (byGateReason[gate] ?? 0) + 1;
-      }
-    } catch (err: any) {
-      // Unique-violation on (rule, date) is the idempotency guarantee. The
-      // re-run is a no-op — DON'T treat as inserted.
-      if (
-        String(err?.code) === "23505" ||
-        /unique/i.test(String(err?.message ?? ""))
+      if (!consent) {
+        gate = "consent_missing";
+      } else if (consent.withdrawnAt) {
+        gate = "consent_withdrawn";
+      } else if (
+        consent.consentExpiryDate &&
+        new Date(consent.consentExpiryDate).getTime() <= accrualDate.getTime()
       ) {
-        // Idempotent re-run: a row for (rule, date) already exists. Count it
-        // separately from `inserted` / `skipped` so the cron / admin trigger
-        // can surface "we re-ran today and N rows were already there".
-        duplicates++;
+        gate = "consent_expired";
+      }
+
+      // (b) Adviser-client link still active.
+      if (!gate) {
+        const [link] = await tx
+          .select()
+          .from(adviserClients)
+          .where(
+            and(
+              eq(adviserClients.adviserUserId, rule.adviserUserId),
+              eq(adviserClients.clientUserId, rule.clientUserId),
+              eq(adviserClients.isActive, true),
+            ),
+          )
+          .limit(1);
+        if (!link) gate = "link_inactive";
+      }
+
+      // (c) Rule itself active.
+      if (!gate && rule.status !== "active") gate = "rule_paused";
+
+      // (d) Splits sum to 10000 (DB CHECK already enforces this on create,
+      //     but belt-and-braces in case the constraint is ever relaxed).
+      if (
+        !gate &&
+        Number(rule.adviserSplitBps) + Number(rule.platformSplitBps) !== 10000
+      ) {
+        gate = "splits_invalid";
+      }
+
+      let accrualAmount = 0;
+      let adviserShare = 0;
+      let platformShare = 0;
+      if (!gate) {
+        const c = computeAccrualForRule(rule);
+        accrualAmount = c.accrualAmount;
+        adviserShare = c.adviserShare;
+        platformShare = c.platformShare;
+      }
+
+      // ON CONFLICT DO NOTHING + RETURNING lets us distinguish a fresh
+      // insert (returns the row) from a duplicate skip (returns []) without
+      // throwing — keeping the surrounding transaction usable.
+      const inserts = await tx
+        .insert(adviserFeeAccruals)
+        .values({
+          feeRuleId: rule.id,
+          clientUserId: rule.clientUserId,
+          adviserUserId: rule.adviserUserId,
+          accrualDate,
+          accrualAmount: toDecimalStr(accrualAmount),
+          adviserShareAmount: toDecimalStr(adviserShare),
+          platformShareAmount: toDecimalStr(platformShare),
+          currency: rule.currency,
+          gateReason: gate,
+        })
+        .onConflictDoNothing({
+          target: [adviserFeeAccruals.feeRuleId, adviserFeeAccruals.accrualDate],
+        })
+        .returning({ id: adviserFeeAccruals.id });
+
+      if (inserts.length > 0) {
+        inserted++;
+        if (gate) {
+          skipped++;
+          byGateReason[gate] = (byGateReason[gate] ?? 0) + 1;
+        }
       } else {
-        throw err;
+        // Idempotent re-run: a row for (rule, date) already exists.
+        duplicates++;
       }
     }
-  }
 
-  return { inserted, skipped, duplicates, byGateReason };
+    return { inserted, skipped, duplicates, byGateReason };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 3b. getLatestAccrualDate — returns the most recent `accrualDate` already
+//     present in `adviser_fee_accruals` (any rule), or null if the table is
+//     empty. Used by the daily cron to detect midnights it may have slept
+//     through (deploy, outage, maintenance) and backfill them. Read-only.
+// ---------------------------------------------------------------------------
+export async function getLatestAccrualDate(): Promise<Date | null> {
+  const [row] = await db
+    .select({ accrualDate: adviserFeeAccruals.accrualDate })
+    .from(adviserFeeAccruals)
+    .orderBy(desc(adviserFeeAccruals.accrualDate))
+    .limit(1);
+  return row?.accrualDate ?? null;
 }
 
 // ---------------------------------------------------------------------------

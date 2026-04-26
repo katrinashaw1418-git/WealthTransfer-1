@@ -152,52 +152,167 @@ app.use((req, res, next) => {
 
   // ---------------------------------------------------------------------------
   // SESSION 26 (Task #13) — Daily fee accrual sweep
+  //   + SESSION 27 (Task #24) — Automatic backfill of missed UTC days
   // ---------------------------------------------------------------------------
   // Runs `runDailyAccruals` once per day for the current UTC date so the
   // adviser fee engine no longer relies on an admin pressing the "Run today's
   // accruals" button. Gate A invariants are unchanged: the service writes
   // ONLY to `adviser_fee_accruals` and never moves money or posts to the
   // ledger. The "Run today's accruals" admin trigger remains in place for
-  // manual catch-up (e.g. backfilling a missed day).
+  // manual catch-up.
+  //
+  // Backfill behaviour (Task #24): if the server was offline across one or
+  // more midnights (deploy, outage, maintenance), today's tick alone would
+  // silently skip the missed dates. Instead, on every tick we look up the
+  // most recent `accrualDate` already present in `adviser_fee_accruals` and
+  // run the sweep for every UTC date between (latest + 1) and today
+  // inclusive. The window is capped at FEE_ACCRUAL_BACKFILL_MAX_DAYS so a
+  // pathologically long outage cannot trigger a runaway sweep — the oldest
+  // missed days beyond the cap are dropped (admins can still hit them via
+  // the manual "Run today's accruals" trigger).
   //
   // Idempotent by construction — `adviser_fee_accruals` has a unique index on
   // (`feeRuleId`, `accrualDate`), and `runDailyAccruals` returns explicit
-  // `inserted` / `skipped` (gated rows) / `duplicates` counts so the cron log
-  // line tells operators at a glance whether today was a fresh run or a
-  // safe re-run on top of an earlier run.
+  // `inserted` / `skipped` (gated rows) / `duplicates` counts. Re-running
+  // for any date already swept is a no-op (everything counts as duplicate).
   //
-  // Failures are surfaced via `console.error` (matching the other crons in
-  // this file) so the platform's log-based alerting picks them up; we never
-  // swallow exceptions or retry blindly here, because the unique index makes
-  // a same-day re-run free — the next scheduled tick is the natural retry.
+  // Failures on a single date are caught and logged so the remaining dates
+  // still get a chance to run; the next scheduled tick is the natural retry
+  // for any date that fails today.
   //
   // Staggered 180s after start so the four daily crons (wallet recon, ledger
   // recon, adviser-task automation, fee accruals) don't pile up on first boot.
   // ---------------------------------------------------------------------------
-  const { runDailyAccrualsAndRecord } = await import("./services/fee-engine");
+  // Task #23 added `runDailyAccrualsAndRecord` — a thin wrapper that records
+  // one row in `fee_accrual_runs` per invocation so admins can see the latest
+  // run without scanning logs. We keep using it here (one record per date),
+  // which means a backfill run produces one record per backfilled date —
+  // exactly the audit trail admins need.
+  const { runDailyAccrualsAndRecord, getLatestAccrualDate } = await import(
+    "./services/fee-engine"
+  );
+
+  const FEE_ACCRUAL_BACKFILL_MAX_DAYS = 14;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function startOfUtcDay(d: Date): Date {
+    return new Date(
+      Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+    );
+  }
 
   async function runDailyFeeAccrualsCron() {
-    const accrualDate = new Date();
+    const today = startOfUtcDay(new Date());
+
+    // Decide which UTC dates to run. Default: today only. If a previous
+    // accrual exists and there's a gap, fill in every missed UTC date up to
+    // today (capped). If the table is empty (first ever run) we don't try
+    // to invent history — we just do today.
+    let plannedDates: Date[] = [today];
     try {
-      // Session 27 (Task #23): use the recording wrapper so each cron run
-      // also writes one row to `fee_accrual_runs` with trigger='cron'. The
-      // admin fees page surfaces the latest such row so operators don't have
-      // to grep the server logs to confirm the job ran.
-      const s = await runDailyAccrualsAndRecord({
-        accrualDate,
-        trigger: "cron",
-        triggeredByUserId: null,
-      });
-      const gateBreakdown = Object.entries(s.byGateReason)
+      const latest = await getLatestAccrualDate();
+      if (latest) {
+        const latestDay = startOfUtcDay(latest);
+        // Both operands are UTC-midnight Dates so the divison is an exact
+        // integer; Math.floor makes the "calendar day count" intent obvious.
+        const gapDays = Math.floor(
+          (today.getTime() - latestDay.getTime()) / DAY_MS,
+        );
+        if (gapDays > 0) {
+          const computed: Date[] = [];
+          for (let i = 1; i <= gapDays; i++) {
+            computed.push(new Date(latestDay.getTime() + i * DAY_MS));
+          }
+          // Keep the most recent N days if the gap exceeds the cap so the
+          // catch-up still reaches `today`; older days fall off.
+          plannedDates =
+            computed.length > FEE_ACCRUAL_BACKFILL_MAX_DAYS
+              ? computed.slice(computed.length - FEE_ACCRUAL_BACKFILL_MAX_DAYS)
+              : computed;
+        }
+      }
+    } catch (e) {
+      console.error(
+        "[fee-accruals] failed to determine backfill range; running today only",
+        e,
+      );
+      plannedDates = [today];
+    }
+
+    let totalInserted = 0;
+    let totalSkipped = 0;
+    let totalDuplicates = 0;
+    const totalsByGate: Record<string, number> = {};
+    const datesRun: string[] = [];
+    const datesFailed: string[] = [];
+
+    for (const accrualDate of plannedDates) {
+      const iso = accrualDate.toISOString().slice(0, 10);
+      try {
+        const s = await runDailyAccrualsAndRecord({
+          accrualDate,
+          trigger: "cron",
+          triggeredByUserId: null,
+        });
+        totalInserted += s.inserted;
+        totalSkipped += s.skipped;
+        totalDuplicates += s.duplicates;
+        for (const [k, v] of Object.entries(s.byGateReason)) {
+          totalsByGate[k] = (totalsByGate[k] ?? 0) + v;
+        }
+        datesRun.push(iso);
+      } catch (e) {
+        // One failed date doesn't block the rest — the next scheduled tick
+        // will retry it (idempotency + per-date transaction make that safe).
+        // The recording wrapper already wrote a `fee_accrual_runs` row with
+        // errorMessage set before re-throwing, so the failure is visible in
+        // the admin UI too.
+        console.error(`[fee-accruals] cron error for ${iso}`, e);
+        datesFailed.push(iso);
+      }
+    }
+
+    const gateBreakdown =
+      Object.entries(totalsByGate)
         .map(([k, v]) => `${k}=${v}`)
         .join(",") || "none";
+    const todayIso = today.toISOString().slice(0, 10);
+    const failedSuffix =
+      datesFailed.length > 0
+        ? `, ${datesFailed.length} failed (${datesFailed.join(",")})`
+        : "";
+
+    // "today only" is reserved for the case where the cron PLANNED a single
+    // tick (no backfill needed). If we planned multiple dates and only some
+    // succeeded, we still report it as a backfill run so operators can see
+    // the failed dates in the log line above.
+    const plannedTodayOnly =
+      plannedDates.length === 1 &&
+      plannedDates[0].toISOString().slice(0, 10) === todayIso;
+
+    if (plannedTodayOnly) {
       log(
-        `[fee-accruals] completed for ${accrualDate.toISOString().slice(0, 10)}: ` +
-          `${s.inserted} inserted, ${s.skipped} gated (${gateBreakdown}), ` +
-          `${s.duplicates} duplicate(s)`
+        `[fee-accruals] completed for ${todayIso} (today only): ` +
+          `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
+          `${totalDuplicates} duplicate(s)${failedSuffix}`,
       );
-    } catch (e) {
-      console.error("[fee-accruals] cron error", e);
+    } else if (datesRun.length > 0 || datesFailed.length > 0) {
+      const firstPlanned = plannedDates[0].toISOString().slice(0, 10);
+      const lastPlanned = plannedDates[plannedDates.length - 1]
+        .toISOString()
+        .slice(0, 10);
+      // "backfilled N" counts past-day catch-ups (i.e. planned dates other
+      // than today), regardless of which actually succeeded — that matches
+      // operator intent ("we attempted to fill N missed days").
+      const backfilled = plannedDates.filter(
+        (d) => d.toISOString().slice(0, 10) !== todayIso,
+      ).length;
+      log(
+        `[fee-accruals] completed for ${firstPlanned}..${lastPlanned} ` +
+          `(backfilled ${backfilled} day(s)): ` +
+          `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
+          `${totalDuplicates} duplicate(s)${failedSuffix}`,
+      );
     }
   }
 
