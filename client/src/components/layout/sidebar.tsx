@@ -20,6 +20,7 @@ import {
   FileText,
   Receipt,
   Coins,
+  Target,
   type LucideIcon,
 } from "lucide-react";
 import amaxLogo from "@assets/AMAX_LOGO_BLUE_1776303944567.jpg";
@@ -48,6 +49,7 @@ const clientNav: NavItem[] = [
   { name: "Market Insights", href: "/ai-advisory", icon: Bot },
   { name: "Activity", href: "/transactions", icon: History },
   { name: "KYC", href: "/compliance", icon: Shield },
+  { name: "Wealth Planner", href: "/client/wealth-planner", icon: Target },
   { name: "Fee Consents", href: "/client/fee-consents", icon: Receipt },
   { name: "Your Fees", href: "/client/fees", icon: Receipt },
   { name: "Legal & Compliance", href: "/legal", icon: Scale },

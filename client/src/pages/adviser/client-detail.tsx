@@ -14,7 +14,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, FileText, ClipboardList, Briefcase, ArrowLeftRight } from "lucide-react";
+import {
+  ArrowLeft,
+  FileText,
+  ClipboardList,
+  Briefcase,
+  ArrowLeftRight,
+  Target,
+} from "lucide-react";
+import { WealthPlannerPanel } from "@/components/adviser/wealth-planner-panel";
 
 interface ClientDetail {
   client: {
@@ -198,6 +206,10 @@ export default function AdviserClientDetail() {
           <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
           <TabsTrigger value="transactions" data-testid="tab-transactions">Transactions</TabsTrigger>
           <TabsTrigger value="advice" data-testid="tab-advice">Advice & Fees</TabsTrigger>
+          <TabsTrigger value="planner" data-testid="tab-planner">
+            <Target className="h-4 w-4 mr-1" />
+            Wealth planner
+          </TabsTrigger>
         </TabsList>
 
         {/* OVERVIEW TAB */}
@@ -380,6 +392,14 @@ export default function AdviserClientDetail() {
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* WEALTH PLANNER TAB */}
+        <TabsContent value="planner" className="space-y-4">
+          <WealthPlannerPanel
+            clientId={client.id}
+            adviceRecords={adviceRecords}
+          />
         </TabsContent>
       </Tabs>
     </div>

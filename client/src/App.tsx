@@ -55,6 +55,8 @@ import AdminFees from "@/pages/admin/fees";
 import AdminReconciliation from "@/pages/admin/reconciliation";
 import ClientInstructions from "@/pages/client-instructions";
 import ClientFeeConsents from "@/pages/client/fee-consents";
+import ClientWealthPlanner from "@/pages/client/wealth-planner";
+import ClientAdviceViewer from "@/pages/client/advice-viewer";
 import ClientFees from "@/pages/fees";
 import RegisterInvite from "@/pages/register-invite";
 import { Loader2 } from "lucide-react";
@@ -135,6 +137,8 @@ function ClientApp() {
         <Route path="/client/instructions" component={ClientInstructions} />
         <Route path="/client/fee-consents" component={ClientFeeConsents} />
         <Route path="/client/fees" component={ClientFees} />
+        <Route path="/client/wealth-planner" component={ClientWealthPlanner} />
+        <Route path="/client/advice/:id" component={ClientAdviceViewer} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
