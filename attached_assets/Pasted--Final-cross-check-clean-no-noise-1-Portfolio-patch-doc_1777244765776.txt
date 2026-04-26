@@ -1,0 +1,154 @@
+## ✅ Final cross-check (clean, no noise)
+
+### 1. Portfolio patch document
+
+Verdict:
+
+```txt
+✔ Technically correct
+✔ Fixes fake data + misleading P&L
+❌ NOT current sprint
+```
+
+Reason:
+
+```txt
+Touches:
+- routes.ts (valuation logic)
+- storage engine
+- charts / UI
+```
+
+👉 That is **portfolio engine layer**, separate from planner sprint 
+
+---
+
+### 2. Wealth planner system
+
+Verdict:
+
+```txt
+✔ COMPLETE
+✔ Verified
+✔ No architectural gaps
+```
+
+You already have:
+
+```txt
+✔ adviceRecords
+✔ audit logs (before/after)
+✔ review lock (423)
+✔ verification script (11/11)
+✔ planner UI + documents
+```
+
+---
+
+### 3. “Phase 1 migration” doc
+
+Verdict:
+
+```txt
+✔ Correct conceptually
+❌ OUTDATED for your system
+```
+
+Because you already built a **more advanced planner layer**.
+
+👉 Do NOT regress into:
+
+```txt
+- adviserClients-first model
+- feeConsents-only system
+```
+
+---
+
+# 🎯 TO-DO LIST (FINAL, EXECUTABLE)
+
+## STEP 1 — Verification (DO THIS FIRST)
+
+```bash
+npx tsx scripts/test-wealth-planner-compliance.ts
+```
+
+Result must be:
+
+```txt
+PASS
+```
+
+---
+
+## STEP 2 — Finish current sprint (ONLY these tasks)
+
+```txt
+1. Admin audit log diff viewer   (Start)
+2. #107 Lock banner              (Accept)
+3. #108 Audit-on-block           (Accept)
+```
+
+---
+
+## STEP 3 — Verify again
+
+```bash
+npx tsx scripts/test-wealth-planner-compliance.ts
+```
+
+Must still:
+
+```txt
+PASS
+```
+
+---
+
+## STEP 4 — STOP (end of sprint)
+
+```txt
+Do NOT add more tasks
+```
+
+---
+
+# ⛔ DO NOT DO NOW
+
+```txt
+❌ Portfolio snapshot patch (even though correct)
+❌ Monthly P&L fixes
+❌ Storage engine changes
+❌ AI performance chart removal
+❌ Commission engine / payout
+❌ Ledger redesign
+```
+
+---
+
+# 📌 CREATE (but DO NOT BUILD)
+
+```txt
+1. Remove synthetic portfolio data (from patch doc)
+2. Pre-launch safety validation (idempotency + reconciliation + lifecycle)
+```
+
+---
+
+# 🧠 FINAL EXECUTION FLOW
+
+```txt
+Verify → Build audit visibility → Verify → STOP
+```
+
+---
+
+# 🔥 Bottom line
+
+```txt
+You are DONE building core system.
+
+Remaining work = visibility + compliance UX only.
+
+Portfolio fixes = next sprint, not now.
+```
