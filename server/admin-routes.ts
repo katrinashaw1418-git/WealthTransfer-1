@@ -49,6 +49,8 @@ import {
   insertInvestmentProductSchema,
   // Session 25 (Task #17) — wallet-vs-ledger drift visibility
   walletLedgerReconciliations,
+  // Task #93 — drift attribution by fee-deduction transaction id
+  ledgerEntries,
   // Session 28 (Task #35) — drift acknowledgements (alert suppression)
   walletLedgerDriftAcknowledgements,
   // Session 27 (Task #23) — fee accrual run log
@@ -65,6 +67,10 @@ import {
   DriftAckConflictError,
   DriftAckNoMismatchError,
   DriftAckNotFoundError,
+  // Task #93 — share the SAME drift tolerance the recon cron uses so the
+  // reporting page can never disagree with the reconciliation page about
+  // whether a wallet is "clean".
+  MATCH_EPSILON,
 } from "./services/reconciliation";
 import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 import { requireAuth, requireRole, hashPassword } from "./auth";
@@ -2956,6 +2962,712 @@ export function registerAdminRoutes(app: Express): void {
         req.ip ?? null,
       );
       return reversed;
+    }),
+  );
+
+  // ===========================================================================
+  // TASK #93 — Fee reconciliation + payout REPORTING (read-only)
+  // ---------------------------------------------------------------------------
+  // Four read-only endpoints that let admins answer:
+  //   1. "What does each adviser get paid this period?"  (/adviser-payouts)
+  //   2. "What's the platform's share of fee revenue?"   (/platform-fee-revenue)
+  //   3. "What fee deductions are stuck?"                (/fee-exceptions)
+  //   4. "How does the picture roll up overall?"          (/fee-reconciliation)
+  //
+  // HARD RULES (do not relax without a new gate):
+  //   - Reporting only. NO money movement, NO external payout, NO bank
+  //     transfer, NO automatic monthly sweep. Any future endpoint that
+  //     mutates payout state belongs behind its own gate.
+  //   - Period-scoped. Every query reads `?from=ISO&to=ISO` and validates
+  //     the bounds the same way `/api/admin/operator-alerts` does
+  //     (length-bound, NaN-guard, 400 on invalid, 400 on `from > to`).
+  //     A fresh DB load with no period filter must NEVER trigger an
+  //     unbounded scan over `adviser_fee_deductions`.
+  //   - Read-only. No `auditLogs` row is written.
+  //   - Reuse `MATCH_EPSILON` from `services/reconciliation` for any drift
+  //     comparison; do not introduce a second tolerance constant.
+  //   - Access: admin OR compliance_admin (see feeReportingRoute below).
+  //     The latter role is reserved for compliance-only operators who
+  //     should be able to read fee-flow numbers without the rest of the
+  //     admin surface.
+  // ===========================================================================
+
+  // ---- Reporting-route wrapper: admin OR compliance_admin ------------------
+  // We do NOT reuse `adminRoute` because that calls
+  // `requireRole(auth, "admin")` and would lock compliance_admin out. The
+  // reporting endpoints are strictly read-only so the broader audience is
+  // safe — and is required by the spec.
+  function feeReportingRoute(
+    handler: (
+      req: Request,
+      auth: { userId: number; username: string; email: string; role: string },
+    ) => Promise<unknown>,
+  ) {
+    return async (req: Request, res: any) => {
+      try {
+        const auth = requireAuth(req);
+        requireRole(auth, "admin", "compliance_admin");
+        const result = await handler(req, auth);
+        res.json(result);
+      } catch (error: any) {
+        handleError(res, error, "Fee reporting request failed");
+      }
+    };
+  }
+
+  // ---- Typed row extractor for raw db.execute() results --------------------
+  // drizzle-orm/neon-serverless returns a pg-shaped QueryResult whose `rows`
+  // is `Record<string, unknown>[]`. The rest of this file uses `(result as
+  // any).rows`; for the new reporting endpoints we use a tiny generic helper
+  // so the call sites stay typed instead of leaking `as any` everywhere.
+  function rowsFrom<T extends Record<string, unknown>>(
+    result: { rows?: unknown },
+  ): T[] {
+    const r = result.rows;
+    return Array.isArray(r) ? (r as T[]) : [];
+  }
+
+  // ---- Shared period parser (mirrors the operator-alerts endpoint) ---------
+  function parseFeeReportingPeriod(req: Request): { from: Date; to: Date } {
+    const fromRaw =
+      typeof req.query.from === "string" ? req.query.from.trim() : "";
+    const toRaw =
+      typeof req.query.to === "string" ? req.query.to.trim() : "";
+    const parseBound = (raw: string, label: string): Date | null => {
+      if (raw.length === 0) return null;
+      if (raw.length > 64) {
+        throw Object.assign(new Error(`${label} is too long`), { status: 400 });
+      }
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) {
+        throw Object.assign(
+          new Error(`${label} is not a valid ISO timestamp`),
+          { status: 400 },
+        );
+      }
+      return d;
+    };
+    const fromDate = parseBound(fromRaw, "from");
+    const toDate = parseBound(toRaw, "to");
+    if (!fromDate || !toDate) {
+      throw Object.assign(
+        new Error(
+          "Both `from` and `to` are required (ISO timestamps). Reporting endpoints never run unbounded.",
+        ),
+        { status: 400 },
+      );
+    }
+    if (fromDate.getTime() > toDate.getTime()) {
+      throw Object.assign(
+        new Error("from must be earlier than or equal to to"),
+        { status: 400 },
+      );
+    }
+    return { from: fromDate, to: toDate };
+  }
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/fee-reconciliation?from=ISO&to=ISO
+  //
+  // Single-shot summary across deduction statuses for the period plus any
+  // wallet-vs-ledger drift attributable to users involved in fee deductions
+  // in that period. The drift count is the number of distinct (userId,
+  // currency) pairs whose MOST RECENT wallet_ledger_reconciliations row is
+  // a mismatch above MATCH_EPSILON, restricted to users that appeared on
+  // either side of a fee deduction in the period (clients OR advisers).
+  // We use the most-recent recon row per pair to avoid double-counting the
+  // daily entries the cron writes.
+  //
+  // Status buckets:
+  //   - settled         → settledAt ∈ [from, to]
+  //   - reversed        → reversedAt ∈ [from, to]
+  //   - insufficient_funds / pending_approval → CURRENT status,
+  //                       createdAt ∈ [from, to] (so a fresh load is bounded)
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/fee-reconciliation",
+    feeReportingRoute(async (req) => {
+      const { from, to } = parseFeeReportingPeriod(req);
+
+      // Settled in window — keyed by settledAt because that's when the
+      // money actually moved on the ledger.
+      const settledAgg = await db
+        .select({
+          count: sql<number>`count(*)::int`,
+          totalAccrued: sql<string>`coalesce(sum(${adviserFeeDeductions.totalAccrued}), 0)::text`,
+          adviserShare: sql<string>`coalesce(sum(${adviserFeeDeductions.adviserShareAmount}), 0)::text`,
+          platformShare: sql<string>`coalesce(sum(${adviserFeeDeductions.platformShareAmount}), 0)::text`,
+        })
+        .from(adviserFeeDeductions)
+        .where(
+          and(
+            eq(adviserFeeDeductions.status, "settled"),
+            gte(adviserFeeDeductions.settledAt, from),
+            lte(adviserFeeDeductions.settledAt, to),
+          ),
+        );
+
+      // Reversed in window — keyed by reversedAt for the same reason.
+      const reversedAgg = await db
+        .select({
+          count: sql<number>`count(*)::int`,
+          totalAccrued: sql<string>`coalesce(sum(${adviserFeeDeductions.totalAccrued}), 0)::text`,
+          adviserShare: sql<string>`coalesce(sum(${adviserFeeDeductions.adviserShareAmount}), 0)::text`,
+          platformShare: sql<string>`coalesce(sum(${adviserFeeDeductions.platformShareAmount}), 0)::text`,
+        })
+        .from(adviserFeeDeductions)
+        .where(
+          and(
+            eq(adviserFeeDeductions.status, "reversed"),
+            gte(adviserFeeDeductions.reversedAt, from),
+            lte(adviserFeeDeductions.reversedAt, to),
+          ),
+        );
+
+      // Currently held / pending — bound to createdAt so the scan stays
+      // period-shaped.
+      const heldAgg = await db
+        .select({
+          count: sql<number>`count(*)::int`,
+          totalAccrued: sql<string>`coalesce(sum(${adviserFeeDeductions.totalAccrued}), 0)::text`,
+        })
+        .from(adviserFeeDeductions)
+        .where(
+          and(
+            eq(adviserFeeDeductions.status, "insufficient_funds"),
+            gte(adviserFeeDeductions.createdAt, from),
+            lte(adviserFeeDeductions.createdAt, to),
+          ),
+        );
+
+      const pendingAgg = await db
+        .select({
+          count: sql<number>`count(*)::int`,
+          totalAccrued: sql<string>`coalesce(sum(${adviserFeeDeductions.totalAccrued}), 0)::text`,
+        })
+        .from(adviserFeeDeductions)
+        .where(
+          and(
+            eq(adviserFeeDeductions.status, "pending_approval"),
+            gte(adviserFeeDeductions.createdAt, from),
+            lte(adviserFeeDeductions.createdAt, to),
+          ),
+        );
+
+      // Wallet-vs-ledger drift attributable to fee transactions in the
+      // period.
+      //
+      // The wallet_ledger_reconciliations table stores per-(user, currency)
+      // SNAPSHOTS — it has no transactionId column, because a snapshot is
+      // a balance comparison, not a per-posting receipt. So we can't
+      // directly filter recon rows by "this transaction belongs to a fee
+      // deduction in the period". Instead we walk the link the other way:
+      //
+      //   1. Collect the fee deduction transaction ids that POSTED in the
+      //      period — i.e. any settledTransactionId whose deduction was
+      //      settled in the window, plus any reversalTransactionId whose
+      //      deduction was reversed in the window.
+      //   2. Look up the (userId, currency) pairs those ledger entries
+      //      moved (via ledger_entries.transaction_id → user_id, currency).
+      //   3. For each such pair, take the LATEST wallet_ledger_reconciliations
+      //      row and count it as "drifted" iff abs(drift_amount) >
+      //      MATCH_EPSILON.
+      //
+      // This is fee-transaction-linked attribution: a wallet that drifted
+      // for some unrelated cause does not count here unless a fee posting
+      // touched the same (user, currency) in the window.
+      const driftRow = await db.execute(sql`
+        WITH fee_tx_ids AS (
+          SELECT ${adviserFeeDeductions.settledTransactionId} AS transaction_id
+          FROM ${adviserFeeDeductions}
+          WHERE ${adviserFeeDeductions.status} = 'settled'
+            AND ${adviserFeeDeductions.settledAt} BETWEEN ${from} AND ${to}
+            AND ${adviserFeeDeductions.settledTransactionId} IS NOT NULL
+          UNION
+          SELECT ${adviserFeeDeductions.reversalTransactionId} AS transaction_id
+          FROM ${adviserFeeDeductions}
+          WHERE ${adviserFeeDeductions.status} = 'reversed'
+            AND ${adviserFeeDeductions.reversedAt} BETWEEN ${from} AND ${to}
+            AND ${adviserFeeDeductions.reversalTransactionId} IS NOT NULL
+        ),
+        touched_pairs AS (
+          SELECT DISTINCT le.user_id, le.currency
+          FROM ${ledgerEntries} le
+          INNER JOIN fee_tx_ids f ON f.transaction_id = le.transaction_id
+        ),
+        latest_recon AS (
+          SELECT DISTINCT ON (r.user_id, r.currency)
+                 r.user_id, r.currency, r.drift_amount, r.status
+          FROM ${walletLedgerReconciliations} r
+          INNER JOIN touched_pairs tp
+            ON tp.user_id = r.user_id AND tp.currency = r.currency
+          ORDER BY r.user_id, r.currency, r.created_at DESC, r.id DESC
+        )
+        SELECT count(*)::int AS drift_count
+        FROM latest_recon
+        WHERE abs(drift_amount) > ${MATCH_EPSILON}
+      `);
+      const driftCount = Number(
+        rowsFrom<{ drift_count: number }>(driftRow)[0]?.drift_count ?? 0,
+      );
+
+      return {
+        period: { from: from.toISOString(), to: to.toISOString() },
+        settled: {
+          count: Number(settledAgg[0]?.count ?? 0),
+          totalAccrued: String(settledAgg[0]?.totalAccrued ?? "0"),
+          adviserShare: String(settledAgg[0]?.adviserShare ?? "0"),
+          platformShare: String(settledAgg[0]?.platformShare ?? "0"),
+        },
+        reversed: {
+          count: Number(reversedAgg[0]?.count ?? 0),
+          totalAccrued: String(reversedAgg[0]?.totalAccrued ?? "0"),
+          adviserShare: String(reversedAgg[0]?.adviserShare ?? "0"),
+          platformShare: String(reversedAgg[0]?.platformShare ?? "0"),
+        },
+        insufficientFunds: {
+          count: Number(heldAgg[0]?.count ?? 0),
+          totalAccrued: String(heldAgg[0]?.totalAccrued ?? "0"),
+        },
+        pendingApproval: {
+          count: Number(pendingAgg[0]?.count ?? 0),
+          totalAccrued: String(pendingAgg[0]?.totalAccrued ?? "0"),
+        },
+        walletLedgerDrift: {
+          count: driftCount,
+          // Surfaced so the UI can explain the number without the admin
+          // having to hunt down where the tolerance lives.
+          matchEpsilon: MATCH_EPSILON,
+        },
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/adviser-payouts?from=ISO&to=ISO
+  //
+  // Per-adviser roll-up for the period:
+  //   - settled count + sum of adviser_share_amount (settled in window)
+  //   - reversed count + sum of adviser_share_amount (reversed in window)
+  //   - net payable = settled adviser_share - reversed adviser_share
+  //
+  // Joined to `users` so the UI can render the adviser's name + email and
+  // link straight to the adviser detail page. The join filters on
+  // `users.role = 'adviser'`. A non-adviser user with a settled deduction
+  // (data corruption) is intentionally NOT silently aggregated here — it
+  // surfaces as an exception in /fee-exceptions instead.
+  //
+  // Sorted by net payable DESC by default; client-side resort is fine since
+  // payload size is per-adviser, not per-deduction.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/adviser-payouts",
+    feeReportingRoute(async (req) => {
+      const { from, to } = parseFeeReportingPeriod(req);
+
+      // Settled-in-window aggregates joined to users(adviser).
+      const settledRows = await db
+        .select({
+          adviserUserId: adviserFeeDeductions.adviserUserId,
+          firstName: users.firstName,
+          lastName: users.lastName,
+          email: users.email,
+          settledCount: sql<number>`count(*)::int`,
+          settledTotal: sql<string>`coalesce(sum(${adviserFeeDeductions.adviserShareAmount}), 0)::text`,
+          settledTotalAccrued: sql<string>`coalesce(sum(${adviserFeeDeductions.totalAccrued}), 0)::text`,
+        })
+        .from(adviserFeeDeductions)
+        .innerJoin(users, eq(users.id, adviserFeeDeductions.adviserUserId))
+        .where(
+          and(
+            eq(adviserFeeDeductions.status, "settled"),
+            eq(users.role, "adviser"),
+            gte(adviserFeeDeductions.settledAt, from),
+            lte(adviserFeeDeductions.settledAt, to),
+          ),
+        )
+        .groupBy(
+          adviserFeeDeductions.adviserUserId,
+          users.firstName,
+          users.lastName,
+          users.email,
+        );
+
+      const reversedRows = await db
+        .select({
+          adviserUserId: adviserFeeDeductions.adviserUserId,
+          reversedCount: sql<number>`count(*)::int`,
+          reversedTotal: sql<string>`coalesce(sum(${adviserFeeDeductions.adviserShareAmount}), 0)::text`,
+          reversedTotalAccrued: sql<string>`coalesce(sum(${adviserFeeDeductions.totalAccrued}), 0)::text`,
+        })
+        .from(adviserFeeDeductions)
+        .innerJoin(users, eq(users.id, adviserFeeDeductions.adviserUserId))
+        .where(
+          and(
+            eq(adviserFeeDeductions.status, "reversed"),
+            eq(users.role, "adviser"),
+            gte(adviserFeeDeductions.reversedAt, from),
+            lte(adviserFeeDeductions.reversedAt, to),
+          ),
+        )
+        .groupBy(adviserFeeDeductions.adviserUserId);
+
+      // Merge the two halves keyed by adviser id. An adviser may have
+      // settlements without reversals (the common case) or vice versa
+      // (e.g. unwinding a settlement that happened pre-period).
+      type Row = {
+        adviserUserId: number;
+        firstName: string;
+        lastName: string;
+        email: string;
+        settledCount: number;
+        settledTotal: string;
+        settledTotalAccrued: string;
+        reversedCount: number;
+        reversedTotal: string;
+        reversedTotalAccrued: string;
+        netPayable: string;
+      };
+      const map = new Map<number, Row>();
+      for (const s of settledRows) {
+        map.set(s.adviserUserId, {
+          adviserUserId: s.adviserUserId,
+          firstName: s.firstName ?? "",
+          lastName: s.lastName ?? "",
+          email: s.email ?? "",
+          settledCount: Number(s.settledCount ?? 0),
+          settledTotal: String(s.settledTotal ?? "0"),
+          settledTotalAccrued: String(s.settledTotalAccrued ?? "0"),
+          reversedCount: 0,
+          reversedTotal: "0",
+          reversedTotalAccrued: "0",
+          netPayable: "0",
+        });
+      }
+      // For advisers that ONLY have reversals in the window we still want a
+      // row, so look up their identity separately.
+      const advisersNeedingLookup: number[] = [];
+      for (const r of reversedRows) {
+        const existing = map.get(r.adviserUserId);
+        if (existing) {
+          existing.reversedCount = Number(r.reversedCount ?? 0);
+          existing.reversedTotal = String(r.reversedTotal ?? "0");
+          existing.reversedTotalAccrued = String(r.reversedTotalAccrued ?? "0");
+        } else {
+          advisersNeedingLookup.push(r.adviserUserId);
+        }
+      }
+      if (advisersNeedingLookup.length > 0) {
+        const lookupRows = await db
+          .select({
+            id: users.id,
+            firstName: users.firstName,
+            lastName: users.lastName,
+            email: users.email,
+          })
+          .from(users)
+          .where(
+            and(
+              inArray(users.id, advisersNeedingLookup),
+              eq(users.role, "adviser"),
+            ),
+          );
+        const byId = new Map(lookupRows.map((u) => [u.id, u]));
+        for (const r of reversedRows) {
+          if (map.has(r.adviserUserId)) continue;
+          const u = byId.get(r.adviserUserId);
+          if (!u) continue; // non-adviser corruption — Exceptions tab will surface it
+          map.set(r.adviserUserId, {
+            adviserUserId: r.adviserUserId,
+            firstName: u.firstName ?? "",
+            lastName: u.lastName ?? "",
+            email: u.email ?? "",
+            settledCount: 0,
+            settledTotal: "0",
+            settledTotalAccrued: "0",
+            reversedCount: Number(r.reversedCount ?? 0),
+            reversedTotal: String(r.reversedTotal ?? "0"),
+            reversedTotalAccrued: String(r.reversedTotalAccrued ?? "0"),
+            netPayable: "0",
+          });
+        }
+      }
+
+      // Compute net payable (settled adviser-share minus reversed
+      // adviser-share). Strings → Number → toFixed(4) so the response
+      // matches the 4dp precision the deductions table stores at.
+      const items: Row[] = Array.from(map.values()).map((row) => ({
+        ...row,
+        netPayable: (
+          Number(row.settledTotal) - Number(row.reversedTotal)
+        ).toFixed(4),
+      }));
+
+      items.sort((a, b) => Number(b.netPayable) - Number(a.netPayable));
+
+      return {
+        period: { from: from.toISOString(), to: to.toISOString() },
+        items,
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/platform-fee-revenue?from=ISO&to=ISO&buckets=monthly|weekly
+  //
+  // Time-bucketed sums of `platform_share_amount` from settled deductions
+  // (status='settled' AND settledAt in window). Once a deduction is
+  // reversed its status flips to 'reversed' and the row drops out of this
+  // sum — so the result is implicitly "settled and not subsequently
+  // reversed", as the spec requires, without us having to maintain a
+  // separate "is currently active" join.
+  //
+  // Buckets:
+  //   - monthly (default): truncate settledAt to the first day of its month.
+  //   - weekly           : truncate to the start of its ISO week (Mon).
+  //
+  // The response also exposes a `sparkline` of the LAST 12 buckets ending
+  // at `to`, regardless of `from`, so the UI can render trend context even
+  // when the admin has selected a narrow window.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/platform-fee-revenue",
+    feeReportingRoute(async (req) => {
+      const { from, to } = parseFeeReportingPeriod(req);
+      const bucketsRaw =
+        typeof req.query.buckets === "string"
+          ? req.query.buckets.trim()
+          : "monthly";
+      const bucket: "monthly" | "weekly" =
+        bucketsRaw === "weekly" ? "weekly" : "monthly";
+      const truncUnit = bucket === "weekly" ? "week" : "month";
+
+      // Period rollup.
+      const inWindow = await db.execute(sql`
+        SELECT
+          date_trunc(${truncUnit}, ${adviserFeeDeductions.settledAt}) AS bucket,
+          count(*)::int AS count,
+          coalesce(sum(${adviserFeeDeductions.platformShareAmount}), 0)::text AS platform_share,
+          coalesce(sum(${adviserFeeDeductions.totalAccrued}), 0)::text AS total_accrued
+        FROM ${adviserFeeDeductions}
+        WHERE ${adviserFeeDeductions.status} = 'settled'
+          AND ${adviserFeeDeductions.settledAt} BETWEEN ${from} AND ${to}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+      `);
+      type RevenueRow = {
+        bucket: string | Date;
+        count: number;
+        platform_share: string;
+        total_accrued: string;
+      };
+      const items = rowsFrom<RevenueRow>(inWindow).map((row) => ({
+        bucket: new Date(row.bucket).toISOString(),
+        count: Number(row.count ?? 0),
+        platformShare: String(row.platform_share ?? "0"),
+        totalAccrued: String(row.total_accrued ?? "0"),
+      }));
+
+      // 12-bucket sparkline ending at `to`. We compute the start window
+      // server-side so the client doesn't need to know the bucket
+      // arithmetic (handles month-of-31-days vs leap-day correctly).
+      // The densification cursor MUST land on the same boundaries that
+      // postgres' `date_trunc(...)` produces, otherwise the lookup map
+      // misses every bucket. `date_trunc('month', x)` → first-of-month
+      // 00:00 UTC; `date_trunc('week', x)` → Monday 00:00 UTC (ISO).
+      const sparkStart = new Date(to.getTime());
+      if (bucket === "monthly") {
+        sparkStart.setUTCMonth(sparkStart.getUTCMonth() - 11);
+        sparkStart.setUTCDate(1);
+        sparkStart.setUTCHours(0, 0, 0, 0);
+      } else {
+        sparkStart.setUTCHours(0, 0, 0, 0);
+        // Snap back to Monday (PG ISO week start). getUTCDay(): 0=Sun..6=Sat.
+        const dayOffset = (sparkStart.getUTCDay() + 6) % 7;
+        sparkStart.setUTCDate(sparkStart.getUTCDate() - dayOffset - 7 * 11);
+      }
+      const sparkRaw = await db.execute(sql`
+        SELECT
+          date_trunc(${truncUnit}, ${adviserFeeDeductions.settledAt}) AS bucket,
+          coalesce(sum(${adviserFeeDeductions.platformShareAmount}), 0)::text AS platform_share
+        FROM ${adviserFeeDeductions}
+        WHERE ${adviserFeeDeductions.status} = 'settled'
+          AND ${adviserFeeDeductions.settledAt} BETWEEN ${sparkStart} AND ${to}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+      `);
+      type SparkRow = { bucket: string | Date; platform_share: string };
+      const sparkByIso = new Map<string, string>();
+      for (const row of rowsFrom<SparkRow>(sparkRaw)) {
+        sparkByIso.set(
+          new Date(row.bucket).toISOString(),
+          String(row.platform_share ?? "0"),
+        );
+      }
+      // Densify to exactly 12 buckets so the UI sparkline renders a stable
+      // 12-period band even when revenue was zero in some intervals.
+      const sparkline: { bucket: string; platformShare: string }[] = [];
+      const cursor = new Date(sparkStart.getTime());
+      for (let i = 0; i < 12; i++) {
+        const iso = cursor.toISOString();
+        sparkline.push({
+          bucket: iso,
+          platformShare: sparkByIso.get(iso) ?? "0",
+        });
+        if (bucket === "monthly") {
+          cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+        } else {
+          cursor.setUTCDate(cursor.getUTCDate() + 7);
+        }
+      }
+
+      return {
+        period: { from: from.toISOString(), to: to.toISOString() },
+        bucket,
+        items,
+        sparkline,
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/fee-exceptions?from=ISO&to=ISO
+  //
+  // One row per problem deduction in the period:
+  //   - status = 'insufficient_funds'                              (held)
+  //   - status = 'pending_approval' AND createdAt < now() - 7 days (stuck)
+  //   - failureReason IS NOT NULL                                  (failed)
+  //
+  // Includes Task #64 sweep tracking columns so the admin can see what the
+  // daily insufficient-funds sweep last did. Plus a `kind` discriminator
+  // (`held|stuck|failed|role_corruption`) the UI uses to render an icon and
+  // pre-build the "Open in deductions" link (which sets status filter +
+  // jumps to the row).
+  //
+  // Also includes "role corruption" rows: settled or reversed deductions
+  // whose adviserUserId points at a user whose role is NOT 'adviser'. These
+  // would silently aggregate into an adviser payout row otherwise — the
+  // /adviser-payouts query filters them out so they MUST surface here.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/fee-exceptions",
+    feeReportingRoute(async (req) => {
+      const { from, to } = parseFeeReportingPeriod(req);
+      const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+      const stuckCutoff = new Date(Date.now() - SEVEN_DAYS_MS);
+
+      // Held + stuck + failed are simple per-row classifiers; we union them
+      // server-side so the response is one shape the UI can render with a
+      // single table. Period-scoped to createdAt so a fresh load is bounded.
+      const rows = await db
+        .select()
+        .from(adviserFeeDeductions)
+        .where(
+          and(
+            gte(adviserFeeDeductions.createdAt, from),
+            lte(adviserFeeDeductions.createdAt, to),
+            or(
+              eq(adviserFeeDeductions.status, "insufficient_funds"),
+              and(
+                eq(adviserFeeDeductions.status, "pending_approval"),
+                lte(adviserFeeDeductions.createdAt, stuckCutoff),
+              ),
+              sql`${adviserFeeDeductions.failureReason} IS NOT NULL`,
+            ),
+          ),
+        )
+        .orderBy(desc(adviserFeeDeductions.createdAt));
+      // No .limit() here: the spec says "one row per problem deduction in
+      // the period" and the period filter is the bound. Truncating would
+      // silently hide real exceptions and defeat the whole point of this
+      // tab. The query is bound by createdAt ∈ [from, to] so the result
+      // size is operator-controllable from the period picker.
+
+      type Exception = {
+        kind: "held" | "stuck" | "failed" | "role_corruption";
+        deduction: typeof rows[number];
+        ageDays: number;
+      };
+      const now = Date.now();
+      const items: Exception[] = rows.map((d) => {
+        const createdAtMs = d.createdAt
+          ? new Date(d.createdAt).getTime()
+          : now;
+        const ageDays = Math.max(
+          0,
+          Math.floor((now - createdAtMs) / (24 * 60 * 60 * 1000)),
+        );
+        let kind: Exception["kind"];
+        if (d.status === "insufficient_funds") kind = "held";
+        else if (
+          d.status === "pending_approval" &&
+          createdAtMs < stuckCutoff.getTime()
+        )
+          kind = "stuck";
+        else kind = "failed";
+        return { kind, deduction: d, ageDays };
+      });
+
+      // Role-corruption sweep: settled OR reversed deductions in the window
+      // whose adviserUserId belongs to a non-adviser user. Critical because
+      // /adviser-payouts filters these out — without a surface here they
+      // would be invisible.
+      const corruptRows = await db
+        .select({
+          d: adviserFeeDeductions,
+          actualRole: users.role,
+        })
+        .from(adviserFeeDeductions)
+        .innerJoin(users, eq(users.id, adviserFeeDeductions.adviserUserId))
+        .where(
+          and(
+            sql`${users.role} <> 'adviser'`,
+            or(
+              and(
+                eq(adviserFeeDeductions.status, "settled"),
+                gte(adviserFeeDeductions.settledAt, from),
+                lte(adviserFeeDeductions.settledAt, to),
+              ),
+              and(
+                eq(adviserFeeDeductions.status, "reversed"),
+                gte(adviserFeeDeductions.reversedAt, from),
+                lte(adviserFeeDeductions.reversedAt, to),
+              ),
+            ),
+          ),
+        );
+      // No .limit() here either — same reasoning as the held/stuck/failed
+      // sweep above: we never want to silently swallow a corruption row.
+
+      for (const row of corruptRows) {
+        const createdAtMs = row.d.createdAt
+          ? new Date(row.d.createdAt).getTime()
+          : now;
+        const ageDays = Math.max(
+          0,
+          Math.floor((now - createdAtMs) / (24 * 60 * 60 * 1000)),
+        );
+        items.push({
+          kind: "role_corruption",
+          deduction: { ...row.d, failureReason: row.d.failureReason ?? null },
+          ageDays,
+        });
+      }
+
+      // Resolve display names for both client and adviser per row so the UI
+      // doesn't need a second round-trip.
+      const userIds = items.flatMap((x) => [
+        x.deduction.clientUserId,
+        x.deduction.adviserUserId,
+      ]);
+      const usersMap = await getUserNameMap(userIds);
+
+      return {
+        period: { from: from.toISOString(), to: to.toISOString() },
+        stuckCutoff: stuckCutoff.toISOString(),
+        items,
+        users: usersMap,
+      };
     }),
   );
 }

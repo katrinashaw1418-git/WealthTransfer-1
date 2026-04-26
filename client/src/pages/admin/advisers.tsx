@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { useSearch } from "wouter";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -72,6 +73,23 @@ export default function AdminAdvisers() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const { data, isLoading } = useQuery<Adviser[]>({ queryKey: ["/api/admin/advisers"] });
+  // Cross-link target from /admin/fees → Adviser Payouts: ?userId=<id> scrolls
+  // and highlights the matching row so admins land on the right adviser.
+  const search = useSearch();
+  const focusUserId = (() => {
+    const raw = new URLSearchParams(search).get("userId");
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  })();
+  useEffect(() => {
+    if (!focusUserId || isLoading || !data?.some((a) => a.id === focusUserId))
+      return;
+    const el = document.querySelector(`[data-testid="row-adviser-${focusUserId}"]`);
+    if (el && el instanceof HTMLElement) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [focusUserId, isLoading, data]);
 
   const form = useForm<CreateAdviserValues>({
     resolver: zodResolver(createAdviserSchema),
@@ -135,7 +153,15 @@ export default function AdminAdvisers() {
               </TableHeader>
               <TableBody>
                 {data.map((a) => (
-                  <TableRow key={a.id} data-testid={`row-adviser-${a.id}`}>
+                  <TableRow
+                    key={a.id}
+                    data-testid={`row-adviser-${a.id}`}
+                    className={
+                      focusUserId === a.id
+                        ? "bg-violet-50 ring-2 ring-violet-300"
+                        : undefined
+                    }
+                  >
                     <TableCell className="font-mono text-sm">{a.username}</TableCell>
                     <TableCell>
                       {a.firstName} {a.lastName}

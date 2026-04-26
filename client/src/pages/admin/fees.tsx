@@ -10,7 +10,8 @@
 // that NO money moves here yet.
 // =============================================================================
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -35,7 +36,26 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2, Clock, AlertCircle, Search, X, Undo2 } from "lucide-react";
+import {
+  ShieldAlert,
+  HandCoins,
+  Play,
+  Pause,
+  Plus,
+  CheckCircle2,
+  Clock,
+  AlertCircle,
+  Search,
+  X,
+  Undo2,
+  // Task #93 — reporting tab icons
+  Scale,
+  Wallet,
+  TrendingUp,
+  Bug,
+  ExternalLink,
+  AlertTriangle,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -191,6 +211,72 @@ interface Paginated<T> {
   // rows currently held for insufficient funds, regardless of the active
   // filter, so the header counter stays stable as admins toggle filters.
   heldCount?: number;
+}
+
+// =============================================================================
+// TASK #93 — Reporting types (mirror the four read-only endpoints).
+// =============================================================================
+interface ReportingPeriod {
+  from: string;
+  to: string;
+}
+interface FeeReconciliationResp {
+  period: ReportingPeriod;
+  settled: {
+    count: number;
+    totalAccrued: string;
+    adviserShare: string;
+    platformShare: string;
+  };
+  reversed: {
+    count: number;
+    totalAccrued: string;
+    adviserShare: string;
+    platformShare: string;
+  };
+  insufficientFunds: { count: number; totalAccrued: string };
+  pendingApproval: { count: number; totalAccrued: string };
+  walletLedgerDrift: { count: number; matchEpsilon: number };
+}
+interface AdviserPayoutRow {
+  adviserUserId: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+  settledCount: number;
+  settledTotal: string;
+  settledTotalAccrued: string;
+  reversedCount: number;
+  reversedTotal: string;
+  reversedTotalAccrued: string;
+  netPayable: string;
+}
+interface AdviserPayoutsResp {
+  period: ReportingPeriod;
+  items: AdviserPayoutRow[];
+}
+interface PlatformRevenueBucket {
+  bucket: string;
+  count: number;
+  platformShare: string;
+  totalAccrued: string;
+}
+interface PlatformRevenueResp {
+  period: ReportingPeriod;
+  bucket: "monthly" | "weekly";
+  items: PlatformRevenueBucket[];
+  sparkline: { bucket: string; platformShare: string }[];
+}
+interface FeeExceptionRow {
+  kind: "held" | "stuck" | "failed" | "role_corruption";
+  deduction: FeeDeductionRow;
+  ageDays: number;
+}
+interface FeeExceptionsResp {
+  period: ReportingPeriod;
+  stuckCutoff: string;
+  items: FeeExceptionRow[];
+  users: UsersMap;
 }
 
 // Session 27 (Task #23) — Latest fee accrual run summary surfaced near the
@@ -584,6 +670,205 @@ export default function AdminFeesPage() {
     },
   });
 
+  // ===========================================================================
+  // TASK #93 — Reporting tab state.
+  // ---------------------------------------------------------------------------
+  // Single from/to range shared across all four reporting tabs so admins don't
+  // have to re-enter the period every time they switch tab. Defaults to "last
+  // 30 days" so a fresh page load is always bounded — the backend rejects an
+  // unbounded request anyway, but this keeps the UX clean.
+  // ===========================================================================
+  const todayEndIso = (): string => {
+    const d = new Date();
+    d.setHours(23, 59, 59, 999);
+    return d.toISOString();
+  };
+  const daysAgoStartIso = (days: number): string => {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    d.setHours(0, 0, 0, 0);
+    return d.toISOString();
+  };
+  // <input type="datetime-local"> needs YYYY-MM-DDTHH:MM (no seconds, no Z),
+  // but the API needs full ISO. We keep the source of truth as ISO strings
+  // and convert on the boundary.
+  const toLocalInput = (iso: string): string => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const fromLocalInput = (local: string): string => {
+    if (!local) return "";
+    const d = new Date(local);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toISOString();
+  };
+
+  const [reportFrom, setReportFrom] = useState<string>(daysAgoStartIso(30));
+  const [reportTo, setReportTo] = useState<string>(todayEndIso());
+  const [revenueBucket, setRevenueBucket] = useState<"monthly" | "weekly">(
+    "monthly",
+  );
+  // Adviser-payouts UX: client-side sort. The default ("net_desc") matches
+  // the server's default ordering, but admins can flip to "net_asc"
+  // (smallest first — useful for spotting reversals dominating settlements)
+  // or "name_asc" (alphabetical, easier when scanning a long list).
+  const [payoutsSort, setPayoutsSort] = useState<
+    "net_desc" | "net_asc" | "settled_desc" | "name_asc"
+  >("net_desc");
+
+  // Cross-link state: when an admin clicks "Open in deductions" on an
+  // exception row, we jump to the deductions tab, set its status filter,
+  // and remember which row id to highlight + scroll to once the deductions
+  // table re-fetches.
+  const [highlightDeductionId, setHighlightDeductionId] = useState<
+    number | null
+  >(null);
+  useEffect(() => {
+    if (!highlightDeductionId) return;
+    if (tab !== "deductions") return;
+    if (deductionsQ.isLoading) return;
+    const el = document.querySelector(
+      `[data-testid="row-deduction-${highlightDeductionId}"]`,
+    );
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("bg-yellow-100", "dark:bg-yellow-900/30");
+      const id = highlightDeductionId;
+      const t = setTimeout(() => {
+        el.classList.remove("bg-yellow-100", "dark:bg-yellow-900/30");
+        setHighlightDeductionId((cur) => (cur === id ? null : cur));
+      }, 2500);
+      return () => clearTimeout(t);
+    }
+  }, [highlightDeductionId, tab, deductionsQ.isLoading, deductionsQ.dataUpdatedAt]);
+
+  function openDeductionFromException(d: FeeDeductionRow) {
+    if (d.status === "insufficient_funds") {
+      setDeductionsStatus("insufficient_funds");
+    } else if (d.status === "pending_approval") {
+      setDeductionsStatus("pending_approval");
+    } else if (d.status === "settled") {
+      setDeductionsStatus("settled");
+    } else if (d.status === "reversed") {
+      setDeductionsStatus("reversed");
+    } else {
+      setDeductionsStatus("all");
+    }
+    setHighlightDeductionId(d.id);
+    setTab("deductions");
+  }
+
+  // Common reporting query options. 60s stale time is plenty for what is
+  // effectively a daily-cadence reconciliation page; window-focus refetch
+  // means the admin gets fresh numbers when they switch back to the tab
+  // after a settlement.
+  const reportingQueryOptions = {
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
+  } as const;
+
+  // The four reporting tabs are only enabled when both bounds parse — this
+  // mirrors the backend, which rejects requests with missing bounds.
+  const periodValid =
+    reportFrom !== "" &&
+    reportTo !== "" &&
+    !Number.isNaN(new Date(reportFrom).getTime()) &&
+    !Number.isNaN(new Date(reportTo).getTime()) &&
+    new Date(reportFrom).getTime() <= new Date(reportTo).getTime();
+
+  const reconQ = useQuery<FeeReconciliationResp>({
+    queryKey: [
+      "/api/admin/fee-reconciliation",
+      { from: reportFrom, to: reportTo },
+    ],
+    queryFn: () => {
+      const params = new URLSearchParams({ from: reportFrom, to: reportTo });
+      return fetchPaginated<FeeReconciliationResp>(
+        `/api/admin/fee-reconciliation?${params.toString()}`,
+      );
+    },
+    enabled: periodValid && tab === "reconciliation",
+    ...reportingQueryOptions,
+  });
+
+  const payoutsQ = useQuery<AdviserPayoutsResp>({
+    queryKey: [
+      "/api/admin/adviser-payouts",
+      { from: reportFrom, to: reportTo },
+    ],
+    queryFn: () => {
+      const params = new URLSearchParams({ from: reportFrom, to: reportTo });
+      return fetchPaginated<AdviserPayoutsResp>(
+        `/api/admin/adviser-payouts?${params.toString()}`,
+      );
+    },
+    enabled: periodValid && tab === "adviser-payouts",
+    ...reportingQueryOptions,
+  });
+
+  // Client-side sort over the payouts response. We don't re-fetch when the
+  // sort changes — the response is per-adviser (not per-deduction), so even
+  // a large book stays well under a few hundred rows.
+  const sortedPayouts = useMemo(() => {
+    const items = payoutsQ.data?.items ?? [];
+    const copy = items.slice();
+    switch (payoutsSort) {
+      case "net_asc":
+        copy.sort((a, b) => Number(a.netPayable) - Number(b.netPayable));
+        break;
+      case "settled_desc":
+        copy.sort((a, b) => Number(b.settledTotal) - Number(a.settledTotal));
+        break;
+      case "name_asc":
+        copy.sort((a, b) =>
+          `${a.lastName} ${a.firstName}`.localeCompare(
+            `${b.lastName} ${b.firstName}`,
+          ),
+        );
+        break;
+      case "net_desc":
+      default:
+        copy.sort((a, b) => Number(b.netPayable) - Number(a.netPayable));
+    }
+    return copy;
+  }, [payoutsQ.data, payoutsSort]);
+
+  const revenueQ = useQuery<PlatformRevenueResp>({
+    queryKey: [
+      "/api/admin/platform-fee-revenue",
+      { from: reportFrom, to: reportTo, buckets: revenueBucket },
+    ],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        from: reportFrom,
+        to: reportTo,
+        buckets: revenueBucket,
+      });
+      return fetchPaginated<PlatformRevenueResp>(
+        `/api/admin/platform-fee-revenue?${params.toString()}`,
+      );
+    },
+    enabled: periodValid && tab === "platform-revenue",
+    ...reportingQueryOptions,
+  });
+
+  const exceptionsQ = useQuery<FeeExceptionsResp>({
+    queryKey: [
+      "/api/admin/fee-exceptions",
+      { from: reportFrom, to: reportTo },
+    ],
+    queryFn: () => {
+      const params = new URLSearchParams({ from: reportFrom, to: reportTo });
+      return fetchPaginated<FeeExceptionsResp>(
+        `/api/admin/fee-exceptions?${params.toString()}`,
+      );
+    },
+    enabled: periodValid && tab === "exceptions",
+    ...reportingQueryOptions,
+  });
+
   return (
     <div className="space-y-6 p-6" data-testid="page-admin-fees">
       <div className="flex items-center gap-2">
@@ -602,10 +887,23 @@ export default function AdminFeesPage() {
       </Alert>
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+        <TabsList className="flex-wrap h-auto">
           <TabsTrigger value="rules" data-testid="tab-rules">Rules</TabsTrigger>
           <TabsTrigger value="accruals" data-testid="tab-accruals">Accruals</TabsTrigger>
           <TabsTrigger value="deductions" data-testid="tab-deductions">Deductions</TabsTrigger>
+          {/* Task #93 — read-only reporting tabs */}
+          <TabsTrigger value="reconciliation" data-testid="tab-reconciliation">
+            <Scale className="h-3.5 w-3.5 mr-1" /> Reconciliation
+          </TabsTrigger>
+          <TabsTrigger value="adviser-payouts" data-testid="tab-adviser-payouts">
+            <Wallet className="h-3.5 w-3.5 mr-1" /> Adviser payouts
+          </TabsTrigger>
+          <TabsTrigger value="platform-revenue" data-testid="tab-platform-revenue">
+            <TrendingUp className="h-3.5 w-3.5 mr-1" /> Platform revenue
+          </TabsTrigger>
+          <TabsTrigger value="exceptions" data-testid="tab-exceptions">
+            <Bug className="h-3.5 w-3.5 mr-1" /> Exceptions
+          </TabsTrigger>
         </TabsList>
 
         {/* ---- RULES TAB ---- */}
@@ -1216,6 +1514,612 @@ export default function AdminFeesPage() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        {/* ============================================================ */}
+        {/* TASK #93 — REPORTING TABS (read-only)                         */}
+        {/* Shared period picker rendered inside each tab so the          */}
+        {/* selection survives tab switches.                              */}
+        {/* ============================================================ */}
+        {(() => {
+          const PeriodPicker = () => (
+            <Card data-testid="card-reporting-period">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Reporting period</CardTitle>
+                <CardDescription>
+                  All four reporting tabs are read-only and period-bound. No
+                  money moves from this screen — payouts are settled
+                  transactionally on approval in the Deductions tab.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-wrap items-end gap-3">
+                <div>
+                  <Label className="text-xs text-muted-foreground">From</Label>
+                  <Input
+                    type="datetime-local"
+                    value={toLocalInput(reportFrom)}
+                    onChange={(e) => {
+                      const iso = fromLocalInput(e.target.value);
+                      if (iso) setReportFrom(iso);
+                    }}
+                    className="w-[220px]"
+                    data-testid="input-report-from"
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs text-muted-foreground">To</Label>
+                  <Input
+                    type="datetime-local"
+                    value={toLocalInput(reportTo)}
+                    onChange={(e) => {
+                      const iso = fromLocalInput(e.target.value);
+                      if (iso) setReportTo(iso);
+                    }}
+                    className="w-[220px]"
+                    data-testid="input-report-to"
+                  />
+                </div>
+                <div className="flex gap-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setReportFrom(daysAgoStartIso(7));
+                      setReportTo(todayEndIso());
+                    }}
+                    data-testid="button-range-7d"
+                  >
+                    Last 7d
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setReportFrom(daysAgoStartIso(30));
+                      setReportTo(todayEndIso());
+                    }}
+                    data-testid="button-range-30d"
+                  >
+                    Last 30d
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setReportFrom(daysAgoStartIso(90));
+                      setReportTo(todayEndIso());
+                    }}
+                    data-testid="button-range-90d"
+                  >
+                    Last 90d
+                  </Button>
+                </div>
+                {!periodValid && (
+                  <span
+                    className="text-xs text-destructive"
+                    data-testid="text-period-invalid"
+                  >
+                    Pick a valid range (from must be ≤ to).
+                  </span>
+                )}
+              </CardContent>
+            </Card>
+          );
+
+          return (
+            <>
+              {/* ---- RECONCILIATION TAB ---- */}
+              <TabsContent value="reconciliation" className="space-y-4">
+                <PeriodPicker />
+                {reconQ.isLoading || !reconQ.data ? (
+                  <Skeleton className="h-48 w-full" />
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <Card data-testid="card-recon-settled">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm font-medium text-muted-foreground">
+                          Settled in period
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="text-2xl font-semibold">
+                          {reconQ.data.settled.count}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                          <div>Total accrued: {reconQ.data.settled.totalAccrued}</div>
+                          <div>Adviser share: {reconQ.data.settled.adviserShare}</div>
+                          <div>Platform share: {reconQ.data.settled.platformShare}</div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Card data-testid="card-recon-reversed">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm font-medium text-muted-foreground">
+                          Reversed in period
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="text-2xl font-semibold">
+                          {reconQ.data.reversed.count}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                          <div>Total accrued: {reconQ.data.reversed.totalAccrued}</div>
+                          <div>Adviser share: {reconQ.data.reversed.adviserShare}</div>
+                          <div>Platform share: {reconQ.data.reversed.platformShare}</div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Card data-testid="card-recon-held">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm font-medium text-muted-foreground">
+                          Held — insufficient funds
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="text-2xl font-semibold">
+                          {reconQ.data.insufficientFunds.count}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                          Total: {reconQ.data.insufficientFunds.totalAccrued}
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Card data-testid="card-recon-pending">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm font-medium text-muted-foreground">
+                          Pending approval
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="text-2xl font-semibold">
+                          {reconQ.data.pendingApproval.count}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                          Total: {reconQ.data.pendingApproval.totalAccrued}
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Card data-testid="card-recon-drift">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm font-medium text-muted-foreground">
+                          Wallet vs ledger drift
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="text-2xl font-semibold flex items-center gap-2">
+                          {reconQ.data.walletLedgerDrift.count}
+                          {reconQ.data.walletLedgerDrift.count > 0 && (
+                            <AlertTriangle className="h-5 w-5 text-amber-500" />
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                          Distinct (user, currency) pairs whose latest recon row
+                          drifts by more than {reconQ.data.walletLedgerDrift.matchEpsilon}.
+                          Restricted to users involved in fee deductions in this
+                          period.
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+              </TabsContent>
+
+              {/* ---- ADVISER PAYOUTS TAB ---- */}
+              <TabsContent value="adviser-payouts" className="space-y-4">
+                <PeriodPicker />
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <CardTitle className="text-base">
+                          Adviser payouts (read-only)
+                        </CardTitle>
+                        <CardDescription>
+                          Net payable = settled adviser share − reversed
+                          adviser share, in the period. This screen does not
+                          transfer any money — it shows what each adviser has
+                          already had credited to their wallet via the
+                          Deductions tab.
+                        </CardDescription>
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground">
+                          Sort
+                        </Label>
+                        <Select
+                          value={payoutsSort}
+                          onValueChange={(v) =>
+                            setPayoutsSort(
+                              v as
+                                | "net_desc"
+                                | "net_asc"
+                                | "settled_desc"
+                                | "name_asc",
+                            )
+                          }
+                        >
+                          <SelectTrigger
+                            className="w-[200px]"
+                            data-testid="select-payouts-sort"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="net_desc">
+                              Net payable (high → low)
+                            </SelectItem>
+                            <SelectItem value="net_asc">
+                              Net payable (low → high)
+                            </SelectItem>
+                            <SelectItem value="settled_desc">
+                              Settled total (high → low)
+                            </SelectItem>
+                            <SelectItem value="name_asc">
+                              Adviser name (A → Z)
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    {payoutsQ.isLoading ? (
+                      <Skeleton className="h-32 w-full" />
+                    ) : sortedPayouts.length === 0 ? (
+                      <p
+                        className="text-sm text-muted-foreground"
+                        data-testid="text-payouts-empty"
+                      >
+                        No adviser payouts in this period.
+                      </p>
+                    ) : (
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Adviser</TableHead>
+                            <TableHead>Settled</TableHead>
+                            <TableHead>Reversed</TableHead>
+                            <TableHead className="text-right">
+                              Net payable
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {sortedPayouts.map((row) => (
+                            <TableRow
+                              key={row.adviserUserId}
+                              data-testid={`row-payout-${row.adviserUserId}`}
+                            >
+                              <TableCell>
+                                {/* Deep-link into the advisers list. The
+                                    advisers page reads ?userId=<id>, scrolls
+                                    that row into view and highlights it so
+                                    admins land on the exact adviser. */}
+                                <Link
+                                  href={`/admin/advisers?userId=${row.adviserUserId}`}
+                                  className="font-medium text-primary hover:underline"
+                                  data-testid={`link-adviser-${row.adviserUserId}`}
+                                >
+                                  {row.firstName} {row.lastName}
+                                </Link>
+                                <div className="text-xs text-muted-foreground">
+                                  {row.email}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div>{row.settledTotal}</div>
+                                <div className="text-xs text-muted-foreground">
+                                  {row.settledCount}{" "}
+                                  {row.settledCount === 1
+                                    ? "deduction"
+                                    : "deductions"}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div>{row.reversedTotal}</div>
+                                <div className="text-xs text-muted-foreground">
+                                  {row.reversedCount}{" "}
+                                  {row.reversedCount === 1
+                                    ? "reversal"
+                                    : "reversals"}
+                                </div>
+                              </TableCell>
+                              <TableCell
+                                className="text-right font-semibold"
+                                data-testid={`text-net-payable-${row.adviserUserId}`}
+                              >
+                                {row.netPayable}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    )}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              {/* ---- PLATFORM REVENUE TAB ---- */}
+              <TabsContent value="platform-revenue" className="space-y-4">
+                <PeriodPicker />
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <CardTitle className="text-base">
+                          Platform fee revenue (settled only)
+                        </CardTitle>
+                        <CardDescription>
+                          Sum of platform_share_amount on settled deductions,
+                          bucketed by {revenueBucket}. Reversed deductions
+                          are excluded by status.
+                        </CardDescription>
+                      </div>
+                      <Select
+                        value={revenueBucket}
+                        onValueChange={(v) =>
+                          setRevenueBucket(v as "monthly" | "weekly")
+                        }
+                      >
+                        <SelectTrigger
+                          className="w-[140px]"
+                          data-testid="select-revenue-bucket"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="monthly">Monthly</SelectItem>
+                          <SelectItem value="weekly">Weekly</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    {revenueQ.isLoading ? (
+                      <Skeleton className="h-48 w-full" />
+                    ) : !revenueQ.data ? null : (
+                      <>
+                        {/* Sparkline (last 12 buckets) */}
+                        {revenueQ.data.sparkline.length > 0 && (
+                          <div
+                            className="mb-4"
+                            data-testid="container-sparkline"
+                          >
+                            <div className="text-xs text-muted-foreground mb-1">
+                              Trend — last 12 {revenueBucket === "weekly" ? "weeks" : "months"}
+                            </div>
+                            {(() => {
+                              const vals = revenueQ.data.sparkline.map((p) =>
+                                Number(p.platformShare),
+                              );
+                              const max = Math.max(1, ...vals);
+                              const w = 320;
+                              const h = 48;
+                              const step = vals.length > 1 ? w / (vals.length - 1) : 0;
+                              const points = vals
+                                .map(
+                                  (v, i) =>
+                                    `${(i * step).toFixed(1)},${(h - (v / max) * (h - 4) - 2).toFixed(1)}`,
+                                )
+                                .join(" ");
+                              return (
+                                <svg
+                                  viewBox={`0 0 ${w} ${h}`}
+                                  className="w-full max-w-sm h-12"
+                                  preserveAspectRatio="none"
+                                >
+                                  <polyline
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.5"
+                                    points={points}
+                                    className="text-primary"
+                                  />
+                                </svg>
+                              );
+                            })()}
+                          </div>
+                        )}
+                        {revenueQ.data.items.length === 0 ? (
+                          <p
+                            className="text-sm text-muted-foreground"
+                            data-testid="text-revenue-empty"
+                          >
+                            No settled platform revenue in this period.
+                          </p>
+                        ) : (
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead>
+                                  {revenueBucket === "weekly"
+                                    ? "Week of"
+                                    : "Month"}
+                                </TableHead>
+                                <TableHead>Settled count</TableHead>
+                                <TableHead>Total accrued</TableHead>
+                                <TableHead className="text-right">
+                                  Platform share
+                                </TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {revenueQ.data.items.map((row) => (
+                                <TableRow
+                                  key={row.bucket}
+                                  data-testid={`row-revenue-${row.bucket}`}
+                                >
+                                  <TableCell>{row.bucket.slice(0, 10)}</TableCell>
+                                  <TableCell>{row.count}</TableCell>
+                                  <TableCell>{row.totalAccrued}</TableCell>
+                                  <TableCell className="text-right font-semibold">
+                                    {row.platformShare}
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        )}
+                      </>
+                    )}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              {/* ---- EXCEPTIONS TAB ---- */}
+              <TabsContent value="exceptions" className="space-y-4">
+                <PeriodPicker />
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      Fee deduction exceptions
+                    </CardTitle>
+                    <CardDescription>
+                      Held (insufficient funds), stuck (pending {">"} 7 days),
+                      failed (failure_reason set) and role-corruption
+                      (settled/reversed against a non-adviser user) deductions
+                      from the selected period. Click "Open in deductions" to
+                      jump to the row in the Deductions tab.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {exceptionsQ.isLoading ? (
+                      <Skeleton className="h-32 w-full" />
+                    ) : !exceptionsQ.data ||
+                      exceptionsQ.data.items.length === 0 ? (
+                      <p
+                        className="text-sm text-muted-foreground"
+                        data-testid="text-exceptions-empty"
+                      >
+                        No exceptions in this period.
+                      </p>
+                    ) : (
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Kind</TableHead>
+                            <TableHead>ID</TableHead>
+                            <TableHead>Client</TableHead>
+                            <TableHead>Adviser</TableHead>
+                            <TableHead>Total</TableHead>
+                            <TableHead>Age</TableHead>
+                            <TableHead>Last sweep</TableHead>
+                            <TableHead>Client notified</TableHead>
+                            <TableHead>Reason</TableHead>
+                            <TableHead></TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {exceptionsQ.data.items.map((x) => (
+                            <TableRow
+                              key={`${x.kind}-${x.deduction.id}`}
+                              data-testid={`row-exception-${x.deduction.id}`}
+                            >
+                              <TableCell>
+                                <Badge
+                                  variant={
+                                    x.kind === "held" || x.kind === "role_corruption"
+                                      ? "destructive"
+                                      : "secondary"
+                                  }
+                                >
+                                  {x.kind === "role_corruption"
+                                    ? "role corruption"
+                                    : x.kind}
+                                </Badge>
+                              </TableCell>
+                              <TableCell>{x.deduction.id}</TableCell>
+                              <TableCell>
+                                <UserCell
+                                  users={exceptionsQ.data?.users}
+                                  userId={x.deduction.clientUserId}
+                                />
+                              </TableCell>
+                              <TableCell>
+                                <UserCell
+                                  users={exceptionsQ.data?.users}
+                                  userId={x.deduction.adviserUserId}
+                                />
+                              </TableCell>
+                              <TableCell>
+                                {x.deduction.totalAccrued}{" "}
+                                {x.deduction.currency}
+                              </TableCell>
+                              <TableCell>{x.ageDays}d</TableCell>
+                              <TableCell
+                                className="text-xs whitespace-nowrap"
+                                data-testid={`text-exception-recheck-${x.deduction.id}`}
+                              >
+                                {x.deduction.lastRecheckedAt ? (
+                                  <span title={x.deduction.lastRecheckedAt}>
+                                    {formatRelative(x.deduction.lastRecheckedAt)}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </TableCell>
+                              <TableCell
+                                className="text-xs whitespace-nowrap"
+                                data-testid={`text-exception-notified-${x.deduction.id}`}
+                              >
+                                {x.deduction.clientNotifiedAt ? (
+                                  <span title={x.deduction.clientNotifiedAt}>
+                                    {formatRelative(x.deduction.clientNotifiedAt)}
+                                    {x.deduction.clientNotificationCount > 1 && (
+                                      <span className="text-slate-500 ml-1">
+                                        (×{x.deduction.clientNotificationCount})
+                                      </span>
+                                    )}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </TableCell>
+                              <TableCell
+                                className="text-xs max-w-[240px] truncate"
+                                title={
+                                  x.deduction.failureReason ??
+                                  (x.kind === "held"
+                                    ? "Insufficient client balance"
+                                    : x.kind === "stuck"
+                                      ? "Pending approval > 7 days"
+                                      : x.kind === "role_corruption"
+                                        ? "Settled or reversed against a non-adviser user"
+                                        : "")
+                                }
+                              >
+                                {x.deduction.failureReason ??
+                                  (x.kind === "held"
+                                    ? "Insufficient client balance"
+                                    : x.kind === "stuck"
+                                      ? "Pending > 7d"
+                                      : x.kind === "role_corruption"
+                                        ? "Non-adviser user"
+                                        : "")}
+                              </TableCell>
+                              <TableCell>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() =>
+                                    openDeductionFromException(x.deduction)
+                                  }
+                                  data-testid={`button-open-deduction-${x.deduction.id}`}
+                                >
+                                  <ExternalLink className="h-3.5 w-3.5 mr-1" />
+                                  Open
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    )}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+            </>
+          );
+        })()}
       </Tabs>
 
       <Dialog

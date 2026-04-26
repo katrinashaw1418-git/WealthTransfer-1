@@ -1456,3 +1456,6 @@ Preferred communication style: Simple, everyday language.
 - **Charts**: Recharts
 - **Date Utilities**: date-fns
 - **Planned Integrations**: Third-party KYC/AML services, institutional custody services (Fireblocks, BitGo), traditional banking rails.
+
+### Fee reconciliation + payout reporting (Task #93)
+The admin fees page (`/admin/fees`) exposes four read-only reporting tabs — Reconciliation, Adviser payouts, Platform revenue, and Exceptions — backed by `GET /api/admin/fee-reconciliation`, `GET /api/admin/adviser-payouts`, `GET /api/admin/platform-fee-revenue`, and `GET /api/admin/fee-exceptions`. Every endpoint requires `?from=ISO&to=ISO` (length-bound, NaN-guarded, 400 on `from > to`) so a fresh load is never an unbounded scan over `adviser_fee_deductions`. **Hard rule: these endpoints are reporting only — no money movement, no external payout, no automatic monthly sweep, and no audit-log writes.** Any future endpoint that mutates payout state belongs behind its own gate. Wallet-vs-ledger drift counts reuse the same `MATCH_EPSILON` constant the reconciliation cron uses, so the reporting page can never disagree with the dedicated reconciliation page about whether a wallet is "clean".
