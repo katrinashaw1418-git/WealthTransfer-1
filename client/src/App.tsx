@@ -45,6 +45,7 @@ import AdminAdvisers from "@/pages/admin/advisers";
 import AdminAdviserClients from "@/pages/admin/adviser-clients";
 import AdminRegistrationInvites from "@/pages/admin/registration-invites";
 import AdminAuditLogs from "@/pages/admin/audit-logs";
+import AdminOperatorAlerts from "@/pages/admin/operator-alerts";
 import AdminProducts from "@/pages/admin/products";
 import AdminInstructions from "@/pages/admin/instructions";
 import AdminReports from "@/pages/admin/reports";
@@ -104,6 +105,7 @@ function AdminApp() {
         <Route path="/admin/advisers" component={AdminAdvisers} />
         <Route path="/admin/adviser-clients" component={AdminAdviserClients} />
         <Route path="/admin/audit-logs" component={AdminAuditLogs} />
+        <Route path="/admin/operator-alerts" component={AdminOperatorAlerts} />
         <Route path="/admin/products" component={AdminProducts} />
         <Route path="/admin/instructions" component={AdminInstructions} />
         <Route path="/admin/reports" component={AdminReports} />

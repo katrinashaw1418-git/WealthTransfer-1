@@ -7,6 +7,7 @@ import {
   Users,
   Link2,
   ScrollText,
+  Siren,
   Shield,
   Package,
   ListChecks,
@@ -38,6 +39,7 @@ const NAV_ITEMS = [
   { to: "/admin/reconciliation", label: "Reconciliation", icon: Scale },
   { to: "/admin/compliance", label: "Compliance", icon: ShieldCheck },
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
+  { to: "/admin/operator-alerts", label: "Operator Alerts", icon: Siren },
 ] as const;
 
 export default function AdminSidebar({ open, onClose }: AdminSidebarProps) {
