@@ -55,6 +55,7 @@ import {
   adviserFeeDeductions,
 } from "@shared/schema";
 import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
+import { getUserNameMap } from "./services/user-name-map";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
 import { storage } from "./storage";
@@ -2051,7 +2052,16 @@ export function registerAdminRoutes(app: Express): void {
           .from(adviserFeeRules)
           .where(where as any),
       ]);
-      return { items: rows, page, limit, total: Number(totalRow[0]?.count ?? 0) };
+      const usersMap = await getUserNameMap(
+        rows.flatMap((r) => [r.clientUserId, r.adviserUserId]),
+      );
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+        users: usersMap,
+      };
     }),
   );
 
@@ -2148,11 +2158,15 @@ export function registerAdminRoutes(app: Express): void {
           .from(adviserFeeAccruals)
           .where(where as any),
       ]);
+      const usersMap = await getUserNameMap(
+        rows.flatMap((r) => [r.clientUserId, r.adviserUserId]),
+      );
       return {
         items: rows,
         page,
         limit,
         total: Number(totalRow[0]?.count ?? 0),
+        users: usersMap,
       };
     }),
   );
@@ -2213,11 +2227,15 @@ export function registerAdminRoutes(app: Express): void {
           .from(adviserFeeDeductions)
           .where(where as any),
       ]);
+      const usersMap = await getUserNameMap(
+        rows.flatMap((r) => [r.clientUserId, r.adviserUserId, r.approvedByUserId]),
+      );
       return {
         items: rows,
         page,
         limit,
         total: Number(totalRow[0]?.count ?? 0),
+        users: usersMap,
       };
     }),
   );

@@ -30,6 +30,7 @@ import {
   adviserFeeDeductions,
 } from "@shared/schema";
 import { requireAuth } from "./auth";
+import { getUserNameMap } from "./services/user-name-map";
 import {
   listClientPendingInstructions,
   consentClientInstruction,
@@ -453,7 +454,13 @@ export function registerClientRoutes(app: Express): void {
           .orderBy(desc(adviserFeeDeductions.createdAt)),
       ]);
 
-      res.json({ rules, recentAccruals, pendingDeductions });
+      const usersMap = await getUserNameMap([
+        ...rules.map((r) => r.adviserUserId),
+        ...recentAccruals.map((a) => a.adviserUserId),
+        ...pendingDeductions.map((d) => d.adviserUserId),
+      ]);
+
+      res.json({ rules, recentAccruals, pendingDeductions, users: usersMap });
     } catch (error: any) {
       handleError(res, error, "Failed to load client fees");
     }

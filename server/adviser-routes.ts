@@ -30,6 +30,7 @@ import {
 } from "@shared/schema";
 import { storage } from "./storage";
 import { requireAuth, requireRole } from "./auth";
+import { getUserNameMap } from "./services/user-name-map";
 import { generateReportPdf, REPORTS_DIR } from "./services/reports";
 import path from "node:path";
 import {
@@ -880,7 +881,10 @@ export function registerAdviserRoutes(app: Express): void {
         .from(adviserFeeRules)
         .where(and(...filters))
         .orderBy(desc(adviserFeeRules.createdAt));
-      res.json(rows);
+      const usersMap = await getUserNameMap(
+        rows.flatMap((r) => [r.clientUserId, r.adviserUserId]),
+      );
+      res.json({ items: rows, users: usersMap });
     } catch (error: any) {
       handleError(res, error, "Failed to list fee rules");
     }
@@ -903,7 +907,10 @@ export function registerAdviserRoutes(app: Express): void {
         .where(and(...filters))
         .orderBy(desc(adviserFeeAccruals.accrualDate), desc(adviserFeeAccruals.id))
         .limit(limit);
-      res.json(rows);
+      const usersMap = await getUserNameMap(
+        rows.flatMap((r) => [r.clientUserId, r.adviserUserId]),
+      );
+      res.json({ items: rows, users: usersMap });
     } catch (error: any) {
       handleError(res, error, "Failed to list fee accruals");
     }
@@ -926,7 +933,10 @@ export function registerAdviserRoutes(app: Express): void {
         .from(adviserFeeDeductions)
         .where(and(...filters))
         .orderBy(desc(adviserFeeDeductions.createdAt));
-      res.json(rows);
+      const usersMap = await getUserNameMap(
+        rows.flatMap((r) => [r.clientUserId, r.adviserUserId]),
+      );
+      res.json({ items: rows, users: usersMap });
     } catch (error: any) {
       handleError(res, error, "Failed to list fee deductions");
     }

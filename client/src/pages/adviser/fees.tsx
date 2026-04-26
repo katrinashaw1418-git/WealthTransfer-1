@@ -61,10 +61,52 @@ interface FeeDeductionRow {
   status: string;
 }
 
+interface UserRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+type UsersMap = Record<number, UserRef>;
+interface AdviserListResponse<T> {
+  items: T[];
+  users?: UsersMap;
+}
+
+function ClientCell({
+  users,
+  userId,
+}: {
+  users: UsersMap | undefined;
+  userId: number;
+}) {
+  const u = users?.[userId];
+  if (!u) {
+    return (
+      <span className="text-sm" title={`Client #${userId}`}>
+        #{userId}
+      </span>
+    );
+  }
+  const name = `${u.firstName} ${u.lastName}`.trim() || u.email;
+  return (
+    <div className="leading-tight">
+      <div className="text-sm font-medium">{name}</div>
+      <div className="text-xs text-muted-foreground">{u.email}</div>
+    </div>
+  );
+}
+
 export default function AdviserFeesPage() {
-  const rulesQ = useQuery<FeeRuleRow[]>({ queryKey: ["/api/adviser/fee-rules"] });
-  const accrualsQ = useQuery<FeeAccrualRow[]>({ queryKey: ["/api/adviser/fee-accruals"] });
-  const deductionsQ = useQuery<FeeDeductionRow[]>({ queryKey: ["/api/adviser/fee-deductions"] });
+  const rulesQ = useQuery<AdviserListResponse<FeeRuleRow>>({
+    queryKey: ["/api/adviser/fee-rules"],
+  });
+  const accrualsQ = useQuery<AdviserListResponse<FeeAccrualRow>>({
+    queryKey: ["/api/adviser/fee-accruals"],
+  });
+  const deductionsQ = useQuery<AdviserListResponse<FeeDeductionRow>>({
+    queryKey: ["/api/adviser/fee-deductions"],
+  });
 
   return (
     <div className="space-y-6 p-6" data-testid="page-adviser-fees">
@@ -99,7 +141,7 @@ export default function AdviserFeesPage() {
             <CardContent>
               {rulesQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
-              ) : rulesQ.data && rulesQ.data.length > 0 ? (
+              ) : rulesQ.data && rulesQ.data.items.length > 0 ? (
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -112,10 +154,12 @@ export default function AdviserFeesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {rulesQ.data.map((r) => (
+                    {rulesQ.data.items.map((r) => (
                       <TableRow key={r.id} data-testid={`row-rule-${r.id}`}>
                         <TableCell>{r.id}</TableCell>
-                        <TableCell>{r.clientUserId}</TableCell>
+                        <TableCell>
+                          <ClientCell users={rulesQ.data?.users} userId={r.clientUserId} />
+                        </TableCell>
                         <TableCell>{r.feeType}</TableCell>
                         <TableCell>
                           {r.amountType === "fixed"
@@ -145,7 +189,7 @@ export default function AdviserFeesPage() {
             <CardContent>
               {accrualsQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
-              ) : accrualsQ.data && accrualsQ.data.length > 0 ? (
+              ) : accrualsQ.data && accrualsQ.data.items.length > 0 ? (
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -158,10 +202,12 @@ export default function AdviserFeesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {accrualsQ.data.map((a) => (
+                    {accrualsQ.data.items.map((a) => (
                       <TableRow key={a.id} data-testid={`row-accrual-${a.id}`}>
                         <TableCell>{a.accrualDate.slice(0, 10)}</TableCell>
-                        <TableCell>{a.clientUserId}</TableCell>
+                        <TableCell>
+                          <ClientCell users={accrualsQ.data?.users} userId={a.clientUserId} />
+                        </TableCell>
                         <TableCell>{a.feeRuleId}</TableCell>
                         <TableCell>{a.accrualAmount} {a.currency}</TableCell>
                         <TableCell>{a.adviserShareAmount}</TableCell>
@@ -189,7 +235,7 @@ export default function AdviserFeesPage() {
             <CardContent>
               {deductionsQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
-              ) : deductionsQ.data && deductionsQ.data.length > 0 ? (
+              ) : deductionsQ.data && deductionsQ.data.items.length > 0 ? (
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -202,10 +248,12 @@ export default function AdviserFeesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {deductionsQ.data.map((d) => (
+                    {deductionsQ.data.items.map((d) => (
                       <TableRow key={d.id} data-testid={`row-deduction-${d.id}`}>
                         <TableCell>{d.id}</TableCell>
-                        <TableCell>{d.clientUserId}</TableCell>
+                        <TableCell>
+                          <ClientCell users={deductionsQ.data?.users} userId={d.clientUserId} />
+                        </TableCell>
                         <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
                         <TableCell>{d.totalAccrued} {d.currency}</TableCell>
                         <TableCell>{d.adviserShareAmount}</TableCell>

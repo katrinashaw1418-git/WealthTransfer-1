@@ -61,10 +61,30 @@ interface FeeDeduction {
   createdAt: string | null;
 }
 
+interface UserRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+type UsersMap = Record<number, UserRef>;
+
 interface PaginatedResponse<T> {
   items: T[];
   page: number;
   limit: number;
+  users?: UsersMap;
+}
+
+interface ListResponse<T> {
+  items?: T[];
+  users?: UsersMap;
+}
+
+function adviserName(users: UsersMap | undefined, userId: number): string {
+  const u = users?.[userId];
+  if (!u) return `Adviser #${userId}`;
+  return `${u.firstName} ${u.lastName}`.trim() || u.email;
 }
 
 const DEDUCTION_STATUSES = [
@@ -129,10 +149,12 @@ function authedFetch<T>(url: string): Promise<T> {
 }
 
 function RulesTab() {
-  const q = useQuery<FeeRule[]>({
+  const q = useQuery<ListResponse<FeeRule>>({
     queryKey: ["/api/client/fee-rules"],
-    queryFn: () => authedFetch<FeeRule[]>("/api/client/fee-rules"),
+    queryFn: () => authedFetch<ListResponse<FeeRule>>("/api/client/fee-rules"),
   });
+  const items = Array.isArray(q.data) ? (q.data as unknown as FeeRule[]) : q.data?.items ?? [];
+  const users = Array.isArray(q.data) ? undefined : q.data?.users;
 
   return (
     <Card>
@@ -144,7 +166,7 @@ function RulesTab() {
           <Skeleton className="h-32 w-full" />
         ) : q.isError ? (
           <p className="text-sm text-red-600">Unable to load rules.</p>
-        ) : !q.data || q.data.length === 0 ? (
+        ) : items.length === 0 ? (
           <p className="text-sm text-gray-500" data-testid="text-client-no-rules">
             No fee rules are currently set up against your account.
           </p>
@@ -160,9 +182,9 @@ function RulesTab() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {q.data.map((r) => (
+              {items.map((r) => (
                 <TableRow key={r.id} data-testid={`row-client-rule-${r.id}`}>
-                  <TableCell className="text-sm">#{r.adviserUserId}</TableCell>
+                  <TableCell className="text-sm">{adviserName(users, r.adviserUserId)}</TableCell>
                   <TableCell className="text-sm capitalize">
                     {r.feeType.replace(/_/g, " ")}
                     <div className="text-xs text-gray-500">{r.amountType}</div>
@@ -194,6 +216,7 @@ function AccrualsTab() {
         `/api/client/fee-accruals?page=${page}&limit=${limit}`,
       ),
   });
+  const users = q.data?.users;
 
   return (
     <Card>
@@ -226,7 +249,7 @@ function AccrualsTab() {
                   <TableRow key={a.id} data-testid={`row-client-accrual-${a.id}`}>
                     <TableCell className="text-sm">{formatDate(a.accrualDate)}</TableCell>
                     <TableCell className="text-sm">#{a.feeRuleId}</TableCell>
-                    <TableCell className="text-sm">#{a.adviserUserId}</TableCell>
+                    <TableCell className="text-sm">{adviserName(users, a.adviserUserId)}</TableCell>
                     <TableCell className="text-sm tabular-nums text-right">
                       {formatAud(a.accrualAmount)}
                     </TableCell>
@@ -285,6 +308,7 @@ function DeductionsTab() {
         `/api/client/fee-deductions${params ? `?${params}` : ""}`,
       ),
   });
+  const users = q.data?.users;
 
   return (
     <Card>
@@ -328,7 +352,7 @@ function DeductionsTab() {
               {q.data.items.map((d) => (
                 <TableRow key={d.id} data-testid={`row-client-deduction-${d.id}`}>
                   <TableCell className="text-sm">{formatDate(d.createdAt)}</TableCell>
-                  <TableCell className="text-sm">#{d.adviserUserId}</TableCell>
+                  <TableCell className="text-sm">{adviserName(users, d.adviserUserId)}</TableCell>
                   <TableCell className="text-sm">
                     {formatDate(d.periodStart)} → {formatDate(d.periodEnd)}
                   </TableCell>

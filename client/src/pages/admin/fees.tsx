@@ -89,7 +89,20 @@ interface FeeDeductionRow {
   createdAt: string;
 }
 
-interface Paginated<T> { items: T[]; page: number; limit: number; total: number; }
+interface UserRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+type UsersMap = Record<number, UserRef>;
+interface Paginated<T> {
+  items: T[];
+  page: number;
+  limit: number;
+  total: number;
+  users?: UsersMap;
+}
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -97,6 +110,41 @@ function todayIso() {
 
 function bpsLabel(bps: number) {
   return `${(bps / 100).toFixed(2)}%`;
+}
+
+function userLabel(
+  users: UsersMap | undefined,
+  userId: number | null | undefined,
+): string {
+  if (userId == null) return "—";
+  const u = users?.[userId];
+  if (!u) return `#${userId}`;
+  return `${u.firstName} ${u.lastName}`.trim() || u.email || `#${userId}`;
+}
+
+function UserCell({
+  users,
+  userId,
+}: {
+  users: UsersMap | undefined;
+  userId: number | null | undefined;
+}) {
+  if (userId == null) return <span className="text-muted-foreground">—</span>;
+  const u = users?.[userId];
+  if (!u) {
+    return (
+      <span className="text-sm" title={`User #${userId}`}>
+        #{userId}
+      </span>
+    );
+  }
+  const name = `${u.firstName} ${u.lastName}`.trim() || u.email;
+  return (
+    <div className="leading-tight">
+      <div className="text-sm font-medium">{name}</div>
+      <div className="text-xs text-muted-foreground">{u.email}</div>
+    </div>
+  );
 }
 
 export default function AdminFeesPage() {
@@ -375,8 +423,12 @@ export default function AdminFeesPage() {
                       <TableRow key={r.id} data-testid={`row-rule-${r.id}`}>
                         <TableCell>{r.id}</TableCell>
                         <TableCell>{r.feeConsentId}</TableCell>
-                        <TableCell>{r.clientUserId}</TableCell>
-                        <TableCell>{r.adviserUserId}</TableCell>
+                        <TableCell>
+                          <UserCell users={rulesQ.data?.users} userId={r.clientUserId} />
+                        </TableCell>
+                        <TableCell>
+                          <UserCell users={rulesQ.data?.users} userId={r.adviserUserId} />
+                        </TableCell>
                         <TableCell>{r.feeType}</TableCell>
                         <TableCell>
                           {r.amountType === "fixed"
@@ -469,8 +521,12 @@ export default function AdminFeesPage() {
                       <TableRow key={a.id} data-testid={`row-accrual-${a.id}`}>
                         <TableCell>{a.id}</TableCell>
                         <TableCell>{a.feeRuleId}</TableCell>
-                        <TableCell>{a.clientUserId}</TableCell>
-                        <TableCell>{a.adviserUserId}</TableCell>
+                        <TableCell>
+                          <UserCell users={accrualsQ.data?.users} userId={a.clientUserId} />
+                        </TableCell>
+                        <TableCell>
+                          <UserCell users={accrualsQ.data?.users} userId={a.adviserUserId} />
+                        </TableCell>
                         <TableCell>{a.accrualDate.slice(0, 10)}</TableCell>
                         <TableCell>{a.accrualAmount} {a.currency}</TableCell>
                         <TableCell>{a.adviserShareAmount}</TableCell>
@@ -547,8 +603,12 @@ export default function AdminFeesPage() {
                     {deductionsQ.data?.items.map((d) => (
                       <TableRow key={d.id} data-testid={`row-deduction-${d.id}`}>
                         <TableCell>{d.id}</TableCell>
-                        <TableCell>{d.clientUserId}</TableCell>
-                        <TableCell>{d.adviserUserId}</TableCell>
+                        <TableCell>
+                          <UserCell users={deductionsQ.data?.users} userId={d.clientUserId} />
+                        </TableCell>
+                        <TableCell>
+                          <UserCell users={deductionsQ.data?.users} userId={d.adviserUserId} />
+                        </TableCell>
                         <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
                         <TableCell>{d.totalAccrued} {d.currency}</TableCell>
                         <TableCell>

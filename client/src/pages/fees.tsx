@@ -20,10 +20,19 @@ import {
 } from "@/components/ui/table";
 import { ShieldAlert, Receipt } from "lucide-react";
 
+interface UserRef {
+  id: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+type UsersMap = Record<number, UserRef>;
+
 interface ClientFeesPayload {
   rules: Array<{
     id: number;
     feeConsentId: number;
+    adviserUserId: number;
     feeType: string;
     amountType: string;
     rateBps: number | null;
@@ -36,6 +45,7 @@ interface ClientFeesPayload {
   recentAccruals: Array<{
     id: number;
     feeRuleId: number;
+    adviserUserId: number;
     accrualDate: string;
     accrualAmount: string;
     currency: string;
@@ -43,12 +53,38 @@ interface ClientFeesPayload {
   }>;
   pendingDeductions: Array<{
     id: number;
+    adviserUserId: number;
     periodStart: string;
     periodEnd: string;
     totalAccrued: string;
     currency: string;
     status: string;
   }>;
+  users?: UsersMap;
+}
+
+function AdviserCell({
+  users,
+  userId,
+}: {
+  users: UsersMap | undefined;
+  userId: number;
+}) {
+  const u = users?.[userId];
+  if (!u) {
+    return (
+      <span className="text-sm text-muted-foreground" title={`Adviser #${userId}`}>
+        Adviser #{userId}
+      </span>
+    );
+  }
+  const name = `${u.firstName} ${u.lastName}`.trim() || u.email;
+  return (
+    <div className="leading-tight">
+      <div className="text-sm font-medium">{name}</div>
+      <div className="text-xs text-muted-foreground">{u.email}</div>
+    </div>
+  );
 }
 
 export default function ClientFeesPage() {
@@ -89,6 +125,7 @@ export default function ClientFeesPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead>Adviser</TableHead>
                       <TableHead>Type</TableHead>
                       <TableHead>Amount</TableHead>
                       <TableHead>Status</TableHead>
@@ -99,6 +136,9 @@ export default function ClientFeesPage() {
                   <TableBody>
                     {q.data.rules.map((r) => (
                       <TableRow key={r.id} data-testid={`row-rule-${r.id}`}>
+                        <TableCell>
+                          <AdviserCell users={q.data?.users} userId={r.adviserUserId} />
+                        </TableCell>
                         <TableCell>{r.feeType}</TableCell>
                         <TableCell>
                           {r.amountType === "fixed"
@@ -138,6 +178,7 @@ export default function ClientFeesPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Date</TableHead>
+                      <TableHead>Adviser</TableHead>
                       <TableHead>Rule</TableHead>
                       <TableHead>Would accrue</TableHead>
                       <TableHead>Status</TableHead>
@@ -147,6 +188,9 @@ export default function ClientFeesPage() {
                     {q.data.recentAccruals.map((a) => (
                       <TableRow key={a.id} data-testid={`row-accrual-${a.id}`}>
                         <TableCell>{a.accrualDate.slice(0, 10)}</TableCell>
+                        <TableCell>
+                          <AdviserCell users={q.data?.users} userId={a.adviserUserId} />
+                        </TableCell>
                         <TableCell>{a.feeRuleId}</TableCell>
                         <TableCell>{a.accrualAmount} {a.currency}</TableCell>
                         <TableCell>
@@ -180,6 +224,7 @@ export default function ClientFeesPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>ID</TableHead>
+                      <TableHead>Adviser</TableHead>
                       <TableHead>Period</TableHead>
                       <TableHead>Total</TableHead>
                       <TableHead>Status</TableHead>
@@ -189,6 +234,9 @@ export default function ClientFeesPage() {
                     {q.data.pendingDeductions.map((d) => (
                       <TableRow key={d.id} data-testid={`row-deduction-${d.id}`}>
                         <TableCell>{d.id}</TableCell>
+                        <TableCell>
+                          <AdviserCell users={q.data?.users} userId={d.adviserUserId} />
+                        </TableCell>
                         <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
                         <TableCell>{d.totalAccrued} {d.currency}</TableCell>
                         <TableCell><Badge variant="secondary">{d.status}</Badge></TableCell>
