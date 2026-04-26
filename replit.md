@@ -19,6 +19,46 @@ Cleanup is idempotent: the suite tracks any test users, transactions, ledger row
 
 **Adding new money-movement tests**: drop a `*.test.ts` file alongside the service it covers (e.g. `server/services/fee-engine.test.ts`), import from `@shared/schema` and the service module, and follow the cleanup pattern in `ledger.test.ts` (track every row you create, delete in `afterAll`, never call `pool.end()`).
 
+## Recent Changes (April 2026) — Session 28 (Task #35): Stop re-paging operators about acknowledged drift
+
+The daily wallet-vs-ledger reconciliation cron (Task #25) was re-paging ops every 24 hours for the same drift case, even when admins were already actively investigating it. This change adds an acknowledgement layer that suppresses repeat operator notifications until the drift moves materially or the ack is cleared. The reconciliation row itself is still written every run — the audit trail must show drift continued to exist; only the notification dispatch is suppressed.
+
+**Schema (`shared/schema.ts`)** — one new table `walletLedgerDriftAcknowledgements`:
+- `(userId, currency, acknowledgedDriftAmount, note, acknowledgedByUserId, acknowledgedAt, clearedAt, clearedByUserId, clearReason)`.
+- `acknowledgedDriftAmount` is a SIGNED snapshot of `cached - ledgerSum` at ack time (so a sign-flip later still counts as "drift moved").
+- Partial unique index `wallet_ledger_drift_ack_active_uidx ON (user_id, currency) WHERE cleared_at IS NULL` — at most one ACTIVE ack per pair; cleared rows accumulate freely as audit history.
+- `npm run db:push` migrated cleanly.
+
+**Reconciliation (`server/services/reconciliation.ts`)**:
+- New helper `getActiveDriftAcknowledgement(userId, currency)` runs once per mismatched pair.
+- New `shouldSuppressNotification(currentDrift, ack)`: suppress when `|currentDrift - ackDrift| <= MATCH_EPSILON` (uses the SAME `MATCH_EPSILON = 0.01` the rest of the recon code uses — no second tolerance constant).
+- The `notifyOperator` call in `runWalletLedgerReconciliation` is now wrapped: if suppressed, append a one-line note to the recon row (`"Operator alert suppressed: drift acknowledged on YYYY-MM-DD …"`) and bump `summary.operatorNotificationsSuppressed`. If the ack exists but drift moved, the row notes `"Drift moved beyond MATCH_EPSILON since acknowledgement on YYYY-MM-DD — re-paging."` and the alert fires anyway.
+- New helpers `acknowledgeWalletLedgerDrift` / `clearWalletLedgerDriftAcknowledgement` (with typed errors `DriftAckConflictError`, `DriftAckNotFoundError`, `DriftAckNoMismatchError`) so the route layer can map cleanly to 409 / 404 / 400.
+- Acknowledge live-computes the current drift (not from the most recent recon row, which can be up to 24h stale) so the snapshot reflects truth at ack time.
+- `WalletLedgerReconciliationSummary` gained `operatorNotificationsSuppressed: number`.
+
+**Backend (`server/admin-routes.ts`)** — 3 thin endpoints, each audit-logged:
+- `POST /api/admin/wallet-ledger-reconciliations/acknowledge` — `{userId, currency, note?}`. Validates with Zod, snapshots the live drift, audits `wallet_ledger_drift_acknowledged`. Returns 400 when there is no drift, 409 when an active ack already exists.
+- `POST /api/admin/wallet-ledger-reconciliations/clear-acknowledgement` — `{userId, currency, reason?}`. Audits `wallet_ledger_drift_acknowledgement_cleared`. Returns 404 when no active ack.
+- `GET /api/admin/wallet-ledger-drift-acknowledgements?activeOnly=true&page=&limit=` — paginated list joined with usernames for the actor and target.
+- The existing `GET /api/admin/wallet-ledger-reconciliations` is now enriched per-row with `activeAcknowledgement: {…} | null` so the UI can render "alert suppressed because acknowledged on …" without a second round-trip.
+
+**Smoke test** (`scripts/test-task-35-suppression.ts`) — re-runnable against a deterministic test user; 7 assertions all pass:
+1. Baseline drifted run dispatches an operator notification + writes one recon row.
+2. After ack, next run reports `operatorNotificationsSuppressed: 1` and the new recon row's `notes` mentions suppression.
+3. Drift moved by > MATCH_EPSILON → re-pages and notes `"re-paging"`.
+4. Drift moved by < MATCH_EPSILON → still suppressed.
+5. Cleared ack → next run pages again.
+6. Acknowledge with no drift → `DriftAckNoMismatchError`.
+7. Second active ack → `DriftAckConflictError`.
+
+**Live HTTP smoke (admin endpoints)**:
+- 400 on no-drift ack; 400 on bad input; 200 on valid ack (snapshot 1,949,850.00000000 USD captured); 409 on second ack; recon listing now carries `activeAcknowledgement` block; 200 on clear; 404 on second clear.
+
+**Hard rules unchanged**: reconciliation NEVER mutates the ledger or wallet cache. Acks only gate the notification dispatch; the recon row is still written every run. The 10C fee engine remains gated. Demo creds unchanged: wise/wise888 (admin), wiseadviser/wise888, wiseinvestor/wise888.
+
+**Deferred to sibling task** ("Let admins resolve and annotate ledger drift from the reconciliation page"): a richer admin UI on top of the same `walletLedgerDriftAcknowledgements` table — bulk acknowledge, status timeline, free-text annotations beyond `note`/`clearReason`. The data model and API surface added here are designed to be that UI's read/write target unchanged.
+
 ## Recent Changes (April 2026) — Build #3: Transaction lifecycle safety test
 
 A standalone test script that proves the integrity rails the deposit/withdraw money paths rely on, before any fee-engine money-movement work resumes. Hard-stop gate: if any of these fail, do not proceed to Gate B.

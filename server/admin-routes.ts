@@ -49,11 +49,21 @@ import {
   insertInvestmentProductSchema,
   // Session 25 (Task #17) — wallet-vs-ledger drift visibility
   walletLedgerReconciliations,
+  // Session 28 (Task #35) — drift acknowledgements (alert suppression)
+  walletLedgerDriftAcknowledgements,
   // Session 27 (Task #23) — fee accrual run log
   feeAccrualRuns,
   // Task #36 — operator alert audit log
   operatorAlerts,
 } from "@shared/schema";
+import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
+import {
+  acknowledgeWalletLedgerDrift,
+  clearWalletLedgerDriftAcknowledgement,
+  DriftAckConflictError,
+  DriftAckNoMismatchError,
+  DriftAckNotFoundError,
+} from "./services/reconciliation";
 import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
@@ -1275,6 +1285,207 @@ export function registerAdminRoutes(app: Express): void {
       const items = (itemsResult as any).rows ?? [];
       const total = Number(((totalResult as any).rows ?? [{ count: 0 }])[0]?.count ?? 0);
 
+      // Task #35 — enrich each item with the active acknowledgement (if any)
+      // so the admin UI can show "alert suppressed because acknowledged on
+      // YYYY-MM-DD by Z" without a second round-trip per row.
+      let acks: any[] = [];
+      if (items.length > 0) {
+        const pairs = items.map((r: any) => sql`(${Number(r.userId)}, ${String(r.currency)})`);
+        const inList = sql.join(pairs, sql`, `);
+        const ackResult = await db.execute(sql`
+          SELECT a.id,
+                 a.user_id              AS "userId",
+                 a.currency,
+                 a.acknowledged_drift_amount AS "acknowledgedDriftAmount",
+                 a.note,
+                 a.acknowledged_by_user_id   AS "acknowledgedByUserId",
+                 a.acknowledged_at      AS "acknowledgedAt",
+                 u.username             AS "acknowledgedByUsername"
+            FROM wallet_ledger_drift_acknowledgements a
+            LEFT JOIN users u ON u.id = a.acknowledged_by_user_id
+           WHERE a.cleared_at IS NULL
+             AND (a.user_id, a.currency) IN (${inList})
+        `);
+        acks = (ackResult as any).rows ?? [];
+      }
+      const ackByPair = new Map<string, any>();
+      for (const a of acks) {
+        ackByPair.set(`${Number(a.userId)}|${String(a.currency)}`, a);
+      }
+      const enriched = items.map((r: any) => ({
+        ...r,
+        activeAcknowledgement:
+          ackByPair.get(`${Number(r.userId)}|${String(r.currency)}`) ?? null,
+      }));
+
+      return { items: enriched, page, limit, total };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 28 (Task #35) — DRIFT ACKNOWLEDGEMENTS
+  // -------------------------------------------------------------------------
+  // Suppress repeat operator pages on a known drift case. The next
+  // reconciliation pass will see the active acknowledgement and skip the
+  // notifyOperator call as long as the drift hasn't moved by more than
+  // MATCH_EPSILON since the snapshot was taken. The reconciliation row
+  // itself is still written every day — the audit trail must show drift
+  // continued to exist.
+  //
+  // These endpoints exist as the minimum needed to drive suppression; a
+  // sibling task ("Let admins resolve and annotate ledger drift from the
+  // reconciliation page") layers a richer UI on top of the same data model.
+  // -------------------------------------------------------------------------
+  const ackDriftSchema = z.object({
+    userId: z.number().int().positive(),
+    currency: z
+      .string()
+      .trim()
+      .min(2)
+      .max(10)
+      .transform((s) => s.toUpperCase()),
+    note: z.string().trim().max(2000).optional().nullable(),
+  });
+
+  const clearAckDriftSchema = z.object({
+    userId: z.number().int().positive(),
+    currency: z
+      .string()
+      .trim()
+      .min(2)
+      .max(10)
+      .transform((s) => s.toUpperCase()),
+    reason: z.string().trim().max(2000).optional().nullable(),
+  });
+
+  app.post(
+    "/api/admin/wallet-ledger-reconciliations/acknowledge",
+    adminRoute(async (req, auth) => {
+      const parsed = ackDriftSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error(parsed.error.issues.map((i) => i.message).join("; ")), {
+          status: 400,
+        });
+      }
+      const { userId, currency, note } = parsed.data;
+
+      try {
+        const ack = await acknowledgeWalletLedgerDrift({
+          userId,
+          currency,
+          note: note ?? null,
+          actorUserId: auth.userId,
+        });
+        await db.insert(auditLogs).values({
+          userId: auth.userId,
+          action: "wallet_ledger_drift_acknowledged",
+          entityType: "wallet_ledger_drift_acknowledgement",
+          entityId: String(ack.id),
+          metadata: {
+            targetUserId: userId,
+            currency,
+            acknowledgedDriftAmount: ack.acknowledgedDriftAmount,
+            note: note ?? null,
+            note_to_ops:
+              "Operator notifications for this drift case will be suppressed until the drift moves > MATCH_EPSILON or this acknowledgement is cleared.",
+          } as any,
+          ipAddress: req.ip ?? null,
+        });
+        return { acknowledgement: ack };
+      } catch (err: any) {
+        if (err instanceof DriftAckConflictError) {
+          throw Object.assign(new Error(err.message), { status: 409 });
+        }
+        if (err instanceof DriftAckNoMismatchError) {
+          throw Object.assign(new Error(err.message), { status: 400 });
+        }
+        throw err;
+      }
+    }),
+  );
+
+  app.post(
+    "/api/admin/wallet-ledger-reconciliations/clear-acknowledgement",
+    adminRoute(async (req, auth) => {
+      const parsed = clearAckDriftSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(new Error(parsed.error.issues.map((i) => i.message).join("; ")), {
+          status: 400,
+        });
+      }
+      const { userId, currency, reason } = parsed.data;
+
+      try {
+        const cleared = await clearWalletLedgerDriftAcknowledgement({
+          userId,
+          currency,
+          actorUserId: auth.userId,
+          reason: reason ?? null,
+        });
+        await db.insert(auditLogs).values({
+          userId: auth.userId,
+          action: "wallet_ledger_drift_acknowledgement_cleared",
+          entityType: "wallet_ledger_drift_acknowledgement",
+          entityId: String(cleared.id),
+          metadata: {
+            targetUserId: userId,
+            currency,
+            reason: reason ?? null,
+            note_to_ops:
+              "Operator notifications resume on the next mismatch for this drift case.",
+          } as any,
+          ipAddress: req.ip ?? null,
+        });
+        return { acknowledgement: cleared };
+      } catch (err: any) {
+        if (err instanceof DriftAckNotFoundError) {
+          throw Object.assign(new Error(err.message), { status: 404 });
+        }
+        throw err;
+      }
+    }),
+  );
+
+  app.get(
+    "/api/admin/wallet-ledger-drift-acknowledgements",
+    adminRoute(async (req) => {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+      const activeOnly = String(req.query.activeOnly ?? "").toLowerCase() === "true";
+
+      const result = await db.execute(sql`
+        SELECT a.id,
+               a.user_id                  AS "userId",
+               a.currency,
+               a.acknowledged_drift_amount AS "acknowledgedDriftAmount",
+               a.note,
+               a.acknowledged_by_user_id  AS "acknowledgedByUserId",
+               a.acknowledged_at          AS "acknowledgedAt",
+               a.cleared_at               AS "clearedAt",
+               a.cleared_by_user_id       AS "clearedByUserId",
+               a.clear_reason             AS "clearReason",
+               u.username                 AS "username",
+               ua.username                AS "acknowledgedByUsername",
+               uc.username                AS "clearedByUsername"
+          FROM wallet_ledger_drift_acknowledgements a
+          LEFT JOIN users u  ON u.id  = a.user_id
+          LEFT JOIN users ua ON ua.id = a.acknowledged_by_user_id
+          LEFT JOIN users uc ON uc.id = a.cleared_by_user_id
+         WHERE 1 = 1
+           ${activeOnly ? sql`AND a.cleared_at IS NULL` : sql``}
+         ORDER BY a.acknowledged_at DESC, a.id DESC
+         LIMIT ${limit}
+        OFFSET ${offset}
+      `);
+      const totalResult = await db.execute(sql`
+        SELECT COUNT(*)::int AS count
+          FROM wallet_ledger_drift_acknowledgements
+         WHERE 1 = 1
+           ${activeOnly ? sql`AND cleared_at IS NULL` : sql``}
+      `);
+      const items = (result as any).rows ?? [];
+      const total = Number(((totalResult as any).rows ?? [{ count: 0 }])[0]?.count ?? 0);
       return { items, page, limit, total };
     }),
   );

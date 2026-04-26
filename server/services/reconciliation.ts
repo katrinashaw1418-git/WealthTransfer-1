@@ -30,10 +30,12 @@ import {
   reconciliations,
   wallets,
   walletLedgerReconciliations,
+  walletLedgerDriftAcknowledgements,
   type InsertReconciliation,
   type InsertWalletLedgerReconciliation,
+  type WalletLedgerDriftAcknowledgement,
 } from "@shared/schema";
-import { eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { getUserCurrencyBalance } from "./ledger";
 import { notifyOperator, type OperatorAlertSeverity } from "./operator-alerts";
 
@@ -240,7 +242,64 @@ export type WalletLedgerReconciliationSummary = {
   // mismatched (user, currency) pair. Surfaced so the cron caller can log
   // "alerts dispatched: N" and ops can verify the notification path is firing.
   operatorNotifications: number;
+  // Task #35 — count of operator notifications SUPPRESSED because the
+  // (user, currency) pair has an active acknowledgement and the drift has
+  // not moved by more than MATCH_EPSILON since the ack was recorded.
+  // Surfaced so ops can confirm the suppression is firing as intended.
+  operatorNotificationsSuppressed: number;
 };
+
+// ---------------------------------------------------------------------------
+// Task #35 — drift acknowledgement lookup
+// ---------------------------------------------------------------------------
+// Fetch the most recent ACTIVE acknowledgement (clearedAt IS NULL) for a
+// (userId, currency) pair. The partial unique index `wallet_ledger_drift_ack_active_uidx`
+// guarantees at most one such row exists, so the LIMIT 1 is defensive only.
+// Returns null when no active ack is on file — i.e. the dispatcher should
+// page operators normally.
+// ---------------------------------------------------------------------------
+async function getActiveDriftAcknowledgement(
+  userId: number,
+  currency: string,
+): Promise<WalletLedgerDriftAcknowledgement | null> {
+  const [row] = await db
+    .select()
+    .from(walletLedgerDriftAcknowledgements)
+    .where(
+      and(
+        eq(walletLedgerDriftAcknowledgements.userId, userId),
+        eq(walletLedgerDriftAcknowledgements.currency, currency),
+        isNull(walletLedgerDriftAcknowledgements.clearedAt),
+      ),
+    )
+    .orderBy(desc(walletLedgerDriftAcknowledgements.acknowledgedAt))
+    .limit(1);
+  return row ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Task #35 — suppression decision
+// ---------------------------------------------------------------------------
+// Given the drift the current reconciliation pass observed and a previously
+// recorded acknowledgement, decide whether to dispatch a fresh operator
+// notification. Suppression rule:
+//   - If |currentDrift - acknowledgedDrift| <= MATCH_EPSILON, suppress.
+//     "The situation is unchanged; ops already know."
+//   - Otherwise, the drift has materially moved since the snapshot — fire
+//     a new alert so ops can re-evaluate.
+//
+// Comparing SIGNED drift (rather than absolute magnitude) catches both
+// growth in the same direction AND a sign-flip that happens to keep the
+// magnitude similar — both of which are real changes ops needs to see.
+// ---------------------------------------------------------------------------
+function shouldSuppressNotification(
+  currentDrift: number,
+  ack: WalletLedgerDriftAcknowledgement,
+): boolean {
+  const ackDrift = Number(ack.acknowledgedDriftAmount);
+  const change = Math.abs(currentDrift - ackDrift);
+  return change <= MATCH_EPSILON;
+}
 
 export async function runWalletLedgerReconciliation(): Promise<WalletLedgerReconciliationSummary> {
   // Union the two sides so a wallet row that has zero ledger activity (and
@@ -266,6 +325,7 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
     alerts: 0,
     criticals: 0,
     operatorNotifications: 0,
+    operatorNotificationsSuppressed: 0,
   };
 
   for (const pair of pairs as Array<{ userId: number; currency: string }>) {
@@ -325,14 +385,19 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
       }
 
       // -----------------------------------------------------------------
-      // Task #25 — operator notification
+      // Task #25 + Task #35 — operator notification (with ack-based suppression)
       // -----------------------------------------------------------------
       // Any drift above MATCH_EPSILON (i.e. status === "mismatch") pages
-      // an operator. The dispatcher always logs a structured
-      // `[OPERATOR ALERT]` line (used by log-based ops alerting) and, when
-      // OPERATOR_ALERT_WEBHOOK_URL is configured, also POSTs the payload
-      // to that webhook (Slack-compatible). Webhook failures cannot break
-      // the cron — see `notifyOperator`.
+      // an operator UNLESS an active acknowledgement exists for this
+      // (userId, currency) pair AND the drift has not moved by more than
+      // MATCH_EPSILON since the ack was recorded. In that case ops already
+      // know about the case and re-paging would just be alert fatigue.
+      //
+      // The reconciliation row itself is ALWAYS written (the audit trail
+      // must show drift continued to exist); only the notification
+      // dispatch is suppressed. We also append a one-line note to the row
+      // so admins reading the listing can see "alert suppressed because
+      // acknowledged on YYYY-MM-DD".
       //
       // We map our internal severity onto the operator-alert severity 1:1
       // ("none" is unreachable here because absDrift >= MATCH_EPSILON
@@ -342,28 +407,76 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
         severity === "critical" || severity === "alert" || severity === "warning"
           ? severity
           : "info";
-      try {
-        await notifyOperator({
-          source: "wallet-ledger-reconciliation",
-          severity: opSeverity,
-          title: `Wallet cache drift detected for user ${userId} (${currency})`,
-          details: {
+
+      const ack = await getActiveDriftAcknowledgement(userId, currency);
+      const suppress = ack !== null && shouldSuppressNotification(drift, ack);
+
+      if (suppress && ack) {
+        const ackDate = ack.acknowledgedAt.toISOString().slice(0, 10);
+        const suppressionLine =
+          `Operator alert suppressed: drift acknowledged on ${ackDate} ` +
+          `(snapshot ${Number(ack.acknowledgedDriftAmount).toFixed(8)} ${currency}, ` +
+          `current ${drift.toFixed(8)} ${currency}).`;
+        notes = notes ? `${notes} ${suppressionLine}` : suppressionLine;
+        summary.operatorNotificationsSuppressed += 1;
+        console.log(
+          "[wallet-ledger-reconciliation] operator alert suppressed (acknowledged)",
+          {
             userId,
             currency,
-            walletCachedBalance: cached,
-            ledgerSumBalance: ledgerSum,
-            driftAmount: drift.toFixed(8),
+            acknowledgementId: ack.id,
+            acknowledgedAt: ack.acknowledgedAt,
+            acknowledgedDriftAmount: ack.acknowledgedDriftAmount,
+            currentDriftAmount: drift.toFixed(8),
           },
-        });
-        summary.operatorNotifications += 1;
-      } catch (err) {
-        // notifyOperator is designed to swallow its own errors; this
-        // catch is belt-and-braces so a hypothetical synchronous throw
-        // can never abort the loop and skip remaining pairs.
-        console.error(
-          "[wallet-ledger-reconciliation] notifyOperator threw unexpectedly",
-          { userId, currency, err: (err as Error)?.message ?? err },
         );
+      } else {
+        if (ack) {
+          // Ack exists but drift has moved materially — record why we are
+          // re-paging despite the acknowledgement, so the audit trail makes
+          // the decision auditable.
+          notes = notes
+            ? `${notes} Drift moved beyond MATCH_EPSILON since acknowledgement on ${ack.acknowledgedAt
+                .toISOString()
+                .slice(0, 10)} — re-paging.`
+            : `Drift moved beyond MATCH_EPSILON since acknowledgement on ${ack.acknowledgedAt
+                .toISOString()
+                .slice(0, 10)} — re-paging.`;
+          console.warn(
+            "[wallet-ledger-reconciliation] re-paging despite acknowledgement (drift moved)",
+            {
+              userId,
+              currency,
+              acknowledgementId: ack.id,
+              acknowledgedDriftAmount: ack.acknowledgedDriftAmount,
+              currentDriftAmount: drift.toFixed(8),
+              changeAbs: Math.abs(drift - Number(ack.acknowledgedDriftAmount)).toFixed(8),
+            },
+          );
+        }
+        try {
+          await notifyOperator({
+            source: "wallet-ledger-reconciliation",
+            severity: opSeverity,
+            title: `Wallet cache drift detected for user ${userId} (${currency})`,
+            details: {
+              userId,
+              currency,
+              walletCachedBalance: cached,
+              ledgerSumBalance: ledgerSum,
+              driftAmount: drift.toFixed(8),
+            },
+          });
+          summary.operatorNotifications += 1;
+        } catch (err) {
+          // notifyOperator is designed to swallow its own errors; this
+          // catch is belt-and-braces so a hypothetical synchronous throw
+          // can never abort the loop and skip remaining pairs.
+          console.error(
+            "[wallet-ledger-reconciliation] notifyOperator threw unexpectedly",
+            { userId, currency, err: (err as Error)?.message ?? err },
+          );
+        }
       }
     }
 
@@ -382,4 +495,146 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
   }
 
   return summary;
+}
+
+// =============================================================================
+// SESSION 28 (Task #35) — DRIFT ACKNOWLEDGEMENT HELPERS
+// =============================================================================
+// Tiny service-layer helpers consumed by the admin route layer. The admin
+// route layer is where authn/authz/audit happens; these helpers are pure
+// data-layer operations so the same logic can be unit-tested in isolation.
+// =============================================================================
+
+export class DriftAckConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DriftAckConflictError";
+  }
+}
+
+export class DriftAckNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DriftAckNotFoundError";
+  }
+}
+
+export class DriftAckNoMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DriftAckNoMismatchError";
+  }
+}
+
+/**
+ * Acknowledge a drift case for (userId, currency).
+ *
+ * Snapshots the CURRENT drift (live-computed from `wallets` vs ledger sum,
+ * not from the most recent reconciliation row — that row may be stale by
+ * up to 24h) so the dispatcher can later decide whether the situation has
+ * materially changed.
+ *
+ * Throws:
+ *   - `DriftAckConflictError` when an active ack already exists for this pair
+ *     (caller maps to 409). The partial unique index also prevents the insert
+ *     at the DB level so this is a defence-in-depth check.
+ *   - `DriftAckNoMismatchError` when the live drift is below MATCH_EPSILON —
+ *     there is nothing to acknowledge.
+ */
+export async function acknowledgeWalletLedgerDrift(opts: {
+  userId: number;
+  currency: string;
+  note: string | null;
+  actorUserId: number;
+}): Promise<WalletLedgerDriftAcknowledgement> {
+  const { userId, currency, note, actorUserId } = opts;
+
+  // Live-compute the drift right now so we snapshot the truth, not a stale
+  // reconciliation row.
+  const ledgerSum = await getUserCurrencyBalance(userId, currency);
+  const [walletRow] = await db
+    .select({ balance: wallets.balance })
+    .from(wallets)
+    .where(sql`${wallets.userId} = ${userId} AND ${wallets.currency} = ${currency}`);
+  const cached = walletRow?.balance ?? "0";
+  const drift = Number(cached) - Number(ledgerSum);
+
+  if (Math.abs(drift) < MATCH_EPSILON) {
+    throw new DriftAckNoMismatchError(
+      `No drift to acknowledge for user ${userId} (${currency}); cached and ledger agree within tolerance.`,
+    );
+  }
+
+  // Defence-in-depth: surface a friendly 409 before the partial unique index
+  // would also reject the insert.
+  const existing = await getActiveDriftAcknowledgement(userId, currency);
+  if (existing) {
+    throw new DriftAckConflictError(
+      `Active acknowledgement #${existing.id} already exists for user ${userId} (${currency}).`,
+    );
+  }
+
+  try {
+    const [inserted] = await db
+      .insert(walletLedgerDriftAcknowledgements)
+      .values({
+        userId,
+        currency,
+        acknowledgedDriftAmount: drift.toFixed(8),
+        note,
+        acknowledgedByUserId: actorUserId,
+      })
+      .returning();
+    return inserted;
+  } catch (err: any) {
+    // 23505 = unique_violation. The partial unique index would only fire
+    // if a concurrent ack snuck in between our SELECT and INSERT.
+    if (err?.code === "23505") {
+      throw new DriftAckConflictError(
+        `Active acknowledgement already exists for user ${userId} (${currency}).`,
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Clear the active acknowledgement for (userId, currency). Sets clearedAt /
+ * clearedByUserId / clearReason on the row but does not delete it — the
+ * audit trail of "this was acknowledged from X to Y" must persist.
+ *
+ * Throws `DriftAckNotFoundError` when there is no active ack to clear.
+ */
+export async function clearWalletLedgerDriftAcknowledgement(opts: {
+  userId: number;
+  currency: string;
+  actorUserId: number;
+  reason: string | null;
+}): Promise<WalletLedgerDriftAcknowledgement> {
+  const { userId, currency, actorUserId, reason } = opts;
+
+  // Conditional UPDATE: target only the active row. If two admins race to
+  // clear, the loser sees a 0-row update and gets a 404 — which is correct.
+  const [updated] = await db
+    .update(walletLedgerDriftAcknowledgements)
+    .set({
+      clearedAt: new Date(),
+      clearedByUserId: actorUserId,
+      clearReason: reason,
+    })
+    .where(
+      and(
+        eq(walletLedgerDriftAcknowledgements.userId, userId),
+        eq(walletLedgerDriftAcknowledgements.currency, currency),
+        isNull(walletLedgerDriftAcknowledgements.clearedAt),
+      ),
+    )
+    .returning();
+
+  if (!updated) {
+    throw new DriftAckNotFoundError(
+      `No active acknowledgement for user ${userId} (${currency}).`,
+    );
+  }
+  return updated;
 }

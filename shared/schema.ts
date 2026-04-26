@@ -1418,6 +1418,85 @@ export type WalletLedgerReconciliation = typeof walletLedgerReconciliations.$inf
 export type InsertWalletLedgerReconciliation = z.infer<typeof insertWalletLedgerReconciliationSchema>;
 
 // =============================================================================
+// SESSION 28 (Task #35) — DRIFT ACKNOWLEDGEMENTS (alert suppression)
+// =============================================================================
+// Companion to `walletLedgerReconciliations`. When ops are already aware of a
+// drift case (because they're investigating it) the daily reconciliation must
+// stop re-paging them every 24 hours. An admin records an acknowledgement for
+// the (userId, currency) pair, snapshotting the CURRENT drift amount; the
+// dispatcher then suppresses further operator notifications for that pair
+// until either:
+//   (a) the drift moves by more than MATCH_EPSILON from the snapshot
+//       (the situation has changed — ops needs to re-page), or
+//   (b) the acknowledgement is explicitly cleared (clearedAt set).
+//
+// Hard rules:
+//   1. The reconciliation row is STILL written every run regardless of
+//      acknowledgement — the audit trail must show the drift continued to
+//      exist. Only the notification dispatch is suppressed.
+//   2. Exactly one ACTIVE (clearedAt IS NULL) acknowledgement per
+//      (userId, currency) — enforced by a partial unique index. A second
+//      ack attempt while one is open returns 409.
+//   3. Ack rows are append-only-ish: clearing an ack sets clearedAt rather
+//      than deleting the row, so "alert suppressed because acknowledged on
+//      YYYY-MM-DD by Z" stays auditable forever.
+// =============================================================================
+export const walletLedgerDriftAcknowledgements = pgTable(
+  "wallet_ledger_drift_acknowledgements",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id").references(() => users.id).notNull(),
+    currency: text("currency").notNull(),
+    // Snapshot of the SIGNED drift (cached - ledgerSum) at the moment of
+    // acknowledgement. Used by the dispatcher to decide whether the drift
+    // has materially moved since the ack was recorded.
+    acknowledgedDriftAmount: decimal("acknowledged_drift_amount", {
+      precision: 18,
+      scale: 8,
+    }).notNull(),
+    // Free-form note from the admin: ticket id, root-cause hypothesis, etc.
+    note: text("note"),
+    // Admin who recorded the acknowledgement.
+    acknowledgedByUserId: integer("acknowledged_by_user_id")
+      .references(() => users.id)
+      .notNull(),
+    acknowledgedAt: timestamp("acknowledged_at").defaultNow().notNull(),
+    // When set, the acknowledgement is no longer active and notifications
+    // resume on the next mismatch.
+    clearedAt: timestamp("cleared_at"),
+    clearedByUserId: integer("cleared_by_user_id").references(() => users.id),
+    clearReason: text("clear_reason"),
+  },
+  (table) => ({
+    // Look up the active ack for a (user, currency) pair on every recon run.
+    userCurrencyIdx: index("wallet_ledger_drift_ack_user_currency_idx").on(
+      table.userId,
+      table.currency,
+    ),
+    // At most one ACTIVE ack per (user, currency). Cleared rows are excluded
+    // from the constraint so historical acks accumulate freely.
+    activeUniq: uniqueIndex("wallet_ledger_drift_ack_active_uidx")
+      .on(table.userId, table.currency)
+      .where(sql`cleared_at IS NULL`),
+  }),
+);
+
+export const insertWalletLedgerDriftAcknowledgementSchema = createInsertSchema(
+  walletLedgerDriftAcknowledgements,
+).omit({
+  id: true,
+  acknowledgedAt: true,
+  clearedAt: true,
+  clearedByUserId: true,
+  clearReason: true,
+});
+export type WalletLedgerDriftAcknowledgement =
+  typeof walletLedgerDriftAcknowledgements.$inferSelect;
+export type InsertWalletLedgerDriftAcknowledgement = z.infer<
+  typeof insertWalletLedgerDriftAcknowledgementSchema
+>;
+
+// =============================================================================
 // SESSION 9 — ADVISER ACCESS LAYER (read-only overlay for retail-AFSL partner)
 // =============================================================================
 // Purpose: let `role='adviser'` users (planners working under a partnered
