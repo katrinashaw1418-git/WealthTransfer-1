@@ -44,11 +44,47 @@ import {
   type InsertAdviserFeeRule,
 } from "@shared/schema";
 import {
+  getAccountBalance,
   getOrCreateClientAccount,
   getOrCreateFeeAccount,
   postLedgerEntries,
   refreshWalletCacheBalance,
 } from "./ledger";
+
+// ---------------------------------------------------------------------------
+// Task #34 — Insufficient funds guard.
+// Thrown by `settleApprovedDeduction` when the client's available balance in
+// the deduction's currency cannot cover `totalAccrued`. Carries the required
+// vs available figures so the admin UI / audit trail can surface the gap
+// without re-querying. The named class lets the catch block branch on the
+// failure mode and flip the deduction to its own `insufficient_funds` status
+// (rather than the generic pending_approval+failureReason recovery state),
+// so admins can filter for "client can't pay" separately from "settlement
+// crashed for some other reason".
+// ---------------------------------------------------------------------------
+export class InsufficientFundsError extends Error {
+  readonly status = 409;
+  readonly userId: number;
+  readonly currency: string;
+  readonly required: string;
+  readonly available: string;
+  constructor(
+    userId: number,
+    currency: string,
+    required: string,
+    available: string,
+  ) {
+    super(
+      `Insufficient ${currency} balance for client #${userId}: ` +
+        `required ${required}, available ${available}`,
+    );
+    this.name = "InsufficientFundsError";
+    this.userId = userId;
+    this.currency = currency;
+    this.required = required;
+    this.available = available;
+  }
+}
 
 export type GateReason =
   | "consent_missing"
@@ -517,9 +553,14 @@ export async function settleApprovedDeduction(opts: {
           { status: 409 },
         );
       }
+      // `insufficient_funds` (Task #34) is treated as a retry-able starting
+      // state alongside the regular pending/approved states — the admin can
+      // top up the client and click Retry, and the catch-block flip below
+      // will rewrite the failureReason on the next attempt.
       if (
         deduction.status !== "pending_approval" &&
-        deduction.status !== "approved"
+        deduction.status !== "approved" &&
+        deduction.status !== "insufficient_funds"
       ) {
         throw Object.assign(
           new Error(`Deduction in unexpected status '${deduction.status}'`),
@@ -545,6 +586,42 @@ export async function settleApprovedDeduction(opts: {
         );
       }
       const platformShare = Number((total - adviserShare).toFixed(8));
+
+      // ---------------------------------------------------------------
+      // Task #34 — Insufficient-funds gate.
+      // The ledger does not enforce non-negative balances on its own, so
+      // without this check `settleApprovedDeduction` would happily post a
+      // debit larger than the client's balance and silently overdraw the
+      // wallet cache (or, with the wallets check constraint in place,
+      // crash with a confusing CHECK violation late in the transaction
+      // AFTER the transactions/ledger rows have been written and rolled
+      // back). We resolve the client account up-front and read its
+      // ledger-derived balance inside this same tx so the snapshot is
+      // consistent with what postLedgerEntries will see; if the balance
+      // can't cover `total` we throw an InsufficientFundsError. The
+      // outer catch block flips the deduction to `insufficient_funds`
+      // with a clear failureReason — no transactions row, no ledger
+      // entries, no wallet cache change.
+      // ---------------------------------------------------------------
+      const clientAccount = await getOrCreateClientAccount(
+        deduction.clientUserId,
+        deduction.currency,
+        tx,
+      );
+      const balanceStr = await getAccountBalance(clientAccount.id, tx);
+      const available = Number(balanceStr);
+      // 1e-8 matches the smallest-unit epsilon postLedgerEntries uses for
+      // its balance check; anything within that margin is treated as
+      // numerically equal so we don't reject due to floating-point dust.
+      const FUNDS_EPSILON = 1e-8;
+      if (!Number.isFinite(available) || available + FUNDS_EPSILON < total) {
+        throw new InsufficientFundsError(
+          deduction.clientUserId,
+          deduction.currency,
+          toAmount8(total),
+          toAmount8(Number.isFinite(available) && available > 0 ? available : 0),
+        );
+      }
 
       // (3 + 4) Insert the transactions row with the deterministic key. A
       // competing concurrent retry will lose the unique-violation race here
@@ -581,11 +658,9 @@ export async function settleApprovedDeduction(opts: {
         .returning();
 
       // (5) Resolve accounts + post the balanced triple.
-      const clientAccount = await getOrCreateClientAccount(
-        deduction.clientUserId,
-        deduction.currency,
-        tx,
-      );
+      // `clientAccount` was already resolved above as part of the
+      // insufficient-funds gate — reuse that handle so we don't issue a
+      // redundant SELECT for the same row.
       const adviserAccount = await getOrCreateClientAccount(
         deduction.adviserUserId,
         deduction.currency,
@@ -675,6 +750,7 @@ export async function settleApprovedDeduction(opts: {
             inArray(adviserFeeDeductions.status, [
               "pending_approval",
               "approved",
+              "insufficient_funds",
             ] as any),
           ),
         )
@@ -695,10 +771,18 @@ export async function settleApprovedDeduction(opts: {
       err?.message && typeof err.message === "string"
         ? err.message.slice(0, 500)
         : String(err).slice(0, 500);
+    // Task #34: when the failure mode is specifically "client can't pay",
+    // flip the deduction to its own `insufficient_funds` status so admins
+    // can filter/triage these separately from generic settlement crashes.
+    // The status flip is gated on the same retry-eligible starting states
+    // the inner transaction permits, so we never overwrite a row that has
+    // already moved on (e.g. settled by a competing retry).
+    const isInsufficient = err instanceof InsufficientFundsError;
     try {
       await db
         .update(adviserFeeDeductions)
         .set({
+          ...(isInsufficient ? { status: "insufficient_funds" as any } : {}),
           failureReason: `[${new Date().toISOString()}] ${message}`,
         })
         .where(
@@ -707,6 +791,7 @@ export async function settleApprovedDeduction(opts: {
             inArray(adviserFeeDeductions.status, [
               "pending_approval",
               "approved",
+              "insufficient_funds",
             ] as any),
           ),
         );

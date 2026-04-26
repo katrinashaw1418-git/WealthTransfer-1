@@ -219,6 +219,10 @@ function deductionStatusVariant(status: string): "default" | "secondary" | "outl
   if (status === "settled") return "default";
   if (status === "pending_approval") return "secondary";
   if (status === "rejected") return "destructive";
+  // Task #34: client couldn't cover the debit. Render as destructive so it
+  // pops in the table the same way a rejection does — admins need to see
+  // these to top the client up before retrying.
+  if (status === "insufficient_funds") return "destructive";
   return "outline";
 }
 
@@ -439,6 +443,11 @@ export default function AdminFeesPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
     } catch (err: any) {
       toast({ title: "Approve failed", description: err?.message ?? String(err), variant: "destructive" });
+      // Task #34: the backend may have updated the row to
+      // `insufficient_funds` (or written a new failureReason) before
+      // throwing — invalidate so the table reflects the new status
+      // immediately rather than waiting for the next manual refresh.
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
     }
   }
 
@@ -1015,14 +1024,18 @@ export default function AdminFeesPage() {
                               title={d.failureReason}
                               data-testid={`text-failure-${d.id}`}
                             >
-                              Last attempt failed
+                              {d.status === "insufficient_funds"
+                                ? "Insufficient client balance"
+                                : "Last attempt failed"}
                             </span>
                           ) : (
                             "—"
                           )}
                         </TableCell>
                         <TableCell>
-                          {(d.status === "pending_approval" || d.status === "approved") && (
+                          {(d.status === "pending_approval" ||
+                            d.status === "approved" ||
+                            d.status === "insufficient_funds") && (
                             <Button
                               size="sm"
                               variant="default"
@@ -1030,7 +1043,11 @@ export default function AdminFeesPage() {
                               data-testid={`button-approve-${d.id}`}
                             >
                               <CheckCircle2 className="h-4 w-4 mr-1" />
-                              {d.failureReason ? "Retry" : "Approve & settle"}
+                              {d.status === "insufficient_funds"
+                                ? "Retry (after top-up)"
+                                : d.failureReason
+                                  ? "Retry"
+                                  : "Approve & settle"}
                             </Button>
                           )}
                           {d.status === "settled" && (
