@@ -100,8 +100,11 @@ export default function RegisterInvite() {
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         setSubmitError(body.error || "Activation failed. Please try again.");
-        // If the invite is no longer valid, surface that on the validation card too.
-        if (res.status === 410 || res.status === 404) {
+        // If the invite is no longer valid OR the email has been claimed in the
+        // meantime (409), there's no recovery from this form — flip to the
+        // terminal "Invitation Unavailable" card so the user is sent back to
+        // /apply or /login instead of retrying a password they can never set.
+        if (res.status === 410 || res.status === 404 || res.status === 409) {
           setValidation({ kind: "error", message: body.error || "This invitation is no longer valid." });
         }
         return;

@@ -955,6 +955,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(410).json({ valid: false, error: "This invitation has expired." });
       }
 
+      // Spec: validate must reject if a user with this email already exists.
+      // We mirror /complete's pair of checks (email + username) here, because
+      // /complete forces username = email; without both checks the user would
+      // sail past validate and only hit a 409 after typing a password.
+      // Audited as registration_invite_rejected_duplicate_email so reviewers
+      // can match validate-time rejections to the same action used at /complete.
+      const existingByEmail = await storage.getUserByEmail(inv.email);
+      const existingByUsername = existingByEmail
+        ? null
+        : await storage.getUserByUsername(inv.email);
+      if (existingByEmail || existingByUsername) {
+        await db.insert(auditLogs).values({
+          userId: null,
+          action: "registration_invite_rejected_duplicate_email",
+          entityType: "registration_invite",
+          entityId: String(inv.id),
+          metadata: { email: inv.email, stage: "validate" },
+          ipAddress: req.ip || null,
+        });
+        return res.status(409).json({
+          valid: false,
+          error: "An account with this email already exists.",
+        });
+      }
+
       // Audit the view fail-closed: a direct insert (not writeAuditLog, which
       // swallows errors) so the response only succeeds if the audit row lands.
       // The viewer is unauthenticated; the invite hash + email pin the row to the
