@@ -19,7 +19,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ShieldAlert, HandCoins } from "lucide-react";
+import { Link } from "wouter";
+import { ShieldAlert, HandCoins, Undo2, ExternalLink } from "lucide-react";
 
 interface FeeRuleRow {
   id: number;
@@ -62,6 +63,9 @@ interface FeeDeductionRow {
   settledAt: string | null;
   settledTransactionId: number | null;
   failureReason: string | null;
+  reversedAt: string | null;
+  reversedReason: string | null;
+  reversalTransactionId: number | null;
 }
 
 function deductionStatusBadge(status: string) {
@@ -257,6 +261,7 @@ export default function AdviserFeesPage() {
                       <TableHead>Your share</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>Settled</TableHead>
+                      <TableHead>Reversal</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -272,6 +277,38 @@ export default function AdviserFeesPage() {
                         <TableCell>{deductionStatusBadge(d.status)}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {d.settledAt ? d.settledAt.slice(0, 10) : "—"}
+                        </TableCell>
+                        <TableCell>
+                          {d.reversedAt ? (
+                            <div className="flex flex-col gap-1">
+                              <Badge
+                                variant="secondary"
+                                className="inline-flex items-center gap-1 w-fit"
+                                data-testid={`badge-deduction-reversed-${d.id}`}
+                                title={d.reversedReason ?? undefined}
+                              >
+                                <Undo2 className="h-3 w-3" />
+                                Reversed {d.reversedAt.slice(0, 10)}
+                              </Badge>
+                              {d.reversedReason && (
+                                <span className="text-xs text-muted-foreground max-w-[14rem] truncate">
+                                  {d.reversedReason}
+                                </span>
+                              )}
+                              {d.reversalTransactionId && (
+                                <Link
+                                  href={`/transactions?txn=${d.reversalTransactionId}`}
+                                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                                  data-testid={`link-deduction-reversal-txn-${d.id}`}
+                                >
+                                  Txn #{d.reversalTransactionId}
+                                  <ExternalLink className="h-3 w-3" />
+                                </Link>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
                         </TableCell>
                       </TableRow>
                     ))}

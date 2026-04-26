@@ -19,7 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ShieldAlert, Receipt, ExternalLink } from "lucide-react";
+import { ShieldAlert, Receipt, ExternalLink, Undo2 } from "lucide-react";
 
 interface UserRef {
   id: number;
@@ -61,6 +61,7 @@ interface ClientFeesPayload {
     currency: string;
     status: string;
   }>;
+  recentReversals?: ClientDeductionRow[];
   users?: UsersMap;
 }
 
@@ -76,6 +77,9 @@ interface ClientDeductionRow {
   status: string;
   settledAt: string | null;
   settledTransactionId: number | null;
+  reversedAt: string | null;
+  reversedReason: string | null;
+  reversalTransactionId: number | null;
   createdAt: string;
 }
 
@@ -94,6 +98,8 @@ function statusBadgeVariant(status: string): "default" | "outline" | "secondary"
       return "outline";
     case "rejected":
       return "destructive";
+    case "reversed":
+      return "outline";
     default:
       return "secondary";
   }
@@ -306,29 +312,55 @@ export default function ClientFeesPage() {
                         <TableCell>{d.adviserShareAmount} {d.currency}</TableCell>
                         <TableCell>{d.platformShareAmount} {d.currency}</TableCell>
                         <TableCell>
-                          <Badge
-                            variant={statusBadgeVariant(d.status)}
-                            data-testid={`badge-deduction-status-${d.id}`}
-                          >
-                            {d.status}
-                          </Badge>
+                          <div className="flex flex-col gap-1">
+                            <Badge
+                              variant={statusBadgeVariant(d.status)}
+                              data-testid={`badge-deduction-status-${d.id}`}
+                            >
+                              {d.status}
+                            </Badge>
+                            {d.reversedAt && (
+                              <Badge
+                                variant="secondary"
+                                className="inline-flex items-center gap-1 w-fit"
+                                data-testid={`badge-deduction-reversed-${d.id}`}
+                                title={d.reversedReason ?? undefined}
+                              >
+                                <Undo2 className="h-3 w-3" />
+                                Reversed {d.reversedAt.slice(0, 10)}
+                                {d.reversedReason ? ` — ${d.reversedReason}` : ""}
+                              </Badge>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
                           {d.settledAt ? d.settledAt.slice(0, 10) : "—"}
                         </TableCell>
                         <TableCell>
-                          {d.settledTransactionId ? (
-                            <Link
-                              href={`/transactions?txn=${d.settledTransactionId}`}
-                              className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
-                              data-testid={`link-deduction-txn-${d.id}`}
-                            >
-                              #{d.settledTransactionId}
-                              <ExternalLink className="h-3 w-3" />
-                            </Link>
-                          ) : (
-                            <span className="text-sm text-muted-foreground">—</span>
-                          )}
+                          <div className="flex flex-col gap-1">
+                            {d.settledTransactionId ? (
+                              <Link
+                                href={`/transactions?txn=${d.settledTransactionId}`}
+                                className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                                data-testid={`link-deduction-txn-${d.id}`}
+                              >
+                                #{d.settledTransactionId}
+                                <ExternalLink className="h-3 w-3" />
+                              </Link>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">—</span>
+                            )}
+                            {d.reversalTransactionId && (
+                              <Link
+                                href={`/transactions?txn=${d.reversalTransactionId}`}
+                                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:underline"
+                                data-testid={`link-deduction-reversal-txn-${d.id}`}
+                              >
+                                Reversal #{d.reversalTransactionId}
+                                <ExternalLink className="h-3 w-3" />
+                              </Link>
+                            )}
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}

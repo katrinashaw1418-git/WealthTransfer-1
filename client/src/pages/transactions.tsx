@@ -45,6 +45,8 @@ const getTypeLabel = (type: string) => {
     transfer: "Transfer",
     crypto_buy: "Acquisition",
     crypto_sell: "Disposal",
+    adviser_fee_deduction: "Fee deduction",
+    adviser_fee_deduction_reversal: "Fee reversal",
   };
   return labels[type] || type;
 };
@@ -182,6 +184,8 @@ export default function Transactions() {
                   <SelectItem value="transfer">Transfer</SelectItem>
                   <SelectItem value="crypto_buy">Acquisition</SelectItem>
                   <SelectItem value="crypto_sell">Disposal</SelectItem>
+                  <SelectItem value="adviser_fee_deduction">Fee deduction</SelectItem>
+                  <SelectItem value="adviser_fee_deduction_reversal">Fee reversal</SelectItem>
                 </SelectContent>
               </Select>
               <Select value={statusFilter} onValueChange={setStatusFilter}>

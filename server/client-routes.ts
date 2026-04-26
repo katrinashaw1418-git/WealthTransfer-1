@@ -425,7 +425,31 @@ export function registerClientRoutes(app: Express): void {
       const auth = requireAuth(req);
       const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
-      const [rules, recentAccruals, pendingDeductions] = await Promise.all([
+      // Task #61 — explicit projection for the deduction-shaped fields so
+      // the API contract names every column (including the new reversal
+      // pointers reversedAt / reversedReason / reversalTransactionId)
+      // instead of relying on `select *`. Operator-only fields
+      // (reversedByUserId, approvedByUserId, idempotencyKey, ...) stay
+      // hidden from clients.
+      const deductionClientCols = {
+        id: adviserFeeDeductions.id,
+        adviserUserId: adviserFeeDeductions.adviserUserId,
+        periodStart: adviserFeeDeductions.periodStart,
+        periodEnd: adviserFeeDeductions.periodEnd,
+        totalAccrued: adviserFeeDeductions.totalAccrued,
+        adviserShareAmount: adviserFeeDeductions.adviserShareAmount,
+        platformShareAmount: adviserFeeDeductions.platformShareAmount,
+        currency: adviserFeeDeductions.currency,
+        status: adviserFeeDeductions.status,
+        settledAt: adviserFeeDeductions.settledAt,
+        settledTransactionId: adviserFeeDeductions.settledTransactionId,
+        reversedAt: adviserFeeDeductions.reversedAt,
+        reversedReason: adviserFeeDeductions.reversedReason,
+        reversalTransactionId: adviserFeeDeductions.reversalTransactionId,
+        createdAt: adviserFeeDeductions.createdAt,
+      } as const;
+
+      const [rules, recentAccruals, pendingDeductions, recentReversals] = await Promise.all([
         db
           .select()
           .from(adviserFeeRules)
@@ -443,7 +467,7 @@ export function registerClientRoutes(app: Express): void {
           .orderBy(desc(adviserFeeAccruals.accrualDate))
           .limit(200),
         db
-          .select()
+          .select(deductionClientCols)
           .from(adviserFeeDeductions)
           .where(
             and(
@@ -452,15 +476,38 @@ export function registerClientRoutes(app: Express): void {
             ),
           )
           .orderBy(desc(adviserFeeDeductions.createdAt)),
+        // Task #61 — surface recently reversed deductions on the same
+        // payload so the client fees page shows refunds without a second
+        // round-trip. Bounded to the 90-day window already used for
+        // recentAccruals so the response stays small.
+        db
+          .select(deductionClientCols)
+          .from(adviserFeeDeductions)
+          .where(
+            and(
+              eq(adviserFeeDeductions.clientUserId, auth.userId),
+              eq(adviserFeeDeductions.status, "reversed"),
+              sql`${adviserFeeDeductions.reversedAt} >= ${ninetyDaysAgo}`,
+            ),
+          )
+          .orderBy(desc(adviserFeeDeductions.reversedAt))
+          .limit(50),
       ]);
 
       const usersMap = await getUserNameMap([
         ...rules.map((r) => r.adviserUserId),
         ...recentAccruals.map((a) => a.adviserUserId),
         ...pendingDeductions.map((d) => d.adviserUserId),
+        ...recentReversals.map((d) => d.adviserUserId),
       ]);
 
-      res.json({ rules, recentAccruals, pendingDeductions, users: usersMap });
+      res.json({
+        rules,
+        recentAccruals,
+        pendingDeductions,
+        recentReversals,
+        users: usersMap,
+      });
     } catch (error: any) {
       handleError(res, error, "Failed to load client fees");
     }
@@ -494,6 +541,12 @@ export function registerClientRoutes(app: Express): void {
           status: adviserFeeDeductions.status,
           settledAt: adviserFeeDeductions.settledAt,
           settledTransactionId: adviserFeeDeductions.settledTransactionId,
+          // Task #61 — surface reversal info so a client whose fee was
+          // refunded can see when and why it was reversed. We deliberately
+          // do NOT expose `reversedByUserId` (operator-only).
+          reversedAt: adviserFeeDeductions.reversedAt,
+          reversedReason: adviserFeeDeductions.reversedReason,
+          reversalTransactionId: adviserFeeDeductions.reversalTransactionId,
           createdAt: adviserFeeDeductions.createdAt,
         })
         .from(adviserFeeDeductions)
