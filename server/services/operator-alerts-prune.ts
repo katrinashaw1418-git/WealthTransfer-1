@@ -27,7 +27,7 @@
 
 import { lt } from "drizzle-orm";
 import { db } from "../db";
-import { operatorAlerts } from "@shared/schema";
+import { operatorAlerts, operatorAlertPruneRuns } from "@shared/schema";
 import { log } from "../vite";
 
 export const DEFAULT_RETENTION_DAYS = 180;
@@ -115,6 +115,26 @@ export async function pruneOperatorAlerts(
     deleted,
     durationMs,
   };
+
+  // Task #59: persist a small audit row so the admin UI can show recent
+  // prune outcomes without operators having to grep server logs. We log
+  // failures but do NOT throw — the prune itself succeeded; failing to
+  // record the bookkeeping row should not surface as a failed retention
+  // run to the cron caller.
+  try {
+    await db.insert(operatorAlertPruneRuns).values({
+      startedAt: new Date(startedAt),
+      retentionDays,
+      cutoff,
+      deleted,
+      durationMs,
+    });
+  } catch (e) {
+    console.error(
+      "[operator-alerts-prune] failed to persist prune run history",
+      e,
+    );
+  }
 
   log(
     `[operator-alerts-prune] deleted ${result.deleted} row(s) older than ` +

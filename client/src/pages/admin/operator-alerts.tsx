@@ -29,7 +29,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Siren, ChevronLeft, ChevronRight, X, Copy } from "lucide-react";
+import { Siren, ChevronLeft, ChevronRight, X, Copy, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 type Severity = "info" | "warning" | "alert" | "critical";
@@ -58,6 +58,19 @@ interface OperatorAlertsPage {
   page: number;
   limit: number;
   total: number;
+}
+
+interface PruneRunRow {
+  id: number;
+  startedAt: string | null;
+  retentionDays: number;
+  cutoff: string | null;
+  deleted: number;
+  durationMs: number;
+}
+
+interface PruneRunsResponse {
+  items: PruneRunRow[];
 }
 
 const TOKEN_KEY = "amax_jwt";
@@ -163,6 +176,17 @@ export default function AdminOperatorAlerts() {
     { source: appliedSource, severity: appliedSeverity, q: appliedSearch, page },
   ];
 
+  function getAuthHeaders(): Record<string, string> {
+    const token = (() => {
+      try {
+        return localStorage.getItem(TOKEN_KEY);
+      } catch {
+        return null;
+      }
+    })();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
   const { data, isLoading } = useQuery<OperatorAlertsPage>({
     queryKey,
     queryFn: async () => {
@@ -172,15 +196,22 @@ export default function AdminOperatorAlerts() {
       if (appliedSearch.trim()) params.set("q", appliedSearch.trim());
       params.set("page", String(page));
       params.set("limit", String(limit));
-      const token = (() => {
-        try {
-          return localStorage.getItem(TOKEN_KEY);
-        } catch {
-          return null;
-        }
-      })();
       const res = await fetch(`/api/admin/operator-alerts?${params.toString()}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      return res.json();
+    },
+  });
+
+  // Task #59 — recent retention prune runs. Surfaced here so operators can
+  // confirm at a glance that the daily prune job is running without having to
+  // grep server logs.
+  const { data: pruneRunsData, isLoading: pruneRunsLoading } = useQuery<PruneRunsResponse>({
+    queryKey: ["/api/admin/operator-alerts/prune-runs"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/operator-alerts/prune-runs", {
+        headers: getAuthHeaders(),
       });
       if (!res.ok) throw new Error(`${res.status}`);
       return res.json();
@@ -286,6 +317,65 @@ export default function AdminOperatorAlerts() {
               </Button>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card data-testid="card-prune-runs">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Trash2 className="h-4 w-4 text-violet-600" />
+            Recent retention prune runs
+          </CardTitle>
+          <p className="text-xs text-slate-500 mt-1">
+            Daily background job that deletes operator alerts older than the retention window.
+            Most recent runs first.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {pruneRunsLoading ? (
+            <Skeleton className="h-24 w-full" />
+          ) : !pruneRunsData || pruneRunsData.items.length === 0 ? (
+            <p className="text-sm text-slate-500" data-testid="text-no-prune-runs">
+              No prune runs recorded yet. The job runs once per day; the first record
+              will appear within 24 hours of server start.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>When</TableHead>
+                  <TableHead className="text-right">Deleted</TableHead>
+                  <TableHead>Cutoff</TableHead>
+                  <TableHead className="text-right">Retention</TableHead>
+                  <TableHead className="text-right">Duration</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {pruneRunsData.items.map((run) => (
+                  <TableRow key={run.id} data-testid={`row-prune-run-${run.id}`}>
+                    <TableCell className="text-xs text-slate-600 whitespace-nowrap">
+                      {fmt(run.startedAt)}
+                    </TableCell>
+                    <TableCell
+                      className="text-sm font-mono text-right"
+                      data-testid={`text-prune-deleted-${run.id}`}
+                    >
+                      {run.deleted.toLocaleString()}
+                    </TableCell>
+                    <TableCell className="text-xs text-slate-600 whitespace-nowrap">
+                      {fmt(run.cutoff)}
+                    </TableCell>
+                    <TableCell className="text-xs font-mono text-slate-700 text-right">
+                      {run.retentionDays}d
+                    </TableCell>
+                    <TableCell className="text-xs font-mono text-slate-700 text-right">
+                      {run.durationMs}ms
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
 

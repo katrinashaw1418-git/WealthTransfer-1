@@ -55,6 +55,8 @@ import {
   feeAccrualRuns,
   // Task #36 — operator alert audit log
   operatorAlerts,
+  // Task #59 — operator alert retention prune run history
+  operatorAlertPruneRuns,
 } from "@shared/schema";
 import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
 import {
@@ -1635,6 +1637,38 @@ export function registerAdminRoutes(app: Express): void {
         last7d,
         generatedAt: new Date().toISOString(),
       };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // TASK #59 — Operator-alert prune run history
+  // -------------------------------------------------------------------------
+  // Surfaces the recent runs of the daily `pruneOperatorAlerts` job (Task #44)
+  // so operators can confirm from the admin UI that the retention job is
+  // healthy without grepping server logs.
+  //
+  // Read-only and capped at 30 entries — the prune writes one row per day, so
+  // 30 covers the last month at a glance, which is what operators need for an
+  // "is it running?" sanity check. If we ever want longer history we can add
+  // pagination, but the table itself is the source of truth.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/operator-alerts/prune-runs",
+    adminRoute(async () => {
+      const rows = await db
+        .select({
+          id: operatorAlertPruneRuns.id,
+          startedAt: operatorAlertPruneRuns.startedAt,
+          retentionDays: operatorAlertPruneRuns.retentionDays,
+          cutoff: operatorAlertPruneRuns.cutoff,
+          deleted: operatorAlertPruneRuns.deleted,
+          durationMs: operatorAlertPruneRuns.durationMs,
+        })
+        .from(operatorAlertPruneRuns)
+        .orderBy(desc(operatorAlertPruneRuns.startedAt), desc(operatorAlertPruneRuns.id))
+        .limit(30);
+
+      return { items: rows };
     }),
   );
 

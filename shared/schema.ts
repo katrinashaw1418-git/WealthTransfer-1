@@ -2006,3 +2006,39 @@ export const insertOperatorAlertSchema = createInsertSchema(operatorAlerts).omit
 });
 export type OperatorAlertRecord = typeof operatorAlerts.$inferSelect;
 export type InsertOperatorAlertRecord = z.infer<typeof insertOperatorAlertSchema>;
+
+// ---------------------------------------------------------------------------
+// Task #59 — operator-alert retention prune run history
+// ---------------------------------------------------------------------------
+// One row per execution of `pruneOperatorAlerts` (Task #44). Persisting the
+// outcome lets operators confirm at a glance from the admin UI that the daily
+// prune ran and how many rows it removed, without grepping server logs.
+//
+// Kept deliberately small — no payload, just the four numbers operators care
+// about (when it ran, retention window, cutoff, deleted, duration). At one
+// row per day, this table gains ~365 rows/year and never needs its own
+// retention policy.
+// ---------------------------------------------------------------------------
+export const operatorAlertPruneRuns = pgTable(
+  "operator_alert_prune_runs",
+  {
+    id: serial("id").primaryKey(),
+    // Wall-clock time the prune started — what operators actually want to see
+    // ("did it run today?"). DefaultNow keeps the insert path simple for the
+    // service.
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    retentionDays: integer("retention_days").notNull(),
+    // Inclusive lower bound of rows kept (anything strictly older was deleted).
+    cutoff: timestamp("cutoff").notNull(),
+    // Number of operator_alerts rows removed in this run.
+    deleted: integer("deleted").notNull(),
+    // Wall-clock duration of the DELETE statement in ms.
+    durationMs: integer("duration_ms").notNull(),
+  },
+  (table) => ({
+    // Reads are always "show me the most recent N runs" — index startedAt.
+    startedAtIdx: index("operator_alert_prune_runs_started_at_idx").on(table.startedAt),
+  }),
+);
+
+export type OperatorAlertPruneRunRecord = typeof operatorAlertPruneRuns.$inferSelect;

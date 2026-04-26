@@ -22,9 +22,9 @@
 // =============================================================================
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { inArray, sql } from "drizzle-orm";
+import { gte, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
-import { operatorAlerts } from "@shared/schema";
+import { operatorAlerts, operatorAlertPruneRuns } from "@shared/schema";
 import {
   DEFAULT_RETENTION_DAYS,
   getRetentionDays,
@@ -33,10 +33,15 @@ import {
 
 const insertedIds: number[] = [];
 let originalEnv: string | undefined;
+// Capture the wall-clock time the test started so we can scrub any
+// prune-run rows the test caused to be persisted (Task #59) without
+// disturbing rows from earlier real prune runs.
+let testStartedAt: Date;
 
 beforeEach(() => {
   originalEnv = process.env.OPERATOR_ALERT_RETENTION_DAYS;
   delete process.env.OPERATOR_ALERT_RETENTION_DAYS;
+  testStartedAt = new Date();
 });
 
 afterEach(async () => {
@@ -49,6 +54,11 @@ afterEach(async () => {
     await db.delete(operatorAlerts).where(inArray(operatorAlerts.id, insertedIds));
     insertedIds.length = 0;
   }
+  // Task #59: prune now persists a row into operator_alert_prune_runs on every
+  // call. Scrub anything the test produced so reruns stay idempotent.
+  await db
+    .delete(operatorAlertPruneRuns)
+    .where(gte(operatorAlertPruneRuns.startedAt, testStartedAt));
 });
 
 function uniqueSource(label: string): string {
