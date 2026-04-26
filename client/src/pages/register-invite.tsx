@@ -9,14 +9,16 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, ShieldCheck, AlertTriangle, CheckCircle2 } from "lucide-react";
 
-// Session 14 — token-gated registration page.
-// Reads ?token=... from the URL, validates it server-side, then collects
-// username + name + password. Email and role come from the server-side token
-// row and CANNOT be edited from this form (they are admin-issued).
+// Session 14 — registration-invite activation page.
+// Reads ?invite=... from the URL, validates it server-side, then collects
+// password + confirm. Email and role come from the server-side invite row and
+// CANNOT be edited from this form (they are admin-issued). Username is derived
+// from the email server-side. firstName/lastName start empty and are filled in
+// later via profile/KYC.
 
 interface ValidatedInvite {
   email: string;
-  role: "client" | "adviser";
+  role: "client" | "adviser" | "admin";
   expiresAt: string;
 }
 
@@ -25,31 +27,34 @@ type ValidateState =
   | { kind: "ok"; invite: ValidatedInvite }
   | { kind: "error"; message: string };
 
+const ROLE_LABEL: Record<string, string> = {
+  client: "Client",
+  adviser: "Adviser",
+  admin: "Administrator",
+};
+
 export default function RegisterInvite() {
   const { loginWithJwt } = useAuth();
   const [, navigate] = useLocation();
 
-  const [token, setToken] = useState<string>("");
+  const [invite, setInvite] = useState<string>("");
   const [validation, setValidation] = useState<ValidateState>({ kind: "loading" });
 
-  const [username, setUsername] = useState("");
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // 1. Validate the token on mount.
+  // 1. Validate the invite on mount.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const t = (params.get("token") || "").trim();
-    if (!t) {
-      setValidation({ kind: "error", message: "No invitation token in the link." });
+    const i = (params.get("invite") || "").trim();
+    if (!i) {
+      setValidation({ kind: "error", message: "No invitation in the link." });
       return;
     }
-    setToken(t);
-    fetch(`/api/auth/invite/validate?token=${encodeURIComponent(t)}`)
+    setInvite(i);
+    fetch(`/api/auth/registration-invites/validate?invite=${encodeURIComponent(i)}`)
       .then(async (res) => {
         const body = await res.json().catch(() => ({}));
         if (res.ok && body.valid) {
@@ -60,7 +65,7 @@ export default function RegisterInvite() {
         } else {
           setValidation({
             kind: "error",
-            message: body.error || "This invitation link is not valid.",
+            message: body.error || "This invitation is not valid.",
           });
         }
       })
@@ -84,34 +89,20 @@ export default function RegisterInvite() {
       setSubmitError("Password must be at least 8 characters.");
       return;
     }
-    if (username.length < 3) {
-      setSubmitError("Username must be at least 3 characters.");
-      return;
-    }
-    if (!firstName.trim() || !lastName.trim()) {
-      setSubmitError("First name and last name are required.");
-      return;
-    }
 
     setSubmitting(true);
     try {
-      const res = await fetch("/api/auth/register/invite", {
+      const res = await fetch("/api/auth/registration-invites/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          token,
-          username: username.trim(),
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
-          password,
-        }),
+        body: JSON.stringify({ invite, password }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setSubmitError(body.error || "Registration failed. Please try again.");
-        // If the token is no longer valid, surface that on the validation card too.
+        setSubmitError(body.error || "Activation failed. Please try again.");
+        // If the invite is no longer valid, surface that on the validation card too.
         if (res.status === 410 || res.status === 404) {
-          setValidation({ kind: "error", message: body.error || "This invitation link is no longer valid." });
+          setValidation({ kind: "error", message: body.error || "This invitation is no longer valid." });
         }
         return;
       }
@@ -121,7 +112,7 @@ export default function RegisterInvite() {
       if (role === "adviser") {
         navigate("/adviser/dashboard", { replace: true });
       } else if (role === "admin") {
-        navigate("/admin/dashboard", { replace: true });
+        navigate("/admin", { replace: true });
       } else {
         navigate("/dashboard", { replace: true });
       }
@@ -146,7 +137,7 @@ export default function RegisterInvite() {
     );
   }
 
-  // ---- Invalid / expired / used token --------------------------------------
+  // ---- Invalid / expired / used invite -------------------------------------
   if (validation.kind === "error") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-muted/30 p-4">
@@ -183,9 +174,9 @@ export default function RegisterInvite() {
     );
   }
 
-  // ---- Valid invite — render the form --------------------------------------
-  const { invite } = validation;
-  const expiry = new Date(invite.expiresAt);
+  // ---- Valid invite — render the activation form ---------------------------
+  const { invite: details } = validation;
+  const expiry = new Date(details.expiresAt);
   const hoursLeft = Math.max(0, Math.round((expiry.getTime() - Date.now()) / (60 * 60 * 1000)));
 
   return (
@@ -194,23 +185,23 @@ export default function RegisterInvite() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-5 w-5 text-primary" />
-            <CardTitle>Complete Your Registration</CardTitle>
+            <CardTitle>AMAX Wealth Account Activation</CardTitle>
           </div>
           <CardDescription>
-            You've been invited to create an AMAX Wealth account. Review the details below
-            and choose a username + password to finish.
+            You've been invited to create an AMAX Wealth account. Set a password below
+            to activate it.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="rounded-lg border bg-card/50 p-3 mb-5 space-y-1.5 text-sm">
             <div className="flex items-center justify-between">
               <span className="text-muted-foreground">Email</span>
-              <span className="font-medium" data-testid="text-invite-email">{invite.email}</span>
+              <span className="font-medium" data-testid="text-invite-email">{details.email}</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-muted-foreground">Role</span>
               <Badge variant="secondary" data-testid="badge-invite-role">
-                {invite.role === "adviser" ? "Adviser" : "Client"}
+                {ROLE_LABEL[details.role] ?? details.role}
               </Badge>
             </div>
             <div className="flex items-center justify-between">
@@ -222,48 +213,8 @@ export default function RegisterInvite() {
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label htmlFor="firstName">First name</Label>
-                <Input
-                  id="firstName"
-                  value={firstName}
-                  onChange={(e) => setFirstName(e.target.value)}
-                  required
-                  autoComplete="given-name"
-                  data-testid="input-first-name"
-                />
-              </div>
-              <div>
-                <Label htmlFor="lastName">Last name</Label>
-                <Input
-                  id="lastName"
-                  value={lastName}
-                  onChange={(e) => setLastName(e.target.value)}
-                  required
-                  autoComplete="family-name"
-                  data-testid="input-last-name"
-                />
-              </div>
-            </div>
             <div>
-              <Label htmlFor="username">Username</Label>
-              <Input
-                id="username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                minLength={3}
-                pattern="[a-zA-Z0-9_.\\-]+"
-                autoComplete="username"
-                data-testid="input-username"
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                Letters, numbers, _, ., -. Used to sign in.
-              </p>
-            </div>
-            <div>
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password">Set password</Label>
               <Input
                 id="password"
                 type="password"
@@ -302,23 +253,23 @@ export default function RegisterInvite() {
               type="submit"
               className="w-full"
               disabled={submitting}
-              data-testid="button-create-account"
+              data-testid="button-activate-account"
             >
               {submitting ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Creating account…
+                  Activating account…
                 </>
               ) : (
                 <>
                   <CheckCircle2 className="h-4 w-4 mr-2" />
-                  Create my account
+                  Activate account
                 </>
               )}
             </Button>
 
             <p className="text-xs text-muted-foreground text-center pt-2">
-              By creating an account, you agree to our{" "}
+              By activating, you agree to our{" "}
               <Link href="/legal" className="underline">terms and disclosures</Link>.
             </p>
           </form>

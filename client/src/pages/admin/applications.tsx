@@ -76,8 +76,7 @@ export default function AdminApplications() {
   // Set on approve mutation success and surfaced in a separate dialog.
   const [issuedInvite, setIssuedInvite] = useState<{
     email: string;
-    registrationUrl: string;
-    registrationToken: string;
+    inviteLink: string;
     expiresAt: string;
   } | null>(null);
   const [copied, setCopied] = useState(false);
@@ -123,12 +122,11 @@ export default function AdminApplications() {
       });
       setActionTarget(null);
       setReviewNote("");
-      // Approve responses include a one-time registration link (Session 14).
-      if (vars.mode === "approve" && data?.registrationToken && data?.registrationUrl) {
+      // Approve responses include a one-time invite link (Session 14).
+      if (vars.mode === "approve" && data?.inviteLink) {
         setIssuedInvite({
           email: data.application?.email ?? "",
-          registrationUrl: data.registrationUrl,
-          registrationToken: data.registrationToken,
+          inviteLink: data.inviteLink,
           expiresAt: data.expiresAt,
         });
         setCopied(false);
@@ -324,15 +322,15 @@ export default function AdminApplications() {
                 <LinkIcon className="h-4 w-4 mt-0.5 text-slate-500 shrink-0" />
                 <code
                   className="text-xs break-all text-slate-700 select-all flex-1"
-                  data-testid="text-registration-url"
+                  data-testid="text-invite-link"
                 >
-                  {issuedInvite.registrationUrl}
+                  {issuedInvite.inviteLink}
                 </code>
               </div>
               <Button
                 onClick={async () => {
                   try {
-                    await navigator.clipboard.writeText(issuedInvite.registrationUrl);
+                    await navigator.clipboard.writeText(issuedInvite.inviteLink);
                     setCopied(true);
                     setTimeout(() => setCopied(false), 2000);
                   } catch {
@@ -340,10 +338,10 @@ export default function AdminApplications() {
                   }
                 }}
                 className="w-full"
-                data-testid="button-copy-registration-url"
+                data-testid="button-copy-invite-link"
               >
                 {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
-                {copied ? "Copied!" : "Copy registration link"}
+                {copied ? "Copied!" : "Copy invitation link"}
               </Button>
               <p className="text-xs text-muted-foreground">
                 Expires {issuedInvite.expiresAt ? new Date(issuedInvite.expiresAt).toLocaleString() : "—"}.

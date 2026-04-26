@@ -14,7 +14,7 @@ import {
   idempotencyKeys,
   auditLogs,
   passwordResetTokens,
-  registrationTokens,
+  registrationInvites,
   adviserClients,
   users,
   portfolios,
@@ -904,20 +904,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ---------------------------------------------------------------------------
-  // Session 14 — Token-gated registration (admin invites + approved applications)
+  // Session 14 — Registration invites (admin invites + approved applications)
   //
-  // Two public endpoints, both look up by SHA-256(token):
-  //   GET  /api/auth/invite/validate?token=...  — surface email + role for the form
-  //   POST /api/auth/register/invite            — actually create the account
+  // Two public endpoints, both look up by SHA-256(invite):
+  //   GET  /api/auth/registration-invites/validate?invite=...  — surface email + role for the form
+  //   POST /api/auth/registration-invites/complete             — actually activate the account
   //
   // Hard rules enforced server-side:
-  //   - Token is single-use (usedAt set inside the same registration tx).
-  //   - Token expires after 48h (server-side; client display only).
-  //   - email + role come from the token row, NEVER from form input.
-  //   - email must not already be a user.
+  //   - Invite is single-use (usedAt set inside the same activation tx).
+  //   - Invite expires after 48h (server-side; client display only).
+  //   - email + role come from the invite row, NEVER from form input.
+  //   - username is forced to email; firstName/lastName default to "".
+  //   - email must not already belong to a user (else duplicate-email rejection + audit).
   //   - If role=client and adviserUserId set, the new client is auto-linked to
   //     that adviser via adviser_clients in the same tx.
-  //   - All steps audited (invite_token_viewed, account_registered).
+  //   - All steps audited (registration_invite_viewed, registration_account_activated,
+  //     registration_invite_rejected_duplicate_email).
   // ---------------------------------------------------------------------------
 
   // Cheap rate limit — viewing/validating tokens is essentially free, but cap to
@@ -930,52 +932,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
     message: { error: "Too many requests. Please slow down." },
   });
 
-  app.get("/api/auth/invite/validate", inviteValidateLimiter, async (req, res) => {
+  app.get("/api/auth/registration-invites/validate", inviteValidateLimiter, async (req, res) => {
     try {
-      const rawToken = String(req.query.token || "");
-      if (!rawToken || rawToken.length < 16) {
-        return res.status(400).json({ error: "Missing or invalid token." });
+      const rawInvite = String(req.query.invite || "");
+      if (!rawInvite || rawInvite.length < 16) {
+        return res.status(400).json({ valid: false, error: "Missing or invalid invitation." });
       }
-      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
-      const [tok] = await db
+      const inviteHash = createHash("sha256").update(rawInvite).digest("hex");
+      const [inv] = await db
         .select()
-        .from(registrationTokens)
-        .where(eq(registrationTokens.tokenHash, tokenHash))
+        .from(registrationInvites)
+        .where(eq(registrationInvites.inviteHash, inviteHash))
         .limit(1);
 
-      if (!tok) {
-        return res.status(404).json({ valid: false, error: "Invalid registration link." });
+      if (!inv) {
+        return res.status(404).json({ valid: false, error: "Invalid invitation link." });
       }
-      if (tok.usedAt) {
-        return res.status(410).json({ valid: false, error: "This registration link has already been used." });
+      if (inv.usedAt) {
+        return res.status(410).json({ valid: false, error: "This invitation has already been used." });
       }
-      if (tok.expiresAt.getTime() < Date.now()) {
-        return res.status(410).json({ valid: false, error: "This registration link has expired." });
+      if (inv.expiresAt.getTime() < Date.now()) {
+        return res.status(410).json({ valid: false, error: "This invitation has expired." });
       }
 
       // Audit the view fail-closed: a direct insert (not writeAuditLog, which
       // swallows errors) so the response only succeeds if the audit row lands.
-      // The viewer is unauthenticated; the token hash + email pin the row to the
+      // The viewer is unauthenticated; the invite hash + email pin the row to the
       // identity behind the link.
       await db.insert(auditLogs).values({
         userId: null,
-        action: "invite_token_viewed",
-        entityType: "registration_token",
-        entityId: String(tok.id),
-        metadata: { email: tok.email, role: tok.role },
+        action: "registration_invite_viewed",
+        entityType: "registration_invite",
+        entityId: String(inv.id),
+        metadata: { email: inv.email, role: inv.role },
         ipAddress: req.ip || null,
       });
 
       res.json({
         valid: true,
-        email: tok.email,
-        role: tok.role,
+        email: inv.email,
+        role: inv.role,
         // expose expiry so the form can show a countdown / warning
-        expiresAt: tok.expiresAt.toISOString(),
+        expiresAt: inv.expiresAt.toISOString(),
       });
     } catch (error: any) {
-      console.error("[invite/validate] error:", error);
-      res.status(500).json({ error: "Failed to validate invitation." });
+      console.error("[registration-invites/validate] error:", error);
+      res.status(500).json({ valid: false, error: "Failed to validate invitation." });
     }
   });
 
@@ -987,86 +989,92 @@ export async function registerRoutes(app: Express): Promise<Server> {
     message: { error: "Too many registration attempts. Please try again later." },
   });
 
-  const registerInviteSchema = z.object({
-    token: z.string().min(16).max(128),
-    username: z
-      .string()
-      .min(3, "username must be at least 3 chars")
-      .max(50)
-      .regex(/^[a-zA-Z0-9_.-]+$/, "username may only contain letters, numbers, _, ., -"),
+  const completeInviteSchema = z.object({
+    invite: z.string().min(16).max(128),
     password: z.string().min(8, "password must be at least 8 chars").max(128),
-    firstName: z.string().min(1).max(100),
-    lastName: z.string().min(1).max(100),
   });
 
-  app.post("/api/auth/register/invite", registerInviteLimiter, async (req, res) => {
+  app.post("/api/auth/registration-invites/complete", registerInviteLimiter, async (req, res) => {
     try {
-      const parsed = registerInviteSchema.safeParse(req.body ?? {});
+      const parsed = completeInviteSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
         return res.status(400).json({
           error: "Invalid payload: " + parsed.error.issues.map((i) => i.message).join("; "),
         });
       }
-      const { token: rawToken, username, password, firstName, lastName } = parsed.data;
+      const { invite: rawInvite, password } = parsed.data;
 
-      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+      const inviteHash = createHash("sha256").update(rawInvite).digest("hex");
 
       // Pre-flight checks outside the tx so we can return clean error codes.
       // Final atomicity is enforced inside the tx (re-check after locking).
-      const [tok] = await db
+      const [inv] = await db
         .select()
-        .from(registrationTokens)
-        .where(eq(registrationTokens.tokenHash, tokenHash))
+        .from(registrationInvites)
+        .where(eq(registrationInvites.inviteHash, inviteHash))
         .limit(1);
-      if (!tok) {
-        return res.status(404).json({ error: "Invalid registration link." });
+      if (!inv) {
+        return res.status(404).json({ error: "Invalid invitation link." });
       }
-      if (tok.usedAt) {
-        return res.status(410).json({ error: "This registration link has already been used." });
+      if (inv.usedAt) {
+        return res.status(410).json({ error: "This invitation has already been used." });
       }
-      if (tok.expiresAt.getTime() < Date.now()) {
-        return res.status(410).json({ error: "This registration link has expired." });
-      }
-
-      // Username must be globally unique.
-      const usernameTaken = await storage.getUserByUsername(username);
-      if (usernameTaken) {
-        return res.status(409).json({ error: "That username is already taken." });
+      if (inv.expiresAt.getTime() < Date.now()) {
+        return res.status(410).json({ error: "This invitation has expired." });
       }
 
-      // Email must not already belong to a real user.
-      const existingByEmail = await storage.getUserByEmail(tok.email);
+      // Email must not already belong to a real user. Username == email per spec,
+      // so the same check covers both columns (both are unique).
+      const existingByEmail = await storage.getUserByEmail(inv.email);
       if (existingByEmail) {
+        // Audit the duplicate-rejection so we can investigate phishing or
+        // double-invite attempts.
+        await db.insert(auditLogs).values({
+          userId: null,
+          action: "registration_invite_rejected_duplicate_email",
+          entityType: "registration_invite",
+          entityId: String(inv.id),
+          metadata: { email: inv.email },
+          ipAddress: req.ip || null,
+        });
+        return res.status(409).json({ error: "An account with this email already exists." });
+      }
+      const usernameTaken = await storage.getUserByUsername(inv.email);
+      if (usernameTaken) {
         return res.status(409).json({ error: "An account with this email already exists." });
       }
 
       const hashed = await hashPassword(password);
 
       const created = await db.transaction(async (tx) => {
-        // Re-fetch + lock the token row to guarantee single-use even under races.
+        // Re-fetch + lock the invite row to guarantee single-use even under races.
         const [locked] = await (tx as any)
           .select()
-          .from(registrationTokens)
-          .where(eq(registrationTokens.tokenHash, tokenHash))
+          .from(registrationInvites)
+          .where(eq(registrationInvites.inviteHash, inviteHash))
           .for("update")
           .limit(1);
         if (!locked || locked.usedAt || locked.expiresAt.getTime() < Date.now()) {
-          throw Object.assign(new Error("This registration link is no longer valid."), { status: 410 });
+          throw Object.assign(new Error("This invitation is no longer valid."), { status: 410 });
         }
 
+        // Username = email per spec. firstName/lastName start empty — the user
+        // fills them in via profile / KYC. We can't drop the columns (they're
+        // notNull on the users table) so empty strings are the spec-compliant default.
         const [newUser] = await (tx as any)
           .insert(users)
           .values({
-            username,
+            username: locked.email.toLowerCase(),
             email: locked.email.toLowerCase(),
             password: hashed,
-            firstName,
-            lastName,
-            // Role is taken from the (admin-issued) token, NOT from the form.
+            firstName: "",
+            lastName: "",
+            // Role is taken from the (admin-issued) invite, NOT from the form.
             role: locked.role,
-            kycStatus: "pending",
+            // Clients still need to complete KYC; advisers/admins don't.
+            kycStatus: locked.role === "client" ? "pending" : "not_required",
             userTier: "standard",
-            // Token issuance proves the inviter trusts the email; skip a second
+            // Invite issuance proves the inviter trusts the email; skip a second
             // OTP round-trip so the user lands logged in.
             emailVerified: true,
           })
@@ -1095,20 +1103,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
 
         await (tx as any)
-          .update(registrationTokens)
+          .update(registrationInvites)
           .set({ usedAt: new Date() })
-          .where(eq(registrationTokens.id, locked.id));
+          .where(eq(registrationInvites.id, locked.id));
 
-        // Audit the registration. Use the new user's own id so the row is
+        // Audit the activation. Use the new user's own id so the row is
         // discoverable from their account history.
         await (tx as any).insert(auditLogs).values({
           userId: newUser.id,
-          action: "account_registered",
+          action: "registration_account_activated",
           entityType: "user",
           entityId: String(newUser.id),
           metadata: {
-            via: "registration_token",
-            tokenId: locked.id,
+            via: "registration_invite",
+            inviteId: locked.id,
             role: locked.role,
             email: locked.email,
             adviserAutoLinked: locked.role === "client" ? Boolean(locked.adviserUserId) : null,
@@ -1145,10 +1153,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(error.status).json({ error: error.message });
       }
       if (error?.code === "23505") {
-        return res.status(409).json({ error: "An account with this email or username already exists." });
+        return res.status(409).json({ error: "An account with this email already exists." });
       }
-      console.error("[register/invite] error:", error);
-      res.status(500).json({ error: "Registration failed. Please try again." });
+      console.error("[registration-invites/complete] error:", error);
+      res.status(500).json({ error: "Activation failed. Please try again." });
     }
   });
 

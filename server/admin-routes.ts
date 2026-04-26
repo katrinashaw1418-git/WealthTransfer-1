@@ -30,32 +30,32 @@ import {
   applications,
   users,
   adviserClients,
-  registrationTokens,
+  registrationInvites,
 } from "@shared/schema";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 
 // ---------------------------------------------------------------------------
-// Registration-token helpers (Session 14)
-// Token security model:
+// Registration-invite helpers (Session 14)
+// Invite security model:
 //   - 32 random bytes hex (256-bit entropy)
-//   - SHA-256(token) is what we store in the DB; raw token returned ONCE on creation
-//   - 48h default expiry, single-use (usedAt enforced)
-//   - Email + role are FROZEN at issue time and cannot be overridden by registration form
+//   - SHA-256(invite) is what we store in the DB; raw invite returned ONCE on creation
+//   - 48h expiry, single-use (usedAt enforced)
+//   - Email + role are FROZEN at issue time and cannot be overridden by activation form
 // ---------------------------------------------------------------------------
-const TOKEN_DEFAULT_EXPIRY_HOURS = 48;
+const INVITE_EXPIRY_HOURS = 48;
 
-function mintRegistrationToken(): { raw: string; hash: string } {
+function mintRegistrationInvite(): { raw: string; hash: string } {
   const raw = randomBytes(32).toString("hex");
   const hash = createHash("sha256").update(raw).digest("hex");
   return { raw, hash };
 }
 
-function buildRegistrationUrl(req: Request, rawToken: string): string {
+function buildInviteLink(req: Request, rawInvite: string): string {
   // Best-effort: assemble a relative path; the client can prepend its own origin
   // when sharing externally. This avoids hard-coding a hostname.
   const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
   const host = (req.headers["x-forwarded-host"] as string) || req.get("host") || "";
-  return host ? `${proto}://${host}/register/invite?token=${rawToken}` : `/register/invite?token=${rawToken}`;
+  return host ? `${proto}://${host}/register/invite?invite=${rawInvite}` : `/register/invite?invite=${rawInvite}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,12 +118,15 @@ const rejectApplicationSchema = z.object({
 
 const inviteUserSchema = z.object({
   email: z.string().email().max(255),
-  role: z.enum(["client", "adviser"]),
-  // Optional adviser to auto-link this client to on registration. Server validates
+  role: z.enum(["client", "adviser", "admin"]),
+  // Optional context for the invite. `relatedEntityType` examples:
+  // 'adviser_application', 'client_application', 'adviser_firm'. `relatedEntityId`
+  // is the FK into that entity. Both nullable.
+  relatedEntityType: z.string().min(1).max(64).optional().nullable(),
+  relatedEntityId: z.number().int().positive().optional().nullable(),
+  // Optional adviser to auto-link this client to on activation. Server validates
   // that the id refers to a real adviser, and that role === 'client'.
   adviserUserId: z.number().int().positive().optional(),
-  // Defaults to 48h on the server. Capped between 1 and 168 (1 week).
-  expiryHours: z.number().int().min(1).max(168).optional(),
 });
 
 const createAdviserSchema = z.object({
@@ -294,11 +297,11 @@ export function registerAdminRoutes(app: Express): void {
         );
       }
 
-      // Mint registration token in the same tx as the approval + audit. This
-      // closes the loop from "approved application" → "user can actually sign up"
-      // (Session 14). Without a token, an approved applicant has no path forward.
-      const { raw: rawToken, hash: tokenHash } = mintRegistrationToken();
-      const expiresAt = new Date(Date.now() + TOKEN_DEFAULT_EXPIRY_HOURS * 60 * 60 * 1000);
+      // Mint registration invite in the same tx as the approval + audit. This
+      // closes the loop from "approved application" → "user can actually activate"
+      // (Session 14). Without an invite, an approved applicant has no path forward.
+      const { raw: rawInvite, hash: inviteHash } = mintRegistrationInvite();
+      const expiresAt = new Date(Date.now() + INVITE_EXPIRY_HOURS * 60 * 60 * 1000);
 
       let result;
       try {
@@ -340,24 +343,24 @@ export function registerAdminRoutes(app: Express): void {
           req.ip || null,
         );
 
-        // Revoke any prior unused tokens for this email so only the freshest is live.
+        // Revoke any prior unused invites for this email so only the freshest is live.
         await (tx as any)
-          .update(registrationTokens)
+          .update(registrationInvites)
           .set({ usedAt: new Date() })
           .where(
             and(
-              eq(registrationTokens.email, existing.email),
-              isNull(registrationTokens.usedAt),
+              eq(registrationInvites.email, existing.email),
+              isNull(registrationInvites.usedAt),
             ),
           );
 
-        await (tx as any).insert(registrationTokens).values({
+        await (tx as any).insert(registrationInvites).values({
           email: existing.email,
           role: "client",
-          relatedEntityType: "application",
+          relatedEntityType: "client_application",
           relatedEntityId: id,
           adviserUserId: null,
-          tokenHash,
+          inviteHash,
           expiresAt,
           createdBy: auth.userId,
         });
@@ -365,8 +368,8 @@ export function registerAdminRoutes(app: Express): void {
         await auditTx(
           tx,
           auth.userId,
-          "invite_created",
-          "registration_token",
+          "registration_invite_created",
+          "registration_invite",
           existing.email,
           {
             role: "client",
@@ -379,10 +382,10 @@ export function registerAdminRoutes(app: Express): void {
         return row;
         });
       } catch (err: any) {
-        // Partial unique index `registration_tokens_email_active_unique` enforces
-        // "at most one live token per email". A concurrent issuer racing us hits
+        // Partial unique index `registration_invites_email_active_unique` enforces
+        // "at most one live invite per email". A concurrent issuer racing us hits
         // 23505; translate to a deterministic 409 instead of a 500.
-        if (err?.code === "23505" && String(err?.constraint || "").includes("registration_tokens_email_active")) {
+        if (err?.code === "23505" && String(err?.constraint || "").includes("registration_invites_email_active")) {
           throw Object.assign(
             new Error("Another invitation is already in flight for this email — please refresh and retry."),
             { status: 409 },
@@ -393,8 +396,7 @@ export function registerAdminRoutes(app: Express): void {
 
       return {
         application: result,
-        registrationToken: rawToken,
-        registrationUrl: buildRegistrationUrl(req, rawToken),
+        inviteLink: buildInviteLink(req, rawInvite),
         expiresAt: expiresAt.toISOString(),
       };
     }),
@@ -461,7 +463,7 @@ export function registerAdminRoutes(app: Express): void {
   );
 
   // -------------------------------------------------------------------------
-  // Direct invites (Session 14) — admin issues a registration token without
+  // Direct invites (Session 14) — admin issues a registration invite without
   // going through the full /apply flow. Used to onboard advisers, or to
   // pre-link a client to a specific adviser at issue time.
   //
@@ -474,7 +476,7 @@ export function registerAdminRoutes(app: Express): void {
   //   - Existing live tokens for the same email are revoked (only newest is valid).
   // -------------------------------------------------------------------------
   app.post(
-    "/api/admin/invite",
+    "/api/admin/registration-invites",
     adminRoute(async (req, auth) => {
       const parsed = inviteUserSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
@@ -483,7 +485,7 @@ export function registerAdminRoutes(app: Express): void {
           { status: 400 },
         );
       }
-      const { email, role, adviserUserId, expiryHours } = parsed.data;
+      const { email, role, relatedEntityType, relatedEntityId, adviserUserId } = parsed.data;
       const normalisedEmail = email.toLowerCase();
 
       // Reject if a real account already exists.
@@ -520,30 +522,29 @@ export function registerAdminRoutes(app: Express): void {
         }
       }
 
-      const { raw: rawToken, hash: tokenHash } = mintRegistrationToken();
-      const hours = expiryHours ?? TOKEN_DEFAULT_EXPIRY_HOURS;
-      const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000);
+      const { raw: rawInvite, hash: inviteHash } = mintRegistrationInvite();
+      const expiresAt = new Date(Date.now() + INVITE_EXPIRY_HOURS * 60 * 60 * 1000);
 
       try {
         await db.transaction(async (tx) => {
-          // Revoke any prior live tokens for this email so only the freshest is valid.
+          // Revoke any prior live invites for this email so only the freshest is valid.
           await (tx as any)
-            .update(registrationTokens)
+            .update(registrationInvites)
             .set({ usedAt: new Date() })
             .where(
               and(
-                eq(registrationTokens.email, normalisedEmail),
-                isNull(registrationTokens.usedAt),
+                eq(registrationInvites.email, normalisedEmail),
+                isNull(registrationInvites.usedAt),
               ),
             );
 
-          await (tx as any).insert(registrationTokens).values({
+          await (tx as any).insert(registrationInvites).values({
             email: normalisedEmail,
             role,
-            relatedEntityType: "invite",
-            relatedEntityId: null,
+            relatedEntityType: relatedEntityType ?? "invite",
+            relatedEntityId: relatedEntityId ?? null,
             adviserUserId: adviserUserId ?? null,
-            tokenHash,
+            inviteHash,
             expiresAt,
             createdBy: auth.userId,
           });
@@ -551,12 +552,14 @@ export function registerAdminRoutes(app: Express): void {
           await auditTx(
             tx,
             auth.userId,
-            "invite_created",
-            "registration_token",
+            "registration_invite_created",
+            "registration_invite",
             normalisedEmail,
             {
               role,
               source: "direct_invite",
+              relatedEntityType: relatedEntityType ?? "invite",
+              relatedEntityId: relatedEntityId ?? null,
               adviserUserId: adviserUserId ?? null,
               expiresAt: expiresAt.toISOString(),
             },
@@ -564,9 +567,9 @@ export function registerAdminRoutes(app: Express): void {
           );
         });
       } catch (err: any) {
-        // Partial unique index ensures only one live token per email; concurrent
+        // Partial unique index ensures only one live invite per email; concurrent
         // issuers race here. Translate the unique-violation to a clean 409.
-        if (err?.code === "23505" && String(err?.constraint || "").includes("registration_tokens_email_active")) {
+        if (err?.code === "23505" && String(err?.constraint || "").includes("registration_invites_email_active")) {
           throw Object.assign(
             new Error("Another invitation is already in flight for this email — please refresh and retry."),
             { status: 409 },
@@ -578,8 +581,7 @@ export function registerAdminRoutes(app: Express): void {
       return {
         email: normalisedEmail,
         role,
-        registrationToken: rawToken,
-        registrationUrl: buildRegistrationUrl(req, rawToken),
+        inviteLink: buildInviteLink(req, rawInvite),
         expiresAt: expiresAt.toISOString(),
       };
     }),
