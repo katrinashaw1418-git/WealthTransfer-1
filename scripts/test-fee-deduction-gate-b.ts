@@ -1607,13 +1607,21 @@ async function test13_postingReceiptInvariantHolds(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
+// Status object returned by `runAllTests()`. The runner NEVER calls
+// process.exit itself — that decision lives in `main()`, AFTER the
+// guaranteed cleanup `finally` has run. This is critical: a hard exit
+// inside the runner would skip cleanup and leave seeded fixture rows
+// behind in the dev DB, violating the script's PK-tracked cleanup
+// contract.
+type RunStatus = { exitCode: number };
+
 async function main(): Promise<void> {
   console.log("=== Fee Deduction GATE B verification roll-up (Task #92) ===\n");
-  let mainErrored = false;
+  let status: RunStatus = { exitCode: 0 };
   try {
-    await runAllTests();
+    status = await runAllTests();
   } catch (err) {
-    mainErrored = true;
+    status = { exitCode: 1 };
     console.error("Gate B verification roll-up threw:", err);
   } finally {
     // GUARANTEED post-run cleanup. Runs even if a test threw, so the dev
@@ -1625,12 +1633,16 @@ async function main(): Promise<void> {
       await cleanupTrackedRows();
     } catch (cleanupErr) {
       console.error("Post-run cleanup threw:", cleanupErr);
+      // Do NOT downgrade a successful run on cleanup failure — the test
+      // result itself is still valid — but DO ensure non-zero exit so an
+      // operator notices the cleanup gap.
+      if (status.exitCode === 0) status = { exitCode: 1 };
     }
   }
-  if (mainErrored) process.exit(1);
+  process.exit(status.exitCode);
 }
 
-async function runAllTests(): Promise<void> {
+async function runAllTests(): Promise<RunStatus> {
   // Capture the actual admin route handlers so test #1 calls the same
   // adminRoute() wrapper the production app uses.
   captureAdminRoutes();
@@ -1903,11 +1915,14 @@ async function runAllTests(): Promise<void> {
     console.error(
       `\n${failedCount} fail(s), ${canonicalMissing} missing canonical assertion(s) in Gate B verification roll-up.`,
     );
-    process.exit(1);
+    // Return non-zero status — main() will exit AFTER cleanup. Do NOT
+    // call process.exit here; doing so would skip the guaranteed
+    // cleanup `finally` block in main() and leave fixture rows behind.
+    return { exitCode: 1 };
   }
 
   console.log("\nALL GATE B FEE DEDUCTION TESTS PASSED \u2705");
-  process.exit(0);
+  return { exitCode: 0 };
 }
 
 main().catch((err) => {
