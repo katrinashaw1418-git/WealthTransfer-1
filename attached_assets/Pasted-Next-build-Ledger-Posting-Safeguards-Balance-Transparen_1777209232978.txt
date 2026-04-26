@@ -1,0 +1,349 @@
+Next build:
+
+Ledger Posting Safeguards & Balance Transparency
+
+Copy to Replit:
+
+Proceed with Ledger Posting Safeguards & Balance Transparency.
+
+Purpose:
+Harden ledger posting after transaction lifecycle/idempotency work and make balance source visible.
+
+Build:
+1. extra duplicate ledger posting guard
+2. balanceSource flag in wallet/portfolio responses
+3. drift / mismatch flag where wallet cached value differs from ledger-derived value
+4. UI label showing Ledger-sourced balance
+5. warning label if mismatch detected
+
+Do not build:
+- reconciliation UI
+- fee engine
+- payouts
+- external payments
+- automatic settlement
+Code patches
+1. Ledger duplicate guard
+
+In settlement posting logic, before creating a ledger entry:
+
+const existingLedgerEntry = await db
+  .select()
+  .from(ledgerEntries)
+  .where(and(
+    eq(ledgerEntries.referenceType, "transaction"),
+    eq(ledgerEntries.referenceId, String(transaction.id)),
+    eq(ledgerEntries.entryType, `${transaction.type}_settlement`)
+  ));
+
+if (existingLedgerEntry.length > 0) {
+  return {
+    skipped: true,
+    reason: "ledger_entry_already_exists",
+  };
+}
+2. Balance response helper
+
+Create:
+
+server/services/balance-transparency.ts
+export async function getTransparentBalance(userId: number, currency: string) {
+  const ledgerBalance = await getLedgerBalance(userId, currency);
+
+  const [wallet] = await db
+    .select()
+    .from(wallets)
+    .where(and(
+      eq(wallets.userId, userId),
+      eq(wallets.currency, currency)
+    ));
+
+  const cachedBalance = wallet ? Number(wallet.balance) : 0;
+  const drift = ledgerBalance - cachedBalance;
+
+  return {
+    balance: ledgerBalance.toFixed(2),
+    availableBalance: ledgerBalance.toFixed(2),
+    balanceSource: "ledger",
+    cachedBalance: cachedBalance.toFixed(2),
+    driftAmount: drift.toFixed(2),
+    hasBalanceMismatch: Math.abs(drift) > 0.01,
+  };
+}
+3. Patch wallet/portfolio APIs
+
+Where balances are returned, include:
+
+const transparentBalance = await getTransparentBalance(userId, "AUD");
+
+res.json({
+  ...existingResponse,
+  balance: transparentBalance.balance,
+  availableBalance: transparentBalance.availableBalance,
+  balanceSource: transparentBalance.balanceSource,
+  driftAmount: transparentBalance.driftAmount,
+  hasBalanceMismatch: transparentBalance.hasBalanceMismatch,
+});
+4. UI patch
+
+On wallet / portfolio summary cards:
+
+<div className="text-xs text-slate-500">
+  Balance source: Ledger
+</div>
+
+{wallet?.hasBalanceMismatch && (
+  <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800">
+    Reconciliation pending: displayed ledger balance differs from cached wallet balance.
+  </div>
+)}
+5. Verification checklist
+1. Settling same transaction twice does not create duplicate ledger entry.
+2. Wallet API returns balanceSource: ledger.
+3. Portfolio API returns balanceSource: ledger.
+4. If cached wallet balance differs, hasBalanceMismatch = true.
+5. UI shows “Balance source: Ledger”.
+6. UI shows warning only when mismatch exists.
+
+After this:
+
+Option C — Reconciliation Engine + Admin UI
+next build and code patches
+
+Next build:
+
+Option C — Reconciliation Engine + Admin UI
+
+Copy to Replit:
+
+Proceed with Option C — Reconciliation Engine + Admin UI.
+
+Purpose:
+Run formal reconciliation between ledger-derived balances and cached wallet/system balances, surface drift, and prevent silent corrections.
+
+Build:
+1. reconciliationReports table
+2. reconciliation service
+3. admin reconciliation APIs
+4. /admin/reconciliation UI
+5. audit logs for each reconciliation run
+
+Rules:
+- do not auto-correct wallet balances
+- do not silently adjust drift
+- mismatches must remain visible
+- fixes must happen through proper transactions / ledger entries only
+
+Do not build:
+- fee engine
+- payouts
+- external payments
+- automatic settlement
+Code patches
+1. shared/schema.ts
+export const reconciliationReports = pgTable("reconciliation_reports", {
+  id: serial("id").primaryKey(),
+
+  userId: integer("user_id").references(() => users.id),
+  currency: text("currency").notNull().default("AUD"),
+
+  ledgerBalance: decimal("ledger_balance", { precision: 15, scale: 2 }).notNull(),
+  cachedWalletBalance: decimal("cached_wallet_balance", { precision: 15, scale: 2 }).notNull(),
+  driftAmount: decimal("drift_amount", { precision: 15, scale: 2 }).notNull(),
+
+  status: text("status").notNull().default("matched"),
+  // matched | mismatch
+
+  notes: text("notes"),
+
+  checkedAt: timestamp("checked_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+2. server/services/reconciliation.ts
+export async function runWalletReconciliation(userId: number, currency = "AUD") {
+  const ledgerBalance = await getLedgerBalance(userId, currency);
+
+  const [wallet] = await db
+    .select()
+    .from(wallets)
+    .where(and(
+      eq(wallets.userId, userId),
+      eq(wallets.currency, currency)
+    ));
+
+  const cachedWalletBalance = wallet ? Number(wallet.balance) : 0;
+  const driftAmount = ledgerBalance - cachedWalletBalance;
+
+  const [report] = await db.insert(reconciliationReports).values({
+    userId,
+    currency,
+    ledgerBalance: ledgerBalance.toFixed(2),
+    cachedWalletBalance: cachedWalletBalance.toFixed(2),
+    driftAmount: driftAmount.toFixed(2),
+    status: Math.abs(driftAmount) > 0.01 ? "mismatch" : "matched",
+  }).returning();
+
+  return report;
+}
+3. server/routes.ts
+
+Add:
+
+POST /api/admin/reconciliation/run
+GET  /api/admin/reconciliation
+
+Run endpoint:
+
+app.post("/api/admin/reconciliation/run", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (!["admin", "compliance_admin"].includes(role)) {
+    return res.status(403).json({ error: "Admin access required" });
+  }
+
+  const allWallets = await db.select().from(wallets);
+  const reports = [];
+
+  for (const wallet of allWallets) {
+    const report = await runWalletReconciliation(wallet.userId, wallet.currency);
+    reports.push(report);
+  }
+
+  await writeAuditLog(
+    userId,
+    "reconciliation_run",
+    "reconciliation_reports",
+    null,
+    { count: reports.length },
+    req.ip || null
+  );
+
+  res.json({
+    count: reports.length,
+    mismatches: reports.filter(r => r.status === "mismatch").length,
+    reports,
+  });
+});
+
+List endpoint:
+
+app.get("/api/admin/reconciliation", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (!["admin", "compliance_admin"].includes(role)) {
+    return res.status(403).json({ error: "Admin access required" });
+  }
+
+  const reports = await db
+    .select()
+    .from(reconciliationReports)
+    .orderBy(desc(reconciliationReports.checkedAt))
+    .limit(200);
+
+  res.json({ reports });
+});
+4. UI
+
+Add:
+
+/admin/reconciliation
+
+Page sections:
+
+Run reconciliation button
+Summary cards:
+- checked wallets
+- matched
+- mismatches
+- last run
+
+Table:
+- userId
+- currency
+- ledger balance
+- cached wallet balance
+- drift
+- status
+- checked at
+
+Warning copy:
+
+Mismatches are not automatically corrected. Corrections must be made through proper transaction and ledger workflows.
+Verification checklist
+1. Admin can run reconciliation.
+2. Non-admin blocked.
+3. Reports are created for all wallets.
+4. Drift > 0.01 marks mismatch.
+5. No wallet balance is changed.
+6. Audit log records run.
+7. /admin/reconciliation shows results.
+next build and code patches
+
+Next build:
+
+Transaction Lifecycle Test Script + Failure Simulation
+
+This should come before returning to fee engine / payouts.
+
+Replit prompt
+Proceed with Transaction Lifecycle Test Script + Failure Simulation.
+
+Purpose:
+Prove idempotency, ledger posting, transaction states and reconciliation safety before enabling fee automation.
+
+Build:
+1. test script for deposit retry
+2. test script for settlement retry
+3. test script for failed transaction
+4. test script for reversal
+5. test script for reconciliation mismatch detection
+6. verification report output
+
+Do not build:
+- fee engine
+- payouts
+- external payments
+- automatic settlement
+Code patches
+1. Add script
+
+Create:
+
+scripts/test-transaction-safety.ts
+
+Tests:
+
+1. Same Idempotency-Key submitted 3 times
+   → one transaction only
+
+2. Pending transaction
+   → no ledger entry
+
+3. Settle transaction twice
+   → one ledger entry only
+
+4. Failed transaction
+   → no ledger entry
+
+5. Reversal
+   → offsetting ledger entry
+
+6. Artificial wallet/ledger drift
+   → reconciliation detects mismatch
+2. Add npm script
+{
+  "scripts": {
+    "test:transaction-safety": "tsx scripts/test-transaction-safety.ts"
+  }
+}
+3. Output format
+PASS deposit idempotency
+PASS pending no ledger impact
+PASS settlement single ledger entry
+PASS failure no ledger impact
+PASS reversal offset
+PASS reconciliation mismatch detection
+Hard stop
+Do not proceed to fee engine until all tests pass.
