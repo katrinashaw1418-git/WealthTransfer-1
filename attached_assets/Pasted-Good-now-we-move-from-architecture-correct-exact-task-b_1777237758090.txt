@@ -1,0 +1,293 @@
+Good — now we move from “architecture correct” → **exact task board actions**.
+
+Below is **what to ACCEPT, CREATE, REJECT, and the exact sequence**.
+
+---
+
+# ✅ 1. CREATE (before accepting anything else)
+
+These are **missing but mandatory**.
+
+### 🔴 A. Planner verification script (CREATE NOW)
+
+```txt
+Task: Planner verification script
+
+Scope:
+- review lock enforcement (423)
+- auditLogs before/after shape
+- append-only enforcement (notes/objectives)
+- previousNoteId chain
+- adviceRecordVersions created on every material write
+- SOA issuance creates version snapshot
+- NO ledger entries created
+- NO wallet.balance mutation
+- role access enforcement
+
+Output:
+- exits 0 only if ALL pass
+- exits non-zero otherwise
+
+Dependency:
+- uses Gate B seed/token pattern
+```
+
+👉 Place in:
+
+```txt
+NOW IN PROGRESS → LAST STEP (gate)
+```
+
+---
+
+### 🔴 B. Audit snapshot test coverage (CREATE)
+
+```txt
+Task: Add tests that lock in audit snapshot shape
+
+Scope:
+- metadata.before exists
+- metadata.after exists
+- both reconstructable
+- applied to ALL write paths (planner + fee/ledger)
+
+Dependency:
+- audit log standardisation
+```
+
+👉 This prevents regression later.
+
+---
+
+# ✅ 2. ACCEPT (CORE BUILD — STRICT ORDER)
+
+### STEP 1 — Audit foundation
+
+```txt
+ACCEPT:
+✔ Add tests that lock in the new audit snapshot shape
+✔ Bring remaining money-write surfaces onto standard audit format
+✔ Show before/after diffs in admin audit-log viewer
+```
+
+---
+
+### STEP 2 — Compliance enforcement
+
+```txt
+ACCEPT:
+✔ Block writes to advice records during compliance review
+```
+
+---
+
+### STEP 3 — Advice system completeness
+
+```txt
+ACCEPT:
+✔ Wire SOA issuance → adviceRecordVersions snapshot hook
+```
+
+---
+
+### STEP 4 — Planner layer
+
+```txt
+ACCEPT:
+✔ Build wealth-planner UI (objectives, documents, notes)
+✔ Wire client-document storage to object storage
+```
+
+---
+
+### STEP 5 — VERIFICATION GATE (must exist before continuing)
+
+```txt
+RUN:
+✔ Planner verification script
+
+RULE:
+→ If non-zero → STOP sprint
+→ If zero → continue
+```
+
+---
+
+# ✅ 3. ACCEPT (OPERATIONAL POLISH — AFTER GATE)
+
+Group these — do NOT interleave with core build.
+
+---
+
+### 📊 Reporting UX
+
+```txt
+✔ Add CSV export buttons (fee reporting)
+✔ Show alerting threshold (wallet vs ledger drift)
+✔ Show admin last refresh time
+✔ Keep dashboard activity live
+✔ Job run history + overdue indicators
+```
+
+---
+
+### 🚨 Alerting + monitoring
+
+```txt
+✔ Stop prune alert spam
+✔ Add alert search highlight
+✔ Add alert payload search tests
+✔ Copy-to-clipboard for alert fields
+✔ Show acknowledged drift cases
+✔ Auto-clear stale drift acknowledgements
+```
+
+---
+
+### 💰 Fee UX correctness
+
+```txt
+✔ Fix insufficient funds messaging
+✔ Show correct sign for deduction/reversal
+✔ Stop showing stale “insufficient funds”
+✔ Link fee → correct transaction
+✔ Remove unused pending deduction data
+✔ Notify client on fee refund
+```
+
+---
+
+### 🧪 Test coverage
+
+```txt
+✔ Dashboard refresh test (every minute)
+✔ Operator alert tests pass on fresh DB
+✔ Suppression behaviour CI test
+✔ Withdrawal atomic wallet cache refresh test
+✔ 422 unbalanced ledger test (deposit/withdraw)
+```
+
+---
+
+### 🧰 Admin UX
+
+```txt
+✔ Filters (rules + deductions tables)
+✔ Pagination controls
+✔ Backfill outage warning
+✔ Manual insufficient-funds recheck trigger
+```
+
+---
+
+# ⚠️ 4. ACCEPT WITH CONSTRAINT
+
+### Ledger refinement
+
+```txt
+ACCEPT:
+✔ Split withdrawal fees into separate ledger entries
+
+ONLY IF:
+- purely accounting change
+- no wallet direct mutation
+- no behaviour change to balances
+- covered by tests
+```
+
+---
+
+# ❌ 5. DO NOT ACCEPT
+
+### 🚫 Hard blocked
+
+```txt
+❌ Build adviser payout batch system
+```
+
+Before accepting, require:
+
+```txt
+ONE QUESTION:
+
+Does it:
+A) Generate reports/export files only → OK later
+B) Initiate transfers / touch payment rails → NEW GATE REQUIRED
+```
+
+---
+
+# 📌 FINAL SEQUENCE (EXECUTION ORDER)
+
+```txt
+[PRE-RUN FIXES]
+1. auditLogs.resourceId type (FIRST)
+2. wallets export
+3. clientUser.id placeholders
+4. route verification
+5. keep SOA block commented
+6. copy Gate B auth pattern
+7. add test:planner script
+8. add CI gate
+
+[BUILD]
+0. WRITE planner verification script (first)
+
+1. Audit snapshot tests
+2. Audit log standardisation
+3. Audit log diff viewer
+
+4. Review lock enforcement
+
+5. SOA snapshot hook
+
+6. Planner UI + document storage
+
+7. ENABLE SOA test block
+
+8. RUN planner verification script
+   → must exit 0
+
+[POST-GATE]
+9. Operational polish (batch group)
+
+[DECISION POINT]
+10. Payout batch → ONLY after scope clarification
+```
+
+---
+
+# 🧠 Key control rules (do not break)
+
+```txt
+✔ No new planner system
+✔ No ledger writes from planner
+✔ No UI enforcement (server-only)
+✔ No execution layer
+✔ No payout rails
+✔ All writes must hit auditLogs with before/after
+✔ All plan changes must create version snapshot
+```
+
+---
+
+# 🔥 Bottom line
+
+You now have:
+
+```txt
+✔ Exact tasks to accept
+✔ Exact tasks to create
+✔ Exact tasks to reject
+✔ Exact execution order
+✔ Explicit gate before moving forward
+```
+
+This is **production-safe sequencing** — not just “good architecture”.
+
+---
+
+If you want next step:
+
+👉 I can convert this into a **Jira / Linear-ready task board with IDs + owners + acceptance criteria**
+👉 Or review your actual PRs to ensure dev didn’t bypass any of these gates

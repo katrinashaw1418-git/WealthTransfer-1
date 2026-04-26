@@ -1,0 +1,235 @@
+Cross-checking your **reranked task order + pre-run checklist + build sequence** against everything we’ve established:
+
+---
+
+# ✅ FINAL VERDICT (strict, no fluff)
+
+```txt
+✔ Ordering is correct
+✔ Dependencies are correct
+✔ Risk prioritisation is correct
+✔ No architectural conflicts
+✔ No missing mandatory build steps
+```
+
+👉 This is now **execution-grade**.
+
+---
+
+# 🔴 ONE CRITICAL CONFIRMATION (still stands)
+
+You correctly moved:
+
+```txt
+auditLogs.resourceId type → FIRST
+```
+
+This is **100% correct**.
+
+Why:
+
+```txt
+Wrong type → zero rows → test passes falsely → audit system broken in production
+```
+
+This is the **only silent failure in the entire system**.
+
+---
+
+# ✅ PRE-RUN CHECKLIST — VERIFIED ORDER
+
+Your final order is **correct and optimal**:
+
+```txt
+1. Confirm auditLogs.resourceId type   ✅ (must be first)
+2. Confirm wallets export             ✅
+3. Replace clientUser.id placeholders ✅
+4. Verify route names                 ✅
+5. Keep SOA block commented           ✅
+6. Copy Gate B seed/token pattern     ✅
+7. Add test:planner script            ✅
+8. Add CI gate                        ✅
+```
+
+No changes needed.
+
+---
+
+# ✅ BUILD SEQUENCE — VERIFIED
+
+Your locked sequence is correct:
+
+```txt
+Script written
+→ Audit log standardisation
+→ Review lock enforcement
+→ Planner UI + docs
+→ SOA snapshot hook
+→ Uncomment SOA test block
+→ Run planner verification script
+→ Block next sprint if non-zero
+```
+
+### One precision (important but small):
+
+You should:
+
+```txt
+WRITE the script BEFORE Planner UI (so dev builds to pass it)
+RUN the script AFTER SOA hook
+```
+
+So mentally:
+
+```txt
+Step 0: Write script
+Step 1–5: Build
+Step 6: Run script
+```
+
+---
+
+# ⚠️ ONE SMALL GAP (still exists — you mentioned it earlier)
+
+You already identified it correctly:
+
+👉 **Planner verification script placement**
+
+It must NOT sit in “next phase”.
+
+It must be:
+
+```txt
+IN CURRENT SPRINT → final step (gate)
+```
+
+---
+
+# 📌 CONFIRMATION AGAINST YOUR FILE 
+
+Your file states:
+
+```txt
+Planner verification script → NEXT PHASE
+```
+
+👉 That is still slightly wrong.
+
+### Fix:
+
+```txt
+Move:
+Planner verification script
+
+FROM:
+Next phase
+
+TO:
+End of current sprint (after SOA snapshot hook)
+```
+
+---
+
+# 🚫 HARD STOPS — VERIFIED CORRECT
+
+All correctly enforced:
+
+```txt
+✔ No payout execution
+✔ No bank transfers
+✔ No external rails
+✔ No AFSL execution layer
+✔ No portfolio execution/rebalancing
+✔ No commission system yet
+✔ No regulatory exports yet
+```
+
+No leakage. No violation.
+
+---
+
+# ⚠️ PAYOUT BATCH — STILL NOT ACCEPTABLE YET
+
+Your decision gate is correct:
+
+```txt
+IF reporting/export only → OK later
+IF touches money → new gate required
+```
+
+👉 Do NOT accept until this is answered.
+
+---
+
+# 🟢 WHAT YOU DID RIGHT (important)
+
+You avoided all common failure patterns:
+
+```txt
+✔ No duplicate planner system
+✔ No new tables outside adviceRecords layer
+✔ No ledger coupling
+✔ No UI-driven enforcement (server-only)
+✔ No premature execution layer
+✔ Proper append-only + versioning
+✔ Proper audit before/after enforcement
+✔ Proper test-first gating (Gate B pattern reused)
+```
+
+This is **institutional-grade architecture now**.
+
+---
+
+# 🔥 FINAL EXECUTION SUMMARY
+
+```txt
+READY TO BUILD
+
+Do this:
+
+1. Fix auditLogs.resourceId type FIRST
+2. Complete remaining 7 pre-run fixes
+3. Write planner verification script now
+4. Build:
+   - audit logs
+   - review lock
+   - planner UI
+   - docs
+   - SOA snapshot hook
+5. Enable SOA test block
+6. Run npm run test:planner
+7. Block next sprint if non-zero
+
+Do NOT:
+- accept payout batch yet
+- introduce execution layer
+- add new planner system
+```
+
+---
+
+# 🧠 Bottom line
+
+You’re no longer designing.
+
+You’re now in:
+
+```txt
+Controlled execution phase with verification gate
+```
+
+And this setup is:
+
+```txt
+✔ Safe
+✔ Complete
+✔ Enforceable
+✔ Non-bypassable (server-side + CI gate)
+```
+
+---
+
+If you want next step, I can:
+
+👉 Turn this into a **dev handoff checklist (one page, zero ambiguity)**
+👉 Or review the actual implementation once your dev starts committing code
