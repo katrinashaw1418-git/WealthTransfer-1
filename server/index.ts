@@ -322,6 +322,47 @@ app.use((req, res, next) => {
     setInterval(runDailyFeeAccrualsCron, 24 * 60 * 60 * 1000);
   }, 180 * 1000);
 
+  // ---------------------------------------------------------------------------
+  // Task #44 — Daily operator-alert retention prune
+  // ---------------------------------------------------------------------------
+  // The `operator_alerts` table receives one row per dispatched alert (wallet
+  // recon drifts, ledger recon drifts, webhook failures, etc.) and previously
+  // had no retention policy. Left alone, it grows forever — fine for a few
+  // weeks, painful after a year. This cron deletes rows older than the
+  // retention window (default 180 days, override with the
+  // OPERATOR_ALERT_RETENTION_DAYS env var) once per day.
+  //
+  // The DELETE is bounded by the existing `operator_alerts_created_at_idx`
+  // index, so even on a large table it touches only the rows it needs to
+  // remove. Outcomes (deleted count, cutoff, duration) are logged on stdout
+  // for observability; we deliberately do NOT call notifyOperator from here,
+  // as that would write a fresh row into the very table we are trying to
+  // bound.
+  //
+  // Staggered 240s after start so it lands after the four other daily crons
+  // (wallet recon, ledger recon, adviser-task automation, fee accruals) have
+  // fired on first boot.
+  // ---------------------------------------------------------------------------
+  const { pruneOperatorAlerts } = await import(
+    "./services/operator-alerts-prune"
+  );
+
+  async function runOperatorAlertsPruneCron() {
+    try {
+      // pruneOperatorAlerts already logs the outcome line; we do not need to
+      // re-log it here. Returning the result is enough for the surrounding
+      // try/catch to confirm success.
+      await pruneOperatorAlerts();
+    } catch (e) {
+      console.error("[operator-alerts-prune] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runOperatorAlertsPruneCron();
+    setInterval(runOperatorAlertsPruneCron, 24 * 60 * 60 * 1000);
+  }, 240 * 1000);
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.
