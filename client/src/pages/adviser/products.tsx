@@ -70,6 +70,8 @@ function riskBadgeVariant(profile: string | null): "default" | "secondary" | "ou
 export default function AdviserProducts() {
   const products = useQuery<AdviserProduct[]>({
     queryKey: ["/api/adviser/products"],
+    staleTime: 30_000,
+    refetchOnMount: "always",
   });
 
   if (products.isLoading) {
