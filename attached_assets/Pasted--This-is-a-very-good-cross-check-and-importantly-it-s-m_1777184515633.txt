@@ -1,0 +1,244 @@
+
+
+This is a very good cross-check — and importantly, it’s more grounded in your actual codebase than the earlier specs. I’ll verify it line-by-line and tell you exactly what is correct, overstated, or needs adjustment.
+
+✅ 1. Overall verdict
+Direction:        ✔ Correct
+Reality check:    ✔ Accurate
+Overengineering:  ✔ Correctly identified
+Execution path:   ✔ Much improved
+This version fixes the biggest problem in earlier designs:
+
+❌ Designing systems that cannot run
+→ Now replaced with
+✔ Build only what your schema supports
+🔴 2. Critical corrections — confirmed TRUE
+✔ Missing tables (100% correct)
+factFindSnapshots ❌
+adviceRecords ❌
+soaDocuments ❌
+feeConsents ❌
+executionAuthorisations ❌
+adviserClients ❌
+👉 This is the most important finding
+
+Your previous design assumed:
+
+Phase 2+ already exists
+Reality:
+
+You are still at pre-Phase 2
+So this statement is correct:
+
+“None of the 10 automation triggers can fire”
+
+✔ Verified
+
+✔ Role system missing
+requireAuth → no role
+✔ This breaks:
+
+adviser access
+permission checks
+dashboard filtering
+task ownership
+👉 Must be fixed BEFORE anything else
+
+✔ Phantom functions
+getSplit ❌
+getClientAUM ❌
+getAllUserBalances ❌
+✔ Correct — these would crash immediately
+
+✔ Commission engine overbuilt
+This is a very important correction:
+
+Netwealth does NOT implement commission via programmable tier engines like this
+
+✔ True
+
+Netwealth:
+
+Configured fees
+Adviser portal controls
+Simple structures
+NOT:
+
+runtime tier resolution logic
+complex split engines
+🟡 3. One nuance — Netwealth interpretation
+The document slightly understates Netwealth.
+
+It says:
+
+“Not a full SOA/commission engine”
+
+That’s partially misleading.
+
+Reality:
+Netwealth DOES support:
+
+✔ SOA workflows (via adviser tools)
+✔ Fee consent tracking (critical)
+✔ Reporting
+But:
+
+✔ NOT programmatic
+✔ NOT API-driven
+✔ NOT developer-extensible
+👉 Your architecture is still valid — just more advanced.
+
+🟢 4. The corrected build path (this is the real value)
+This is the first fully executable roadmap you’ve had.
+
+Phase 1 — Foundation (must do)
+users.role ✔ REQUIRED
+adviserClients ✔ REQUIRED
+feeConsents ✔ REQUIRED
+This is correct AND minimal
+Phase 2 — Tasks (limited scope)
+This is the biggest improvement in the doc:
+
+Only build tasks you can actually trigger
+Valid triggers
+✔ KYC pending
+✔ Fee consent expiring
+✔ Portfolio review
+Invalid (must NOT build yet)
+❌ SOA review
+❌ Fact find missing
+❌ Risk profile missing
+❌ Execution blocked
+👉 Because:
+
+Those tables do not exist yet
+Phase 3 — Reporting
+reportRequests ✔ VALID
+✔ This aligns with:
+
+Netwealth real value = reporting
+🔴 5. One missing piece (important)
+The doc is strong but misses one thing:
+
+👉 Ledger dependency
+Your system already has:
+
+ledger_entries
+transactions
+accounts
+So:
+
+Portfolio report must use:
+ledger-derived balances
+NOT snapshots alone
+🧠 6. Correct minimal system (final architecture)
+This is your real system today:
+
+users (with role)
+→ adviserClients (linking)
+→ feeConsents (core revenue object)
+→ adviserTasks (workflow)
+→ reportRequests (output)
+→ ledger (financial truth)
+⚠️ 7. What to REMOVE from previous design
+You should explicitly delete or pause:
+
+❌ factFindSnapshots
+❌ riskProfiles
+❌ adviceRecords
+❌ soaDocuments
+❌ executionAuthorisations
+❌ commission tier engine
+Until:
+
+You actually build advice engine Phase 2+
+🟢 8. What is now 100% correct
+✔ Tasks
+adviserTasks = valid
+✔ Fee consent tracking
+feeConsents = CORE system
+👉 This is the Netwealth equivalent layer
+
+✔ Reporting
+reportRequests = correct abstraction
+✔ Adviser-client mapping
+adviserClients = required
+🧭 9. Final recommended build order (clean)
+1. Add users.role
+2. Add adviserClients
+3. Add feeConsents
+4. Add adviserTasks (only 3 triggers)
+5. Add reportRequests
+6. Build dashboard
+7. Build PDF reports
+🟢 Final conclusion
+This version is:
+
+✔ Executable
+✔ Realistic
+✔ Aligned with your codebase
+✔ Aligned with Netwealth reality
+✔ Avoids overengineering
+🧠 Most important takeaway
+You just corrected a major architectural mistake:
+
+Before:
+Build everything upfront
+
+Now:
+Build only what your data supports
+▶️ Next step (recommended)
+If you want, I’ll now give you:
+
+👉 exact Phase 1 migration script (role + adviserClients + feeConsents)
+👉 minimal working dashboard (connected to real data)
+👉 first real client portfolio PDF (ledger-based)
+This will move you from:
+
+design → working system
+
+all above
+
+Thought for 14s
+Below is the correct executable scope based on the latest cross-check.
+
+1. Phase 1 migration — role + adviserClients + feeConsents
+Add to shared/schema.ts.
+
+// users table — add only this column
+role: text("role").notNull().default("client"),
+export const adviserClients = pgTable("adviser_clients", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  clientUserId: integer("client_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  assignedAt: timestamp("assigned_at").defaultNow(),
+
+  isActive: boolean("is_active").notNull().default(true),
+}, (table) => ({
+  adviserClientUniq: uniqueIndex("adviser_clients_uniq")
+    .on(table.adviserUserId, table.clientUserId),
+}));
+export const feeConsents = pgTable("fee_consents", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  clientUserId: integer("client_user_id")
+
+
+Pasted text(97).txt
+Document
+
+Your latest build + instructions are mostly correct, but there are a
+
+
+
