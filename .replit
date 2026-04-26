@@ -48,3 +48,7 @@ ALLOW_LOCAL_DEV_AUTH = "true"
 
 [userenv.shared]
 PLATFORM_USER_ID = "11"
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
