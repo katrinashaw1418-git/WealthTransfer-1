@@ -46,9 +46,13 @@ import {
 
 type DbHandle = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-// Deliberately a different currency from ledger.test.ts (which uses USD) so
-// the two files do not race on creating the platform suspense account when
-// vitest schedules them in parallel forks.
+// Kept different from ledger.test.ts (which uses USD) as defence in depth:
+// Task #51 fixed the real bug (vitest.config.ts was using a non-existent
+// `fileParallel` key instead of `fileParallelism`, so files were running in
+// parallel forks against the same dev DB and racing on
+// `accounts_user_currency_type_uidx`). With the config fix this currency
+// split is no longer load-bearing, but it costs nothing to keep and makes
+// the test files independently inspectable.
 const TEST_CURRENCY = "EUR";
 const DEPOSIT_AMOUNT = "250.00000000";
 const DRIFT_AMOUNT = "999.99999999";
