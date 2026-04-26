@@ -398,3 +398,133 @@ export const adviserClients = pgTable("adviser_clients", {
 export const insertAdviserClientSchema = createInsertSchema(adviserClients).omit({ id: true, linkedAt: true, unlinkedAt: true });
 export type AdviserClient = typeof adviserClients.$inferSelect;
 export type InsertAdviserClient = z.infer<typeof insertAdviserClientSchema>;
+
+// ===========================================================================
+// Phase 2.1 — Fact find + risk profile (advice-engine foundation)
+// ---------------------------------------------------------------------------
+// These two tables capture the structured fact-find snapshot and the resulting
+// risk-profile scoring outcome. They are the bottom layer of the advice engine.
+// SOA, fee consents, advice acks, execution auths and the DB triggers for the
+// execution gate / 7-year retention lock are NOT created here — they belong to
+// later phases (2.2 → 2.5).
+//
+// Both tables include retentionUntil + deletionLocked columns up front so the
+// later DB trigger work can enforce the 7-year retention without an additional
+// ALTER. retentionUntil currently defaults to now() — the actual now()+7y rule
+// is enforced by the DB trigger added in a later phase.
+//
+// Decimal columns use the existing `decimal()` helper (Drizzle alias of
+// `numeric()`) for consistency with the rest of the schema.
+// ===========================================================================
+
+export const factFindSnapshots = pgTable("fact_find_snapshots", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  adviserId: integer("adviser_id").references(() => users.id),
+
+  // Section A — Personal & Household
+  employmentStatus: text("employment_status"), // full_time | part_time | self_employed | retired | unemployed
+  incomeStability: text("income_stability"),    // stable | variable | unstable
+  annualIncome: decimal("annual_income", { precision: 14, scale: 2 }),
+  annualExpenses: decimal("annual_expenses", { precision: 14, scale: 2 }),
+
+  // Section B — Financial Position (assets)
+  cashAssets: decimal("cash_assets", { precision: 14, scale: 2 }),
+  investmentAssets: decimal("investment_assets", { precision: 14, scale: 2 }),
+  propertyAssets: decimal("property_assets", { precision: 14, scale: 2 }),
+  superAssets: decimal("super_assets", { precision: 14, scale: 2 }),
+  otherAssets: decimal("other_assets", { precision: 14, scale: 2 }),
+
+  // Section B — Financial Position (liabilities)
+  mortgageDebt: decimal("mortgage_debt", { precision: 14, scale: 2 }),
+  personalDebt: decimal("personal_debt", { precision: 14, scale: 2 }),
+  creditCardDebt: decimal("credit_card_debt", { precision: 14, scale: 2 }),
+  otherDebt: decimal("other_debt", { precision: 14, scale: 2 }),
+
+  // Dependants + liquidity
+  dependantsCount: integer("dependants_count").notNull().default(0),
+  liquidityBufferMonths: integer("liquidity_buffer_months"),
+  liquidityNeeds: text("liquidity_needs"), // low | medium | high
+
+  // Section C — Objectives & Time Horizon
+  primaryObjective: text("primary_objective"),     // wealth_accumulation | income_generation | capital_preservation | speculative_growth
+  investmentHorizon: text("investment_horizon"),   // <2 | 2-5 | 5-10 | 10+
+  incomeReliance: text("income_reliance"),         // full | partial | none
+
+  // Section F — Existing investments
+  existingAllocation: jsonb("existing_allocation").$type<{
+    cash?: number;
+    bonds?: number;
+    equities?: number;
+    property?: number;
+    alternatives?: number;
+    crypto?: number;
+  }>(),
+
+  // Raw answers payload — preserved verbatim for audit defensibility.
+  rawAnswers: jsonb("raw_answers").notNull(),
+
+  isComplete: boolean("is_complete").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+
+  // Retention scaffolding — DB trigger in a later phase will enforce
+  // retentionUntil = createdAt + 7 years and block deletes while
+  // deletionLocked = true. Defaults are placeholders until the trigger lands.
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+
+export const insertFactFindSnapshotSchema = createInsertSchema(factFindSnapshots).omit({
+  id: true,
+  createdAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type FactFindSnapshot = typeof factFindSnapshots.$inferSelect;
+export type InsertFactFindSnapshot = z.infer<typeof insertFactFindSnapshotSchema>;
+
+export const riskProfiles = pgTable("risk_profiles", {
+  id: serial("id").primaryKey(),
+
+  clientId: integer("client_id").references(() => users.id).notNull(),
+  factFindSnapshotId: integer("fact_find_snapshot_id")
+    .references(() => factFindSnapshots.id)
+    .notNull(),
+
+  behaviouralScore: integer("behavioural_score").notNull(),
+  capacityAdjustment: integer("capacity_adjustment").notNull(),
+  finalScore: integer("final_score").notNull(),
+
+  riskBand: text("risk_band").notNull(),               // conservative | moderate | balanced | growth | high_growth
+  recommendedPortfolio: text("recommended_portfolio").notNull(),
+
+  overrideApplied: boolean("override_applied").notNull().default(false),
+  overrideReasons: jsonb("override_reasons").$type<string[]>().notNull().default([]),
+
+  allocation: jsonb("allocation").$type<{
+    cash: number;
+    bonds: number;
+    equities: number;
+    alternatives: number;
+    crypto: number;
+  }>().notNull(),
+
+  // Full set of inputs that produced this scoring decision — stored as-is for
+  // audit (so the decision can be exactly reproduced on demand).
+  scoringInputs: jsonb("scoring_inputs").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow(),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+});
+
+export const insertRiskProfileSchema = createInsertSchema(riskProfiles).omit({
+  id: true,
+  createdAt: true,
+  retentionUntil: true,
+  deletionLocked: true,
+});
+export type RiskProfile = typeof riskProfiles.$inferSelect;
+export type InsertRiskProfile = z.infer<typeof insertRiskProfileSchema>;

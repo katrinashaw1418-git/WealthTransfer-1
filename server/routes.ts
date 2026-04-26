@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { createHash, randomBytes } from "crypto";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 import { storage } from "./storage";
 import { db } from "./db";
@@ -18,8 +18,11 @@ import {
   leads,
   funnelEvents,
   applications as applicationsTable,
+  factFindSnapshots,
+  riskProfiles,
 } from "@shared/schema";
 import { getRecommendation } from "@shared/recommendation-engine";
+import { scoreRiskProfile, type RiskAnswers } from "./services/risk-scoring";
 import { sendVerificationEmail, emailConfigured } from "./email";
 import {
   requireAuth,
@@ -3184,6 +3187,222 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors[0].message });
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to reset password" });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 2.1 — Fact find + risk profile (advice-engine foundation)
+  // ---------------------------------------------------------------------------
+  // Routes:
+  //   POST /api/fact-find              — create a new fact-find snapshot
+  //   POST /api/risk-profile/score     — score answers, persist a risk profile
+  //   GET  /api/fact-find/latest       — most recent snapshot for current user
+  //   GET  /api/risk-profile/latest    — most recent risk profile for current user
+  //
+  // All routes require auth + verified KYC. Persisting these inputs is what
+  // makes the scoring decision auditable later, so we always insert before
+  // returning (no read-only scoring path in this phase).
+  // ---------------------------------------------------------------------------
+
+  // Zod schema for fact-find body. All decimal-amount fields are accepted as
+  // strings (Drizzle decimal columns expect strings) but also tolerate numbers
+  // by coercing to string. Optional everywhere except clientId (derived from
+  // the authenticated user) and rawAnswers (defaults to the body itself).
+  const decimalString = z
+    .union([z.string(), z.number()])
+    .optional()
+    .transform((v) => (v === undefined || v === null || v === "" ? undefined : String(v)));
+
+  const factFindBodySchema = z.object({
+    employmentStatus: z.string().optional(),
+    incomeStability: z.enum(["stable", "variable", "unstable"]).optional(),
+    annualIncome: decimalString,
+    annualExpenses: decimalString,
+    cashAssets: decimalString,
+    investmentAssets: decimalString,
+    propertyAssets: decimalString,
+    superAssets: decimalString,
+    otherAssets: decimalString,
+    mortgageDebt: decimalString,
+    personalDebt: decimalString,
+    creditCardDebt: decimalString,
+    otherDebt: decimalString,
+    dependantsCount: z.number().int().nonnegative().optional(),
+    liquidityBufferMonths: z.number().int().nonnegative().optional(),
+    liquidityNeeds: z.enum(["low", "medium", "high"]).optional(),
+    primaryObjective: z.string().optional(),
+    investmentHorizon: z.enum(["<2", "2-5", "5-10", "10+"]).optional(),
+    incomeReliance: z.enum(["full", "partial", "none"]).optional(),
+    existingAllocation: z.record(z.string(), z.number()).optional(),
+    rawAnswers: z.record(z.string(), z.unknown()).optional(),
+  });
+
+  app.post("/api/fact-find", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      await requireKyc(userId, storage);
+
+      const payload = factFindBodySchema.parse(req.body);
+
+      const [snapshot] = await db
+        .insert(factFindSnapshots)
+        .values({
+          clientId: userId,
+          employmentStatus: payload.employmentStatus,
+          incomeStability: payload.incomeStability,
+          annualIncome: payload.annualIncome,
+          annualExpenses: payload.annualExpenses,
+
+          cashAssets: payload.cashAssets,
+          investmentAssets: payload.investmentAssets,
+          propertyAssets: payload.propertyAssets,
+          superAssets: payload.superAssets,
+          otherAssets: payload.otherAssets,
+
+          mortgageDebt: payload.mortgageDebt,
+          personalDebt: payload.personalDebt,
+          creditCardDebt: payload.creditCardDebt,
+          otherDebt: payload.otherDebt,
+
+          dependantsCount: payload.dependantsCount ?? 0,
+          liquidityBufferMonths: payload.liquidityBufferMonths,
+          liquidityNeeds: payload.liquidityNeeds,
+
+          primaryObjective: payload.primaryObjective,
+          investmentHorizon: payload.investmentHorizon,
+          incomeReliance: payload.incomeReliance,
+
+          existingAllocation: payload.existingAllocation ?? {},
+          rawAnswers: payload.rawAnswers ?? payload,
+          isComplete: true,
+        })
+        .returning();
+
+      await writeAuditLog(userId, "fact_find_created", "fact_find_snapshot", String(snapshot.id), {}, req.ip || null);
+      res.json({ success: true, factFindSnapshot: snapshot });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors[0].message });
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error("Create fact find error:", error);
+      res.status(500).json({ error: "Failed to create fact find snapshot" });
+    }
+  });
+
+  // Zod schema for the risk-profile scoring body.
+  const riskAnswersSchema = z.object({
+    marketDropReaction: z.enum(["sell_all", "sell_some", "hold", "buy_more"]),
+    volatilityTolerance: z.enum(["low", "some", "moderate", "high"]),
+    lossTolerance: z.enum(["under_5", "5_10", "10_20", "over_20"]),
+    investmentExperience: z.enum(["none", "basic", "moderate", "advanced"]),
+    incomeReliance: z.enum(["full", "partial", "none"]),
+    incomeStability: z.enum(["stable", "variable", "unstable"]),
+    liquidityBufferMonths: z.number().int().nonnegative(),
+    dependantsCount: z.number().int().nonnegative(),
+    debtRatio: z.enum(["low", "medium", "high"]),
+    investmentHorizon: z.enum(["<2", "2-5", "5-10", "10+"]),
+    liquidityNeeds: z.enum(["low", "medium", "high"]),
+  });
+
+  const riskProfileScoreBodySchema = z.object({
+    factFindSnapshotId: z.number().int().positive(),
+    answers: riskAnswersSchema,
+  });
+
+  app.post("/api/risk-profile/score", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      await requireKyc(userId, storage);
+
+      const { factFindSnapshotId, answers } = riskProfileScoreBodySchema.parse(req.body);
+
+      // Verify the referenced fact-find snapshot belongs to this user before
+      // scoring — prevents a user from binding their risk profile to someone
+      // else's snapshot.
+      const [parent] = await db
+        .select({ id: factFindSnapshots.id, clientId: factFindSnapshots.clientId })
+        .from(factFindSnapshots)
+        .where(eq(factFindSnapshots.id, factFindSnapshotId))
+        .limit(1);
+
+      if (!parent || parent.clientId !== userId) {
+        return res.status(404).json({ error: "Fact find snapshot not found." });
+      }
+
+      const result = scoreRiskProfile(answers as RiskAnswers);
+
+      const [riskProfile] = await db
+        .insert(riskProfiles)
+        .values({
+          clientId: userId,
+          factFindSnapshotId,
+
+          behaviouralScore: result.behaviouralScore,
+          capacityAdjustment: result.capacityAdjustment,
+          finalScore: result.finalScore,
+
+          riskBand: result.riskBand,
+          recommendedPortfolio: result.recommendedPortfolio,
+
+          overrideApplied: result.overrideApplied,
+          overrideReasons: result.overrideReasons,
+
+          allocation: result.allocation,
+          scoringInputs: result.scoringInputs,
+        })
+        .returning();
+
+      await writeAuditLog(userId, "risk_profile_scored", "risk_profile", String(riskProfile.id), {
+        riskBand: result.riskBand,
+        finalScore: result.finalScore,
+        overrideApplied: result.overrideApplied,
+      }, req.ip || null);
+
+      res.json({ success: true, riskProfile });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors[0].message });
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error("Risk scoring error:", error);
+      res.status(500).json({ error: "Failed to score risk profile" });
+    }
+  });
+
+  app.get("/api/fact-find/latest", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      await requireKyc(userId, storage);
+
+      const [snapshot] = await db
+        .select()
+        .from(factFindSnapshots)
+        .where(eq(factFindSnapshots.clientId, userId))
+        .orderBy(desc(factFindSnapshots.createdAt))
+        .limit(1);
+
+      res.json({ factFindSnapshot: snapshot ?? null });
+    } catch (error: any) {
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error("Get latest fact find error:", error);
+      res.status(500).json({ error: "Failed to fetch fact find" });
+    }
+  });
+
+  app.get("/api/risk-profile/latest", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      await requireKyc(userId, storage);
+
+      const [profile] = await db
+        .select()
+        .from(riskProfiles)
+        .where(eq(riskProfiles.clientId, userId))
+        .orderBy(desc(riskProfiles.createdAt))
+        .limit(1);
+
+      res.json({ riskProfile: profile ?? null });
+    } catch (error: any) {
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error("Get latest risk profile error:", error);
+      res.status(500).json({ error: "Failed to fetch risk profile" });
     }
   });
 

@@ -14,6 +14,47 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 4 (Phase 2.1): Fact-Find + Risk-Profile Advice-Engine Foundation
+
+Phase 2.1 of the advice engine. **Schema + scoring + 4 API endpoints only.** SOA, fee consents, advice acks, execution authorisations, and the DB triggers (execution gate, 7-year retention) are explicitly deferred to Phase 2.2+. No UI built yet.
+
+Schema changes (`shared/schema.ts`):
+1. **`factFindSnapshots`** new table — structured fact-find capture (Sections A–F of the AFSL-grade questionnaire). Columns: `clientId` FK, optional `adviserId` FK, employment + income + expenses, asset breakdown (cash/investment/property/super/other), liability breakdown (mortgage/personal/credit-card/other), `dependantsCount` (default 0), `liquidityBufferMonths`, `liquidityNeeds`, `primaryObjective`, `investmentHorizon`, `incomeReliance`, `existingAllocation` (jsonb), `rawAnswers` (jsonb, NOT NULL — raw payload preserved verbatim for audit defensibility), `isComplete`, `createdAt`, plus retention scaffolding (`retentionUntil`, `deletionLocked = true` default).
+2. **`riskProfiles`** new table — outcome of scoring a fact-find. Columns: `clientId` FK, `factFindSnapshotId` FK to `factFindSnapshots.id`, `behaviouralScore` / `capacityAdjustment` / `finalScore` integers, `riskBand` (`conservative` | `moderate` | `balanced` | `growth` | `high_growth`), `recommendedPortfolio`, `overrideApplied` (bool), `overrideReasons` (jsonb string[] default `'[]'`), `allocation` (jsonb), `scoringInputs` (jsonb, NOT NULL — full input set for audit replay), `createdAt`, plus retention scaffolding.
+3. Insert schemas + `Insert*` and select types added for both tables.
+
+Decimal columns use the existing `decimal()` helper (Drizzle alias of `numeric()`) for consistency with the rest of the schema. `retentionUntil` currently defaults to `now()` — the actual `now() + 7 years` rule will be enforced by a DB trigger in Phase 2.5 (this session does NOT add triggers).
+
+Scoring service (`server/services/risk-scoring.ts`, new file):
+- Pure `scoreRiskProfile(answers: RiskAnswers)` — no I/O, no DB access, no side effects.
+- Behavioural rubric: `marketDropReaction` (0/2/4/6) + `volatilityTolerance` (1/3/5/7) + `lossTolerance` (1/3/5/7) + `investmentExperience` (1/3/5/7) + `incomeReliance` (5/3/1) → range ~5..30.
+- Capacity adjustment: `incomeStability` (+2/0/-2) + `liquidityBufferMonths` (>12 → +2, ≥6 → +1, else -2) + `dependantsCount` (0 → +1, ≥3 → -2, else 0) + `debtRatio` (+1/0/-2) → range ~ -8..+6.
+- Final score = behavioural + capacity, **clamped to [5, 35]**.
+- Score → band: ≤10 conservative · ≤16 moderate · ≤22 balanced · ≤28 growth · else high_growth.
+- **Three mandatory hard overrides** applied AFTER band mapping, each only if current band rank exceeds cap (riskRank guard): horizon `<2` → cap Moderate · `liquidityNeeds = high` → cap Balanced · `incomeReliance = full` → cap Balanced. Each cap pushes a verbatim explanation onto `overrideReasons` for audit defensibility.
+- 5 model portfolios (`PORTFOLIO_ALLOCATIONS`) match the spec exactly: Conservative 25/45/25/5/0, Moderate 15/35/45/5/0, Balanced 10/25/55/5/5, Growth 5/10/70/5/10, High Growth 0/5/75/5/15 (cash/bonds/equities/alternatives/crypto).
+
+API routes (`server/routes.ts`, inserted after `/api/auth/reset-password`, before FX-refresh block):
+- `POST /api/fact-find` — Zod-validated body, decimal fields accepted as `number | string` and coerced to string for Drizzle. Persists snapshot, writes audit log `fact_find_created`. **Auth + KYC required.**
+- `POST /api/risk-profile/score` — Zod-validated `{ factFindSnapshotId, answers }`. Verifies the referenced snapshot belongs to the caller before scoring (rejects with 404 otherwise — prevents binding a risk profile to someone else's snapshot). Calls `scoreRiskProfile()`, persists the result, writes audit log `risk_profile_scored` with riskBand + finalScore + overrideApplied. **Auth + KYC required.**
+- `GET /api/fact-find/latest` — most recent snapshot for the caller, or `null`. **Auth + KYC required.**
+- `GET /api/risk-profile/latest` — most recent risk profile for the caller, or `null`. **Auth + KYC required.**
+
+Imports added: `desc` to `drizzle-orm`, `factFindSnapshots`/`riskProfiles` to schema imports, `scoreRiskProfile`/`RiskAnswers` from the new risk-scoring service.
+
+DB migration: `drizzle-kit push --force` succeeded, schema verified via `information_schema`:
+- `fact_find_snapshots` and `risk_profiles` tables present with all columns ✓
+- All 4 FKs to `users.id` and `fact_find_snapshots.id` (integer, not UUID) ✓
+- Defaults `dependants_count=0`, `is_complete=false`, `override_applied=false`, `override_reasons='[]'::jsonb`, `deletion_locked=true` ✓
+
+Typecheck: clean except for the same 2 pre-existing errors in `server/storage.ts` (lines 3276/3299) — both predate Session 1, both out of scope.
+
+Server restart: clean. FX rate refresh ran on startup, no errors.
+
+Code review: PASS after one fix — initial review flagged that GET `/latest` endpoints lacked KYC enforcement; added `requireKyc` to both. All four Phase 2.1 routes are now consistent (auth + KYC).
+
+**No scope creep:** zero advice-record / SOA / fee-consent / advice-ack / execution-auth tables created; zero DB triggers added; no UI built.
+
 ## Recent Changes (April 2026) — Session 3 (Phase 1): Drizzle Schema + Auth Role Propagation
 
 Phase 1 of the B2B adviser overlay. **Scaffolding only** — no advice-engine surface (SOA, ROA, fact-find, fee-consents, risk-profiles) was created. All FKs to `users.id` are `integer`, not UUID, matching the existing repo convention.
