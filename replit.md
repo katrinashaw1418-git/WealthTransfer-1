@@ -14,6 +14,52 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 12 (Adviser PDF Reports)
+
+Goal: Wire the adviser report generator end-to-end. Previously, "Request report" inserted a `reportRequests` row at status='requested' and nothing ever happened. Now the row is generated to a real PDF, the adviser can download it, and access is gated on live entitlement. Phase 3 (10C — fee engine, real money) remains gated.
+
+### Backend
+- New `server/services/reports.ts` exporting `generateReportPdf(reportId)`:
+  - Re-asserts `assertAdviserClientLink` (defence in depth — required if generation ever moves async).
+  - Marks the row `status='generating'`, then assembles per `reportType`:
+    - `portfolio_summary` — `userInvestments` holdings (product NAV) + AUD/USD cash via `getUserCurrencyBalance` (LEDGER-DERIVED, never stored balance columns)
+    - `fee_summary` — `feeConsents` for the client + explicit "fee engine not yet operative" disclaimer
+    - `transaction_history` — last 100 `transactions` for the client
+    - `full_statement` — all of the above
+  - Renders A4 PDF via `pdfkit`: header band, DRAFT watermark on the cover, sectioned tables, dedicated disclosure page, per-page footer ("Draft — placeholder regulatory details. Page X of Y.").
+  - On success: `status='ready'`, `downloadUrl`, `generatedAt`, `expiresAt = +30 days`.
+  - On failure: `status='failed'`, `failureReason`. Function returns a tagged result rather than throwing — caller audits both branches.
+  - Files land at `.local/reports/<reportId>.pdf` (added to `.gitignore`).
+- `server/adviser-routes.ts`:
+  - `POST /api/adviser/reports` now `await`s `generateReportPdf` inline (datasets are small, so synchronous is fine for v1). Audits `adviser_report_requested` then either `adviser_report_generated` or `adviser_report_failed`. Re-reads the row before returning so the UI sees terminal state.
+  - New `GET /api/adviser/reports/:id/download` (NOT wrapped in `adviserRoute()` because it streams binary). Inline auth: `requireAuth` + `requireRole("adviser")` + `row.adviserUserId === auth.userId` ownership check + `assertAdviserClientLink(auth.userId, row.clientUserId)` LIVE entitlement re-check (deactivating an adviser-client link immediately revokes download access to historical PDFs). Returns 409 if status≠ready, 410 + flips to 'expired' if past `expiresAt`, 404 if file missing on disk. Sends `Content-Type: application/pdf`, `Content-Disposition: attachment`, plus `Cache-Control: no-store, private`, `Pragma: no-cache`, `X-Content-Type-Options: nosniff`. Audits `adviser_report_downloaded`.
+
+### Frontend
+- `client/src/pages/adviser/reports.tsx`:
+  - Download cell uses a fetch+blob+anchor pattern via `downloadReport()` (a plain `<a href>` can't carry the JWT).
+  - `failed` rows show an "AlertCircle Failed" badge with `failureReason` in a tooltip.
+  - Create-mutation `onSuccess` distinguishes ready/failed/other and toasts accordingly. Also invalidates the notifications query so the bell badge updates.
+
+### Verified end-to-end
+- All 4 report types generate to real PDFs (5–8 KB each) on disk.
+- Download returns `application/pdf`, body starts with `%PDF-`, anti-cache headers present.
+- Security matrix: link active → 200; link deactivated → 403 (proven live by toggling `adviser_clients.is_active`); other adviser → 403; no auth → 401; bogus id → 404; unlinked client at request time → 403 from `assertAdviserClientLink`.
+- Audit log: `adviser_report_requested`, `adviser_report_generated`, `adviser_report_downloaded`, `adviser_report_failed` all firing.
+- Architect review: PASS with one MEDIUM (stale-authorization on download) — fixed in same session by adding the live-link re-check + cache headers.
+
+### Files
+- `server/services/reports.ts` (NEW)
+- `server/adviser-routes.ts` (POST wired to generator + new download route)
+- `client/src/pages/adviser/reports.tsx` (fetch-blob download + Failed tooltip)
+- `.gitignore` (`.local/reports/` added)
+- `package.json` — pdfkit + @types/pdfkit added via packager
+
+### Out of scope (Phase 3 — still gated)
+- Fee engine accrual/deduction (10C — real money)
+- Async/queued generation (synchronous is fine for v1; queue trigger threshold noted for future)
+- CSV/XLSX formats
+- Charts inside PDFs
+
 ## Recent Changes (April 2026) — Session 11 (Adviser Notifications)
 
 Goal: Replace the inert bell icon in the adviser topbar with a real notifications popover backed by a single read-only aggregator. Phase 3 (10C — fee engine, real money) remains gated.

@@ -11,11 +11,15 @@
 // adviser_tasks and report_requests (the adviser's own working tables).
 // =============================================================================
 
-import type { Express, Request } from "express";
+import fs from "node:fs";
+import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 import { db } from "./db";
-import { auditLogs } from "@shared/schema";
+import { auditLogs, reportRequests } from "@shared/schema";
 import { requireAuth, requireRole } from "./auth";
+import { generateReportPdf, REPORTS_DIR } from "./services/reports";
+import path from "node:path";
 import {
   listAdviserClients,
   getAdviserClientDetail,
@@ -34,6 +38,7 @@ import {
   getAdviserClientTransactions,
   listAdviserInstructions,
   createAdviserInstruction,
+  assertAdviserClientLink,
 } from "./services/adviser-access";
 import { insertAdviserTaskSchema, insertReportRequestSchema } from "@shared/schema";
 
@@ -390,7 +395,110 @@ export function registerAdviserRoutes(app: Express): void {
         clientUserId: report.clientUserId,
         reportType: report.reportType,
       }, (req as Request).ip || null);
-      return report;
+
+      // Generate the PDF synchronously. Datasets are small (one client, ≤100
+      // transactions) so an inline await keeps the implementation simple and
+      // means the row returned to the UI is already in its terminal state.
+      const result = await generateReportPdf(report.id);
+      if (result.status === "ready") {
+        await audit(auth.userId, "adviser_report_generated", "report_request", String(report.id), {
+          clientUserId: report.clientUserId,
+          reportType: report.reportType,
+          downloadUrl: result.downloadUrl,
+        }, (req as Request).ip || null);
+      } else {
+        await audit(auth.userId, "adviser_report_failed", "report_request", String(report.id), {
+          clientUserId: report.clientUserId,
+          reportType: report.reportType,
+          failureReason: result.failureReason,
+        }, (req as Request).ip || null);
+      }
+
+      // Re-read the row so the UI gets the final status / downloadUrl / etc.
+      const [final] = await db
+        .select()
+        .from(reportRequests)
+        .where(eq(reportRequests.id, report.id))
+        .limit(1);
+      return final;
     }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/adviser/reports/:id/download — stream the generated PDF.
+  // Not wrapped in adviserRoute() because we send binary, not JSON.
+  // Auth checks are performed inline with the same shape: requireAuth +
+  // requireRole + ownership check (report.adviserUserId === auth.userId).
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/reports/:id/download",
+    async (req: Request, res: Response) => {
+      try {
+        const auth = requireAuth(req);
+        requireRole(auth, "adviser");
+
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+          return res.status(400).json({ error: "Invalid report id" });
+        }
+
+        const [row] = await db
+          .select()
+          .from(reportRequests)
+          .where(eq(reportRequests.id, id))
+          .limit(1);
+
+        if (!row) return res.status(404).json({ error: "Report not found" });
+
+        // Ownership: only the requesting adviser can download. Defence in depth
+        // beyond the role check.
+        if (row.adviserUserId !== auth.userId) {
+          return res.status(403).json({ error: "Forbidden — this report does not belong to you" });
+        }
+
+        // Live entitlement: even though the adviser owns the report row, they
+        // must STILL be linked to the client at download time. If the adviser-
+        // client link has been deactivated since generation, deny access — the
+        // PDF contains client data the adviser is no longer authorised to see.
+        // Throws 403 from assertAdviserClientLink if link is missing/inactive.
+        await assertAdviserClientLink(auth.userId, row.clientUserId);
+
+        if (row.status !== "ready") {
+          return res.status(409).json({
+            error: `Report is not ready (status: ${row.status})`,
+            failureReason: row.failureReason ?? undefined,
+          });
+        }
+
+        if (row.expiresAt && new Date(row.expiresAt).getTime() < Date.now()) {
+          await db.update(reportRequests).set({ status: "expired" }).where(eq(reportRequests.id, id));
+          return res.status(410).json({ error: "Report has expired" });
+        }
+
+        const filePath = path.join(REPORTS_DIR, `${id}.pdf`);
+        if (!fs.existsSync(filePath)) {
+          return res.status(404).json({ error: "Report file missing on disk" });
+        }
+
+        await audit(auth.userId, "adviser_report_downloaded", "report_request", String(id), {
+          clientUserId: row.clientUserId,
+          reportType: row.reportType,
+        }, req.ip || null);
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="amax-report-${id}.pdf"`,
+        );
+        // Anti-cache: PDFs may contain sensitive client data; never let an
+        // intermediate proxy or browser cache hold them.
+        res.setHeader("Cache-Control", "no-store, private, max-age=0, must-revalidate");
+        res.setHeader("Pragma", "no-cache");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        fs.createReadStream(filePath).pipe(res);
+      } catch (error: any) {
+        handleError(res, error, "Report download failed");
+      }
+    },
   );
 }
