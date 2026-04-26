@@ -1,0 +1,304 @@
+Thought for 4s
+
+Next step:
+
+Session 24 — Fee Reconciliation + Payout Reporting
+
+Do this after Gate B, before any automatic monthly sweep or external adviser payout.
+
+Replit prompt
+Proceed with Session 24 — Fee Reconciliation + Payout Reporting.
+
+Purpose:
+Give AMAX admin a reconciliation layer after fee deductions are posted.
+
+Build:
+1. fee reconciliation report
+2. adviser payout summary
+3. platform revenue summary
+4. exception report
+5. export-ready tables
+
+Do not build:
+- automatic payout
+- external bank transfer
+- monthly sweep automation
+- commission tier engine
+- investment execution
+Code patches
+1. server/routes.ts
+
+Add admin APIs:
+
+GET /api/admin/fee-reconciliation
+GET /api/admin/adviser-payouts
+GET /api/admin/platform-fee-revenue
+GET /api/admin/fee-exceptions
+2. Reconciliation logic
+feeDeductionJournals
+→ compare deducted gross amount
+→ adviserAmount
+→ platformAmount
+→ deduction status
+→ reversal status
+
+Checks:
+
+deduction status = deducted but no journal → exception
+journal posted but deduction not deducted → exception
+journal reversed but deduction not reversed → exception
+grossAmount != adviserAmount + platformAmount → exception
+3. Adviser payout report
+Group by adviserUserId
+Sum adviserAmount
+Filter status = posted
+Exclude reversed journals
+
+Fields:
+
+Adviser
+Period
+Gross fees
+Adviser share
+Platform share
+Reversed amount
+Net payable
+Status: pending payout
+4. Platform revenue report
+Group by month
+Sum platformAmount
+Exclude reversed journals
+
+Fields:
+
+Month
+Gross deducted
+Platform revenue
+Adviser payable
+Reversals
+Net revenue
+5. UI patch
+
+Add to:
+
+/admin/fees
+
+New tabs:
+
+Reconciliation
+Adviser Payouts
+Platform Revenue
+Exceptions
+Hard stop
+No external payment.
+No bank payout.
+No automatic settlement.
+Reporting only.
+next step and code patches
+
+Next step:
+
+Session 25 — Adviser Payout Approval Workflow
+
+Build approval records only. No bank transfer.
+
+Replit prompt
+Proceed with Session 25 — Adviser Payout Approval Workflow.
+
+Purpose:
+Turn reconciliation totals into admin-approved payout batches for adviser revenue.
+
+Build:
+1. adviserPayoutBatches table
+2. adviserPayoutItems table
+3. create payout batch from posted, unreversed fee journals
+4. admin review / approve / reject payout batch
+5. payout reporting UI
+
+Do not build:
+- bank transfer
+- external payout execution
+- automatic settlement
+- commission tiers
+- wallet movement
+Code patches
+1. shared/schema.ts
+
+Add:
+
+adviserPayoutBatches
+adviserPayoutItems
+
+Fields:
+
+adviserPayoutBatches:
+- id
+- periodStart
+- periodEnd
+- status: draft | pending_approval | approved | rejected | paid_later
+- totalGross
+- totalAdviserPayable
+- totalPlatformRevenue
+- createdBy
+- approvedBy
+- approvedAt
+- rejectedBy
+- rejectedAt
+- rejectionReason
+- createdAt
+
+adviserPayoutItems:
+- id
+- batchId
+- adviserUserId
+- grossFees
+- adviserPayable
+- platformRevenue
+- journalCount
+- status
+2. server/routes.ts
+
+Add APIs:
+
+POST /api/admin/adviser-payout-batches
+GET  /api/admin/adviser-payout-batches
+GET  /api/admin/adviser-payout-batches/:id
+POST /api/admin/adviser-payout-batches/:id/submit
+POST /api/admin/adviser-payout-batches/:id/approve
+POST /api/admin/adviser-payout-batches/:id/reject
+3. Logic
+
+Create batch:
+
+select feeDeductionJournals
+where status = posted
+and postedAt between periodStart and periodEnd
+and not reversed
+and not already included in payout batch
+
+group by adviserUserId
+sum adviserAmount
+sum platformAmount
+sum grossAmount
+
+Approve:
+
+admin/compliance_admin only
+status must be pending_approval
+set approvedBy / approvedAt
+audit log
+
+Reject:
+
+admin/compliance_admin only
+requires rejectionReason
+audit log
+4. UI patch
+
+Add to:
+
+/admin/fees
+
+New tab:
+
+Payout Batches
+
+Components:
+
+Create payout batch
+Period start / end
+Batch list
+Batch detail
+Approve / reject
+Export CSV
+Hard stop
+No money leaves AMAX.
+No bank payout.
+No external transfer.
+This is approval/reporting only.
+next step and code patches
+
+Next step:
+
+Session 26 — Payout Export Pack
+
+Build export + reconciliation support only. Still no bank transfer.
+
+Replit prompt
+Proceed with Session 26 — Payout Export Pack.
+
+Purpose:
+Allow AMAX admin to export approved adviser payout batches for external finance processing.
+
+Build:
+1. CSV export for approved payout batch
+2. PDF payout summary
+3. payout batch audit trail view
+4. mark batch as exported
+5. export timestamp and exportedBy fields
+
+Do not build:
+- bank transfer
+- external payment API
+- automatic payout
+- wallet movement
+Code patches
+1. shared/schema.ts
+
+Patch adviserPayoutBatches:
+
+exportedAt: timestamp("exported_at"),
+exportedBy: integer("exported_by").references(() => users.id),
+exportFormat: text("export_format"),
+// csv | pdf | csv_pdf
+2. server/routes.ts
+
+Add APIs:
+
+GET  /api/admin/adviser-payout-batches/:id/export.csv
+GET  /api/admin/adviser-payout-batches/:id/summary.pdf
+POST /api/admin/adviser-payout-batches/:id/mark-exported
+GET  /api/admin/adviser-payout-batches/:id/audit
+3. CSV fields
+Batch ID
+Period Start
+Period End
+Adviser User ID
+Adviser Name
+Gross Fees
+Adviser Payable
+Platform Revenue
+Journal Count
+Status
+4. PDF summary
+
+Include:
+
+AMAX Wealth Adviser Payout Summary
+Batch ID
+Period
+Prepared By
+Approved By
+Exported At
+Total Gross Fees
+Total Adviser Payable
+Total Platform Revenue
+Items table
+Disclaimer: export pack only; no payment executed by platform
+5. UI patch
+
+Add to:
+
+/admin/fees → Payout Batches tab
+
+Buttons:
+
+Download CSV
+Download PDF Summary
+Mark as Exported
+View Audit Trail
+Hard stop
+No payment execution.
+No bank file upload.
+No external transfer.
+Finance team processes externally.
