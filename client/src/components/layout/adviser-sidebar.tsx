@@ -11,6 +11,7 @@ import {
   ClipboardCheck,
   ListChecks,
   FileText,
+  HandCoins,
   TrendingUp,
   Scale,
   User,
@@ -51,6 +52,7 @@ const adviserSections: NavSection[] = [
       { name: "Client book", href: "/adviser/clients", icon: Users },
       { name: "Investment products", href: "/adviser/products", icon: Building2 },
       { name: "Instructions", href: "/adviser/instructions", icon: ClipboardCheck },
+      { name: "Fee consents", href: "/adviser/fee-consents", icon: HandCoins, hint: "DBFO requests + signed" },
     ],
   },
   {

@@ -3,6 +3,34 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Session 20: Live Fee Consents (DBFO request → sign → admin oversight)
+
+Implements the full DBFO (Deduction-Based Fee Order) consent lifecycle so an adviser can REQUEST a fee consent from a linked client, the client can SIGN or DECLINE, and admin gets read-only oversight of both the in-flight request log and the executed consent log. **No money is moved by this flow** — AMAX still requires separate admin-approved deduction controls (still gated). The 10C fee engine remains DISABLED.
+
+**Schema (`shared/schema.ts`)**
+- New `feeConsentRequests` table with status state machine: `pending | consented | declined | withdrawn_by_adviser | superseded`. FK `signedFeeConsentId → feeConsents.id` is set atomically when the client signs.
+- Indexes: `(clientUserId, status)`, `(adviserUserId, status)`.
+- Hardening (added in architect Round 2 fix): partial unique index `fee_consent_request_signed_unique_idx ON (signed_fee_consent_id) WHERE signed_fee_consent_id IS NOT NULL` (one executed consent can only ever be linked to one request); CHECK constraint `fee_consent_request_status_signed_chk` enforcing `status='consented' IFF signedFeeConsentId IS NOT NULL` at the DB level.
+- `insertFeeConsentRequestSchema`, `InsertFeeConsentRequest`, `FeeConsentRequest` exported. Migrated cleanly via `npm run db:push`.
+
+**Backend** — every write wrapped in `db.transaction` + `auditLogs` insert in the same tx:
+- `server/adviser-routes.ts`: `POST /api/adviser/fee-consent-requests` (Zod `superRefine` enforces RG175 ±2-day renewal window: 60 days before / 150 days after the proposed referenceDay; asserts adviser–client link), `GET` (paginated `?clientId=&status=&page=&limit=`, link enforcement on `clientId` filter), `PATCH /:id/withdraw` (only `status='pending'`, ownership-checked, row-locked).
+- `server/client-routes.ts`: `GET /api/client/fee-consent-requests`, `POST /:id/sign` (transactionally inserts `feeConsents` executed row + flips request to `consented` + sets `signedFeeConsentId`; emits TWO audit rows `fee_consent_signed` + `fee_consent_created`), `POST /:id/decline`, `GET /api/client/fee-consents` (read-only executed list).
+- `server/admin-routes.ts`: `GET /api/admin/fee-consent-requests` and `GET /api/admin/fee-consents` — both paginated with adviser/client username joins.
+- **Concurrency hardening** (architect-mandated): every state-changing transition does `SELECT ... FOR UPDATE` on the request row AND a conditional `UPDATE ... WHERE id = :id AND status = 'pending'`, with `409` returned if the loser sees a 0-row update. This was verified live: two parallel sign calls now produce exactly one executed consent + one `400 'Cannot sign request in status consented'`.
+
+**Frontend** — 3 new pages, all TanStack Query v5 object-form, shadcn/ui, `apiRequest` + array-key cache invalidation:
+- `client/src/pages/adviser/fee-consents.tsx` — request dialog (client picker → linked-advice-record picker, fee type / amount type / amount or calculation method, account, frequency, reference day; the renewal window is auto-derived in the client and re-validated server-side); status filter; paginated list; `Withdraw` action on pending rows.
+- `client/src/pages/client/fee-consents.tsx` — pending requests table with Sign / Decline; Sign dialog requires `signatureName`; Active consents table shows `renewalStatus` badges + days-until-expiry.
+- `client/src/pages/admin/fee-consents.tsx` — Tabs: `Requests` (with status filter) and `Live consents` (with renewal-status filter), both paginated.
+- All three pages carry the explicit hardening notice: *"No money will be moved by this consent — AMAX requires separate admin-approved deduction controls (currently disabled)."*
+- `client/src/App.tsx` — 3 new routes wired (`/adviser/fee-consents`, `/client/fee-consents`, `/admin/fee-consents`).
+- Sidebars: `Receipt` icon for client (`Fee Consents`), `HandCoins` icon for adviser (under Clients) and admin (between Reports and Compliance).
+
+**Architect verdict**: Round 1 = FAIL (1 Critical: sign transaction was not concurrency-safe; two parallel sign calls could both pass the read-then-insert path and create duplicate executed consents). Round 2 fix = SELECT FOR UPDATE on every transition + conditional UPDATE WHERE status='pending' + DB-level partial unique index on `signedFeeConsentId` + CHECK constraint tying `status` to `signedFeeConsentId`. Verified live with parallel-curl race test: exactly one consent created, loser correctly 400'd.
+
+**Hard rules unchanged**: 10C fee engine STILL GATED. No money movement. Every adviser/admin/client write is audit-logged. Cross-role attempts return 403 (admin POSTing adviser endpoints, adviser signing on behalf of client). Demo creds unchanged: wise/wise888 (admin), wiseadviser/wise888, wiseinvestor/wise888.
+
 ## Recent Changes (April 2026) — Session 19: Admin Shell Expansion (Products, Instructions, Reports, Compliance)
 
 Fills out the admin shell to match the spec: catalogue management, read-only oversight of in-flight investment instructions, oversight of generated reports, and a compliance overview dashboard. No money movement, no fee-engine activation, no KYC bypass — every admin write emits an audit row in the same transaction.

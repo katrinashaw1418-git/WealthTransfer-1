@@ -1025,6 +1025,124 @@ export const insertFeeConsentSchema = createInsertSchema(feeConsents).omit({
 export type FeeConsent = typeof feeConsents.$inferSelect;
 export type InsertFeeConsent = z.infer<typeof insertFeeConsentSchema>;
 
+// =============================================================================
+// SESSION 20 — DBFO live fee-consent REQUESTS
+// -----------------------------------------------------------------------------
+// `feeConsents` represents a SIGNED, executed consent (clientSignatureName is
+// notNull, consentedAt defaults to now()). It cannot represent the
+// "adviser asked, client hasn't responded" state.
+//
+// `feeConsentRequests` is the pre-signature lifecycle row. Adviser POSTs the
+// proposed terms here; client signs (transition to "consented" + insert a
+// row into `feeConsents`) or declines. Withdraw and supersede states cover
+// the corner cases where the adviser pulls the request or sends a fresh one.
+//
+// State machine: pending -> consented | declined | withdrawn_by_adviser | superseded
+//
+// Hard rules baked in:
+//   - clientUserId always notNull (cannot request a consent without a client).
+//   - signedFeeConsentId is the link back to the executed consent row, set
+//     atomically with the status transition to "consented".
+//   - All money-movement is OUT OF SCOPE — this table is request-and-sign
+//     only. The fee engine (Session 23A/B) is gated separately.
+// =============================================================================
+export const feeConsentRequests = pgTable(
+  "fee_consent_requests",
+  {
+    id: serial("id").primaryKey(),
+
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+    clientUserId: integer("client_user_id")
+      .references(() => users.id)
+      .notNull(),
+
+    // Optional — request can pre-date a fresh advice record. When the client
+    // signs, the executed feeConsents row will reference whichever advice
+    // record was active at sign time.
+    adviceRecordId: integer("advice_record_id").references(() => adviceRecords.id),
+
+    // Mirror of feeConsents fee shape. Numeric stored as text-decimal.
+    feeType: text("fee_type").notNull(),
+    // ongoing_service_fee | advice_fee | platform_fee
+    amountType: text("amount_type").notNull(),
+    // fixed | percentage | calculation_method
+    amount: decimal("amount", { precision: 14, scale: 4 }),
+    calculationMethod: text("calculation_method"),
+
+    accountNumber: text("account_number").notNull(),
+    accountName: text("account_name"),
+
+    deductionFrequency: text("deduction_frequency").notNull(),
+    // monthly | quarterly | annually
+
+    // Proposed reference day (the DBFO renewal anchor). Renewal window is
+    // proposed too: per RG175/Netwealth, opens 60 days before reference and
+    // closes 150 days after — server validates this on POST.
+    proposedReferenceDay: timestamp("proposed_reference_day").notNull(),
+    proposedRenewalWindowStart: timestamp("proposed_renewal_window_start").notNull(),
+    proposedRenewalWindowEnd: timestamp("proposed_renewal_window_end").notNull(),
+    proposedConsentExpiryDate: timestamp("proposed_consent_expiry_date").notNull(),
+
+    // Adviser-supplied justification (shown to client at sign time).
+    requestNote: text("request_note"),
+
+    status: text("status").notNull().default("pending"),
+    // pending | consented | declined | withdrawn_by_adviser | superseded
+
+    // Reason captured on decline (client) or withdraw (adviser).
+    declineReason: text("decline_reason"),
+
+    // Set atomically when the client signs — points to the executed consent.
+    signedFeeConsentId: integer("signed_fee_consent_id").references(
+      () => feeConsents.id,
+    ),
+
+    respondedAt: timestamp("responded_at"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    clientStatusIdx: index("fee_consent_request_client_status_idx").on(
+      table.clientUserId,
+      table.status,
+    ),
+    adviserStatusIdx: index("fee_consent_request_adviser_status_idx").on(
+      table.adviserUserId,
+      table.status,
+    ),
+    // One executed consent can only ever be linked to one request — prevents
+    // a race from creating two requests both pointing at the same consent row.
+    signedConsentUnique: uniqueIndex("fee_consent_request_signed_unique_idx")
+      .on(table.signedFeeConsentId)
+      .where(sql`signed_fee_consent_id IS NOT NULL`),
+    // DB-level state-machine invariant:
+    //   status='consented' iff signedFeeConsentId IS NOT NULL.
+    // Stops any code path from leaving an orphan partial state.
+    statusSignedConsistency: check(
+      "fee_consent_request_status_signed_chk",
+      sql`(status = 'consented' AND signed_fee_consent_id IS NOT NULL)
+          OR (status <> 'consented' AND signed_fee_consent_id IS NULL)`,
+    ),
+  }),
+);
+
+export const insertFeeConsentRequestSchema = createInsertSchema(
+  feeConsentRequests,
+).omit({
+  id: true,
+  status: true,
+  declineReason: true,
+  signedFeeConsentId: true,
+  respondedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type FeeConsentRequest = typeof feeConsentRequests.$inferSelect;
+export type InsertFeeConsentRequest = z.infer<typeof insertFeeConsentRequestSchema>;
+
 export const insertAdviceAcknowledgementSchema = createInsertSchema(adviceAcknowledgements).omit({
   id: true,
   retentionUntil: true,

@@ -12,6 +12,7 @@ import {
   ListChecks,
   FileText,
   ShieldCheck,
+  HandCoins,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ const NAV_ITEMS = [
   { to: "/admin/products", label: "Investment Products", icon: Package },
   { to: "/admin/instructions", label: "Instructions", icon: ListChecks },
   { to: "/admin/reports", label: "Report Requests", icon: FileText },
+  { to: "/admin/fee-consents", label: "Fee Consents", icon: HandCoins },
   { to: "/admin/compliance", label: "Compliance", icon: ShieldCheck },
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
 ] as const;

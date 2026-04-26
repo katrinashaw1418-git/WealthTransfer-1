@@ -18,8 +18,13 @@
 
 import type { Express, Request } from "express";
 import { z } from "zod";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "./db";
-import { auditLogs } from "@shared/schema";
+import {
+  auditLogs,
+  feeConsentRequests,
+  feeConsents,
+} from "@shared/schema";
 import { requireAuth } from "./auth";
 import {
   listClientPendingInstructions,
@@ -135,6 +140,268 @@ export function registerClientRoutes(app: Express): void {
       res.json(updated);
     } catch (error: any) {
       handleError(res, error, "Failed to reject instruction");
+    }
+  });
+
+  // ===========================================================================
+  // SESSION 20 — Client-side fee consent REQUESTS (sign / decline / live view)
+  // ---------------------------------------------------------------------------
+  // The client is the only role that can sign or decline. Signing inserts a
+  // row into the existing `feeConsents` table (the executed consent) AND flips
+  // the request status atomically. NO money moves here — fee deduction is
+  // gated separately (Session 23A/B).
+  // ===========================================================================
+
+  // GET /api/client/fee-consent-requests?status=
+  app.get("/api/client/fee-consent-requests", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const status = typeof req.query.status === "string" ? req.query.status : null;
+      const conds: any[] = [eq(feeConsentRequests.clientUserId, auth.userId)];
+      if (status) conds.push(eq(feeConsentRequests.status, status));
+      const rows = await db
+        .select()
+        .from(feeConsentRequests)
+        .where(conds.length === 1 ? conds[0] : and(...conds))
+        .orderBy(desc(feeConsentRequests.createdAt));
+      res.json(rows);
+    } catch (error: any) {
+      handleError(res, error, "Failed to list fee consent requests");
+    }
+  });
+
+  // POST /api/client/fee-consent-requests/:id/sign
+  // Atomic transition pending -> consented + insert executed feeConsents row.
+  const signSchema = z.object({
+    signatureName: z.string().min(2).max(200),
+  });
+  app.post("/api/client/fee-consent-requests/:id/sign", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        return res.status(400).json({ error: "Invalid request id" });
+      }
+      const parsed = signSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          error:
+            "Invalid sign payload: " +
+            parsed.error.issues.map((i) => i.message).join("; "),
+        });
+      }
+      const result = await db.transaction(async (tx) => {
+        // Row-level lock so two concurrent sign attempts can't both read
+        // status='pending' and both insert a feeConsents row. The loser
+        // blocks until the winner commits, then sees status='consented' and
+        // is rejected by the state-machine guard below.
+        const [request] = await tx
+          .select()
+          .from(feeConsentRequests)
+          .where(eq(feeConsentRequests.id, id))
+          .for("update")
+          .limit(1);
+        if (!request) {
+          throw Object.assign(new Error("Fee consent request not found"), {
+            status: 404,
+          });
+        }
+        if (request.clientUserId !== auth.userId) {
+          throw Object.assign(new Error("Not your fee consent request"), {
+            status: 403,
+          });
+        }
+        if (request.status !== "pending") {
+          throw Object.assign(
+            new Error(`Cannot sign request in status '${request.status}'`),
+            { status: 400 },
+          );
+        }
+        // Executed consent row is required to have an adviceRecordId. If the
+        // request didn't carry one, refuse here so the upstream advice trail
+        // is preserved.
+        if (!request.adviceRecordId) {
+          throw Object.assign(
+            new Error(
+              "Cannot sign — request is not linked to an advice record. Ask your adviser to attach one.",
+            ),
+            { status: 400 },
+          );
+        }
+        const [executed] = await tx
+          .insert(feeConsents)
+          .values({
+            adviceRecordId: request.adviceRecordId,
+            clientId: request.clientUserId,
+            adviserId: request.adviserUserId,
+            feeType: request.feeType,
+            amountType: request.amountType,
+            amount: request.amount,
+            calculationMethod: request.calculationMethod,
+            accountNumber: request.accountNumber,
+            accountName: request.accountName,
+            deductionFrequency: request.deductionFrequency,
+            referenceDay: request.proposedReferenceDay,
+            renewalWindowStart: request.proposedRenewalWindowStart,
+            renewalWindowEnd: request.proposedRenewalWindowEnd,
+            consentExpiryDate: request.proposedConsentExpiryDate,
+            renewalStatus: "active",
+            clientSignatureName: parsed.data.signatureName,
+          })
+          .returning();
+        // Belt-and-braces: even with FOR UPDATE the conditional WHERE on
+        // status='pending' makes a second-attempt update a no-op rather than
+        // overwriting a consented request.
+        const updatedRows = await tx
+          .update(feeConsentRequests)
+          .set({
+            status: "consented",
+            signedFeeConsentId: executed.id,
+            respondedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(feeConsentRequests.id, id),
+              eq(feeConsentRequests.status, "pending"),
+            ),
+          )
+          .returning();
+        const updated = updatedRows[0];
+        if (!updated) {
+          throw Object.assign(
+            new Error("Fee consent request was already actioned"),
+            { status: 409 },
+          );
+        }
+        // Two audit rows so each artefact (request + executed consent) has its
+        // own searchable trail.
+        await tx.insert(auditLogs).values([
+          {
+            userId: auth.userId,
+            action: "fee_consent_signed",
+            entityType: "fee_consent_request",
+            entityId: String(id),
+            metadata: {
+              feeConsentId: executed.id,
+              adviserUserId: request.adviserUserId,
+              signatureName: parsed.data.signatureName,
+            } as any,
+            ipAddress: (req as Request).ip || null,
+          },
+          {
+            userId: auth.userId,
+            action: "fee_consent_created",
+            entityType: "fee_consent",
+            entityId: String(executed.id),
+            metadata: {
+              feeConsentRequestId: id,
+              adviserUserId: request.adviserUserId,
+              feeType: executed.feeType,
+              amount: executed.amount,
+            } as any,
+            ipAddress: (req as Request).ip || null,
+          },
+        ]);
+        return { request: updated, feeConsent: executed };
+      });
+      res.json(result);
+    } catch (error: any) {
+      handleError(res, error, "Failed to sign fee consent request");
+    }
+  });
+
+  // POST /api/client/fee-consent-requests/:id/decline
+  const declineSchema = z.object({
+    reason: z.string().max(2000).optional().nullable(),
+  });
+  app.post("/api/client/fee-consent-requests/:id/decline", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        return res.status(400).json({ error: "Invalid request id" });
+      }
+      const parsed = declineSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid decline payload" });
+      }
+      const updated = await db.transaction(async (tx) => {
+        const [request] = await tx
+          .select()
+          .from(feeConsentRequests)
+          .where(eq(feeConsentRequests.id, id))
+          .for("update")
+          .limit(1);
+        if (!request) {
+          throw Object.assign(new Error("Fee consent request not found"), {
+            status: 404,
+          });
+        }
+        if (request.clientUserId !== auth.userId) {
+          throw Object.assign(new Error("Not your fee consent request"), {
+            status: 403,
+          });
+        }
+        if (request.status !== "pending") {
+          throw Object.assign(
+            new Error(`Cannot decline request in status '${request.status}'`),
+            { status: 400 },
+          );
+        }
+        const updatedRows = await tx
+          .update(feeConsentRequests)
+          .set({
+            status: "declined",
+            declineReason: parsed.data.reason ?? null,
+            respondedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(feeConsentRequests.id, id),
+              eq(feeConsentRequests.status, "pending"),
+            ),
+          )
+          .returning();
+        const row = updatedRows[0];
+        if (!row) {
+          throw Object.assign(
+            new Error("Fee consent request was already actioned"),
+            { status: 409 },
+          );
+        }
+        await tx.insert(auditLogs).values({
+          userId: auth.userId,
+          action: "fee_consent_declined",
+          entityType: "fee_consent_request",
+          entityId: String(id),
+          metadata: {
+            adviserUserId: request.adviserUserId,
+            reason: parsed.data.reason ?? null,
+          } as any,
+          ipAddress: (req as Request).ip || null,
+        });
+        return row;
+      });
+      res.json(updated);
+    } catch (error: any) {
+      handleError(res, error, "Failed to decline fee consent request");
+    }
+  });
+
+  // GET /api/client/fee-consents — read-only list of executed consents.
+  app.get("/api/client/fee-consents", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const rows = await db
+        .select()
+        .from(feeConsents)
+        .where(eq(feeConsents.clientId, auth.userId))
+        .orderBy(desc(feeConsents.consentedAt));
+      res.json(rows);
+    } catch (error: any) {
+      handleError(res, error, "Failed to list fee consents");
     }
   });
 }

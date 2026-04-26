@@ -14,9 +14,16 @@
 import fs from "node:fs";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "./db";
-import { auditLogs, reportRequests, adviserNotificationDismissals } from "@shared/schema";
+import {
+  auditLogs,
+  reportRequests,
+  adviserNotificationDismissals,
+  feeConsentRequests,
+  feeConsents,
+  insertFeeConsentRequestSchema,
+} from "@shared/schema";
 import { requireAuth, requireRole } from "./auth";
 import { generateReportPdf, REPORTS_DIR } from "./services/reports";
 import path from "node:path";
@@ -562,6 +569,285 @@ export function registerAdviserRoutes(app: Express): void {
         fs.createReadStream(filePath).pipe(res);
       } catch (error: any) {
         handleError(res, error, "Report download failed");
+      }
+    },
+  );
+
+  // ===========================================================================
+  // SESSION 20 — Adviser-side fee consent REQUESTS (DBFO live consents)
+  // ---------------------------------------------------------------------------
+  // Adviser proposes terms; client signs/declines from their portal. NOTHING
+  // here moves money — this is request-and-record only. The fee engine
+  // (Session 23A/B) is gated separately.
+  // ===========================================================================
+
+  const FEE_TYPES = ["ongoing_service_fee", "advice_fee", "platform_fee"] as const;
+  const AMOUNT_TYPES = ["fixed", "percentage", "calculation_method"] as const;
+  const DEDUCTION_FREQUENCIES = ["monthly", "quarterly", "annually"] as const;
+
+  // RG175/Netwealth window: opens 60 days before reference, closes 150 days
+  // after — same window used by the existing renewal cron in index.ts.
+  const RENEWAL_WINDOW_BEFORE_DAYS = 60;
+  const RENEWAL_WINDOW_AFTER_DAYS = 150;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  const createFeeConsentRequestSchema = insertFeeConsentRequestSchema
+    .omit({ adviserUserId: true })
+    .extend({
+      clientUserId: z.number().int().positive(),
+      feeType: z.enum(FEE_TYPES),
+      amountType: z.enum(AMOUNT_TYPES),
+      amount: z.union([z.string(), z.number()]).transform(String).optional().nullable(),
+      calculationMethod: z.string().max(2000).optional().nullable(),
+      accountNumber: z.string().min(1).max(120),
+      accountName: z.string().max(200).optional().nullable(),
+      deductionFrequency: z.enum(DEDUCTION_FREQUENCIES),
+      proposedReferenceDay: z.coerce.date(),
+      proposedRenewalWindowStart: z.coerce.date(),
+      proposedRenewalWindowEnd: z.coerce.date(),
+      proposedConsentExpiryDate: z.coerce.date(),
+      adviceRecordId: z.number().int().positive().optional().nullable(),
+      requestNote: z.string().max(4000).optional().nullable(),
+    })
+    .superRefine((val, ctx) => {
+      // Amount must be present unless explicitly using a free-text
+      // calculation method (DBFO requires a quantifiable basis either way,
+      // but a calc-method consent legitimately defers the dollar amount).
+      const hasAmount =
+        val.amount !== null && val.amount !== undefined && val.amount !== "";
+      if (val.amountType !== "calculation_method" && !hasAmount) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["amount"],
+          message: "amount is required unless amountType is calculation_method",
+        });
+      }
+      if (val.amountType === "calculation_method" && !val.calculationMethod) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["calculationMethod"],
+          message: "calculationMethod is required when amountType is calculation_method",
+        });
+      }
+      // RG175 / DBFO: renewal window relative to reference day. We allow a
+      // ±2 day tolerance for timezone rounding when the client computes
+      // dates locally.
+      const ref = val.proposedReferenceDay.getTime();
+      const start = val.proposedRenewalWindowStart.getTime();
+      const end = val.proposedRenewalWindowEnd.getTime();
+      const expiry = val.proposedConsentExpiryDate.getTime();
+      const expectedStart = ref - RENEWAL_WINDOW_BEFORE_DAYS * DAY_MS;
+      const expectedEnd = ref + RENEWAL_WINDOW_AFTER_DAYS * DAY_MS;
+      const tolerance = 2 * DAY_MS;
+      if (Math.abs(start - expectedStart) > tolerance) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["proposedRenewalWindowStart"],
+          message: `Renewal window must open ${RENEWAL_WINDOW_BEFORE_DAYS} days before referenceDay`,
+        });
+      }
+      if (Math.abs(end - expectedEnd) > tolerance) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["proposedRenewalWindowEnd"],
+          message: `Renewal window must close ${RENEWAL_WINDOW_AFTER_DAYS} days after referenceDay`,
+        });
+      }
+      if (expiry < end - tolerance) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["proposedConsentExpiryDate"],
+          message: "Consent expiry cannot be earlier than the renewal window end",
+        });
+      }
+    });
+
+  // POST /api/adviser/fee-consent-requests
+  app.post(
+    "/api/adviser/fee-consent-requests",
+    async (req: Request, res: Response) => {
+      try {
+        const auth = requireAuth(req);
+        requireRole(auth, "adviser");
+        const parsed = createFeeConsentRequestSchema.safeParse(req.body ?? {});
+        if (!parsed.success) {
+          return res.status(400).json({
+            error:
+              "Invalid payload: " +
+              parsed.error.issues.map((i) => i.message).join("; "),
+          });
+        }
+        // Must be linked to this client (active link).
+        await assertAdviserClientLink(auth.userId, parsed.data.clientUserId);
+
+        const created = await db.transaction(async (tx) => {
+          const [row] = await tx
+            .insert(feeConsentRequests)
+            .values({
+              adviserUserId: auth.userId,
+              clientUserId: parsed.data.clientUserId,
+              adviceRecordId: parsed.data.adviceRecordId ?? null,
+              feeType: parsed.data.feeType,
+              amountType: parsed.data.amountType,
+              amount: parsed.data.amount ?? null,
+              calculationMethod: parsed.data.calculationMethod ?? null,
+              accountNumber: parsed.data.accountNumber,
+              accountName: parsed.data.accountName ?? null,
+              deductionFrequency: parsed.data.deductionFrequency,
+              proposedReferenceDay: parsed.data.proposedReferenceDay,
+              proposedRenewalWindowStart: parsed.data.proposedRenewalWindowStart,
+              proposedRenewalWindowEnd: parsed.data.proposedRenewalWindowEnd,
+              proposedConsentExpiryDate: parsed.data.proposedConsentExpiryDate,
+              requestNote: parsed.data.requestNote ?? null,
+              status: "pending",
+            })
+            .returning();
+          await tx.insert(auditLogs).values({
+            userId: auth.userId,
+            action: "fee_consent_requested",
+            entityType: "fee_consent_request",
+            entityId: String(row.id),
+            metadata: {
+              clientUserId: row.clientUserId,
+              feeType: row.feeType,
+              amountType: row.amountType,
+              amount: row.amount,
+              deductionFrequency: row.deductionFrequency,
+            } as any,
+            ipAddress: req.ip || null,
+          });
+          return row;
+        });
+        res.status(201).json(created);
+      } catch (error: any) {
+        handleError(res, error, "Failed to create fee consent request");
+      }
+    },
+  );
+
+  // GET /api/adviser/fee-consent-requests?clientId=&status=&page=&limit=
+  app.get(
+    "/api/adviser/fee-consent-requests",
+    async (req: Request, res: Response) => {
+      try {
+        const auth = requireAuth(req);
+        requireRole(auth, "adviser");
+        const clientIdRaw = req.query.clientId
+          ? Number(req.query.clientId)
+          : null;
+        const status = typeof req.query.status === "string" ? req.query.status : null;
+        const page = Math.max(1, Number(req.query.page) || 1);
+        const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+        const offset = (page - 1) * limit;
+
+        const conds: any[] = [eq(feeConsentRequests.adviserUserId, auth.userId)];
+        if (clientIdRaw && Number.isFinite(clientIdRaw)) {
+          await assertAdviserClientLink(auth.userId, clientIdRaw);
+          conds.push(eq(feeConsentRequests.clientUserId, clientIdRaw));
+        }
+        if (status) conds.push(eq(feeConsentRequests.status, status));
+
+        const where = conds.length === 1 ? conds[0] : and(...conds);
+        const [items, totalRow] = await Promise.all([
+          db
+            .select()
+            .from(feeConsentRequests)
+            .where(where)
+            .orderBy(desc(feeConsentRequests.createdAt))
+            .limit(limit)
+            .offset(offset),
+          db
+            .select({ count: sql<number>`count(*)::int` })
+            .from(feeConsentRequests)
+            .where(where),
+        ]);
+        res.json({
+          items,
+          page,
+          limit,
+          total: Number(totalRow[0]?.count ?? 0),
+        });
+      } catch (error: any) {
+        handleError(res, error, "Failed to list fee consent requests");
+      }
+    },
+  );
+
+  // PATCH /api/adviser/fee-consent-requests/:id/withdraw
+  app.patch(
+    "/api/adviser/fee-consent-requests/:id/withdraw",
+    async (req: Request, res: Response) => {
+      try {
+        const auth = requireAuth(req);
+        requireRole(auth, "adviser");
+        const id = parseInt(req.params.id, 10);
+        if (!Number.isFinite(id)) {
+          return res.status(400).json({ error: "Invalid request id" });
+        }
+        const reasonSchema = z.object({
+          reason: z.string().max(2000).optional().nullable(),
+        });
+        const parsed = reasonSchema.safeParse(req.body ?? {});
+        if (!parsed.success) {
+          return res.status(400).json({ error: "Invalid payload" });
+        }
+        const updated = await db.transaction(async (tx) => {
+          const [existing] = await tx
+            .select()
+            .from(feeConsentRequests)
+            .where(eq(feeConsentRequests.id, id))
+            .for("update")
+            .limit(1);
+          if (!existing) {
+            throw Object.assign(new Error("Fee consent request not found"), { status: 404 });
+          }
+          if (existing.adviserUserId !== auth.userId) {
+            throw Object.assign(new Error("Not your fee consent request"), { status: 403 });
+          }
+          if (existing.status !== "pending") {
+            throw Object.assign(
+              new Error(`Cannot withdraw request in status '${existing.status}'`),
+              { status: 400 },
+            );
+          }
+          const updatedRows = await tx
+            .update(feeConsentRequests)
+            .set({
+              status: "withdrawn_by_adviser",
+              declineReason: parsed.data.reason ?? null,
+              respondedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(feeConsentRequests.id, id),
+                eq(feeConsentRequests.status, "pending"),
+              ),
+            )
+            .returning();
+          const row = updatedRows[0];
+          if (!row) {
+            throw Object.assign(
+              new Error("Fee consent request was already actioned"),
+              { status: 409 },
+            );
+          }
+          await tx.insert(auditLogs).values({
+            userId: auth.userId,
+            action: "fee_consent_request_withdrawn",
+            entityType: "fee_consent_request",
+            entityId: String(id),
+            metadata: {
+              clientUserId: existing.clientUserId,
+              reason: parsed.data.reason ?? null,
+            } as any,
+            ipAddress: req.ip || null,
+          });
+          return row;
+        });
+        res.json(updated);
+      } catch (error: any) {
+        handleError(res, error, "Failed to withdraw fee consent request");
       }
     },
   );

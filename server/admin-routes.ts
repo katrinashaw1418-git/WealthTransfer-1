@@ -38,6 +38,7 @@ import {
   reportRequests,
   adminReviewNotes,
   feeConsents,
+  feeConsentRequests,
   adviceRecords,
   adviceAcknowledgements,
   insertInvestmentProductSchema,
@@ -1604,6 +1605,107 @@ export function registerAdminRoutes(app: Express): void {
           .where(where as any),
       ]);
 
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 20 — admin oversight of fee-consent REQUESTS and live consents.
+  // Both endpoints are read-only paginated lists for the admin fee-consents
+  // page (Requests tab + Live consents tab).
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/fee-consent-requests",
+    adminRoute(async (req) => {
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+      const where = status ? eq(feeConsentRequests.status, status) : undefined;
+
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select({
+            id: feeConsentRequests.id,
+            adviserUserId: feeConsentRequests.adviserUserId,
+            clientUserId: feeConsentRequests.clientUserId,
+            adviceRecordId: feeConsentRequests.adviceRecordId,
+            feeType: feeConsentRequests.feeType,
+            amountType: feeConsentRequests.amountType,
+            amount: feeConsentRequests.amount,
+            deductionFrequency: feeConsentRequests.deductionFrequency,
+            proposedConsentExpiryDate: feeConsentRequests.proposedConsentExpiryDate,
+            status: feeConsentRequests.status,
+            declineReason: feeConsentRequests.declineReason,
+            signedFeeConsentId: feeConsentRequests.signedFeeConsentId,
+            respondedAt: feeConsentRequests.respondedAt,
+            createdAt: feeConsentRequests.createdAt,
+            adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsentRequests.adviserUserId})`,
+            clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsentRequests.clientUserId})`,
+          })
+          .from(feeConsentRequests)
+          .where(where as any)
+          .orderBy(desc(feeConsentRequests.createdAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(feeConsentRequests)
+          .where(where as any),
+      ]);
+      return {
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow[0]?.count ?? 0),
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/fee-consents",
+    adminRoute(async (req) => {
+      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+      const where = status ? eq(feeConsents.renewalStatus, status) : undefined;
+
+      const [rows, totalRow] = await Promise.all([
+        db
+          .select({
+            id: feeConsents.id,
+            adviceRecordId: feeConsents.adviceRecordId,
+            clientId: feeConsents.clientId,
+            adviserId: feeConsents.adviserId,
+            feeType: feeConsents.feeType,
+            amountType: feeConsents.amountType,
+            amount: feeConsents.amount,
+            accountNumber: feeConsents.accountNumber,
+            deductionFrequency: feeConsents.deductionFrequency,
+            referenceDay: feeConsents.referenceDay,
+            consentExpiryDate: feeConsents.consentExpiryDate,
+            renewalStatus: feeConsents.renewalStatus,
+            consentedAt: feeConsents.consentedAt,
+            withdrawnAt: feeConsents.withdrawnAt,
+            adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.adviserId})`,
+            clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.clientId})`,
+          })
+          .from(feeConsents)
+          .where(where as any)
+          .orderBy(desc(feeConsents.consentedAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(feeConsents)
+          .where(where as any),
+      ]);
       return {
         items: rows,
         page,

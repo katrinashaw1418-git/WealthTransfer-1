@@ -37,6 +37,7 @@ import AdviserProducts from "@/pages/adviser/products";
 import AdviserInstructions from "@/pages/adviser/instructions";
 import AdviserWorkflow from "@/pages/adviser/workflow";
 import AdviserBusiness from "@/pages/adviser/business";
+import AdviserFeeConsents from "@/pages/adviser/fee-consents";
 import AdminDashboard from "@/pages/admin/dashboard";
 import AdminApplications from "@/pages/admin/applications";
 import AdminAdvisers from "@/pages/admin/advisers";
@@ -47,7 +48,9 @@ import AdminProducts from "@/pages/admin/products";
 import AdminInstructions from "@/pages/admin/instructions";
 import AdminReports from "@/pages/admin/reports";
 import AdminCompliance from "@/pages/admin/compliance";
+import AdminFeeConsents from "@/pages/admin/fee-consents";
 import ClientInstructions from "@/pages/client-instructions";
+import ClientFeeConsents from "@/pages/client/fee-consents";
 import RegisterInvite from "@/pages/register-invite";
 import { Loader2 } from "lucide-react";
 
@@ -76,6 +79,7 @@ function AdviserApp() {
         <Route path="/adviser/instructions" component={AdviserInstructions} />
         <Route path="/adviser/tasks" component={AdviserTasks} />
         <Route path="/adviser/reports" component={AdviserReports} />
+        <Route path="/adviser/fee-consents" component={AdviserFeeConsents} />
         <Route path="/legal" component={Legal} />
         <Route component={NotFound} />
       </Switch>
@@ -99,6 +103,7 @@ function AdminApp() {
         <Route path="/admin/instructions" component={AdminInstructions} />
         <Route path="/admin/reports" component={AdminReports} />
         <Route path="/admin/compliance" component={AdminCompliance} />
+        <Route path="/admin/fee-consents" component={AdminFeeConsents} />
         <Route path="/legal" component={Legal} />
         <Route component={NotFound} />
       </Switch>
@@ -119,6 +124,7 @@ function ClientApp() {
         <Route path="/investments" component={Investments} />
         <Route path="/legal" component={Legal} />
         <Route path="/client/instructions" component={ClientInstructions} />
+        <Route path="/client/fee-consents" component={ClientFeeConsents} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

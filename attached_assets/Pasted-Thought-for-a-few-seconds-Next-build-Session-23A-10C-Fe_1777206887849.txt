@@ -1,0 +1,166 @@
+Thought for a few seconds
+
+Next build:
+
+Session 23A — 10C Fee Engine Gate A
+
+Use this exact Replit prompt:
+
+Proceed with Session 23A — 10C Fee Engine Gate A only.
+
+Add DB:
+- adviserFeeRules
+- adviserFeeAccruals
+- adviserFeeDeductions
+
+Add service:
+- server/services/fee-engine.ts
+
+Add APIs:
+Admin:
+- POST /api/admin/fee-rules
+- PATCH /api/admin/fee-rules/:id/pause
+- POST /api/admin/fee-accruals/run
+- GET /api/admin/fee-accruals
+- GET /api/admin/fee-deductions
+- POST /api/admin/fee-deductions/:id/approve
+
+Adviser view-only:
+- GET /api/adviser/fee-rules
+- GET /api/adviser/fee-accruals
+- GET /api/adviser/fee-deductions
+
+Client view-only:
+- GET /api/client/fees
+
+Add UI:
+- /admin/fees
+- update /adviser/fees
+- add /client/fees
+
+Rules:
+- fee accrues only from active signed fee consent
+- consent must not be expired
+- consent must not be withdrawn
+- adviser must be linked to client
+- splits must equal 10000 bps
+- daily accrual unique per feeRuleId + accrualDate
+- all writes audit logged
+- adviser/client are view-only
+- admin approval does not move money
+
+Hard stop:
+- no wallet debit
+- no adviser credit
+- no real deduction
+- no reversal
+- no investment execution
+- no automatic fee processing
+
+After Replit finishes, ask it to run an architect/security review before any Gate B discussion.
+
+next build and code patches
+
+Same next build — do not move past Gate A yet.
+
+Session 23A — 10C Fee Engine Gate A
+
+Give Replit this concise build prompt:
+
+Proceed with Session 23A — 10C Fee Engine Gate A only.
+
+Build:
+1. adviserFeeRules
+2. adviserFeeAccruals
+3. adviserFeeDeductions
+4. server/services/fee-engine.ts
+5. /admin/fees
+6. adviser/client view-only fee pages
+
+APIs:
+- POST /api/admin/fee-rules
+- PATCH /api/admin/fee-rules/:id/pause
+- POST /api/admin/fee-accruals/run
+- GET /api/admin/fee-accruals
+- GET /api/admin/fee-deductions
+- POST /api/admin/fee-deductions/:id/approve
+- GET /api/adviser/fee-rules
+- GET /api/adviser/fee-accruals
+- GET /api/adviser/fee-deductions
+- GET /api/client/fees
+
+Rules:
+- active signed fee consent only
+- consent not expired
+- consent not withdrawn
+- adviser-client link required
+- splits = 10000 bps
+- daily accrual unique by feeRuleId + accrualDate
+- all writes audit logged
+- admin approval does not move money
+
+Hard stop:
+- no wallet debit
+- no adviser credit
+- no real deduction
+- no reversal
+- no investment execution
+
+After completion, run:
+
+Architect/security review before Gate B.
+next build and code patches
+
+Next build is still:
+
+Session 23A — 10C Fee Engine Gate A
+
+You should not proceed to Gate B until this is built and reviewed.
+
+Copy to Replit:
+
+Proceed with Session 23A — 10C Fee Engine Gate A only.
+
+Add:
+- adviserFeeRules
+- adviserFeeAccruals
+- adviserFeeDeductions
+- server/services/fee-engine.ts
+- /admin/fees
+- /adviser/fees view-only updates
+- /client/fees view-only page
+
+Admin APIs:
+- POST /api/admin/fee-rules
+- PATCH /api/admin/fee-rules/:id/pause
+- POST /api/admin/fee-accruals/run
+- GET /api/admin/fee-accruals
+- GET /api/admin/fee-deductions
+- POST /api/admin/fee-deductions/:id/approve
+
+View-only APIs:
+- GET /api/adviser/fee-rules
+- GET /api/adviser/fee-accruals
+- GET /api/adviser/fee-deductions
+- GET /api/client/fees
+
+Rules:
+- active signed fee consent only
+- consent not expired
+- consent not withdrawn
+- adviser-client link required
+- adviserSplitBps + platformSplitBps = 10000
+- daily accrual unique by feeRuleId + accrualDate
+- all writes audit logged
+- admin approval does not move money
+
+Hard stop:
+- no wallet debit
+- no adviser credit
+- no real deduction
+- no reversal
+- no investment execution
+- no automatic fee processing
+
+After build:
+Run architect/security review before any Gate B discussion.
