@@ -35,6 +35,7 @@ import {
 } from "@shared/schema";
 import { eq, sql } from "drizzle-orm";
 import { getUserCurrencyBalance } from "./ledger";
+import { notifyOperator, type OperatorAlertSeverity } from "./operator-alerts";
 
 // ---------------------------------------------------------------------------
 // Thresholds
@@ -235,6 +236,10 @@ export type WalletLedgerReconciliationSummary = {
   mismatches: number;
   alerts: number;
   criticals: number;
+  // Task #25 — count of operator notifications dispatched this run. One per
+  // mismatched (user, currency) pair. Surfaced so the cron caller can log
+  // "alerts dispatched: N" and ops can verify the notification path is firing.
+  operatorNotifications: number;
 };
 
 export async function runWalletLedgerReconciliation(): Promise<WalletLedgerReconciliationSummary> {
@@ -260,6 +265,7 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
     mismatches: 0,
     alerts: 0,
     criticals: 0,
+    operatorNotifications: 0,
   };
 
   for (const pair of pairs as Array<{ userId: number; currency: string }>) {
@@ -316,6 +322,48 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
         console.warn("[wallet-ledger-reconciliation] mismatch", payload);
       } else {
         console.log("[wallet-ledger-reconciliation] minor drift", payload);
+      }
+
+      // -----------------------------------------------------------------
+      // Task #25 — operator notification
+      // -----------------------------------------------------------------
+      // Any drift above MATCH_EPSILON (i.e. status === "mismatch") pages
+      // an operator. The dispatcher always logs a structured
+      // `[OPERATOR ALERT]` line (used by log-based ops alerting) and, when
+      // OPERATOR_ALERT_WEBHOOK_URL is configured, also POSTs the payload
+      // to that webhook (Slack-compatible). Webhook failures cannot break
+      // the cron — see `notifyOperator`.
+      //
+      // We map our internal severity onto the operator-alert severity 1:1
+      // ("none" is unreachable here because absDrift >= MATCH_EPSILON
+      // guarantees severity is at minimum "info").
+      // -----------------------------------------------------------------
+      const opSeverity: OperatorAlertSeverity =
+        severity === "critical" || severity === "alert" || severity === "warning"
+          ? severity
+          : "info";
+      try {
+        await notifyOperator({
+          source: "wallet-ledger-reconciliation",
+          severity: opSeverity,
+          title: `Wallet cache drift detected for user ${userId} (${currency})`,
+          details: {
+            userId,
+            currency,
+            walletCachedBalance: cached,
+            ledgerSumBalance: ledgerSum,
+            driftAmount: drift.toFixed(8),
+          },
+        });
+        summary.operatorNotifications += 1;
+      } catch (err) {
+        // notifyOperator is designed to swallow its own errors; this
+        // catch is belt-and-braces so a hypothetical synchronous throw
+        // can never abort the loop and skip remaining pairs.
+        console.error(
+          "[wallet-ledger-reconciliation] notifyOperator threw unexpectedly",
+          { userId, currency, err: (err as Error)?.message ?? err },
+        );
       }
     }
 

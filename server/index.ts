@@ -65,7 +65,8 @@ app.use((req, res, next) => {
       log(
         `[wallet-ledger-reconciliation] completed: ${summary.pairsChecked} pair(s), ` +
           `${summary.matches} match, ${summary.mismatches} mismatch, ` +
-          `${summary.alerts} alert, ${summary.criticals} critical`
+          `${summary.alerts} alert, ${summary.criticals} critical, ` +
+          `${summary.operatorNotifications} operator notification(s) dispatched`
       );
     } catch (e) {
       console.error("[wallet-ledger-reconciliation] cron error", e);
