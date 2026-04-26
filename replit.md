@@ -33,7 +33,12 @@ This platform is a comprehensive cross-border wealth management solution designe
 - The `users` table doesn't currently track an active flag. To "disable an adviser" in v1, an admin deactivates that adviser's `adviser_clients` links instead. This immediately revokes the adviser's read access to those clients (including historical reports). Adding a real `isActive` column on `users` is a future-session item.
 
 ### Demo seeding
-- `admin / admin888` is seeded **only** when `isLocalDev` is true (NODE_ENV=development plus the explicit local-dev sentinel). In any shared/staging/production environment the first admin must be provisioned manually — auto-seeding a known privileged credential would be a backdoor.
+Demo credentials follow a consistent `wise*` / `wise888` pattern across all three personas (single password makes demo flows easier; clearly not for production):
+- `wiseinvestor / wise888` — client (id=1, unconditional seed)
+- `wiseadviser / wise888` — adviser (id=12, unconditional seed; renamed from the older `demoadviser`)
+- `wise / wise888` — admin (id=13, **gated to `isLocalDev` only**; renamed from the older `admin`)
+
+The admin seed is the only privileged auto-seed and runs **only** when `isLocalDev` is true (NODE_ENV=development plus the explicit local-dev sentinel). In any shared/staging/production environment the first admin must be provisioned manually — auto-seeding a known privileged credential would be a backdoor. The rename blocks are idempotent and preserve user IDs (so existing audit rows and adviser-client links stay attached).
 
 ## Regulated Application Flow (April 2026)
 

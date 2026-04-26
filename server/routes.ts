@@ -685,7 +685,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.warn("[seed] wiseinvestor demo account seed failed:", (err as Error).message);
     }
 
-    // Seed the `admin` demo account (Session 13 — Admin shell).
+    // Seed the `wiseadviser` demo adviser account. Idempotent.
+    // Renames the older `demoadviser` account (from earlier sessions) so the
+    // demo credentials follow a consistent `wise*` / `wise888` pattern across
+    // all three personas (wiseinvestor / wiseadviser / wise).
+    try {
+      const desiredHash = await hashPassword("wise888");
+      const existingWise = await storage.getUserByUsername("wiseadviser");
+      const existingDemo = await storage.getUserByUsername("demoadviser");
+      if (existingWise) {
+        const updates: any = {};
+        if (existingWise.role !== "adviser") updates.role = "adviser";
+        if (!existingWise.emailVerified) updates.emailVerified = true;
+        if (!(await verifyPassword("wise888", existingWise.password))) updates.password = desiredHash;
+        if (Object.keys(updates).length) await storage.updateUser(existingWise.id, updates);
+      } else if (existingDemo) {
+        // One-time rename: keeps existing adviser_clients links + audit history intact.
+        await storage.updateUser(existingDemo.id, {
+          username: "wiseadviser",
+          password: desiredHash,
+          role: "adviser",
+          emailVerified: true,
+        } as any);
+      } else {
+        await storage.createUser({
+          username: "wiseadviser",
+          email: "wiseadviser@amaxglobal.com.au",
+          password: desiredHash,
+          firstName: "Wise",
+          lastName: "Adviser",
+          role: "adviser",
+          kycStatus: "verified",
+          emailVerified: true,
+        } as any);
+      }
+    } catch (err) {
+      console.warn("[seed] wiseadviser demo account seed failed:", (err as Error).message);
+    }
+
+    // Seed the `wise` demo admin account (Session 13 — Admin shell).
     // GATED to local dev only — the admin role can approve applications,
     // create advisers, and link clients to advisers. Auto-seeding a known
     // privileged credential in any shared/staging/production environment
@@ -693,29 +731,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     // first admin must be provisioned manually.
     if (isLocalDev) {
       try {
-        const existing = await storage.getUserByUsername("admin");
-        const desiredHash = await hashPassword("admin888");
-        if (!existing) {
-          await storage.createUser({
-            username: "admin",
-            email: "admin@amaxglobal.com.au",
+        const desiredHash = await hashPassword("wise888");
+        const existingWise = await storage.getUserByUsername("wise");
+        const existingAdmin = await storage.getUserByUsername("admin");
+        if (existingWise) {
+          const updates: any = {};
+          if (existingWise.role !== "admin") updates.role = "admin";
+          if (!existingWise.emailVerified) updates.emailVerified = true;
+          if (!(await verifyPassword("wise888", existingWise.password))) updates.password = desiredHash;
+          if (Object.keys(updates).length) await storage.updateUser(existingWise.id, updates);
+        } else if (existingAdmin) {
+          // One-time rename: keeps audit history attached to the same user id.
+          await storage.updateUser(existingAdmin.id, {
+            username: "wise",
             password: desiredHash,
-            firstName: "AMAX",
+            role: "admin",
+            emailVerified: true,
+          } as any);
+        } else {
+          await storage.createUser({
+            username: "wise",
+            email: "wise@amaxglobal.com.au",
+            password: desiredHash,
+            firstName: "Wise",
             lastName: "Admin",
             role: "admin",
             kycStatus: "verified",
             userTier: "professional",
             emailVerified: true,
           } as any);
-        } else {
-          const updates: any = {};
-          if (existing.role !== "admin") updates.role = "admin";
-          if (!existing.emailVerified) updates.emailVerified = true;
-          if (!(await verifyPassword("admin888", existing.password))) updates.password = desiredHash;
-          if (Object.keys(updates).length) await storage.updateUser(existing.id, updates);
         }
       } catch (err) {
-        console.warn("[seed] admin demo account seed failed:", (err as Error).message);
+        console.warn("[seed] wise admin demo account seed failed:", (err as Error).message);
       }
     }
   }
