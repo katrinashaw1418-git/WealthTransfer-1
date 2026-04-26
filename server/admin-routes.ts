@@ -1541,13 +1541,29 @@ export function registerAdminRoutes(app: Express): void {
       // can never reach the Date constructor with megabytes of input. Use
       // the parsed Date directly in the WHERE so the existing
       // operator_alerts_created_at_idx index supports the range scan.
-      const parseBound = (raw: string): Date | null => {
-        if (raw.length === 0 || raw.length > 64) return null;
+      // A non-empty but unparseable value is a 400 — we don't silently
+      // ignore it, otherwise an admin who mistypes the year still sees
+      // the full unfiltered list and thinks the filter worked.
+      const parseBound = (raw: string, label: string): Date | null => {
+        if (raw.length === 0) return null;
+        if (raw.length > 64) {
+          throw Object.assign(new Error(`${label} is too long`), { status: 400 });
+        }
         const d = new Date(raw);
-        return Number.isNaN(d.getTime()) ? null : d;
+        if (Number.isNaN(d.getTime())) {
+          throw Object.assign(new Error(`${label} is not a valid ISO timestamp`), {
+            status: 400,
+          });
+        }
+        return d;
       };
-      const fromDate = parseBound(fromRaw);
-      const toDate = parseBound(toRaw);
+      const fromDate = parseBound(fromRaw, "from");
+      const toDate = parseBound(toRaw, "to");
+      if (fromDate && toDate && fromDate.getTime() > toDate.getTime()) {
+        throw Object.assign(new Error("from must be earlier than or equal to to"), {
+          status: 400,
+        });
+      }
 
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
       const page = Math.max(Number(req.query.page) || 1, 1);
