@@ -1,0 +1,371 @@
+Next build should be:
+
+Notifications
+
+Because Registration Invite controls identity, and Notifications become the electricity for AdviserOS.
+
+Session 15 — Adviser Notifications
+Goal
+Bell icon shows real adviser alerts:
+- client consent required
+- open urgent/high tasks
+- fee consents expiring
+- pending reports
+- KYC pending
+1. DB schema
+
+Add only if you want stored notifications.
+
+export const adviserNotifications = pgTable("adviser_notifications", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  clientUserId: integer("client_user_id")
+    .references(() => users.id),
+
+  type: text("type").notNull(),
+  // instruction_consent_required
+  // task_due
+  // fee_consent_expiring
+  // report_pending
+  // kyc_pending
+
+  title: text("title").notNull(),
+  message: text("message"),
+
+  priority: text("priority").notNull().default("medium"),
+  // low | medium | high | critical
+
+  status: text("status").notNull().default("unread"),
+  // unread | read | dismissed
+
+  deepLink: text("deep_link"),
+
+  relatedEntityType: text("related_entity_type"),
+  relatedEntityId: integer("related_entity_id"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  readAt: timestamp("read_at"),
+  dismissedAt: timestamp("dismissed_at"),
+});
+
+Types:
+
+export type AdviserNotification = typeof adviserNotifications.$inferSelect;
+export type InsertAdviserNotification = typeof adviserNotifications.$inferInsert;
+2. API endpoints
+GET   /api/adviser/notifications
+GET   /api/adviser/notifications/count
+PATCH /api/adviser/notifications/:id/read
+PATCH /api/adviser/notifications/:id/dismiss
+POST  /api/adviser/notifications/generate
+GET notifications
+app.get("/api/adviser/notifications", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (role !== "adviser") {
+    return res.status(403).json({ error: "Adviser access required" });
+  }
+
+  const notifications = await db
+    .select()
+    .from(adviserNotifications)
+    .where(eq(adviserNotifications.adviserUserId, userId))
+    .orderBy(desc(adviserNotifications.createdAt));
+
+  res.json({ notifications });
+});
+GET count
+app.get("/api/adviser/notifications/count", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const role = await getRole(userId);
+
+  if (role !== "adviser") {
+    return res.status(403).json({ error: "Adviser access required" });
+  }
+
+  const unread = await db
+    .select()
+    .from(adviserNotifications)
+    .where(and(
+      eq(adviserNotifications.adviserUserId, userId),
+      eq(adviserNotifications.status, "unread")
+    ));
+
+  res.json({ unreadCount: unread.length });
+});
+Mark read
+app.patch("/api/adviser/notifications/:id/read", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const id = Number(req.params.id);
+
+  const [updated] = await db
+    .update(adviserNotifications)
+    .set({
+      status: "read",
+      readAt: new Date(),
+    })
+    .where(and(
+      eq(adviserNotifications.id, id),
+      eq(adviserNotifications.adviserUserId, userId)
+    ))
+    .returning();
+
+  if (!updated) {
+    return res.status(404).json({ error: "Notification not found" });
+  }
+
+  res.json({ notification: updated });
+});
+Dismiss
+app.patch("/api/adviser/notifications/:id/dismiss", async (req, res) => {
+  const { userId } = requireAuth(req);
+  const id = Number(req.params.id);
+
+  const [updated] = await db
+    .update(adviserNotifications)
+    .set({
+      status: "dismissed",
+      dismissedAt: new Date(),
+    })
+    .where(and(
+      eq(adviserNotifications.id, id),
+      eq(adviserNotifications.adviserUserId, userId)
+    ))
+    .returning();
+
+  if (!updated) {
+    return res.status(404).json({ error: "Notification not found" });
+  }
+
+  res.json({ notification: updated });
+});
+3. Notification generation logic
+
+Create service:
+
+server/services/adviser-notifications.ts
+export async function createNotificationIfMissing({
+  adviserUserId,
+  clientUserId,
+  type,
+  title,
+  message,
+  priority,
+  deepLink,
+  relatedEntityType,
+  relatedEntityId,
+}: InsertAdviserNotification) {
+  const [existing] = await db
+    .select()
+    .from(adviserNotifications)
+    .where(and(
+      eq(adviserNotifications.adviserUserId, adviserUserId),
+      eq(adviserNotifications.type, type),
+      eq(adviserNotifications.relatedEntityType, relatedEntityType),
+      eq(adviserNotifications.relatedEntityId, relatedEntityId),
+      eq(adviserNotifications.status, "unread")
+    ));
+
+  if (existing) return existing;
+
+  const [created] = await db
+    .insert(adviserNotifications)
+    .values({
+      adviserUserId,
+      clientUserId,
+      type,
+      title,
+      message,
+      priority,
+      deepLink,
+      relatedEntityType,
+      relatedEntityId,
+    })
+    .returning();
+
+  return created;
+}
+4. Triggers
+
+Generate notifications from real existing data.
+
+A. Instruction needs client consent
+await createNotificationIfMissing({
+  adviserUserId: instruction.adviserUserId,
+  clientUserId: instruction.clientUserId,
+  type: "instruction_consent_required",
+  title: "Client consent required",
+  message: "An investment instruction is waiting for client approval.",
+  priority: "high",
+  deepLink: "/adviser/instructions",
+  relatedEntityType: "investment_instruction",
+  relatedEntityId: instruction.id,
+});
+B. High / urgent task
+await createNotificationIfMissing({
+  adviserUserId: task.adviserUserId,
+  clientUserId: task.clientUserId,
+  type: "task_due",
+  title: "High priority task due",
+  message: task.title,
+  priority: task.priority,
+  deepLink: "/adviser/workflow",
+  relatedEntityType: "adviser_task",
+  relatedEntityId: task.id,
+});
+C. Fee consent expiring
+await createNotificationIfMissing({
+  adviserUserId: consent.adviserUserId,
+  clientUserId: consent.clientUserId,
+  type: "fee_consent_expiring",
+  title: "Fee consent expiring",
+  message: "A client fee consent is approaching expiry.",
+  priority: "critical",
+  deepLink: "/adviser/fees",
+  relatedEntityType: "fee_consent",
+  relatedEntityId: consent.id,
+});
+D. Pending report
+await createNotificationIfMissing({
+  adviserUserId: report.adviserUserId,
+  clientUserId: report.clientUserId,
+  type: "report_pending",
+  title: "Report pending",
+  message: "A requested report is still pending generation.",
+  priority: "medium",
+  deepLink: "/adviser/reports",
+  relatedEntityType: "report_request",
+  relatedEntityId: report.id,
+});
+5. React flow
+Component
+
+Create:
+
+client/src/components/adviser/notification-bell.tsx
+import { Bell } from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import { Button } from "@/components/ui/button";
+
+export default function AdviserNotificationBell() {
+  const [, navigate] = useLocation();
+  const queryClient = useQueryClient();
+
+  const { data } = useQuery({
+    queryKey: ["/api/adviser/notifications"],
+    queryFn: async () => {
+      const res = await fetch("/api/adviser/notifications");
+      if (!res.ok) throw new Error("Failed to load notifications");
+      return res.json();
+    },
+  });
+
+  const markRead = useMutation({
+    mutationFn: async (id: number) => {
+      await fetch(`/api/adviser/notifications/${id}/read`, {
+        method: "PATCH",
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/adviser/notifications"] });
+    },
+  });
+
+  const notifications = data?.notifications ?? [];
+  const unreadCount = notifications.filter((n: any) => n.status === "unread").length;
+
+  return (
+    <div className="relative group">
+      <Button variant="ghost" className="relative">
+        <Bell className="h-5 w-5" />
+        {unreadCount > 0 && (
+          <span className="absolute -right-1 -top-1 rounded-full bg-red-500 px-1.5 text-xs text-white">
+            {unreadCount}
+          </span>
+        )}
+      </Button>
+
+      <div className="absolute right-0 z-50 mt-2 hidden w-96 rounded-xl border bg-white p-3 shadow-xl group-hover:block">
+        <div className="mb-2 font-semibold">Notifications</div>
+
+        {notifications.length === 0 && (
+          <div className="text-sm text-gray-500">No notifications.</div>
+        )}
+
+        {notifications.slice(0, 8).map((n: any) => (
+          <button
+            key={n.id}
+            className="block w-full rounded-lg p-3 text-left hover:bg-gray-50"
+            onClick={async () => {
+              await markRead.mutateAsync(n.id);
+              if (n.deepLink) navigate(n.deepLink);
+            }}
+          >
+            <div className="flex justify-between gap-3">
+              <div className="font-medium">{n.title}</div>
+              <div className="text-xs text-gray-400">{n.priority}</div>
+            </div>
+            <div className="text-sm text-gray-500">{n.message}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+6. Add to adviser layout
+
+In adviser topbar:
+
+import AdviserNotificationBell from "@/components/adviser/notification-bell";
+<AdviserNotificationBell />
+7. Build prompt for Replit
+Build Session 15 — Adviser Notifications.
+
+Goal:
+Wire the adviser bell icon to real notifications.
+
+Add DB:
+- adviserNotifications table
+
+Add APIs:
+- GET /api/adviser/notifications
+- GET /api/adviser/notifications/count
+- PATCH /api/adviser/notifications/:id/read
+- PATCH /api/adviser/notifications/:id/dismiss
+- POST /api/adviser/notifications/generate
+
+Add notification generation for:
+- pending client consent instructions
+- high/urgent adviser tasks
+- fee consents expiring within 30 days
+- pending report requests
+- KYC pending linked clients
+
+Add React:
+- client/src/components/adviser/notification-bell.tsx
+- show unread count on bell
+- dropdown list
+- click marks read and deep-links to relevant page
+
+Rules:
+- adviser only sees own notifications
+- all client-related notifications must respect adviserClients linkage
+- do not create duplicate unread notifications for same entity
+- no money movement
+- no fee deduction
+- no execution
+- no SoA generator
+
+After this build:
+
+Admin shell
+→ Visual re-skin
+→ DBFO fee consent UI
+→ SoA generator
+→ 10C fee engine
