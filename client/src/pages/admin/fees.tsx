@@ -55,6 +55,8 @@ import {
   Bug,
   ExternalLink,
   AlertTriangle,
+  // Task #100 — CSV export buttons on the four reporting tabs
+  Download,
 } from "lucide-react";
 import {
   Dialog,
@@ -308,6 +310,47 @@ function formatRelative(iso: string): string {
   if (hr < 24) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
+}
+
+// =============================================================================
+// TASK #100 — CSV export helpers used by the four reporting tabs.
+// -----------------------------------------------------------------------------
+// We build the CSV client-side from the already-fetched query data so the
+// export naturally reflects the visible period (and any active client-side
+// sort, e.g. adviser payouts). No new server endpoints — the task is read-only
+// and explicitly forbids new money-movement routes.
+// =============================================================================
+function csvEscape(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const s = String(value);
+  if (/[",\r\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+function downloadCsv(
+  filename: string,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): void {
+  const csv = rows.map((r) => r.map(csvEscape).join(",")).join("\r\n");
+  // Prepend a UTF-8 BOM so Excel opens non-ASCII (e.g. accented adviser names)
+  // correctly without manual encoding gymnastics.
+  const blob = new Blob(["\uFEFF" + csv], {
+    type: "text/csv;charset=utf-8;",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function periodSlug(from: string, to: string): string {
+  return `${from.slice(0, 10)}_to_${to.slice(0, 10)}`;
 }
 
 function deductionStatusVariant(status: string): "default" | "secondary" | "outline" | "destructive" {
@@ -868,6 +911,195 @@ export default function AdminFeesPage() {
     enabled: periodValid && tab === "exceptions",
     ...reportingQueryOptions,
   });
+
+  // ===========================================================================
+  // TASK #100 — CSV download handlers, one per reporting tab.
+  // ---------------------------------------------------------------------------
+  // Each handler reads from the corresponding query data (already scoped to the
+  // selected from/to range and any active client-side sort) and triggers a
+  // browser download. Handlers no-op if data hasn't loaded — the buttons that
+  // call them are also disabled in that state.
+  // ===========================================================================
+  function downloadReconciliationCsv() {
+    const d = reconQ.data;
+    if (!d) return;
+    const rows: (string | number)[][] = [
+      ["Period from", d.period.from],
+      ["Period to", d.period.to],
+      [],
+      ["Metric", "Count", "Total accrued", "Adviser share", "Platform share"],
+      [
+        "Settled in period",
+        d.settled.count,
+        d.settled.totalAccrued,
+        d.settled.adviserShare,
+        d.settled.platformShare,
+      ],
+      [
+        "Reversed in period",
+        d.reversed.count,
+        d.reversed.totalAccrued,
+        d.reversed.adviserShare,
+        d.reversed.platformShare,
+      ],
+      [
+        "Held (insufficient funds)",
+        d.insufficientFunds.count,
+        d.insufficientFunds.totalAccrued,
+        "",
+        "",
+      ],
+      [
+        "Pending approval",
+        d.pendingApproval.count,
+        d.pendingApproval.totalAccrued,
+        "",
+        "",
+      ],
+      [
+        "Wallet vs ledger drift",
+        d.walletLedgerDrift.count,
+        `match epsilon ${d.walletLedgerDrift.matchEpsilon}`,
+        "",
+        "",
+      ],
+    ];
+    downloadCsv(
+      `fee-reconciliation_${periodSlug(d.period.from, d.period.to)}.csv`,
+      rows,
+    );
+  }
+
+  function downloadAdviserPayoutsCsv() {
+    const d = payoutsQ.data;
+    if (!d) return;
+    const rows: (string | number)[][] = [
+      ["Period from", d.period.from],
+      ["Period to", d.period.to],
+      [],
+      [
+        "Adviser ID",
+        "First name",
+        "Last name",
+        "Email",
+        "Settled count",
+        "Settled adviser share",
+        "Settled total accrued",
+        "Reversed count",
+        "Reversed adviser share",
+        "Reversed total accrued",
+        "Net payable",
+      ],
+      // sortedPayouts respects the active client-side sort dropdown so the CSV
+      // mirrors what the admin sees in the table.
+      ...sortedPayouts.map((r) => [
+        r.adviserUserId,
+        r.firstName,
+        r.lastName,
+        r.email,
+        r.settledCount,
+        r.settledTotal,
+        r.settledTotalAccrued,
+        r.reversedCount,
+        r.reversedTotal,
+        r.reversedTotalAccrued,
+        r.netPayable,
+      ]),
+    ];
+    downloadCsv(
+      `adviser-payouts_${periodSlug(d.period.from, d.period.to)}.csv`,
+      rows,
+    );
+  }
+
+  function downloadPlatformRevenueCsv() {
+    const d = revenueQ.data;
+    if (!d) return;
+    const rows: (string | number)[][] = [
+      ["Period from", d.period.from],
+      ["Period to", d.period.to],
+      ["Bucket", d.bucket],
+      [],
+      [
+        d.bucket === "weekly" ? "Week of" : "Month",
+        "Settled count",
+        "Total accrued",
+        "Platform share",
+      ],
+      ...d.items.map((r) => [
+        r.bucket.slice(0, 10),
+        r.count,
+        r.totalAccrued,
+        r.platformShare,
+      ]),
+    ];
+    downloadCsv(
+      `platform-revenue-${d.bucket}_${periodSlug(d.period.from, d.period.to)}.csv`,
+      rows,
+    );
+  }
+
+  function downloadExceptionsCsv() {
+    const d = exceptionsQ.data;
+    if (!d) return;
+    const reasonFor = (x: FeeExceptionRow): string =>
+      x.deduction.failureReason ??
+      (x.kind === "held"
+        ? "Insufficient client balance"
+        : x.kind === "stuck"
+          ? "Pending approval > 7 days"
+          : x.kind === "role_corruption"
+            ? "Settled or reversed against a non-adviser user"
+            : "");
+    const rows: (string | number)[][] = [
+      ["Period from", d.period.from],
+      ["Period to", d.period.to],
+      ["Stuck cutoff", d.stuckCutoff],
+      [],
+      [
+        "Kind",
+        "Deduction ID",
+        "Client name",
+        "Client email",
+        "Adviser name",
+        "Adviser email",
+        "Total accrued",
+        "Currency",
+        "Age (days)",
+        "Last sweep",
+        "Client notified at",
+        "Notification count",
+        "Reason",
+      ],
+      ...d.items.map((x) => {
+        const c = d.users[x.deduction.clientUserId];
+        const a = d.users[x.deduction.adviserUserId];
+        return [
+          x.kind,
+          x.deduction.id,
+          c
+            ? `${c.firstName} ${c.lastName}`.trim() || c.email
+            : `#${x.deduction.clientUserId}`,
+          c?.email ?? "",
+          a
+            ? `${a.firstName} ${a.lastName}`.trim() || a.email
+            : `#${x.deduction.adviserUserId}`,
+          a?.email ?? "",
+          x.deduction.totalAccrued,
+          x.deduction.currency,
+          x.ageDays,
+          x.deduction.lastRecheckedAt ?? "",
+          x.deduction.clientNotifiedAt ?? "",
+          x.deduction.clientNotificationCount,
+          reasonFor(x),
+        ];
+      }),
+    ];
+    downloadCsv(
+      `fee-exceptions_${periodSlug(d.period.from, d.period.to)}.csv`,
+      rows,
+    );
+  }
 
   return (
     <div className="space-y-6 p-6" data-testid="page-admin-fees">
@@ -1610,6 +1842,17 @@ export default function AdminFeesPage() {
               {/* ---- RECONCILIATION TAB ---- */}
               <TabsContent value="reconciliation" className="space-y-4">
                 <PeriodPicker />
+                <div className="flex justify-end">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={downloadReconciliationCsv}
+                    disabled={!reconQ.data || reconQ.isLoading}
+                    data-testid="button-download-reconciliation-csv"
+                  >
+                    <Download className="h-4 w-4 mr-1" /> Download CSV
+                  </Button>
+                </div>
                 {reconQ.isLoading || !reconQ.data ? (
                   <Skeleton className="h-48 w-full" />
                 ) : (
@@ -1758,6 +2001,17 @@ export default function AdminFeesPage() {
                             </SelectItem>
                           </SelectContent>
                         </Select>
+                        <div className="mt-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={downloadAdviserPayoutsCsv}
+                            disabled={!payoutsQ.data || payoutsQ.isLoading}
+                            data-testid="button-download-adviser-payouts-csv"
+                          >
+                            <Download className="h-4 w-4 mr-1" /> Download CSV
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   </CardHeader>
@@ -1854,23 +2108,34 @@ export default function AdminFeesPage() {
                           are excluded by status.
                         </CardDescription>
                       </div>
-                      <Select
-                        value={revenueBucket}
-                        onValueChange={(v) =>
-                          setRevenueBucket(v as "monthly" | "weekly")
-                        }
-                      >
-                        <SelectTrigger
-                          className="w-[140px]"
-                          data-testid="select-revenue-bucket"
+                      <div className="flex items-center gap-2">
+                        <Select
+                          value={revenueBucket}
+                          onValueChange={(v) =>
+                            setRevenueBucket(v as "monthly" | "weekly")
+                          }
                         >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="monthly">Monthly</SelectItem>
-                          <SelectItem value="weekly">Weekly</SelectItem>
-                        </SelectContent>
-                      </Select>
+                          <SelectTrigger
+                            className="w-[140px]"
+                            data-testid="select-revenue-bucket"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="monthly">Monthly</SelectItem>
+                            <SelectItem value="weekly">Weekly</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={downloadPlatformRevenueCsv}
+                          disabled={!revenueQ.data || revenueQ.isLoading}
+                          data-testid="button-download-platform-revenue-csv"
+                        >
+                          <Download className="h-4 w-4 mr-1" /> Download CSV
+                        </Button>
+                      </div>
                     </div>
                   </CardHeader>
                   <CardContent>
@@ -1970,16 +2235,29 @@ export default function AdminFeesPage() {
                 <PeriodPicker />
                 <Card>
                   <CardHeader>
-                    <CardTitle className="text-base">
-                      Fee deduction exceptions
-                    </CardTitle>
-                    <CardDescription>
-                      Held (insufficient funds), stuck (pending {">"} 7 days),
-                      failed (failure_reason set) and role-corruption
-                      (settled/reversed against a non-adviser user) deductions
-                      from the selected period. Click "Open in deductions" to
-                      jump to the row in the Deductions tab.
-                    </CardDescription>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <CardTitle className="text-base">
+                          Fee deduction exceptions
+                        </CardTitle>
+                        <CardDescription>
+                          Held (insufficient funds), stuck (pending {">"} 7 days),
+                          failed (failure_reason set) and role-corruption
+                          (settled/reversed against a non-adviser user) deductions
+                          from the selected period. Click "Open in deductions" to
+                          jump to the row in the Deductions tab.
+                        </CardDescription>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={downloadExceptionsCsv}
+                        disabled={!exceptionsQ.data || exceptionsQ.isLoading}
+                        data-testid="button-download-exceptions-csv"
+                      >
+                        <Download className="h-4 w-4 mr-1" /> Download CSV
+                      </Button>
+                    </div>
                   </CardHeader>
                   <CardContent>
                     {exceptionsQ.isLoading ? (
