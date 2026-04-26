@@ -6,6 +6,7 @@
 // =============================================================================
 
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,7 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ShieldAlert, Receipt } from "lucide-react";
+import { ShieldAlert, Receipt, ExternalLink } from "lucide-react";
 
 interface UserRef {
   id: number;
@@ -63,6 +64,41 @@ interface ClientFeesPayload {
   users?: UsersMap;
 }
 
+interface ClientDeductionRow {
+  id: number;
+  adviserUserId: number;
+  periodStart: string;
+  periodEnd: string;
+  totalAccrued: string;
+  adviserShareAmount: string;
+  platformShareAmount: string;
+  currency: string;
+  status: string;
+  settledAt: string | null;
+  settledTransactionId: number | null;
+  createdAt: string;
+}
+
+interface ClientDeductionsPayload {
+  items: ClientDeductionRow[];
+  users?: UsersMap;
+}
+
+function statusBadgeVariant(status: string): "default" | "outline" | "secondary" | "destructive" {
+  switch (status) {
+    case "settled":
+      return "default";
+    case "pending_approval":
+      return "secondary";
+    case "approved":
+      return "outline";
+    case "rejected":
+      return "destructive";
+    default:
+      return "secondary";
+  }
+}
+
 function AdviserCell({
   users,
   userId,
@@ -89,6 +125,12 @@ function AdviserCell({
 
 export default function ClientFeesPage() {
   const q = useQuery<ClientFeesPayload>({ queryKey: ["/api/client/fees"] });
+  const deductionsQ = useQuery<ClientDeductionsPayload>({
+    queryKey: ["/api/client/fee-deductions"],
+  });
+
+  const hasSettled =
+    !!deductionsQ.data?.items.some((d) => d.status === "settled");
 
   return (
     <div className="space-y-6 p-6" data-testid="page-client-fees">
@@ -99,13 +141,28 @@ export default function ClientFeesPage() {
 
       <Alert variant="default" data-testid="alert-gate-a">
         <ShieldAlert className="h-4 w-4" />
-        <AlertTitle>Nothing has been deducted yet</AlertTitle>
-        <AlertDescription>
-          This page shows what your adviser would deduct based on your signed
-          fee consents. <strong>No money has actually moved.</strong> Any
-          future deduction will require an additional, explicit step that is
-          recorded against your account.
-        </AlertDescription>
+        {hasSettled ? (
+          <>
+            <AlertTitle>How to read this page</AlertTitle>
+            <AlertDescription>
+              The rules below show what your adviser is allowed to deduct
+              under your signed fee consents. The <strong>Deductions</strong>
+              section lists each batch your adviser has prepared, along with
+              its current status. Settled rows link to the underlying
+              transaction in your account.
+            </AlertDescription>
+          </>
+        ) : (
+          <>
+            <AlertTitle>Nothing has been deducted yet</AlertTitle>
+            <AlertDescription>
+              This page shows what your adviser would deduct based on your
+              signed fee consents. <strong>No money has actually moved.</strong>{" "}
+              Any future deduction will require an additional, explicit step
+              that is recorded against your account.
+            </AlertDescription>
+          </>
+        )}
       </Alert>
 
       {q.isLoading ? (
@@ -212,14 +269,17 @@ export default function ClientFeesPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Pending deduction batches</CardTitle>
+              <CardTitle className="text-base">Deductions</CardTitle>
               <CardDescription>
-                These are awaiting licensee approval. Even after approval, no
-                money will be moved until the next gate is opened.
+                Every adviser fee deduction batch covering you. Pending rows
+                are awaiting licensee approval. Settled rows have been posted
+                to your wallet — click the transaction link to reconcile.
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {q.data && q.data.pendingDeductions.length > 0 ? (
+              {deductionsQ.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : deductionsQ.data && deductionsQ.data.items.length > 0 ? (
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -227,25 +287,55 @@ export default function ClientFeesPage() {
                       <TableHead>Adviser</TableHead>
                       <TableHead>Period</TableHead>
                       <TableHead>Total</TableHead>
+                      <TableHead>Adviser share</TableHead>
+                      <TableHead>Platform share</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead>Settled</TableHead>
+                      <TableHead>Transaction</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {q.data.pendingDeductions.map((d) => (
+                    {deductionsQ.data.items.map((d) => (
                       <TableRow key={d.id} data-testid={`row-deduction-${d.id}`}>
                         <TableCell>{d.id}</TableCell>
                         <TableCell>
-                          <AdviserCell users={q.data?.users} userId={d.adviserUserId} />
+                          <AdviserCell users={deductionsQ.data?.users} userId={d.adviserUserId} />
                         </TableCell>
                         <TableCell>{d.periodStart.slice(0, 10)} → {d.periodEnd.slice(0, 10)}</TableCell>
                         <TableCell>{d.totalAccrued} {d.currency}</TableCell>
-                        <TableCell><Badge variant="secondary">{d.status}</Badge></TableCell>
+                        <TableCell>{d.adviserShareAmount} {d.currency}</TableCell>
+                        <TableCell>{d.platformShareAmount} {d.currency}</TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={statusBadgeVariant(d.status)}
+                            data-testid={`badge-deduction-status-${d.id}`}
+                          >
+                            {d.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {d.settledAt ? d.settledAt.slice(0, 10) : "—"}
+                        </TableCell>
+                        <TableCell>
+                          {d.settledTransactionId ? (
+                            <Link
+                              href={`/transactions?txn=${d.settledTransactionId}`}
+                              className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                              data-testid={`link-deduction-txn-${d.id}`}
+                            >
+                              #{d.settledTransactionId}
+                              <ExternalLink className="h-3 w-3" />
+                            </Link>
+                          ) : (
+                            <span className="text-sm text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
               ) : (
-                <p className="text-sm text-muted-foreground">No pending deductions.</p>
+                <p className="text-sm text-muted-foreground">No deductions yet.</p>
               )}
             </CardContent>
           </Card>

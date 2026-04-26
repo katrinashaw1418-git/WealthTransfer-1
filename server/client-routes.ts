@@ -465,4 +465,45 @@ export function registerClientRoutes(app: Express): void {
       handleError(res, error, "Failed to load client fees");
     }
   });
+
+  // ===========================================================================
+  // SESSION 32 — CLIENT VIEW OF OWN FEE DEDUCTIONS (Gate B follow-up)
+  // ---------------------------------------------------------------------------
+  // GET /api/client/fee-deductions
+  //   Returns every adviser_fee_deductions row scoped to the signed-in client
+  //   so they can see what was charged, when it settled, and which underlying
+  //   transaction it links to. Strictly read-only and strictly self-scoped:
+  //   the where clause is `clientUserId = auth.userId`, and we only ever
+  //   project the deduction columns that are safe to expose to the client
+  //   (we deliberately omit operator-only fields like accrualIds,
+  //   approvedByUserId, idempotencyKey, failureReason, rejectedReason).
+  // ===========================================================================
+  app.get("/api/client/fee-deductions", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const rows = await db
+        .select({
+          id: adviserFeeDeductions.id,
+          adviserUserId: adviserFeeDeductions.adviserUserId,
+          periodStart: adviserFeeDeductions.periodStart,
+          periodEnd: adviserFeeDeductions.periodEnd,
+          totalAccrued: adviserFeeDeductions.totalAccrued,
+          adviserShareAmount: adviserFeeDeductions.adviserShareAmount,
+          platformShareAmount: adviserFeeDeductions.platformShareAmount,
+          currency: adviserFeeDeductions.currency,
+          status: adviserFeeDeductions.status,
+          settledAt: adviserFeeDeductions.settledAt,
+          settledTransactionId: adviserFeeDeductions.settledTransactionId,
+          createdAt: adviserFeeDeductions.createdAt,
+        })
+        .from(adviserFeeDeductions)
+        .where(eq(adviserFeeDeductions.clientUserId, auth.userId))
+        .orderBy(desc(adviserFeeDeductions.createdAt));
+
+      const usersMap = await getUserNameMap(rows.map((r) => r.adviserUserId));
+      res.json({ items: rows, users: usersMap });
+    } catch (error: any) {
+      handleError(res, error, "Failed to load client fee deductions");
+    }
+  });
 }
