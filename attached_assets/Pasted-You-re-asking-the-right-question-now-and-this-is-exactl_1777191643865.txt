@@ -1,0 +1,468 @@
+You’re asking the right question now — and this is exactly where most fintechs get it wrong.
+
+After reviewing Netwealth adviser features, the key insight is:
+
+Netwealth is NOT “dashboard + portfolio + fees”
+
+It is a full adviser operating system built around:
+
+Clients
+Investments
+Cash
+Fees
+Tasks
+Reporting
+🧠 1. What Netwealth actually has (real structure)
+
+From their adviser platform:
+
+Client search + client accounts
+Portfolio + asset allocation + performance
+Investment products (funds, wraps, managed accounts)
+Workflow + task management (central activities area)
+Fee configuration + reporting
+40+ reports including remuneration + FUM
+Custom client reporting + branded reports
+
+👉 This is critical:
+
+Advisers don’t “use a dashboard”
+They run a business inside the platform
+
+🚨 2. Your current idea (needs correction)
+
+You asked:
+
+dashboard + portfolio + fee sharing page?
+
+❌ This is too shallow
+You will fail to match Netwealth
+
+✅ 3. CORRECT PAGE STRUCTURE (AMAX — VERIFIED)
+🧩 Adviser Portal (FULL STRUCTURE)
+/adviser
+├── Dashboard
+├── Clients
+├── Client Detail
+├── Investment Products
+├── Portfolio / Holdings
+├── Instructions
+├── Cash & Transactions
+├── Fees & Consents
+├── Tasks / Workflow
+├── Reports
+├── Business / Revenue (optional later)
+🧱 4. EXACT PAGES YOU MUST BUILD
+1. Adviser Dashboard ✅ (YES — you need this)
+
+Purpose:
+
+Overview only (not operational)
+
+Contains:
+
+Total clients
+FUM (funds under management)
+Tasks pending
+Fee revenue snapshot
+Alerts (KYC, consent expiry)
+
+✔ Matches Netwealth “business KPI + alerts”
+
+2. Clients Page ✅ (CRITICAL — CORE PAGE)
+/adviser/clients
+
+Must include:
+
+Search (name, account, ID)
+Client list
+Status (KYC / active / pending)
+
+👉 Netwealth emphasises fast client search as core UX
+
+3. Client Detail Page ✅ (MOST IMPORTANT PAGE)
+/adviser/clients/:id
+
+Tabs:
+
+Overview
+Portfolio
+Transactions
+Fees
+Reports
+Documents (later)
+
+This is where advisers actually work.
+
+4. Investment Products Page ✅ (YOU MISSED THIS)
+/adviser/products
+
+This is central to Netwealth
+
+Includes:
+
+Managed portfolios
+Funds
+Term deposits
+Model portfolios
+
+✔ Netwealth provides “300+ investment options”
+
+5. Portfolio / Holdings Page ✅ (YES — REQUIRED)
+/adviser/clients/:id/portfolio
+
+Includes:
+
+Asset allocation
+Performance charts
+Holdings breakdown
+
+✔ Netwealth emphasises portfolio + allocation + performance
+
+6. Instructions Page 🔥 (MOST MISSED PAGE)
+/adviser/instructions
+
+This is where advisers:
+
+Recommend investments
+Create instructions (not execute)
+
+Status:
+
+Draft
+Pending client consent
+Approved
+
+👉 This replaces “manual advice execution”
+
+7. Cash & Transactions Page ⚠️ (YOU DID NOT THINK OF THIS)
+/adviser/clients/:id/transactions
+
+Includes:
+
+Contributions
+Withdrawals
+Dividends
+Cash balances
+
+✔ Netwealth has real-time transaction tracking
+
+8. Fees & Consent Page ✅ (YES — BUT NOT “fee sharing”)
+/adviser/fees
+
+Includes:
+
+Fee setup
+Fee consent tracking
+Fee history
+
+✔ Netwealth supports flexible fee configuration
+
+👉 Rename:
+❌ “Fee sharing page”
+✅ “Fees & Consent Management”
+
+9. Tasks / Workflow Page 🔥 (YOU MISSED — CRITICAL)
+/adviser/tasks
+
+Includes:
+
+KYC follow-ups
+Consent expiry
+Portfolio review reminders
+
+✔ Netwealth uses “activities & workflow management”
+
+10. Reports Page ✅ (MUST HAVE)
+/adviser/reports
+
+Includes:
+
+Portfolio reports
+Fee reports
+Client reports
+Business reports
+
+✔ Netwealth provides 40+ reports
+
+11. Business / Revenue Page (OPTIONAL LATER)
+/adviser/business
+
+Includes:
+
+Revenue tracking
+FUM by client
+Adviser performance
+
+✔ Netwealth has remuneration + KPI reports
+
+🧠 5. FINAL PAGE MAP (CORRECT)
+Landing
+├── Investors → existing app
+└── Wealth Planners
+    └── Adviser Portal
+
+Adviser Portal
+├── Dashboard
+├── Clients
+│   └── Client Detail
+│       ├── Overview
+│       ├── Portfolio
+│       ├── Transactions
+│       ├── Fees
+│       └── Reports
+├── Investment Products
+├── Instructions
+├── Fees & Consent
+├── Tasks
+├── Reports
+└── Business (later)
+🚨 6. KEY CORRECTIONS YOU MUST APPLY
+❌ WRONG THINKING
+“Dashboard is main page”
+“Portfolio is main feature”
+“Fee sharing page”
+✅ CORRECT THINKING
+Clients = core
+Products = engine
+Portfolio = output
+Fees = compliance
+Tasks = workflow
+Reports = value
+🔥 7. MOST IMPORTANT INSIGHT
+
+Your platform should behave like:
+
+A mini Netwealth inside AMAX
+
+NOT:
+
+A dashboard with a few features
+🚀 8. PRIORITY BUILD ORDER (STRICT)
+Phase 1
+Clients
+Client detail
+Portfolio view
+Phase 2
+Investment products
+Instructions
+Phase 3
+Fees & consent
+Tasks
+Phase 4
+Reports
+Business metrics
+🧾 FINAL VERDICT
+
+✔ Yes — you need:
+
+Dashboard ✅
+Portfolio page ✅
+Fees page ✅
+
+❗ BUT you ALSO NEED:
+
+Clients (core)
+Products (engine)
+Instructions (advice flow)
+Tasks (workflow)
+Reports (value)
+
+If you want next step, I can:
+
+✅ Design exact UI screens (pixel-level like Netwealth)
+✅ Map these pages into your React routes
+✅ Build full DB schema for products + instructions
+
+Just tell me.
+
+DESIGN UI SCREENS
+
+Good—this is the right moment to design it properly before you overbuild the backend.
+
+Below is a clean, Netwealth-style UI system for your adviser portal. This is not generic—it’s structured for how advisers actually work daily.
+
+🎨 0. DESIGN PRINCIPLES (FOLLOW THIS OR YOU’LL FAIL UX)
+Left sidebar = primary navigation
+Top bar = search + client switch
+Everything revolves around CLIENT context
+Tables > fancy charts
+Fast scanning > visual noise
+🧭 1. GLOBAL LAYOUT (ALL PAGES)
+7
+Layout Structure
+┌───────────────────────────────────────────────┐
+│ Top Bar: Search | Alerts | Profile           │
+├───────────────┬───────────────────────────────┤
+│ Sidebar       │ Main Content                 │
+│               │                              │
+│ Dashboard     │                              │
+│ Clients       │                              │
+│ Products      │                              │
+│ Instructions  │                              │
+│ Fees          │                              │
+│ Tasks         │                              │
+│ Reports       │                              │
+└───────────────┴───────────────────────────────┘
+🏠 2. ADVISER DASHBOARD
+9
+Purpose:
+
+Quick overview ONLY
+
+Layout:
+[ Total Clients ]   [ FUM ]   [ Revenue ]   [ Tasks ]
+
+----------------------------------------------------
+
+⚠ Alerts
+- KYC pending (5)
+- Fee consent expiring (3)
+
+----------------------------------------------------
+
+📌 Tasks
+- Client review required
+- Follow-up needed
+
+----------------------------------------------------
+
+📊 Portfolio Snapshot
+👥 3. CLIENTS PAGE (CORE PAGE)
+8
+Layout:
+Search: [__________]   Filter: [All | Active | Pending]
+
+-----------------------------------------------------
+
+Client Name | Email | KYC | Portfolio Value | Status
+
+John Smith  | ...   | ✔   | $520,000        | Active
+Jane Lee    | ...   | ⏳   | $120,000        | Pending
+
+👉 This is where advisers LIVE.
+
+📄 4. CLIENT DETAIL PAGE (MOST IMPORTANT)
+6
+Layout:
+Client: John Smith
+
+Tabs:
+[Overview] [Portfolio] [Transactions] [Fees] [Reports]
+Overview Tab
+- KYC Status
+- Risk profile (later)
+- Contact info
+Portfolio Tab
+Total Value: $520,000
+
+Asset Allocation:
+- Equities 60%
+- Fixed Income 30%
+- Cash 10%
+
+Holdings:
+Fund A      $200,000
+Fund B      $150,000
+Transactions Tab
+Date       Type        Amount
+--------------------------------
+01 Apr     Deposit     $50,000
+05 Apr     Investment  $20,000
+Fees Tab
+Adviser Fee: 1.0% p.a.
+Status: Active
+Next Consent Expiry: 15 June
+📦 5. INVESTMENT PRODUCTS PAGE
+5
+Layout:
+Search Products: [________]
+
+----------------------------------------
+
+Product Name | Type | Return | Risk
+
+Global Fund  | Equity | 8.5% | Medium
+Bond Fund    | Fixed  | 4.2% | Low
+
+👉 This is your distribution engine
+
+📝 6. INSTRUCTIONS PAGE (CRITICAL FLOW)
+7
+Layout:
+Client | Instruction | Amount | Status
+
+John   | Buy Fund A  | $10,000 | Pending
+Jane   | Sell Fund B | $5,000  | Approved
+Instruction Detail
+Recommendation:
+Buy $10,000 of Global Fund
+
+Status: Pending Client Approval
+
+[Waiting for client consent]
+💰 7. FEES & CONSENT PAGE
+6
+Layout:
+Client | Fee % | Status | Expiry
+
+John   | 1.0%  | Active | 15 Jun
+Jane   | 0.8%  | Expiring | 02 May
+📌 8. TASKS PAGE
+7
+Layout:
+Task | Client | Priority | Due
+
+KYC follow-up | John | High | Today
+Review portfolio | Jane | Medium | Friday
+📊 9. REPORTS PAGE
+6
+Layout:
+Generate Report:
+
+[ Client Portfolio Report ]
+[ Fee Report ]
+[ Performance Report ]
+
+Client: [Select]
+
+[Generate PDF]
+🎯 10. FINAL UX STRUCTURE
+Adviser Portal
+
+Dashboard
+Clients
+  └ Client Detail
+      ├ Overview
+      ├ Portfolio
+      ├ Transactions
+      ├ Fees
+      └ Reports
+
+Products
+Instructions
+Fees
+Tasks
+Reports
+🔥 KEY UX INSIGHT (MOST IMPORTANT)
+
+Design MUST follow this hierarchy:
+
+Client → Portfolio → Instruction → Consent → Execution
+
+NOT:
+
+Dashboard → random features
+🚀 NEXT STEP
+
+If you want, I can:
+
+✅ Convert ALL of this into React components (shadcn-ready)
+✅ Or design exact pixel-perfect AMAX screens (dark navy + gold theme)
+✅ Or map UI → backend APIs (end-to-end flow)
+
+Just tell me 👍
+
+✅ Convert ALL of this into React components (shadcn-ready)
+
+I’ll create a single shadcn/Tailwind React file that contains the adviser portal shell and all major screens as switchable views, so it can be dropped into your AMAX app and later split into routes.

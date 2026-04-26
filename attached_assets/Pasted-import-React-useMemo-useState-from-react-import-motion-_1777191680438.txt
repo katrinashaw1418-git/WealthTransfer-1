@@ -1,0 +1,490 @@
+import React, { useMemo, useState } from "react";
+import { motion } from "framer-motion";
+import {
+  AlertCircle,
+  BarChart3,
+  BriefcaseBusiness,
+  CheckCircle2,
+  ChevronRight,
+  ClipboardList,
+  DollarSign,
+  Download,
+  FileText,
+  Home,
+  LineChart,
+  Lock,
+  PieChart,
+  Plus,
+  Search,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+
+const navy = "bg-[#0A1628]";
+const goldText = "text-[#C9A96E]";
+const goldBg = "bg-[#C9A96E]";
+
+const clients = [
+  {
+    id: 1,
+    name: "John Smith",
+    email: "john.smith@example.com",
+    kyc: "Verified",
+    status: "Active",
+    portfolioValue: "$520,000",
+    feeStatus: "Active",
+    nextReview: "12 May 2026",
+  },
+  {
+    id: 2,
+    name: "Jane Lee",
+    email: "jane.lee@example.com",
+    kyc: "Pending",
+    status: "Pending",
+    portfolioValue: "$120,000",
+    feeStatus: "Expiring",
+    nextReview: "02 May 2026",
+  },
+  {
+    id: 3,
+    name: "Michael Chen",
+    email: "michael.chen@example.com",
+    kyc: "Verified",
+    status: "Active",
+    portfolioValue: "$860,000",
+    feeStatus: "Active",
+    nextReview: "18 June 2026",
+  },
+];
+
+const products = [
+  {
+    code: "AMX-FI-01",
+    name: "AMAX Fixed Income Portfolio",
+    type: "Fixed Income",
+    risk: "Low–Medium",
+    min: "$25,000",
+    fee: "0.65% p.a.",
+  },
+  {
+    code: "AMX-MA-01",
+    name: "AMAX Multi-Asset Growth",
+    type: "Multi-Asset",
+    risk: "Medium",
+    min: "$50,000",
+    fee: "0.85% p.a.",
+  },
+  {
+    code: "AMX-FX-01",
+    name: "AMAX FX Income Strategy",
+    type: "FX Strategy",
+    risk: "Medium–High",
+    min: "$100,000",
+    fee: "1.00% p.a.",
+  },
+];
+
+const instructions = [
+  { client: "John Smith", action: "Buy AMAX Multi-Asset Growth", amount: "$10,000", status: "Pending Consent" },
+  { client: "Jane Lee", action: "Invest in Fixed Income Portfolio", amount: "$25,000", status: "Draft" },
+  { client: "Michael Chen", action: "Switch to Growth Allocation", amount: "$50,000", status: "Consented" },
+];
+
+const tasks = [
+  { task: "KYC follow-up", client: "Jane Lee", priority: "High", due: "Today" },
+  { task: "Fee consent renewal", client: "John Smith", priority: "Critical", due: "02 May" },
+  { task: "Quarterly portfolio review", client: "Michael Chen", priority: "Medium", due: "Friday" },
+];
+
+function StatusBadge({ value }: { value: string }) {
+  const style =
+    value.toLowerCase().includes("verified") || value.toLowerCase().includes("active") || value.toLowerCase().includes("consented")
+      ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
+      : value.toLowerCase().includes("pending") || value.toLowerCase().includes("expiring")
+      ? "bg-amber-500/10 text-amber-300 border-amber-500/20"
+      : "bg-slate-500/10 text-slate-300 border-slate-500/20";
+
+  return <Badge className={`border ${style}`}>{value}</Badge>;
+}
+
+function MetricCard({ title, value, icon: Icon, note }: any) {
+  return (
+    <Card className="border-white/10 bg-white/[0.03] text-white shadow-xl">
+      <CardContent className="p-5">
+        <div className="flex items-start justify-between">
+          <div>
+            <p className="text-sm text-slate-400">{title}</p>
+            <p className="mt-2 text-2xl font-semibold">{value}</p>
+            {note && <p className="mt-1 text-xs text-slate-500">{note}</p>}
+          </div>
+          <div className="rounded-2xl bg-white/5 p-3">
+            <Icon className={`h-5 w-5 ${goldText}`} />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AdviserSidebar({ active, setActive }: any) {
+  const items = [
+    ["dashboard", "Dashboard", Home],
+    ["clients", "Clients", Users],
+    ["products", "Investment Products", BriefcaseBusiness],
+    ["instructions", "Instructions", ClipboardList],
+    ["fees", "Fees & Consent", DollarSign],
+    ["tasks", "Tasks", AlertCircle],
+    ["reports", "Reports", FileText],
+  ];
+
+  return (
+    <aside className="hidden w-72 shrink-0 border-r border-white/10 bg-[#07111F] p-5 lg:block">
+      <div className="mb-8">
+        <div className="text-lg font-bold text-white">AMAX Wealth</div>
+        <div className={`text-sm ${goldText}`}>Adviser Portal</div>
+      </div>
+      <nav className="space-y-2">
+        {items.map(([key, label, Icon]: any) => (
+          <button
+            key={key}
+            onClick={() => setActive(key)}
+            className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left text-sm transition ${
+              active === key ? "bg-white text-slate-950" : "text-slate-300 hover:bg-white/5 hover:text-white"
+            }`}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div className="mt-8 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-xs text-slate-400">
+        <div className="mb-2 flex items-center gap-2 text-white">
+          <Lock className="h-4 w-4" /> Permissioned access
+        </div>
+        Advisers can only view linked clients and cannot move funds or execute transactions without client consent.
+      </div>
+    </aside>
+  );
+}
+
+function TopBar() {
+  return (
+    <div className="sticky top-0 z-10 border-b border-white/10 bg-[#0A1628]/90 p-4 backdrop-blur">
+      <div className="flex items-center justify-between gap-4">
+        <div className="relative max-w-xl flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+          <Input className="border-white/10 bg-white/5 pl-9 text-white placeholder:text-slate-500" placeholder="Search clients, products, reports..." />
+        </div>
+        <div className="flex items-center gap-3">
+          <Badge className="border border-[#C9A96E]/30 bg-[#C9A96E]/10 text-[#C9A96E]">AFSL Partner Mode</Badge>
+          <Button variant="outline" className="border-white/10 bg-white/5 text-white hover:bg-white/10">Profile</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DashboardScreen({ setActive }: any) {
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Adviser Dashboard" subtitle="Monitor linked clients, consent obligations, tasks and portfolio activity." action="Add Client" />
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <MetricCard title="Linked Clients" value="42" icon={Users} note="Active adviser relationships" />
+        <MetricCard title="Funds Under Advice" value="$18.5m" icon={PieChart} note="Across linked clients" />
+        <MetricCard title="Open Tasks" value="11" icon={ClipboardList} note="3 critical" />
+        <MetricCard title="Monthly Revenue" value="$14.5k" icon={DollarSign} note="Estimated from active consent" />
+      </div>
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card className="border-white/10 bg-white/[0.03] text-white xl:col-span-2">
+          <CardHeader><CardTitle>Priority alerts</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <AlertRow title="Fee consent expiring" detail="3 clients require renewal within 30 days" priority="Critical" />
+            <AlertRow title="KYC pending" detail="5 clients need onboarding follow-up" priority="High" />
+            <AlertRow title="Pending client consent" detail="2 investment instructions awaiting approval" priority="Medium" />
+          </CardContent>
+        </Card>
+        <Card className="border-white/10 bg-white/[0.03] text-white">
+          <CardHeader><CardTitle>Quick actions</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <Button onClick={() => setActive("clients")} className={`w-full ${goldBg} text-slate-950 hover:bg-[#D7B878]`}>View Clients</Button>
+            <Button onClick={() => setActive("products")} variant="outline" className="w-full border-white/10 bg-white/5 text-white hover:bg-white/10">Browse Products</Button>
+            <Button onClick={() => setActive("reports")} variant="outline" className="w-full border-white/10 bg-white/5 text-white hover:bg-white/10">Generate Report</Button>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function PageHeader({ title, subtitle, action }: any) {
+  return (
+    <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+      <div>
+        <motion.h1 initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="text-2xl font-semibold text-white">
+          {title}
+        </motion.h1>
+        <p className="mt-1 text-sm text-slate-400">{subtitle}</p>
+      </div>
+      {action && <Button className={`${goldBg} text-slate-950 hover:bg-[#D7B878]`}><Plus className="mr-2 h-4 w-4" />{action}</Button>}
+    </div>
+  );
+}
+
+function AlertRow({ title, detail, priority }: any) {
+  return (
+    <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <div>
+        <p className="font-medium">{title}</p>
+        <p className="text-sm text-slate-400">{detail}</p>
+      </div>
+      <StatusBadge value={priority} />
+    </div>
+  );
+}
+
+function ClientsScreen({ setActive, setSelectedClient }: any) {
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Clients" subtitle="Search and manage linked client relationships." action="Link Client" />
+      <Card className="border-white/10 bg-white/[0.03] text-white">
+        <CardContent className="p-5">
+          <div className="mb-4 flex flex-col gap-3 md:flex-row">
+            <Input className="border-white/10 bg-white/5 text-white" placeholder="Search clients..." />
+            <Button variant="outline" className="border-white/10 bg-white/5 text-white hover:bg-white/10">Filter</Button>
+          </div>
+          <DataTable
+            columns={["Client", "KYC", "Portfolio", "Fee Consent", "Next Review", "Action"]}
+            rows={clients.map((c) => [
+              <div><p className="font-medium">{c.name}</p><p className="text-xs text-slate-500">{c.email}</p></div>,
+              <StatusBadge value={c.kyc} />,
+              c.portfolioValue,
+              <StatusBadge value={c.feeStatus} />,
+              c.nextReview,
+              <Button size="sm" onClick={() => { setSelectedClient(c); setActive("client-detail"); }} className="bg-white text-slate-950 hover:bg-slate-200">View</Button>,
+            ])}
+          />
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ClientDetailScreen({ client }: any) {
+  const c = client ?? clients[0];
+  return (
+    <div className="space-y-6">
+      <PageHeader title={c.name} subtitle="Linked client account — adviser read-only financial access." action="Create Instruction" />
+      <Tabs defaultValue="overview" className="space-y-4">
+        <TabsList className="bg-white/5 text-slate-300">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="portfolio">Portfolio</TabsTrigger>
+          <TabsTrigger value="transactions">Transactions</TabsTrigger>
+          <TabsTrigger value="fees">Fees</TabsTrigger>
+          <TabsTrigger value="reports">Reports</TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview"><ClientOverview client={c} /></TabsContent>
+        <TabsContent value="portfolio"><PortfolioPanel /></TabsContent>
+        <TabsContent value="transactions"><TransactionsPanel /></TabsContent>
+        <TabsContent value="fees"><FeesPanel /></TabsContent>
+        <TabsContent value="reports"><ReportsPanel compact /></TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+function ClientOverview({ client }: any) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-3">
+      <MetricCard title="Portfolio Value" value={client.portfolioValue} icon={PieChart} note="Read-only adviser view" />
+      <MetricCard title="KYC Status" value={client.kyc} icon={ShieldCheck} note="Client onboarding status" />
+      <MetricCard title="Fee Consent" value={client.feeStatus} icon={CheckCircle2} note="DBFO consent tracking" />
+    </div>
+  );
+}
+
+function PortfolioPanel() {
+  return (
+    <Card className="border-white/10 bg-white/[0.03] text-white">
+      <CardHeader><CardTitle>Portfolio holdings</CardTitle></CardHeader>
+      <CardContent>
+        <div className="grid gap-4 lg:grid-cols-3">
+          <MetricCard title="Equities" value="60%" icon={BarChart3} />
+          <MetricCard title="Fixed Income" value="30%" icon={LineChart} />
+          <MetricCard title="Cash" value="10%" icon={DollarSign} />
+        </div>
+        <div className="mt-5">
+          <DataTable columns={["Holding", "Asset Class", "Value", "Weight"]} rows={[["AMAX Multi-Asset Growth", "Multi-Asset", "$260,000", "50%"], ["AMAX Fixed Income Portfolio", "Fixed Income", "$155,000", "30%"], ["Cash Account", "Cash", "$52,000", "10%"]]} />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TransactionsPanel() {
+  return <DataCard title="Transactions" columns={["Date", "Type", "Amount", "Status"]} rows={[["01 Apr 2026", "Deposit", "$50,000", <StatusBadge value="Settled" />], ["05 Apr 2026", "Investment", "$20,000", <StatusBadge value="Completed" />]]} />;
+}
+
+function FeesPanel() {
+  return <DataCard title="Fees & consent" columns={["Fee", "Basis", "Status", "Expiry"]} rows={[["Adviser service fee", "1.00% p.a.", <StatusBadge value="Active" />, "15 Jun 2026"], ["Platform fee", "0.30% p.a.", <StatusBadge value="Active" />, "N/A"]]} />;
+}
+
+function ProductsScreen() {
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Investment Products" subtitle="AMAX-controlled product menu available for adviser recommendations." action="Create Instruction" />
+      <DataCard columns={["Code", "Product", "Type", "Risk", "Minimum", "Fee", "Action"]} rows={products.map((p) => [p.code, p.name, p.type, p.risk, p.min, p.fee, <Button size="sm" className="bg-white text-slate-950 hover:bg-slate-200">Recommend</Button>])} />
+    </div>
+  );
+}
+
+function InstructionsScreen() {
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Instructions" subtitle="Adviser-created investment instructions requiring client consent before processing." action="New Instruction" />
+      <DataCard columns={["Client", "Instruction", "Amount", "Status", "Action"]} rows={instructions.map((i) => [i.client, i.action, i.amount, <StatusBadge value={i.status} />, <Button size="sm" variant="outline" className="border-white/10 bg-white/5 text-white">View</Button>])} />
+    </div>
+  );
+}
+
+function FeesScreen() {
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Fees & Consent" subtitle="Track fee consent, renewal dates and adviser/platform fee arrangements." action="Add Fee Consent" />
+      <DataCard columns={["Client", "Fee Type", "Amount", "Status", "Expiry"]} rows={[["John Smith", "Ongoing advice", "1.00% p.a.", <StatusBadge value="Active" />, "15 Jun 2026"], ["Jane Lee", "Ongoing advice", "0.80% p.a.", <StatusBadge value="Expiring" />, "02 May 2026"]]} />
+    </div>
+  );
+}
+
+function TasksScreen() {
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Tasks" subtitle="Workflow items for onboarding, reviews and fee consent obligations." action="New Task" />
+      <DataCard columns={["Task", "Client", "Priority", "Due", "Status"]} rows={tasks.map((t) => [t.task, t.client, <StatusBadge value={t.priority} />, t.due, <StatusBadge value="Open" />])} />
+    </div>
+  );
+}
+
+function ReportsScreen() {
+  return <ReportsPanel />;
+}
+
+function ReportsPanel({ compact = false }: any) {
+  return (
+    <div className="space-y-6">
+      {!compact && <PageHeader title="Reports" subtitle="Generate client, fee and portfolio reports without synthetic performance claims." action={null} />}
+      <div className="grid gap-4 lg:grid-cols-3">
+        {[
+          ["Client Portfolio Report", "Portfolio, holdings, allocation and real snapshot history."],
+          ["Fee Consent Report", "Consent status, expiry and fee records."],
+          ["Client Activity Report", "Transactions, instructions and task history."],
+        ].map(([title, desc]) => (
+          <Card key={title} className="border-white/10 bg-white/[0.03] text-white">
+            <CardContent className="p-5">
+              <FileText className={`mb-4 h-6 w-6 ${goldText}`} />
+              <h3 className="font-semibold">{title}</h3>
+              <p className="mt-2 text-sm text-slate-400">{desc}</p>
+              <Button className={`mt-5 w-full ${goldBg} text-slate-950 hover:bg-[#D7B878]`}><Download className="mr-2 h-4 w-4" />Generate PDF</Button>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DataCard({ title, columns, rows }: any) {
+  return (
+    <Card className="border-white/10 bg-white/[0.03] text-white">
+      {title && <CardHeader><CardTitle>{title}</CardTitle></CardHeader>}
+      <CardContent className="p-5">
+        <DataTable columns={columns} rows={rows} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function DataTable({ columns, rows }: any) {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-white/10">
+      <table className="w-full min-w-[760px] text-left text-sm">
+        <thead className="bg-white/[0.04] text-slate-400">
+          <tr>{columns.map((c: any) => <th key={c} className="px-4 py-3 font-medium">{c}</th>)}</tr>
+        </thead>
+        <tbody className="divide-y divide-white/10">
+          {rows.map((row: any[], idx: number) => (
+            <tr key={idx} className="hover:bg-white/[0.03]">
+              {row.map((cell, i) => <td key={i} className="px-4 py-4 text-slate-200">{cell}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AdviserLandingSection({ setActive }: any) {
+  return (
+    <section className="rounded-3xl border border-[#C9A96E]/20 bg-[#C9A96E]/10 p-6 text-white md:p-8">
+      <div className="grid gap-6 lg:grid-cols-[1.3fr_0.7fr] lg:items-center">
+        <div>
+          <Badge className="mb-4 border-[#C9A96E]/30 bg-[#C9A96E]/10 text-[#C9A96E]">For Financial Advisers & AFSL Partners</Badge>
+          <h2 className="text-2xl font-semibold md:text-3xl">Partner with AMAX Wealth</h2>
+          <p className="mt-3 max-w-2xl text-slate-300">
+            A B2B2C adviser layer for linked-client visibility, AMAX-approved investment products, instructions requiring client consent, fee consent tracking and client reporting.
+          </p>
+          <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+            <Button onClick={() => setActive("dashboard")} className={`${goldBg} text-slate-950 hover:bg-[#D7B878]`}>Adviser Login Preview</Button>
+            <Button variant="outline" className="border-white/10 bg-white/5 text-white hover:bg-white/10">Register Adviser Interest</Button>
+          </div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-[#0A1628] p-5">
+          {["Linked client dashboard", "Investment product access", "Fee consent tracking", "Reports & compliance workflow"].map((item) => (
+            <div key={item} className="flex items-center justify-between border-b border-white/10 py-3 last:border-b-0">
+              <span className="text-sm text-slate-300">{item}</span>
+              <ChevronRight className={`h-4 w-4 ${goldText}`} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export default function AMAXAdviserPortalDemo() {
+  const [active, setActive] = useState("dashboard");
+  const [selectedClient, setSelectedClient] = useState(clients[0]);
+
+  const screen = useMemo(() => {
+    switch (active) {
+      case "dashboard": return <DashboardScreen setActive={setActive} />;
+      case "clients": return <ClientsScreen setActive={setActive} setSelectedClient={setSelectedClient} />;
+      case "client-detail": return <ClientDetailScreen client={selectedClient} />;
+      case "products": return <ProductsScreen />;
+      case "instructions": return <InstructionsScreen />;
+      case "fees": return <FeesScreen />;
+      case "tasks": return <TasksScreen />;
+      case "reports": return <ReportsScreen />;
+      default: return <DashboardScreen setActive={setActive} />;
+    }
+  }, [active, selectedClient]);
+
+  return (
+    <div className={`min-h-screen ${navy} text-white`}>
+      <div className="border-b border-white/10 p-6">
+        <AdviserLandingSection setActive={setActive} />
+      </div>
+      <div className="flex min-h-screen">
+        <AdviserSidebar active={active} setActive={setActive} />
+        <main className="flex-1 overflow-hidden">
+          <TopBar />
+          <div className="p-5 md:p-8">{screen}</div>
+        </main>
+      </div>
+    </div>
+  );
+}
