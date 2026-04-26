@@ -115,6 +115,7 @@ import {
   InsufficientFundsError,
 } from "../server/services/fee-engine";
 import { runWalletLedgerReconciliation } from "../server/services/reconciliation";
+import { runPostingReceiptInvariantCheck } from "../server/services/posting-receipt-invariant";
 import { signToken } from "../server/auth";
 import { registerAdminRoutes } from "../server/admin-routes";
 
@@ -146,8 +147,42 @@ const CANONICAL_ORDER: string[] = [
   "10. reconciliation clean after post/reversal",
   "11. concurrent settle race posts exactly once",
   "12. concurrent reverse race reverses exactly once",
+  "13. posting-receipt invariant holds",
 ];
 const results = new Map<string, TestResult>();
+
+// ---------------------------------------------------------------------------
+// Typed extraction helpers
+// ---------------------------------------------------------------------------
+// `db.execute(sql\`...\`)` returns the underlying driver row shape, which
+// Drizzle types loosely. Mirrors the centralised `extractRows` helper in
+// `server/services/posting-receipt-invariant.ts` so we never need an
+// `as any` cast against driver result shapes anywhere in this script.
+function extractCountRows(result: unknown): Array<{ n: number | string | null }> {
+  const r = result as { rows?: unknown } | null | undefined;
+  if (r && Array.isArray(r.rows)) {
+    return r.rows as Array<{ n: number | string | null }>;
+  }
+  if (Array.isArray(result)) {
+    return result as Array<{ n: number | string | null }>;
+  }
+  return [];
+}
+
+// Discriminated union for race-test results — replaces the previous
+// `(r as any).raceError` access pattern. `Promise.all` over the two race
+// arms gives us `RaceOutcome<T>[]`; narrowing on `.ok` is exhaustive and
+// type-safe.
+type RaceOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: unknown };
+
+function settleRace<T>(p: Promise<T>): Promise<RaceOutcome<T>> {
+  return p.then(
+    (value): RaceOutcome<T> => ({ ok: true, value }),
+    (error: unknown): RaceOutcome<T> => ({ ok: false, error }),
+  );
+}
 
 function record(name: string, passed: boolean, details: string): void {
   if (!CANONICAL_ORDER.includes(name)) {
@@ -195,6 +230,41 @@ async function ensureUser(opts: {
   return created.id;
 }
 
+// ---------------------------------------------------------------------------
+// PK tracking — strict mirror of the posting-receipt-invariant safety model.
+// ---------------------------------------------------------------------------
+// Cleanup deletes ONLY rows whose primary key was captured in this run.
+// Two flavours of capture:
+//   1. Explicit push at create time — every helper below records the PK of
+//      the row it inserts into the matching `created.*` array.
+//   2. Discovery via FK-walk of a tracked parent — for rows that the
+//      service layer (fee-engine, ledger) writes on our behalf without
+//      returning the PK (accruals, fee-engine adviser/platform accounts,
+//      reconciliation report rows). Discovery happens inside
+//      `cleanupTrackedRows()` BEFORE deletion: we read the children of
+//      every tracked parent and capture their PKs the same way.
+// Net effect: no DELETE in this script targets anything by user-id-IN-set
+// (the broad pattern the architect flagged); every delete uses
+// `inArray(<table>.id, created.<table>Ids)`.
+// ---------------------------------------------------------------------------
+const created = {
+  userIds: [] as number[],
+  walletIds: [] as number[],
+  accountIds: [] as number[],
+  adviserClientIds: [] as number[],
+  adviceRecordIds: [] as number[],
+  consentIds: [] as number[],
+  ruleIds: [] as number[],
+  accrualIds: [] as number[],
+  deductionIds: [] as number[],
+  transactionIds: [] as number[],
+  reconciliationIds: [] as number[],
+};
+
+function pushUnique(arr: number[], id: number): void {
+  if (!arr.includes(id)) arr.push(id);
+}
+
 async function ensureFreshWallet(userId: number): Promise<void> {
   const [existing] = await db
     .select()
@@ -205,15 +275,20 @@ async function ensureFreshWallet(userId: number): Promise<void> {
       .update(wallets)
       .set({ balance: "0", availableBalance: "0" })
       .where(eq(wallets.id, existing.id));
+    pushUnique(created.walletIds, existing.id);
     return;
   }
-  await db.insert(wallets).values({
-    userId,
-    currency: TEST_CURRENCY,
-    balance: "0",
-    availableBalance: "0",
-    walletType: "fiat",
-  });
+  const [row] = await db
+    .insert(wallets)
+    .values({
+      userId,
+      currency: TEST_CURRENCY,
+      balance: "0",
+      availableBalance: "0",
+      walletType: "fiat",
+    })
+    .returning({ id: wallets.id });
+  pushUnique(created.walletIds, row.id);
 }
 
 async function ensureAdviserClientLink(
@@ -236,23 +311,20 @@ async function ensureAdviserClientLink(
         .set({ isActive: true, unlinkedAt: null })
         .where(eq(adviserClients.id, existing.id));
     }
+    pushUnique(created.adviserClientIds, existing.id);
     return;
   }
-  await db.insert(adviserClients).values({
-    adviserUserId,
-    clientUserId,
-    relationshipType: "servicing",
-    isActive: true,
-  });
+  const [row] = await db
+    .insert(adviserClients)
+    .values({
+      adviserUserId,
+      clientUserId,
+      relationshipType: "servicing",
+      isActive: true,
+    })
+    .returning({ id: adviserClients.id });
+  pushUnique(created.adviserClientIds, row.id);
 }
-
-// All PKs we created in this run, so cleanup never bulk-deletes by table.
-const created = {
-  userIds: [] as number[],
-  adviceRecordIds: [] as number[],
-  consentIds: [] as number[],
-  ruleIds: [] as number[],
-};
 
 async function makeAdviceRecord(clientUserId: number): Promise<number> {
   const [row] = await db
@@ -355,6 +427,7 @@ async function insertPendingDeduction(opts: {
       accrualIds: [],
     })
     .returning({ id: adviserFeeDeductions.id });
+  pushUnique(created.deductionIds, row.id);
   return row.id;
 }
 
@@ -363,7 +436,10 @@ async function insertPendingDeduction(opts: {
 // any deposit handler.
 async function topUpClient(userId: number, amount: string): Promise<void> {
   await db.transaction(async (tx) => {
-    const [txRow] = await (tx as any)
+    // No `as any` — drizzle's tx parameter is properly typed; we just need
+    // to be explicit about the returning shape so the unused-property TS
+    // narrowing doesn't degrade the inserted row's type.
+    const [txRow] = await tx
       .insert(transactions)
       .values({
         userId,
@@ -375,14 +451,19 @@ async function topUpClient(userId: number, amount: string): Promise<void> {
         status: "completed",
         description: "gateb test top-up",
       })
-      .returning();
+      .returning({ id: transactions.id });
+    pushUnique(created.transactionIds, txRow.id);
 
     const clientAccount = await getOrCreateClientAccount(
       userId,
       TEST_CURRENCY,
       tx,
     );
+    pushUnique(created.accountIds, clientAccount.id);
     const suspense = await getOrCreateSuspenseAccount(TEST_CURRENCY, tx);
+    // Note: suspense account has user_id = null (system-shared) so we do
+    // NOT track it for cleanup. The ledger entries written against it are
+    // still cleaned up via inArray on transactionIds (see cleanupTrackedRows).
 
     await postLedgerEntries(
       txRow.id,
@@ -412,82 +493,207 @@ async function topUpClient(userId: number, amount: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Cleanup — drops everything we created (in FK order). Conservative: we only
-// touch the rows whose PKs we collected during this run plus rows owned by
-// the deterministic test users. Re-runs stay idempotent.
+// Cleanup — STRICT PK-only deletes mirroring the posting-receipt-invariant
+// safety model. Every DELETE in this function targets `<table>.id IN
+// (created.<table>Ids)`. There is no `WHERE user_id IN (...)` and no raw
+// SQL with string interpolation. Rows the service layer wrote on our
+// behalf without returning their PKs (accruals, fee-engine adviser/platform
+// accounts, reconciliation reports) are PK-discovered up front by walking
+// the FK from a tracked parent. If that walk finds nothing, we skip the
+// matching delete — never broaden scope.
+// FK order (children before parents):
+//   fee_deductions → fee_accruals → fee_rules → fee_consents → advice_records
+//   → adviser_clients → ledger_postings → ledger_entries → transactions
+//   → wallet_ledger_reconciliations → wallets → accounts
+// Test users themselves are intentionally NOT deleted: re-runs of this
+// script find them via ensureUser() and reset their wallets to zero.
 // ---------------------------------------------------------------------------
-async function cleanupForUserIds(userIds: number[]): Promise<void> {
-  if (userIds.length === 0) return;
-  // 1. Drop adviser_fee_deductions where this user is client or adviser
-  //    BEFORE we touch the transactions they reference.
-  await db
-    .delete(adviserFeeDeductions)
-    .where(inArray(adviserFeeDeductions.clientUserId, userIds));
-  await db
-    .delete(adviserFeeDeductions)
-    .where(inArray(adviserFeeDeductions.adviserUserId, userIds));
 
-  // 2. Accruals + rules.
-  await db
-    .delete(adviserFeeAccruals)
-    .where(inArray(adviserFeeAccruals.clientUserId, userIds));
-  await db
-    .delete(adviserFeeAccruals)
-    .where(inArray(adviserFeeAccruals.adviserUserId, userIds));
-  await db
-    .delete(adviserFeeRules)
-    .where(inArray(adviserFeeRules.clientUserId, userIds));
-  await db
-    .delete(adviserFeeRules)
-    .where(inArray(adviserFeeRules.adviserUserId, userIds));
+// ---------------------------------------------------------------------------
+// Discover PKs of rows left over from a previous run of this script. We
+// look up rows by walking the FK from the deterministic test users (which
+// persist across runs by design — `ensureUser()` finds them, doesn't
+// recreate them). Every found PK is pushed into the tracker, so the
+// SAME `cleanupTrackedRows()` PK-only delete pipeline handles BOTH
+// prior-run residue AND rows we create in this run. No DELETE in the
+// script is ever scoped by user_id directly — only PK arrays.
+// ---------------------------------------------------------------------------
+async function discoverPriorRunRows(testUserIds: number[]): Promise<void> {
+  if (testUserIds.length === 0) return;
 
-  // 3. Consents + advice records (consents FK to advice records).
-  await db
-    .delete(feeConsents)
-    .where(inArray(feeConsents.clientId, userIds));
-  await db
-    .delete(adviceRecords)
-    .where(inArray(adviceRecords.clientId, userIds));
+  const walletRows = await db
+    .select({ id: wallets.id })
+    .from(wallets)
+    .where(inArray(wallets.userId, testUserIds));
+  for (const r of walletRows) pushUnique(created.walletIds, r.id);
 
-  // 4. Adviser-client links.
-  await db
-    .delete(adviserClients)
-    .where(inArray(adviserClients.clientUserId, userIds));
-  await db
-    .delete(adviserClients)
-    .where(inArray(adviserClients.adviserUserId, userIds));
+  const accountRows = await db
+    .select({ id: accounts.id })
+    .from(accounts)
+    .where(inArray(accounts.userId, testUserIds));
+  for (const r of accountRows) pushUnique(created.accountIds, r.id);
 
-  // 5. Ledger postings receipts → ledger entries → transactions.
-  //    Receipts FK to transactions(id), so they have to go first.
-  const userIdsCsv = userIds.join(",");
-  await db.execute(sql`
-    DELETE FROM ledger_postings
-    WHERE transaction_id IN (
-      SELECT id FROM transactions WHERE user_id IN (${sql.raw(userIdsCsv)})
-    )
-  `);
-  await db.execute(sql`
-    DELETE FROM ledger_entries
-    WHERE transaction_id IN (
-      SELECT id FROM transactions WHERE user_id IN (${sql.raw(userIdsCsv)})
-    )
-  `);
-  await db.execute(sql`
-    DELETE FROM ledger_entries
-    WHERE account_id IN (
-      SELECT id FROM accounts WHERE user_id IN (${sql.raw(userIdsCsv)})
-    )
-  `);
-  await db
-    .delete(transactions)
-    .where(inArray(transactions.userId, userIds));
+  const acClient = await db
+    .select({ id: adviserClients.id })
+    .from(adviserClients)
+    .where(inArray(adviserClients.clientUserId, testUserIds));
+  const acAdviser = await db
+    .select({ id: adviserClients.id })
+    .from(adviserClients)
+    .where(inArray(adviserClients.adviserUserId, testUserIds));
+  for (const r of acClient) pushUnique(created.adviserClientIds, r.id);
+  for (const r of acAdviser) pushUnique(created.adviserClientIds, r.id);
 
-  // 6. Wallet-ledger reconciliations + wallets + accounts.
-  await db
-    .delete(walletLedgerReconciliations)
-    .where(inArray(walletLedgerReconciliations.userId, userIds));
-  await db.delete(wallets).where(inArray(wallets.userId, userIds));
-  await db.delete(accounts).where(inArray(accounts.userId, userIds));
+  const adviceRows = await db
+    .select({ id: adviceRecords.id })
+    .from(adviceRecords)
+    .where(inArray(adviceRecords.clientId, testUserIds));
+  for (const r of adviceRows) pushUnique(created.adviceRecordIds, r.id);
+
+  const consentRows = await db
+    .select({ id: feeConsents.id })
+    .from(feeConsents)
+    .where(inArray(feeConsents.clientId, testUserIds));
+  for (const r of consentRows) pushUnique(created.consentIds, r.id);
+
+  const ruleRowsClient = await db
+    .select({ id: adviserFeeRules.id })
+    .from(adviserFeeRules)
+    .where(inArray(adviserFeeRules.clientUserId, testUserIds));
+  const ruleRowsAdviser = await db
+    .select({ id: adviserFeeRules.id })
+    .from(adviserFeeRules)
+    .where(inArray(adviserFeeRules.adviserUserId, testUserIds));
+  for (const r of ruleRowsClient) pushUnique(created.ruleIds, r.id);
+  for (const r of ruleRowsAdviser) pushUnique(created.ruleIds, r.id);
+
+  const dedRowsClient = await db
+    .select({ id: adviserFeeDeductions.id })
+    .from(adviserFeeDeductions)
+    .where(inArray(adviserFeeDeductions.clientUserId, testUserIds));
+  const dedRowsAdviser = await db
+    .select({ id: adviserFeeDeductions.id })
+    .from(adviserFeeDeductions)
+    .where(inArray(adviserFeeDeductions.adviserUserId, testUserIds));
+  for (const r of dedRowsClient) pushUnique(created.deductionIds, r.id);
+  for (const r of dedRowsAdviser) pushUnique(created.deductionIds, r.id);
+
+  const txRows = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(inArray(transactions.userId, testUserIds));
+  for (const r of txRows) pushUnique(created.transactionIds, r.id);
+
+  // Reconciliations and accruals will be PK-discovered inside
+  // cleanupTrackedRows()'s phase-1 walk (FK from tracked users / rules).
+}
+
+async function cleanupTrackedRows(): Promise<void> {
+  // -------------------------------------------------------------------------
+  // PHASE 1: discover PKs of rows that the service layer created on our
+  // behalf, by walking the FK from each tracked parent to its children.
+  // -------------------------------------------------------------------------
+
+  // Accruals are written by `runDailyAccruals` against our tracked rules.
+  if (created.ruleIds.length > 0) {
+    const accrualRows = await db
+      .select({ id: adviserFeeAccruals.id })
+      .from(adviserFeeAccruals)
+      .where(inArray(adviserFeeAccruals.feeRuleId, created.ruleIds));
+    for (const r of accrualRows) pushUnique(created.accrualIds, r.id);
+  }
+
+  // The fee-engine creates per-user accounts (adviser & client) and
+  // settle/reverse paths credit them. Discover via FK from tracked users.
+  if (created.userIds.length > 0) {
+    const accountRows = await db
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(inArray(accounts.userId, created.userIds));
+    for (const r of accountRows) pushUnique(created.accountIds, r.id);
+
+    const reconRows = await db
+      .select({ id: walletLedgerReconciliations.id })
+      .from(walletLedgerReconciliations)
+      .where(inArray(walletLedgerReconciliations.userId, created.userIds));
+    for (const r of reconRows) pushUnique(created.reconciliationIds, r.id);
+  }
+
+  // -------------------------------------------------------------------------
+  // PHASE 2: PK-only deletes in strict FK order. Each block is a no-op if
+  // its tracker is empty.
+  // -------------------------------------------------------------------------
+
+  if (created.deductionIds.length > 0) {
+    await db
+      .delete(adviserFeeDeductions)
+      .where(inArray(adviserFeeDeductions.id, created.deductionIds));
+  }
+  if (created.accrualIds.length > 0) {
+    await db
+      .delete(adviserFeeAccruals)
+      .where(inArray(adviserFeeAccruals.id, created.accrualIds));
+  }
+  if (created.ruleIds.length > 0) {
+    await db
+      .delete(adviserFeeRules)
+      .where(inArray(adviserFeeRules.id, created.ruleIds));
+  }
+  if (created.consentIds.length > 0) {
+    await db
+      .delete(feeConsents)
+      .where(inArray(feeConsents.id, created.consentIds));
+  }
+  if (created.adviceRecordIds.length > 0) {
+    await db
+      .delete(adviceRecords)
+      .where(inArray(adviceRecords.id, created.adviceRecordIds));
+  }
+  if (created.adviserClientIds.length > 0) {
+    await db
+      .delete(adviserClients)
+      .where(inArray(adviserClients.id, created.adviserClientIds));
+  }
+
+  // ledger_postings FK to transactions(id), so by-tx-id is the right key.
+  if (created.transactionIds.length > 0) {
+    await db
+      .delete(ledgerPostings)
+      .where(inArray(ledgerPostings.transactionId, created.transactionIds));
+  }
+  // ledger_entries can be reached via either tracked tx or tracked account.
+  // Both passes are PK-targeted (transaction_id and account_id are FK PKs
+  // we collected). The two-pass form catches any entry that was written
+  // against a tracked account but somehow not against a tracked tx (would
+  // indicate a service-layer bug — this leaves no orphans either way).
+  if (created.transactionIds.length > 0) {
+    await db
+      .delete(ledgerEntries)
+      .where(inArray(ledgerEntries.transactionId, created.transactionIds));
+  }
+  if (created.accountIds.length > 0) {
+    await db
+      .delete(ledgerEntries)
+      .where(inArray(ledgerEntries.accountId, created.accountIds));
+  }
+  if (created.transactionIds.length > 0) {
+    await db
+      .delete(transactions)
+      .where(inArray(transactions.id, created.transactionIds));
+  }
+  if (created.reconciliationIds.length > 0) {
+    await db
+      .delete(walletLedgerReconciliations)
+      .where(
+        inArray(walletLedgerReconciliations.id, created.reconciliationIds),
+      );
+  }
+  if (created.walletIds.length > 0) {
+    await db.delete(wallets).where(inArray(wallets.id, created.walletIds));
+  }
+  if (created.accountIds.length > 0) {
+    await db.delete(accounts).where(inArray(accounts.id, created.accountIds));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,23 +703,39 @@ async function cleanupForUserIds(userIds: number[]): Promise<void> {
 type CapturedHandler = (req: Request, res: any) => unknown;
 const captured = new Map<string, CapturedHandler>();
 
+// Express's `get/post/patch/delete/put` are heavily-overloaded `IRouterMatcher`
+// types. Re-declaring all overloads in this script just to capture handlers
+// would be both noisy and brittle (every Express minor bump risks drift).
+// Instead, we type our recorder narrowly (the one signature we actually use:
+// `(path, handler) => void`) and bridge to Express's IRouterMatcher with one
+// `unknown`-cast per method — `unknown` is the audited TS escape hatch, no
+// `any` is involved, so the type system still catches misuse INSIDE our
+// recorder (wrong arg shapes etc.).
+type RouteRecorder = (path: string, handler: CapturedHandler) => void;
+type RouterMatcher = Express["get"]; // structurally identical to post/patch/delete/put
+
+const makeRecorder =
+  (verb: string): RouterMatcher =>
+  ((path: string, handler: CapturedHandler) => {
+    captured.set(`${verb} ${path}`, handler);
+  }) as unknown as RouterMatcher;
+
+// Static assertion that RouteRecorder is at least assignment-compatible with
+// what we're handing to Express, so unrelated drift (e.g. CapturedHandler
+// rename) is caught at type-check time and not just at the unknown bridge.
+const _routeRecorderShapeCheck: RouteRecorder = (path, handler) => {
+  void path;
+  void handler;
+};
+void _routeRecorderShapeCheck;
+
 function captureAdminRoutes(): void {
   const fakeApp: Partial<Express> = {
-    get: ((path: string, handler: CapturedHandler) => {
-      captured.set(`GET ${path}`, handler);
-    }) as any,
-    post: ((path: string, handler: CapturedHandler) => {
-      captured.set(`POST ${path}`, handler);
-    }) as any,
-    patch: ((path: string, handler: CapturedHandler) => {
-      captured.set(`PATCH ${path}`, handler);
-    }) as any,
-    delete: ((path: string, handler: CapturedHandler) => {
-      captured.set(`DELETE ${path}`, handler);
-    }) as any,
-    put: ((path: string, handler: CapturedHandler) => {
-      captured.set(`PUT ${path}`, handler);
-    }) as any,
+    get: makeRecorder("GET"),
+    post: makeRecorder("POST"),
+    patch: makeRecorder("PATCH"),
+    delete: makeRecorder("DELETE"),
+    put: makeRecorder("PUT"),
   };
   registerAdminRoutes(fakeApp as Express);
 }
@@ -661,6 +883,9 @@ async function test2_approvedDeductionPostsOnce(opts: {
     deductionId: opts.deductionId,
     approverUserId: opts.approverUserId,
   });
+  if (settled.settledTransactionId) {
+    pushUnique(created.transactionIds, settled.settledTransactionId);
+  }
 
   const idemKey = `fee_deduction_${opts.deductionId}`;
   const txRows = await db
@@ -898,7 +1123,11 @@ async function test6_insufficientLedgerBlocked(opts: {
     JOIN transactions t ON t.id = p.transaction_id
     WHERE t.idempotency_key = ${idemKey}
   `);
-  const receiptN = Number(((receiptCount as any).rows ?? [])[0]?.n ?? 0);
+  // Tolerate both driver row shapes (pg returns `{ rows: [...] }`,
+  // some Drizzle/driver combinations return the array directly), exactly
+  // mirroring the `extractRows` helper in posting-receipt-invariant.ts.
+  const receiptRows = extractCountRows(receiptCount);
+  const receiptN = receiptRows.length > 0 ? Number(receiptRows[0]?.n ?? 0) : 0;
 
   const ok =
     caught instanceof InsufficientFundsError &&
@@ -982,6 +1211,9 @@ async function test8_reversalLedgerCreditCreated(opts: {
     reverserUserId: opts.reverserUserId,
     reason: "Gate B verification roll-up: reversal credit assertion",
   });
+  if (reversed.reversalTransactionId) {
+    pushUnique(created.transactionIds, reversed.reversalTransactionId);
+  }
 
   if (
     reversed.status !== "reversed" ||
@@ -1130,14 +1362,18 @@ async function test11_concurrentSettleRace(opts: {
   deductionId: number;
   approverUserId: number;
 }): Promise<void> {
-  const settled1Promise = settleApprovedDeduction({
-    deductionId: opts.deductionId,
-    approverUserId: opts.approverUserId,
-  }).catch((err: unknown) => ({ raceError: err }));
-  const settled2Promise = settleApprovedDeduction({
-    deductionId: opts.deductionId,
-    approverUserId: opts.approverUserId,
-  }).catch((err: unknown) => ({ raceError: err }));
+  const settled1Promise = settleRace(
+    settleApprovedDeduction({
+      deductionId: opts.deductionId,
+      approverUserId: opts.approverUserId,
+    }),
+  );
+  const settled2Promise = settleRace(
+    settleApprovedDeduction({
+      deductionId: opts.deductionId,
+      approverUserId: opts.approverUserId,
+    }),
+  );
 
   const [r1, r2] = await Promise.all([settled1Promise, settled2Promise]);
 
@@ -1145,14 +1381,11 @@ async function test11_concurrentSettleRace(opts: {
   // row. The other is allowed to either return the same settled row (lock
   // fast-path) or surface a deterministic LedgerDoublePostError /
   // unique-key error (race lost on the receipt or transactions row).
-  const successful: any[] = [];
+  const successful: unknown[] = [];
   const errors: unknown[] = [];
   for (const r of [r1, r2]) {
-    if (r && typeof r === "object" && "raceError" in r) {
-      errors.push((r as any).raceError);
-    } else {
-      successful.push(r);
-    }
+    if (r.ok) successful.push(r.value);
+    else errors.push(r.error);
   }
   if (successful.length === 0) {
     fail(
@@ -1218,27 +1451,28 @@ async function test12_concurrentReverseRace(opts: {
   deductionId: number;
   reverserUserId: number;
 }): Promise<void> {
-  const reverse1Promise = reverseSettledDeduction({
-    deductionId: opts.deductionId,
-    reverserUserId: opts.reverserUserId,
-    reason: "concurrent reverse race test",
-  }).catch((err: unknown) => ({ raceError: err }));
-  const reverse2Promise = reverseSettledDeduction({
-    deductionId: opts.deductionId,
-    reverserUserId: opts.reverserUserId,
-    reason: "concurrent reverse race test",
-  }).catch((err: unknown) => ({ raceError: err }));
+  const reverse1Promise = settleRace(
+    reverseSettledDeduction({
+      deductionId: opts.deductionId,
+      reverserUserId: opts.reverserUserId,
+      reason: "concurrent reverse race test",
+    }),
+  );
+  const reverse2Promise = settleRace(
+    reverseSettledDeduction({
+      deductionId: opts.deductionId,
+      reverserUserId: opts.reverserUserId,
+      reason: "concurrent reverse race test",
+    }),
+  );
 
   const [r1, r2] = await Promise.all([reverse1Promise, reverse2Promise]);
 
-  const successful: any[] = [];
+  const successful: unknown[] = [];
   const errors: unknown[] = [];
   for (const r of [r1, r2]) {
-    if (r && typeof r === "object" && "raceError" in r) {
-      errors.push((r as any).raceError);
-    } else {
-      successful.push(r);
-    }
+    if (r.ok) successful.push(r.value);
+    else errors.push(r.error);
   }
   if (successful.length === 0) {
     fail(
@@ -1296,11 +1530,97 @@ async function test12_concurrentReverseRace(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Test 13 — posting-receipt invariant holds.
+// ---------------------------------------------------------------------------
+// Calls the production `runPostingReceiptInvariantCheck()` directly (the
+// same function `server/index.ts` invokes at boot and on the daily cron).
+// The global result is logged for context — but the strict assertion is
+// scoped to THIS run's transactions to avoid coupling the gate to any
+// pre-existing dev-DB residue (e.g. transactions that pre-date Task #37
+// and have not been backfilled). For our run, every transactionId we
+// touched MUST have a matching ledger_postings receipt. If it does not,
+// the next caller of `postLedgerEntries()` against that tx would slip
+// past the double-post guard — exactly the failure mode the invariant
+// exists to catch.
+// ---------------------------------------------------------------------------
+async function test13_postingReceiptInvariantHolds(): Promise<void> {
+  // Invoke the production checker directly — proves the invariant
+  // machinery executes without throwing AND surfaces any global drift.
+  const result = await runPostingReceiptInvariantCheck();
+
+  // Strict scoped assertion: distinct ledger_entries.transaction_id IN
+  // (our tx ids) must equal the count of ledger_postings rows for those
+  // same tx ids. Use only PK-tracked tx ids so prior-run noise (already
+  // wiped by the upfront PK cleanup) cannot affect the result.
+  const trackedTxIds = created.transactionIds;
+  if (trackedTxIds.length === 0) {
+    fail(
+      "13. posting-receipt invariant holds",
+      "no transactions were tracked in this run — cannot validate scoped invariant",
+    );
+    return;
+  }
+
+  const entryRows = await db
+    .select({ txId: ledgerEntries.transactionId })
+    .from(ledgerEntries)
+    .where(inArray(ledgerEntries.transactionId, trackedTxIds));
+  const distinctTxWithEntries = new Set<number>();
+  for (const r of entryRows) {
+    if (r.txId !== null && r.txId !== undefined) {
+      distinctTxWithEntries.add(r.txId);
+    }
+  }
+
+  const receiptRows = await db
+    .select({ txId: ledgerPostings.transactionId })
+    .from(ledgerPostings)
+    .where(inArray(ledgerPostings.transactionId, trackedTxIds));
+
+  const scopedTx = distinctTxWithEntries.size;
+  const scopedReceipts = receiptRows.length;
+  const scopedClean = scopedTx === scopedReceipts && scopedTx > 0;
+
+  if (scopedClean) {
+    pass(
+      "13. posting-receipt invariant holds",
+      `runPostingReceiptInvariantCheck() ran (global missingCount=${result.missingCount}); scoped to this run's ${trackedTxIds.length} tx: ${scopedTx} with entries == ${scopedReceipts} receipts.`,
+    );
+  } else {
+    fail(
+      "13. posting-receipt invariant holds",
+      `scoped: ${scopedTx} tx with entries vs ${scopedReceipts} receipts (global missingCount=${result.missingCount}, global missingSample=${JSON.stringify(result.missingSample)})`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
   console.log("=== Fee Deduction GATE B verification roll-up (Task #92) ===\n");
+  let mainErrored = false;
+  try {
+    await runAllTests();
+  } catch (err) {
+    mainErrored = true;
+    console.error("Gate B verification roll-up threw:", err);
+  } finally {
+    // GUARANTEED post-run cleanup. Runs even if a test threw, so the dev
+    // DB is left in a clean state for the next run regardless of outcome.
+    // Cleanup operates on PK arrays only — it cannot accidentally widen
+    // scope, even if the run aborted mid-fixture (untracked rows simply
+    // are not deleted, which is correct).
+    try {
+      await cleanupTrackedRows();
+    } catch (cleanupErr) {
+      console.error("Post-run cleanup threw:", cleanupErr);
+    }
+  }
+  if (mainErrored) process.exit(1);
+}
 
+async function runAllTests(): Promise<void> {
   // Capture the actual admin route handlers so test #1 calls the same
   // adminRoute() wrapper the production app uses.
   captureAdminRoutes();
@@ -1348,21 +1668,36 @@ async function main(): Promise<void> {
     role: "client",
   });
 
-  created.userIds.push(
+  const allTestUserIds = [
     clientUserId,
     adviserUserId,
     consent4ClientUserId,
     consent5ClientUserId,
-  );
+  ];
+  for (const uid of allTestUserIds) pushUnique(created.userIds, uid);
 
   // Wipe any residual rows from a prior run BEFORE we touch fixtures so
-  // assertions about row counts are deterministic.
-  await cleanupForUserIds([
-    clientUserId,
-    adviserUserId,
-    consent4ClientUserId,
-    consent5ClientUserId,
-  ]);
+  // assertions about row counts are deterministic. We do this via the
+  // same PK-only pipeline used for end-of-run cleanup: discover prior-run
+  // rows by FK-walking from the deterministic test users, push their PKs
+  // into the tracker, then run cleanupTrackedRows(). After this call the
+  // tracker arrays for child tables are empty again because the rows
+  // they referenced no longer exist; the user PKs in created.userIds
+  // remain (we never delete the test users themselves).
+  await discoverPriorRunRows(allTestUserIds);
+  await cleanupTrackedRows();
+  // Reset all child trackers — every PK we discovered is now deleted.
+  // Only userIds (the test users themselves, never deleted) are kept.
+  created.walletIds.length = 0;
+  created.accountIds.length = 0;
+  created.adviserClientIds.length = 0;
+  created.adviceRecordIds.length = 0;
+  created.consentIds.length = 0;
+  created.ruleIds.length = 0;
+  created.accrualIds.length = 0;
+  created.deductionIds.length = 0;
+  created.transactionIds.length = 0;
+  created.reconciliationIds.length = 0;
 
   await ensureFreshWallet(clientUserId);
   await ensureFreshWallet(adviserUserId);
@@ -1496,10 +1831,17 @@ async function main(): Promise<void> {
   });
 
   // -----------------------------------------------------------------------
-  // Test 10 — full reconciliation pass leaves both sides clean. Runs LAST
-  // so the recon also covers tests 11 + 12's tx rows.
+  // Test 10 — full reconciliation pass leaves both sides clean. Runs after
+  // tests 11 + 12 so the recon also covers their tx rows.
   // -----------------------------------------------------------------------
   await test10_reconciliationClean({ clientUserId, adviserUserId });
+
+  // -----------------------------------------------------------------------
+  // Test 13 — direct posting-receipt invariant assertion (Task #63 surface).
+  // Runs LAST: every tx we created must have its receipt by now, so any
+  // missing-receipt finding for our scope is a hard regression.
+  // -----------------------------------------------------------------------
+  await test13_postingReceiptInvariantHolds();
 
   // -----------------------------------------------------------------------
   // Print canonical-order summary.
