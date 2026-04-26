@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { CurrencyConfig } from '@/lib/types';
-import { Info, DollarSign, BarChart3, Landmark, ShieldCheck } from 'lucide-react';
+import { Info, DollarSign, BarChart3, Landmark } from 'lucide-react';
 import { useFxRate } from '@/hooks/use-fx-rates';
 import { useWallets } from '@/hooks/use-portfolio';
 
@@ -153,12 +153,17 @@ export default function Wallets() {
       </div>
 
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
-        <ShieldCheck className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
-        <div>
-          <p className="text-sm text-blue-800 font-medium">Important Disclosure</p>
-          <p className="text-sm text-blue-700 mt-1">
-            All positions shown are maintained with external regulated custodians and are <strong>not held by AMAX Wealth</strong>. 
-            This view is for reporting purposes only. Values are indicative, based on current market rates, and do not constitute financial advice.
+        <Info className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
+        <div className="space-y-2">
+          <p className="text-sm text-blue-800 font-medium">Important Disclosure — Non-Custodial Reporting View</p>
+          <p className="text-sm text-blue-700">
+            <strong>AMAX Global Pty Ltd (ABN 54 690 827 608) does not hold client funds.</strong> Balances shown reflect funds held with regulated banking partners and, for digital asset exposure,
+            with <strong>Independent Reserve Pty Ltd</strong> (AUSTRAC DCE registration <strong>DCE-100461150-001</strong>). AMAX acts as a remittance service provider and Digital Currency Exchange
+            (DCE) facilitator only. AMAX is not a custodian and does not operate a deposit-taking institution.
+          </p>
+          <p className="text-sm text-blue-700">
+            This view is for reporting purposes only. Values are indicative, based on current market rates, and <strong>do not constitute personal financial advice</strong>.
+            Account balances are available for instructed transactions subject to AML/CTF screening, KYC verification and Travel Rule obligations.
           </p>
         </div>
       </div>
@@ -317,9 +322,10 @@ export default function Wallets() {
       )}
 
       <div className="text-center text-xs text-gray-400 py-4 space-y-1">
-        <p>All positions are maintained with external regulated custodians and are not held by AMAX Wealth.</p>
-        <p>Values are indicative only and based on current market rates. This does not constitute financial advice.</p>
-        <p>AMAX Wealth operates as an Authorised Representative under Australian Financial Services Licence arrangements.</p>
+        <p>All positions are maintained with regulated banking partners and external Digital Currency Exchange providers — not held by AMAX.</p>
+        <p>Crypto exposure is held with Independent Reserve Pty Ltd (AUSTRAC DCE-100461150-001). Fiat balances are held with regulated partner banking institutions.</p>
+        <p>Values are indicative only and based on current market rates. This view does not constitute personal financial advice.</p>
+        <p>AMAX Global Pty Ltd (ABN 54 690 827 608) is registered with AUSTRAC as a remittance service provider and Digital Currency Exchange. AMAX Wealth Pty Ltd advisory services are provided under separate AFSL arrangements.</p>
       </div>
     </div>
   );

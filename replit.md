@@ -14,6 +14,24 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 2: Non-Custodial Wording + Dead-File Cleanup
+
+Session 2 brief from external reviewer was to remove pre-submit AMAX banking details (info@amaxglobal, Westpac BSB, "Send to AMAX PayID") and tighten non-custodial language. Investigation showed the active `/wallets` route is wired to `wallets-new.tsx` (a clean read-only Portfolio Overview with no deposit/withdraw modals), and the flagged custody language only existed in 11 dead files that App.tsx did not import. User chose Option B (delete dead files + strengthen active page).
+
+Changes:
+1. **Deleted 11 unused wallet files** (≈4,000 lines removed) — confirmed zero imports/routes/dynamic refs before deletion; pre- and post-deletion typecheck both clean (only the 2 pre-existing unrelated storage.ts:3270/3293 errors on applications/leads remain):
+   - `client/src/pages/wallets.tsx` (1,286 lines, 132 deposit/withdraw refs)
+   - `client/src/pages/wallets-new-simple.tsx` (735 lines, 71 deposit/withdraw refs)
+   - `client/src/pages/versions/wallets-v4.tsx`
+   - `client/src/pages/versions/wallets-v5.tsx` + 8 `(copy)` variants
+   - `client/src/pages/versions/README.md` and the now-empty `versions/` directory
+2. **Strengthened `wallets-new.tsx` disclosure** — replaced the existing single-paragraph "Important Disclosure" block and the page footer with institutional language naming AMAX Global Pty Ltd (ABN 54 690 827 608), confirming AMAX does not hold client funds, naming Independent Reserve Pty Ltd (AUSTRAC DCE-100461150-001) as the DCE counterparty for digital asset exposure, identifying AMAX as a remittance provider + DCE facilitator only, and re-asserting that the page does not constitute personal financial advice.
+3. **fx-exchange.tsx entity fix not required** — repo-wide search confirmed `AMAX Financial Pty Ltd` does not exist anywhere in the active codebase (the string only lived in the deleted dead files).
+
+Files touched: `client/src/pages/wallets-new.tsx`. Files deleted: 13 (above).
+
+Session 3 still pending: Phase 1 Drizzle schema (`users.role`, `isSuperseded` column on `aiRecommendations`, `wealthApplications`, `adviserProfiles`, `adviserClients`) + `AuthPayload`/JWT update.
+
 ## Recent Changes (April 2026) — Session 1: AI Advisory Lockdown
 
 User confirmed AI insights ARE personal advice under Corporations Act and chose Option 0c (rush full SOA stack — Path B). Until that infrastructure ships, the AI advisory surface is locked down to remove live regulatory exposure.
