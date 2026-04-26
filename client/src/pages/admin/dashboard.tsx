@@ -56,8 +56,21 @@ function fmt(d: string | null): string {
 
 export default function AdminDashboard() {
   const { data, isLoading } = useQuery<DashboardData>({ queryKey: ["/api/admin/dashboard"] });
+  // Task #68 — keep the operator-alerts tile live so admins who leave the
+  // dashboard open still see new alerts without a manual reload. We override
+  // the queryClient defaults (`refetchInterval: false`, `staleTime: Infinity`,
+  // `refetchOnWindowFocus: false`) ONLY for this query so the polling actually
+  // takes effect. `isLoading` is true only on the very first fetch — every
+  // subsequent poll keeps the previous data on screen via `isFetching`, so the
+  // tile never flips back to a Skeleton and there is no layout flicker.
+  // `refetchIntervalInBackground` is left false (the default) so we don't
+  // hammer the API when the admin's tab is hidden; window-focus + the next
+  // 60s tick will catch them up the moment they return.
   const { data: alertsSummary, isLoading: alertsLoading } = useQuery<OperatorAlertsSummary>({
     queryKey: ["/api/admin/operator-alerts/summary"],
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    staleTime: 30_000,
   });
 
   return (
