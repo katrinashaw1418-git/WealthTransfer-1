@@ -1,0 +1,302 @@
+Next build:
+
+Gate B — Fee Deduction Execution
+
+Only proceed because:
+
+Ledger source of truth ✅
+Reconciliation ✅
+Posting safeguards ✅
+Transaction safety tests ✅
+Idempotency service extracted ✅
+Replit prompt
+Proceed with Gate B — Fee Deduction Execution.
+
+Purpose:
+Enable admin-approved fee deduction posting using the ledger system.
+
+Build:
+1. feeDeductionJournals table
+2. POST /api/admin/fee-deductions/:id/deduct
+3. POST /api/admin/fee-deductions/:id/reverse
+4. GET /api/admin/fee-deduction-journals
+5. update /admin/fees UI
+
+Rules:
+- admin/compliance_admin only
+- deduction must already be approved
+- re-check active signed fee consent immediately before posting
+- block if consent expired
+- block if consent withdrawn
+- block if client ledger balance is insufficient
+- prevent duplicate fee journal
+- create ledger debit via ledger service only
+- no direct wallet mutation
+- all writes atomic
+- all writes audit logged
+- no automatic deduction
+- no adviser-triggered deduction
+- no external payout
+- no bank transfer
+Code patches
+1. shared/schema.ts
+
+Add:
+
+export const feeDeductionJournals = pgTable("fee_deduction_journals", {
+  id: serial("id").primaryKey(),
+
+  deductionId: integer("deduction_id").references(() => adviserFeeDeductions.id).notNull(),
+
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+
+  grossAmount: decimal("gross_amount", { precision: 15, scale: 2 }).notNull(),
+  adviserAmount: decimal("adviser_amount", { precision: 15, scale: 2 }).notNull(),
+  platformAmount: decimal("platform_amount", { precision: 15, scale: 2 }).notNull(),
+
+  currency: text("currency").notNull().default("AUD"),
+
+  status: text("status").notNull().default("posted"),
+  // posted | reversed | failed
+
+  postedBy: integer("posted_by").references(() => users.id),
+  postedAt: timestamp("posted_at").defaultNow(),
+
+  reversedBy: integer("reversed_by").references(() => users.id),
+  reversedAt: timestamp("reversed_at"),
+  reversalReason: text("reversal_reason"),
+
+  ledgerReferenceId: text("ledger_reference_id"),
+}, (table) => ({
+  uniqDeductionJournal: uniqueIndex("fee_deduction_journals_deduction_uidx")
+    .on(table.deductionId),
+}));
+2. Deduct endpoint
+POST /api/admin/fee-deductions/:id/deduct
+
+Logic:
+
+1. require admin/compliance_admin
+2. load deduction
+3. require status = approved
+4. load linked fee consent
+5. require renewalStatus = active
+6. require no withdrawnAt
+7. require not expired
+8. check client ledger balance >= grossAmount
+9. ensure no feeDeductionJournal already exists
+10. in DB transaction:
+    - create ledger debit entry
+    - create feeDeductionJournal
+    - update deduction status = deducted
+    - audit log
+
+Use ledger service:
+
+const ledgerReferenceId = `fee_deduction:${deduction.id}`;
+
+await createLedgerEntry({
+  userId: deduction.clientUserId,
+  currency: deduction.currency,
+  amount: deduction.grossAmount,
+  direction: "debit",
+  entryType: "fee_deduction",
+  referenceType: "fee_deduction",
+  referenceId: ledgerReferenceId,
+  metadata: {
+    deductionId: deduction.id,
+    adviserUserId: deduction.adviserUserId,
+    feeConsentId: deduction.feeConsentId,
+  },
+});
+3. Reverse endpoint
+POST /api/admin/fee-deductions/:id/reverse
+
+Logic:
+
+1. require admin/compliance_admin
+2. deduction must be deducted
+3. journal must be posted
+4. create offsetting ledger credit
+5. mark journal reversed
+6. mark deduction reversed
+7. audit log
+
+Ledger:
+
+await createLedgerEntry({
+  userId: deduction.clientUserId,
+  currency: deduction.currency,
+  amount: deduction.grossAmount,
+  direction: "credit",
+  entryType: "fee_deduction_reversal",
+  referenceType: "fee_deduction_reversal",
+  referenceId: `fee_deduction_reversal:${deduction.id}`,
+  metadata: {
+    deductionId: deduction.id,
+    journalId: journal.id,
+    reason,
+  },
+});
+4. Admin journal API
+GET /api/admin/fee-deduction-journals
+
+Return:
+
+journal id
+deduction id
+client
+adviser
+gross amount
+adviser amount
+platform amount
+status
+posted at
+reversed at
+ledger reference
+5. UI patch
+
+Update:
+
+/admin/fees
+
+Deductions tab actions:
+
+Deduct
+Reverse
+View journal
+
+Button rules:
+
+Deduct only if status = approved
+Reverse only if status = deducted
+
+Danger modal before deduction:
+
+You are about to post a real fee deduction. This will create a ledger debit against the client account. Confirm active fee consent, available balance and reconciliation controls before continuing.
+Verification
+1. approved deduction can be posted once
+2. second post is blocked
+3. expired consent blocks deduction
+4. withdrawn consent blocks deduction
+5. insufficient ledger balance blocks deduction
+6. deduction creates client ledger debit
+7. reversal creates offsetting ledger credit
+8. no wallet.balance direct mutation
+9. reconciliation still passes after posting/reversal
+
+Hard stop after this:
+
+No external payout.
+No bank transfer.
+No automatic monthly sweep.
+next step and code pathes
+
+Next step:
+
+Gate B Verification + Safety Test Script
+
+Before payout reporting or external payment recording, prove Gate B works safely.
+
+Replit prompt
+Proceed with Gate B Verification + Safety Test Script.
+
+Purpose:
+Verify fee deduction execution is admin-only, consent-gated, ledger-only, idempotent, reversible and reconciliation-safe.
+
+Add:
+1. scripts/test-fee-deduction-gate-b.ts
+2. PASS/FAIL output
+3. non-zero exit code on failure
+4. replit.md verification notes
+
+Tests:
+- non-admin cannot deduct
+- approved deduction can post once
+- second deduction attempt is blocked
+- expired consent blocks deduction
+- withdrawn consent blocks deduction
+- insufficient ledger balance blocks deduction
+- posted deduction creates ledger debit
+- reversal creates offsetting ledger credit
+- wallet.balance is not directly mutated
+- reconciliation detects no unexplained drift after post/reversal
+
+Do not build:
+- payout reporting
+- external payment recording
+- bank transfer
+- automatic monthly sweep
+Code patches
+1. Create script
+scripts/test-fee-deduction-gate-b.ts
+
+Structure:
+
+type TestResult = {
+  name: string;
+  passed: boolean;
+  details?: string;
+};
+
+const results: TestResult[] = [];
+
+function pass(name: string, details?: string) {
+  results.push({ name, passed: true, details });
+}
+
+function fail(name: string, details?: string) {
+  results.push({ name, passed: false, details });
+}
+
+async function run() {
+  // setup deterministic admin, adviser, client
+  // create active signed fee consent
+  // create approved fee deduction
+  // seed ledger credit for client
+  // run deduct
+  // assert ledger debit exists
+  // assert journal exists
+  // assert duplicate blocked
+  // reverse
+  // assert ledger credit reversal exists
+  // run expired/withdrawn/insufficient scenarios
+
+  for (const r of results) {
+    console.log(`${r.passed ? "PASS" : "FAIL"} ${r.name}${r.details ? ` — ${r.details}` : ""}`);
+  }
+
+  const failed = results.filter(r => !r.passed);
+
+  if (failed.length > 0) {
+    console.error(`\n${failed.length} Gate B test(s) failed.`);
+    process.exit(1);
+  }
+
+  console.log("\nALL GATE B FEE DEDUCTION TESTS PASSED ✅");
+}
+
+run().catch((err) => {
+  console.error("Gate B fee deduction test crashed:", err);
+  process.exit(1);
+});
+2. Required final output
+PASS non-admin cannot deduct
+PASS approved deduction posts once
+PASS duplicate deduction blocked
+PASS expired consent blocked
+PASS withdrawn consent blocked
+PASS insufficient ledger balance blocked
+PASS ledger debit created
+PASS reversal ledger credit created
+PASS wallet balance not directly mutated
+PASS reconciliation clean after post/reversal
+
+ALL GATE B FEE DEDUCTION TESTS PASSED ✅
+Hard stop
+If any Gate B test fails, do not proceed to payout reporting.
+
+After this passes:
+
+Fee Reconciliation + Payout Reporting

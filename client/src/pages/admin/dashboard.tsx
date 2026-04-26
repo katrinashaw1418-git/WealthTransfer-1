@@ -150,7 +150,7 @@ export default function AdminDashboard() {
                   return (
                     <Link
                       key={sev}
-                      href={`/admin/operator-alerts?severity=${sev}`}
+                      href={`/admin/operator-alerts?severity=${sev}&window=24h`}
                     >
                       <a
                         data-testid={`tile-operator-alert-${sev}`}

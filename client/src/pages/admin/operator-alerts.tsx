@@ -117,6 +117,42 @@ function normalizeSeverity(raw: string | null): string {
   return SEVERITY_ANY;
 }
 
+// Task #69 — datetime-local inputs need `YYYY-MM-DDTHH:mm` in *local* time.
+// Convert the server-side ISO/UTC value back to the user's local clock so
+// the picker shows what they typed; convert local input back to ISO when
+// sending to the server.
+function toLocalInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+function fromLocalInput(value: string): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toISOString();
+}
+
+// Resolve the dashboard tile's `?window=24h|7d` shortcut to a `from`
+// datetime-local string. The dashboard tile shows two windowed counts and
+// links here with the window the admin clicked, so they land on a view
+// already scoped to the same period.
+function windowToFrom(raw: string | null): string {
+  if (raw === "24h") return toLocalInput(new Date(Date.now() - 24 * 60 * 60 * 1000));
+  if (raw === "7d") return toLocalInput(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
+  return "";
+}
+
+function rawToInput(raw: string | null): string {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return "";
+  return toLocalInput(d);
+}
+
 async function copyToClipboard(text: string): Promise<boolean> {
   try {
     if (
@@ -160,20 +196,36 @@ export default function AdminOperatorAlerts() {
   const initialSeverity = normalizeSeverity(initialParams.get("severity"));
   const initialSource = (initialParams.get("source") ?? "").slice(0, 128);
   const initialQ = (initialParams.get("q") ?? "").slice(0, 200);
+  // `from`/`to` win over the `window` shortcut so a deep link with explicit
+  // bounds is never silently overridden by a stale shortcut.
+  const initialFrom =
+    rawToInput(initialParams.get("from")) || windowToFrom(initialParams.get("window"));
+  const initialTo = rawToInput(initialParams.get("to"));
 
   const [sourceInput, setSourceInput] = useState(initialSource);
   const [severityInput, setSeverityInput] = useState<string>(initialSeverity);
   const [searchInput, setSearchInput] = useState(initialQ);
+  const [fromInput, setFromInput] = useState(initialFrom);
+  const [toInput, setToInput] = useState(initialTo);
   const [appliedSource, setAppliedSource] = useState(initialSource);
   const [appliedSeverity, setAppliedSeverity] = useState<string>(initialSeverity);
   const [appliedSearch, setAppliedSearch] = useState(initialQ);
+  const [appliedFrom, setAppliedFrom] = useState(initialFrom);
+  const [appliedTo, setAppliedTo] = useState(initialTo);
   const [page, setPage] = useState(1);
   const [selectedAlert, setSelectedAlert] = useState<OperatorAlertRow | null>(null);
   const limit = 50;
 
   const queryKey = [
     "/api/admin/operator-alerts",
-    { source: appliedSource, severity: appliedSeverity, q: appliedSearch, page },
+    {
+      source: appliedSource,
+      severity: appliedSeverity,
+      q: appliedSearch,
+      from: appliedFrom,
+      to: appliedTo,
+      page,
+    },
   ];
 
   function getAuthHeaders(): Record<string, string> {
@@ -194,6 +246,10 @@ export default function AdminOperatorAlerts() {
       if (appliedSource.trim()) params.set("source", appliedSource.trim());
       if (appliedSeverity !== SEVERITY_ANY) params.set("severity", appliedSeverity);
       if (appliedSearch.trim()) params.set("q", appliedSearch.trim());
+      const fromIso = fromLocalInput(appliedFrom);
+      const toIso = fromLocalInput(appliedTo);
+      if (fromIso) params.set("from", fromIso);
+      if (toIso) params.set("to", toIso);
       params.set("page", String(page));
       params.set("limit", String(limit));
       const res = await fetch(`/api/admin/operator-alerts?${params.toString()}`, {
@@ -224,9 +280,13 @@ export default function AdminOperatorAlerts() {
     setSourceInput("");
     setSeverityInput(SEVERITY_ANY);
     setSearchInput("");
+    setFromInput("");
+    setToInput("");
     setAppliedSource("");
     setAppliedSeverity(SEVERITY_ANY);
     setAppliedSearch("");
+    setAppliedFrom("");
+    setAppliedTo("");
     setPage(1);
   }
 
@@ -234,6 +294,8 @@ export default function AdminOperatorAlerts() {
     setAppliedSource(sourceInput);
     setAppliedSeverity(severityInput);
     setAppliedSearch(searchInput);
+    setAppliedFrom(fromInput);
+    setAppliedTo(toInput);
     setPage(1);
   }
 
@@ -315,6 +377,111 @@ export default function AdminOperatorAlerts() {
               <Button variant="outline" onClick={clearFilters} data-testid="button-clear-filters">
                 <X className="h-4 w-4" />
               </Button>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-3">
+            <div className="flex flex-col gap-1">
+              <label
+                htmlFor="filter-from"
+                className="text-xs font-medium text-slate-600"
+              >
+                From
+              </label>
+              <Input
+                id="filter-from"
+                type="datetime-local"
+                value={fromInput}
+                onChange={(e) => setFromInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyFilters();
+                }}
+                data-testid="input-filter-from"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label
+                htmlFor="filter-to"
+                className="text-xs font-medium text-slate-600"
+              >
+                To
+              </label>
+              <Input
+                id="filter-to"
+                type="datetime-local"
+                value={toInput}
+                onChange={(e) => setToInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyFilters();
+                }}
+                data-testid="input-filter-to"
+              />
+            </div>
+            <div className="sm:col-span-2 flex items-end gap-2 flex-wrap">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const from = toLocalInput(new Date(Date.now() - 24 * 60 * 60 * 1000));
+                  setFromInput(from);
+                  setToInput("");
+                  setAppliedFrom(from);
+                  setAppliedTo("");
+                  setPage(1);
+                }}
+                data-testid="button-range-24h"
+              >
+                Last 24h
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const from = toLocalInput(
+                    new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+                  );
+                  setFromInput(from);
+                  setToInput("");
+                  setAppliedFrom(from);
+                  setAppliedTo("");
+                  setPage(1);
+                }}
+                data-testid="button-range-7d"
+              >
+                Last 7d
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const from = toLocalInput(
+                    new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+                  );
+                  setFromInput(from);
+                  setToInput("");
+                  setAppliedFrom(from);
+                  setAppliedTo("");
+                  setPage(1);
+                }}
+                data-testid="button-range-30d"
+              >
+                Last 30d
+              </Button>
+              {(appliedFrom || appliedTo) && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setFromInput("");
+                    setToInput("");
+                    setAppliedFrom("");
+                    setAppliedTo("");
+                    setPage(1);
+                  }}
+                  data-testid="button-clear-range"
+                >
+                  Clear range
+                </Button>
+              )}
             </div>
           </div>
         </CardContent>

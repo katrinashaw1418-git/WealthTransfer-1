@@ -22,7 +22,7 @@
 
 import type { Express, Request } from "express";
 import { z } from "zod";
-import { and, asc, desc, eq, ilike, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import {
@@ -1520,6 +1520,8 @@ export function registerAdminRoutes(app: Express): void {
       const sourceRaw = typeof req.query.source === "string" ? req.query.source.trim() : "";
       const severityRaw = typeof req.query.severity === "string" ? req.query.severity.trim() : "";
       const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      const fromRaw = typeof req.query.from === "string" ? req.query.from.trim() : "";
+      const toRaw = typeof req.query.to === "string" ? req.query.to.trim() : "";
       // Allow-list severity to the four supported values so a typo can never
       // reach the DB and a malicious client can never inject an arbitrary
       // value past the filter.
@@ -1535,6 +1537,17 @@ export function registerAdminRoutes(app: Express): void {
       // Bound search length similarly; ILIKE %…% can't use the existing
       // indexes so we keep the input small to keep the seq scan cheap.
       const validQ = qRaw.length > 0 && qRaw.length <= 200 ? qRaw : null;
+      // Date range — Task #69. Bound to 64 chars so a malformed querystring
+      // can never reach the Date constructor with megabytes of input. Use
+      // the parsed Date directly in the WHERE so the existing
+      // operator_alerts_created_at_idx index supports the range scan.
+      const parseBound = (raw: string): Date | null => {
+        if (raw.length === 0 || raw.length > 64) return null;
+        const d = new Date(raw);
+        return Number.isNaN(d.getTime()) ? null : d;
+      };
+      const fromDate = parseBound(fromRaw);
+      const toDate = parseBound(toRaw);
 
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
       const page = Math.max(Number(req.query.page) || 1, 1);
@@ -1543,6 +1556,8 @@ export function registerAdminRoutes(app: Express): void {
       const conditions: SQL[] = [];
       if (validSource) conditions.push(eq(operatorAlerts.source, validSource));
       if (validSeverity) conditions.push(eq(operatorAlerts.severity, validSeverity));
+      if (fromDate) conditions.push(gte(operatorAlerts.createdAt, fromDate));
+      if (toDate) conditions.push(lte(operatorAlerts.createdAt, toDate));
       if (validQ) {
         // Escape LIKE meta-characters (\, %, _) so a literal "100%" is
         // matched literally rather than as a wildcard. The pattern is then
