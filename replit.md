@@ -3,6 +3,38 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Session 14: Token-gated registration after admin approval
+
+### What was missing
+Sessions 12–13 built the admin approval pipeline, but an approved applicant had no way to actually create their account — the public `/api/auth/register` route only verified that an `application` row was approved, with no binding back to a specific approval event. Admins also had no way to onboard advisers (the legacy register flow is client-only by construction).
+
+### What was built
+- **`registrationTokens` table** (`shared/schema.ts`) — stores `SHA-256(token)` only, plus `email`, `role`, `relatedEntityType/Id`, optional `adviserUserId` (for client→adviser auto-link), `expiresAt` (default 48h, capped 1–168h), `usedAt`, `createdBy`.
+- **DB-enforced "one live token per email"** via partial unique index `WHERE used_at IS NULL`. Concurrent issuers race → loser gets 23505, server translates to 409. Verified with a 5-way parallel-issuance test ending with exactly 1 active token.
+- **Atomic approve gate** — `POST /api/admin/applications/:id/approve` updates with a `WHERE status NOT IN ('approved','rejected')` predicate inside the transaction; if two operators race, the loser sees `[]` back and the tx throws 409 (no double-mint).
+- **`POST /api/admin/invite`** — admin-issued direct invites for clients OR advisers. `adviserUserId` only valid when `role='client'` and the referenced user must actually be an adviser.
+- **`GET /api/auth/invite/validate?token=…`** (public, rate-limited 30/min) — hash-lookup, checks not-used + not-expired, returns `{ valid, email, role, expiresAt }`. Audit row inserted via direct `db.insert` (fail-closed) — response only succeeds if the audit lands.
+- **`POST /api/auth/register/invite`** (public, rate-limited 10/15min) — single tx: `SELECT … FOR UPDATE` on the token row, re-checks expiry/used, creates user with role+email FROM TOKEN (request body fields ignored), creates portfolio, optional `adviser_clients` link, marks `usedAt`, audits `account_registered`, returns JWT for auto-login.
+- **Frontend `/register/invite`** (`client/src/pages/register-invite.tsx`) — validates on mount, shows read-only email + role badge + form for username/firstName/lastName/password, auto-logs in via new `loginWithJwt()` on auth context, role-redirects (adviser→/adviser, client→/dashboard).
+- **Admin UX** — applications page shows a one-time copy-to-clipboard dialog with the registration link after approve. (A "Send Invite" button on the advisers page is intentionally deferred — the backend endpoint exists.)
+
+### Security properties (verified)
+- Raw token bytes never persisted (SHA-256 only, raw shown in API response exactly once).
+- **Email + role immutable** — server takes both from the locked token row, never from the request body. Verified: a body containing `role: "adviser"` and a different `email` is silently ignored; the new user gets the token's identity.
+- **Single-use enforced** — `usedAt` set inside the same tx as user creation; `FOR UPDATE` row lock prevents the consumption race.
+- **Adviser-role tokens admin-only** — `/api/admin/invite` is gated by `requireRole("admin")`; `/api/auth/register/invite` accepts whatever role the token carries but tokens are only minted via admin-gated paths.
+- **All admin writes** wrapped in `db.transaction` with `auditTx` (fail-closed pattern from Session 13). Read-side audit (`invite_token_viewed`) also fail-closed.
+- **Audit chain**: `admin_application_approved` → `invite_created` → `invite_token_viewed` → `account_registered` — each links forward via `entityId`/`metadata`.
+
+### Existing flows preserved
+- Legacy `/api/auth/register` (anonymous signup gated by approved-application-by-email) is **untouched** and still works for backward compatibility. Locking it down is a follow-up — the new token flow is the canonical path going forward.
+- No fee, money-movement, KYC, or SoA logic touched in this session.
+
+### Known follow-ups
+- Add "Send Invite" admin UX on advisers page (backend ready).
+- Consider deprecating legacy `/api/auth/register` once all clients have transitioned to the token flow.
+- Pre-existing TS errors at `server/storage.ts:3289,3312` are unrelated to this session and remain.
+
 ## Recent Changes (April 2026) — Session 13: Admin Shell (AFSL operations)
 
 ### What admins do

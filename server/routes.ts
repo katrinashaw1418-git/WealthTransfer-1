@@ -14,7 +14,10 @@ import {
   idempotencyKeys,
   auditLogs,
   passwordResetTokens,
+  registrationTokens,
+  adviserClients,
   users,
+  portfolios,
   leads,
   funnelEvents,
   applications as applicationsTable,
@@ -896,6 +899,255 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (error.code === "23505") {
         return res.status(409).json({ error: "An account with this email already exists" });
       }
+      res.status(500).json({ error: "Registration failed. Please try again." });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Session 14 — Token-gated registration (admin invites + approved applications)
+  //
+  // Two public endpoints, both look up by SHA-256(token):
+  //   GET  /api/auth/invite/validate?token=...  — surface email + role for the form
+  //   POST /api/auth/register/invite            — actually create the account
+  //
+  // Hard rules enforced server-side:
+  //   - Token is single-use (usedAt set inside the same registration tx).
+  //   - Token expires after 48h (server-side; client display only).
+  //   - email + role come from the token row, NEVER from form input.
+  //   - email must not already be a user.
+  //   - If role=client and adviserUserId set, the new client is auto-linked to
+  //     that adviser via adviser_clients in the same tx.
+  //   - All steps audited (invite_token_viewed, account_registered).
+  // ---------------------------------------------------------------------------
+
+  // Cheap rate limit — viewing/validating tokens is essentially free, but cap to
+  // prevent enumeration sweeps.
+  const inviteValidateLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests. Please slow down." },
+  });
+
+  app.get("/api/auth/invite/validate", inviteValidateLimiter, async (req, res) => {
+    try {
+      const rawToken = String(req.query.token || "");
+      if (!rawToken || rawToken.length < 16) {
+        return res.status(400).json({ error: "Missing or invalid token." });
+      }
+      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+      const [tok] = await db
+        .select()
+        .from(registrationTokens)
+        .where(eq(registrationTokens.tokenHash, tokenHash))
+        .limit(1);
+
+      if (!tok) {
+        return res.status(404).json({ valid: false, error: "Invalid registration link." });
+      }
+      if (tok.usedAt) {
+        return res.status(410).json({ valid: false, error: "This registration link has already been used." });
+      }
+      if (tok.expiresAt.getTime() < Date.now()) {
+        return res.status(410).json({ valid: false, error: "This registration link has expired." });
+      }
+
+      // Audit the view fail-closed: a direct insert (not writeAuditLog, which
+      // swallows errors) so the response only succeeds if the audit row lands.
+      // The viewer is unauthenticated; the token hash + email pin the row to the
+      // identity behind the link.
+      await db.insert(auditLogs).values({
+        userId: null,
+        action: "invite_token_viewed",
+        entityType: "registration_token",
+        entityId: String(tok.id),
+        metadata: { email: tok.email, role: tok.role },
+        ipAddress: req.ip || null,
+      });
+
+      res.json({
+        valid: true,
+        email: tok.email,
+        role: tok.role,
+        // expose expiry so the form can show a countdown / warning
+        expiresAt: tok.expiresAt.toISOString(),
+      });
+    } catch (error: any) {
+      console.error("[invite/validate] error:", error);
+      res.status(500).json({ error: "Failed to validate invitation." });
+    }
+  });
+
+  const registerInviteLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many registration attempts. Please try again later." },
+  });
+
+  const registerInviteSchema = z.object({
+    token: z.string().min(16).max(128),
+    username: z
+      .string()
+      .min(3, "username must be at least 3 chars")
+      .max(50)
+      .regex(/^[a-zA-Z0-9_.-]+$/, "username may only contain letters, numbers, _, ., -"),
+    password: z.string().min(8, "password must be at least 8 chars").max(128),
+    firstName: z.string().min(1).max(100),
+    lastName: z.string().min(1).max(100),
+  });
+
+  app.post("/api/auth/register/invite", registerInviteLimiter, async (req, res) => {
+    try {
+      const parsed = registerInviteSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: "Invalid payload: " + parsed.error.issues.map((i) => i.message).join("; "),
+        });
+      }
+      const { token: rawToken, username, password, firstName, lastName } = parsed.data;
+
+      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+
+      // Pre-flight checks outside the tx so we can return clean error codes.
+      // Final atomicity is enforced inside the tx (re-check after locking).
+      const [tok] = await db
+        .select()
+        .from(registrationTokens)
+        .where(eq(registrationTokens.tokenHash, tokenHash))
+        .limit(1);
+      if (!tok) {
+        return res.status(404).json({ error: "Invalid registration link." });
+      }
+      if (tok.usedAt) {
+        return res.status(410).json({ error: "This registration link has already been used." });
+      }
+      if (tok.expiresAt.getTime() < Date.now()) {
+        return res.status(410).json({ error: "This registration link has expired." });
+      }
+
+      // Username must be globally unique.
+      const usernameTaken = await storage.getUserByUsername(username);
+      if (usernameTaken) {
+        return res.status(409).json({ error: "That username is already taken." });
+      }
+
+      // Email must not already belong to a real user.
+      const existingByEmail = await storage.getUserByEmail(tok.email);
+      if (existingByEmail) {
+        return res.status(409).json({ error: "An account with this email already exists." });
+      }
+
+      const hashed = await hashPassword(password);
+
+      const created = await db.transaction(async (tx) => {
+        // Re-fetch + lock the token row to guarantee single-use even under races.
+        const [locked] = await (tx as any)
+          .select()
+          .from(registrationTokens)
+          .where(eq(registrationTokens.tokenHash, tokenHash))
+          .for("update")
+          .limit(1);
+        if (!locked || locked.usedAt || locked.expiresAt.getTime() < Date.now()) {
+          throw Object.assign(new Error("This registration link is no longer valid."), { status: 410 });
+        }
+
+        const [newUser] = await (tx as any)
+          .insert(users)
+          .values({
+            username,
+            email: locked.email.toLowerCase(),
+            password: hashed,
+            firstName,
+            lastName,
+            // Role is taken from the (admin-issued) token, NOT from the form.
+            role: locked.role,
+            kycStatus: "pending",
+            userTier: "standard",
+            // Token issuance proves the inviter trusts the email; skip a second
+            // OTP round-trip so the user lands logged in.
+            emailVerified: true,
+          })
+          .returning();
+
+        // All real users get a portfolio shell (matches /api/auth/register flow).
+        await (tx as any).insert(portfolios).values({
+          userId: newUser.id,
+          totalValue: "0.00",
+          cryptoValue: "0.00",
+          stablecoinValue: "0.00",
+          fiatValue: "0.00",
+          investmentValue: "0.00",
+          monthlyPnl: "0.00",
+          monthlyPnlPercent: "0.00",
+        });
+
+        // Optional adviser auto-link (only for client invites with adviserUserId).
+        if (locked.role === "client" && locked.adviserUserId) {
+          await (tx as any).insert(adviserClients).values({
+            adviserUserId: locked.adviserUserId,
+            clientUserId: newUser.id,
+            relationshipType: "servicing",
+            isActive: true,
+          });
+        }
+
+        await (tx as any)
+          .update(registrationTokens)
+          .set({ usedAt: new Date() })
+          .where(eq(registrationTokens.id, locked.id));
+
+        // Audit the registration. Use the new user's own id so the row is
+        // discoverable from their account history.
+        await (tx as any).insert(auditLogs).values({
+          userId: newUser.id,
+          action: "account_registered",
+          entityType: "user",
+          entityId: String(newUser.id),
+          metadata: {
+            via: "registration_token",
+            tokenId: locked.id,
+            role: locked.role,
+            email: locked.email,
+            adviserAutoLinked: locked.role === "client" ? Boolean(locked.adviserUserId) : null,
+            relatedEntityType: locked.relatedEntityType,
+            relatedEntityId: locked.relatedEntityId,
+          },
+          ipAddress: req.ip || null,
+        });
+
+        return newUser;
+      });
+
+      const jwt = signToken({
+        userId: created.id,
+        username: created.username,
+        email: created.email,
+        role: created.role,
+      });
+
+      return res.status(201).json({
+        token: jwt,
+        user: {
+          id: created.id,
+          username: created.username,
+          email: created.email,
+          firstName: created.firstName,
+          lastName: created.lastName,
+          role: created.role,
+          emailVerified: true,
+        },
+      });
+    } catch (error: any) {
+      if (error?.status) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      if (error?.code === "23505") {
+        return res.status(409).json({ error: "An account with this email or username already exists." });
+      }
+      console.error("[register/invite] error:", error);
       res.status(500).json({ error: "Registration failed. Please try again." });
     }
   });

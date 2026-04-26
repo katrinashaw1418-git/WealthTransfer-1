@@ -29,6 +29,9 @@ interface AuthContextValue {
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
   register: (data: { email: string; password: string; firstName: string; lastName: string }) => Promise<RegisterResult>;
+  // Session 14 — used after token-gated registration to seed auth state from a
+  // freshly-issued JWT without re-doing the password round-trip.
+  loginWithJwt: (jwt: string, freshUser: AuthUser) => void;
   refreshUser: () => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
@@ -115,6 +118,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }
 
+  function loginWithJwt(jwt: string, freshUser: AuthUser): void {
+    localStorage.setItem(TOKEN_KEY, jwt);
+    setToken(jwt);
+    setUser(freshUser);
+  }
+
   async function refreshUser(): Promise<void> {
     const stored = getStoredToken();
     if (!stored) {
@@ -149,7 +158,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, refreshUser, logout, isAuthenticated: !!user }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, register, loginWithJwt, refreshUser, logout, isAuthenticated: !!user }}>
       {children}
     </AuthContext.Provider>
   );

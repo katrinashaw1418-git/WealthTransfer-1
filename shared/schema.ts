@@ -280,6 +280,48 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
 
 export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 
+// Session 14 — Registration tokens (account registration after admin approval).
+// Single-use, 48h expiry. Stores SHA-256(token) — raw token returned ONCE on creation.
+// Email + role come from this table (admin-approved), NEVER from registration form input.
+// `relatedEntityType` is 'application' when the token was minted off an approved
+// application; null/'invite' when admin issued a direct invite. `adviserUserId` is
+// only set when role='client' and the inviter wants the new client auto-linked to
+// that adviser via adviser_clients on registration.
+export const registrationTokens = pgTable(
+  "registration_tokens",
+  {
+    id: serial("id").primaryKey(),
+    email: text("email").notNull(),
+    role: text("role").notNull(), // 'client' | 'adviser'
+    relatedEntityType: text("related_entity_type"), // 'application' | 'invite' | null
+    relatedEntityId: integer("related_entity_id"),
+    adviserUserId: integer("adviser_user_id").references(() => users.id),
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: timestamp("expires_at").notNull(),
+    usedAt: timestamp("used_at"),
+    createdBy: integer("created_by").references(() => users.id).notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    emailActiveIdx: index("registration_tokens_email_active_idx").on(table.email),
+    // Partial unique index: at most ONE live (unused) registration token per email
+    // at any time. The DB enforces the "only newest token is valid" invariant — if
+    // two issuers race, one of them gets a 23505 unique-violation and the
+    // surrounding transaction rolls back. Mappers translate this to a 409.
+    emailActiveUnique: uniqueIndex("registration_tokens_email_active_unique")
+      .on(table.email)
+      .where(sql`${table.usedAt} IS NULL`),
+  }),
+);
+
+export const insertRegistrationTokenSchema = createInsertSchema(registrationTokens).omit({
+  id: true,
+  createdAt: true,
+  usedAt: true,
+});
+export type InsertRegistrationToken = z.infer<typeof insertRegistrationTokenSchema>;
+export type RegistrationToken = typeof registrationTokens.$inferSelect;
+
 export const applications = pgTable("applications", {
   id: serial("id").primaryKey(),
   fullName: text("full_name").notNull(),

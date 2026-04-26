@@ -30,7 +30,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { CheckCircle2, XCircle, Copy, Check, LinkIcon } from "lucide-react";
 
 interface Application {
   id: number;
@@ -72,6 +72,15 @@ export default function AdminApplications() {
   const { toast } = useToast();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [actionTarget, setActionTarget] = useState<{ app: Application; mode: "approve" | "reject" } | null>(null);
+  // After a successful approve, show the (one-time) registration link to the admin.
+  // Set on approve mutation success and surfaced in a separate dialog.
+  const [issuedInvite, setIssuedInvite] = useState<{
+    email: string;
+    registrationUrl: string;
+    registrationToken: string;
+    expiresAt: string;
+  } | null>(null);
+  const [copied, setCopied] = useState(false);
   const [reviewNote, setReviewNote] = useState("");
 
   const queryKey = statusFilter === "all"
@@ -103,17 +112,27 @@ export default function AdminApplications() {
       const res = await apiRequest("POST", `/api/admin/applications/${id}/${mode}`, body);
       return res.json();
     },
-    onSuccess: (_data, vars) => {
+    onSuccess: (data, vars) => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/applications"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/dashboard"] });
       toast({
         title: vars.mode === "approve" ? "Application approved" : "Application rejected",
         description: vars.mode === "approve"
-          ? "The applicant can now register an account."
+          ? "Registration link generated — share it with the applicant."
           : "The applicant has been informed by audit-only flow.",
       });
       setActionTarget(null);
       setReviewNote("");
+      // Approve responses include a one-time registration link (Session 14).
+      if (vars.mode === "approve" && data?.registrationToken && data?.registrationUrl) {
+        setIssuedInvite({
+          email: data.application?.email ?? "",
+          registrationUrl: data.registrationUrl,
+          registrationToken: data.registrationToken,
+          expiresAt: data.expiresAt,
+        });
+        setCopied(false);
+      }
     },
     onError: (err: Error) => {
       toast({ title: "Action failed", description: err.message, variant: "destructive" });
@@ -281,6 +300,59 @@ export default function AdminApplications() {
                 : actionTarget?.mode === "approve"
                   ? "Approve"
                   : "Reject"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Session 14 — one-time registration link, surfaced after a successful approve. */}
+      <Dialog open={!!issuedInvite} onOpenChange={(open) => { if (!open) setIssuedInvite(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Registration link generated</DialogTitle>
+            <DialogDescription>
+              Send this single-use link to <span className="font-medium">{issuedInvite?.email}</span> so they
+              can finish creating their account. The link expires in 48 hours and can only be used once.
+              <span className="block mt-1 text-amber-700">
+                This is the only time we'll show you the link — copy it now.
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          {issuedInvite && (
+            <div className="space-y-3">
+              <div className="rounded-md border bg-muted/40 p-3 flex items-start gap-2">
+                <LinkIcon className="h-4 w-4 mt-0.5 text-slate-500 shrink-0" />
+                <code
+                  className="text-xs break-all text-slate-700 select-all flex-1"
+                  data-testid="text-registration-url"
+                >
+                  {issuedInvite.registrationUrl}
+                </code>
+              </div>
+              <Button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(issuedInvite.registrationUrl);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                  } catch {
+                    toast({ title: "Copy failed — please select and copy manually.", variant: "destructive" });
+                  }
+                }}
+                className="w-full"
+                data-testid="button-copy-registration-url"
+              >
+                {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
+                {copied ? "Copied!" : "Copy registration link"}
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Expires {issuedInvite.expiresAt ? new Date(issuedInvite.expiresAt).toLocaleString() : "—"}.
+              </p>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIssuedInvite(null)} data-testid="button-dismiss-invite">
+              Done
             </Button>
           </DialogFooter>
         </DialogContent>

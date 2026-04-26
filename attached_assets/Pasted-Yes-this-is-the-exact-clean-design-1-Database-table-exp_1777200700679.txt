@@ -1,0 +1,180 @@
+Yes — this is the exact clean design.
+
+1. Database table
+export const registrationInvites = pgTable("registration_invites", {
+  id: serial("id").primaryKey(),
+
+  email: text("email").notNull(),
+  role: text("role").notNull(), 
+  // client | adviser | admin
+
+  relatedEntityType: text("related_entity_type"),
+  // adviser_application | client_application | adviser_firm
+
+  relatedEntityId: integer("related_entity_id"),
+
+  adviserUserId: integer("adviser_user_id").references(() => users.id),
+
+  inviteHash: text("invite_hash").notNull().unique(),
+
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+
+  createdBy: integer("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+Use invite, not “token”, if the wording bothers you.
+
+2. Admin creates invite
+POST /api/admin/registration-invites
+
+Body:
+
+{
+  "email": "planner@example.com",
+  "role": "adviser",
+  "relatedEntityType": "adviser_application",
+  "relatedEntityId": 123
+}
+
+Server:
+
+const rawInvite = crypto.randomBytes(32).toString("hex");
+const inviteHash = hash(rawInvite);
+
+await db.insert(registrationInvites).values({
+  email,
+  role,
+  relatedEntityType,
+  relatedEntityId,
+  inviteHash,
+  expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+  createdBy: adminUserId,
+});
+
+return {
+  inviteLink: `${APP_URL}/register/invite?invite=${rawInvite}`
+};
+3. Validate invite
+GET /api/auth/registration-invites/validate?invite=...
+
+Response:
+
+{
+  "valid": true,
+  "email": "planner@example.com",
+  "role": "adviser",
+  "expiresAt": "2026-04-28T10:00:00Z"
+}
+
+Checks:
+
+invite hash exists
+not expired
+not used
+no existing user with same email
+4. Registration page
+/register/invite?invite=abc
+
+UI:
+
+AMAX Wealth Account Activation
+
+Email: planner@example.com
+Role: Adviser
+
+Set password
+Confirm password
+
+[Activate account]
+
+Do not let user change:
+
+email
+role
+linked adviser/entity
+5. Complete registration
+POST /api/auth/registration-invites/complete
+
+Body:
+
+{
+  "invite": "rawInviteValue",
+  "password": "StrongPassword123!"
+}
+
+Server creates user:
+
+const user = await storage.createUser({
+  email: invite.email,
+  username: invite.email,
+  password: await hashPassword(password),
+  role: invite.role,
+  emailVerified: true,
+  kycStatus: invite.role === "client" ? "pending" : "not_required",
+});
+
+Then:
+
+await db.update(registrationInvites)
+  .set({ usedAt: new Date() })
+  .where(eq(registrationInvites.id, invite.id));
+
+If client invite includes adviser:
+
+await db.insert(adviserClients).values({
+  adviserUserId: invite.adviserUserId,
+  clientUserId: user.id,
+  relationshipType: "servicing",
+});
+6. Redirect after activation
+if (user.role === "adviser") redirect("/adviser/dashboard");
+else if (user.role === "admin") redirect("/admin");
+else redirect("/dashboard");
+7. Audit logs
+
+Write audit logs for:
+
+registration_invite_created
+registration_invite_viewed
+registration_account_activated
+registration_invite_expired
+registration_invite_rejected_duplicate_email
+8. Security rules
+Store inviteHash only — never raw invite
+Raw invite appears only in the emailed link
+Invite expires after 48 hours
+Invite is one-time use
+Email cannot be changed
+Role cannot be changed
+Existing email blocks activation
+Admin/adviser cannot self-assign role through frontend
+Replit instruction
+Build registration invite flow after admin approval.
+
+Use registrationInvites naming, not crypto token wording.
+
+Add:
+1. registrationInvites table
+2. POST /api/admin/registration-invites
+3. GET /api/auth/registration-invites/validate
+4. POST /api/auth/registration-invites/complete
+5. /register/invite page
+6. audit logs for invite lifecycle
+
+Rules:
+- invite is one-time use
+- invite expires after 48 hours
+- store hash only
+- email and role are locked from invite
+- prevent duplicate user emails
+- redirect adviser to /adviser/dashboard
+- redirect client to /dashboard
+- if client invite has adviserUserId, create adviserClients link
+
+Do not touch:
+- fee engine
+- SoA generator
+- investment execution
+- wallet movement

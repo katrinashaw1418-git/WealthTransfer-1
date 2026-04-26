@@ -43,6 +43,7 @@ import AdminAdvisers from "@/pages/admin/advisers";
 import AdminAdviserClients from "@/pages/admin/adviser-clients";
 import AdminAuditLogs from "@/pages/admin/audit-logs";
 import ClientInstructions from "@/pages/client-instructions";
+import RegisterInvite from "@/pages/register-invite";
 import { Loader2 } from "lucide-react";
 
 // -----------------------------------------------------------------------------
@@ -173,6 +174,7 @@ function Router() {
       <Route path="/invest" component={Invest} />
       <Route path="/application-status" component={ApplicationStatus} />
       <Route path="/signup" component={Signup} />
+      <Route path="/register/invite" component={RegisterInvite} />
       <Route path="/verify-email" component={VerifyEmail} />
       <Route path="/forgot-password" component={ForgotPassword} />
       <Route path="/reset-password" component={ResetPassword} />
