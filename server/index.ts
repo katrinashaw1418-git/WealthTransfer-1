@@ -43,28 +43,32 @@ app.use((req, res, next) => {
   const server = await registerRoutes(app);
 
   // ---------------------------------------------------------------------------
-  // Daily wallet-balance reconciliation (PRE-EXISTING, internal-only)
+  // SESSION 25 (Task #17) — Daily wallet ↔ ledger reconciliation
   // ---------------------------------------------------------------------------
-  // Compares each user's cached wallet display balance against the sum of
-  // their transactions. Catches drift between the legacy wallet-balance cache
-  // and the transaction history. Internal-only — does not touch external
-  // custodian feeds.
+  // LEDGER IS THE SOURCE OF TRUTH — wallet cache is derived only.
+  //
+  // Compares the cached wallet display balance against `SUM(ledger_entries)`
+  // for every (userId, currency) pair we know about, on either side, and
+  // writes one row per pair into `wallet_ledger_reconciliations` so the
+  // admin Reconciliation page can show "the most recent check".
+  //
+  // This REPLACES the pre-existing `reconcileWalletBalances` cron, which
+  // compared wallet balances against the *transactions* table — a weaker
+  // check now that the ledger is the system of record. The new service
+  // never mutates the ledger or the wallet cache; it only observes.
   // ---------------------------------------------------------------------------
-  const { db: cronDb } = await import("./db");
-  const { users: usersTable } = await import("@shared/schema");
-  const { reconcileWalletBalances } = await import("./routes");
+  const { runWalletLedgerReconciliation } = await import("./services/reconciliation");
 
   async function runWalletReconciliation() {
     try {
-      const allUsers = await cronDb.select({ id: usersTable.id }).from(usersTable);
-      for (const user of allUsers) {
-        await reconcileWalletBalances(user.id, new Date()).catch((e: any) =>
-          console.error(`[wallet-reconciliation] failed for userId=${user.id}`, e)
-        );
-      }
-      log(`[wallet-reconciliation] completed for ${allUsers.length} user(s)`);
+      const summary = await runWalletLedgerReconciliation();
+      log(
+        `[wallet-ledger-reconciliation] completed: ${summary.pairsChecked} pair(s), ` +
+          `${summary.matches} match, ${summary.mismatches} mismatch, ` +
+          `${summary.alerts} alert, ${summary.criticals} critical`
+      );
     } catch (e) {
-      console.error("[wallet-reconciliation] cron error", e);
+      console.error("[wallet-ledger-reconciliation] cron error", e);
     }
   }
 

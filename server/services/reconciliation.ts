@@ -28,8 +28,12 @@ import { db } from "../db";
 import {
   ledgerEntries,
   reconciliations,
+  wallets,
+  walletLedgerReconciliations,
   type InsertReconciliation,
+  type InsertWalletLedgerReconciliation,
 } from "@shared/schema";
+import { eq, sql } from "drizzle-orm";
 import { getUserCurrencyBalance } from "./ledger";
 
 // ---------------------------------------------------------------------------
@@ -195,6 +199,134 @@ export async function runLedgerReconciliation(): Promise<ReconciliationSummary> 
     };
 
     await db.insert(reconciliations).values(row);
+  }
+
+  return summary;
+}
+
+// =============================================================================
+// SESSION 25 (Task #17) — WALLET ↔ LEDGER RECONCILIATION
+// =============================================================================
+// LEDGER IS THE SOURCE OF TRUTH — wallet cache is derived only.
+//
+// Companion to runLedgerReconciliation() above. Where that one compares the
+// internal ledger against the external custodian, this one compares the
+// CACHED wallet display balance (`wallets.balance`) against the AUTHORITATIVE
+// ledger sum (`SUM(ledger_entries)`) for every (userId, currency) pair we
+// know about (either side).
+//
+// Hard rules:
+//   1. NEVER mutates the ledger.
+//   2. NEVER mutates the wallet cache. (If it did, drift would silently
+//      heal itself and we'd lose the audit trail of "this got out of sync".)
+//   3. Every (userId, currency) pair gets exactly one row inserted per run,
+//      so the admin Reconciliation page can show "the most recent check".
+//   4. Any non-zero drift over the match epsilon is logged at error level
+//      with the same severity classifier the custodian reconciliation uses.
+// =============================================================================
+
+export type WalletLedgerReconciliationSummary = {
+  pairsChecked: number;
+  matches: number;
+  mismatches: number;
+  alerts: number;
+  criticals: number;
+};
+
+export async function runWalletLedgerReconciliation(): Promise<WalletLedgerReconciliationSummary> {
+  // Union the two sides so a wallet row that has zero ledger activity (and
+  // vice versa: a ledger entry against a user with no wallet row yet) is
+  // still examined. The alternative — iterating only one side — silently
+  // hides a category of drift.
+  const pairsRaw = await db.execute(sql`
+    SELECT user_id AS "userId", currency
+    FROM (
+      SELECT user_id, currency FROM ${wallets}
+      UNION
+      SELECT user_id, currency FROM ${ledgerEntries}
+    ) AS combined
+    GROUP BY user_id, currency
+  `);
+
+  const pairs = (pairsRaw as any).rows ?? (pairsRaw as any) ?? [];
+
+  const summary: WalletLedgerReconciliationSummary = {
+    pairsChecked: pairs.length,
+    matches: 0,
+    mismatches: 0,
+    alerts: 0,
+    criticals: 0,
+  };
+
+  for (const pair of pairs as Array<{ userId: number; currency: string }>) {
+    const userId = Number(pair.userId);
+    const currency = String(pair.currency);
+
+    // Authoritative side: SUM(ledger_entries).
+    const ledgerSum = await getUserCurrencyBalance(userId, currency);
+
+    // Cached side: wallets.balance for this (user, currency). May be absent
+    // (no wallet row for this currency yet) — treat as "0" so the drift
+    // surfaces as the full ledger amount.
+    const [walletRow] = await db
+      .select({ balance: wallets.balance })
+      .from(wallets)
+      .where(sql`${wallets.userId} = ${userId} AND ${wallets.currency} = ${currency}`);
+
+    const cached = walletRow?.balance ?? "0";
+
+    const cachedNum = Number(cached);
+    const ledgerNum = Number(ledgerSum);
+    const drift = cachedNum - ledgerNum;
+    const absDrift = Math.abs(drift);
+    const severity = classifySeverity(absDrift);
+
+    let status: "match" | "mismatch";
+    let notes: string | null = null;
+
+    if (absDrift < MATCH_EPSILON) {
+      status = "match";
+      summary.matches += 1;
+    } else {
+      status = "mismatch";
+      summary.mismatches += 1;
+      notes = walletRow
+        ? `Wallet cache disagrees with ledger by ${drift.toFixed(8)} ${currency}.`
+        : `No wallet row for ${currency} but ledger sum is ${ledgerSum}; cache assumed 0.`;
+
+      const payload = {
+        userId,
+        currency,
+        walletCachedBalance: cached,
+        ledgerSumBalance: ledgerSum,
+        driftAmount: drift.toFixed(8),
+      };
+
+      if (severity === "critical") {
+        summary.criticals += 1;
+        console.error("[WALLET-LEDGER RECONCILIATION CRITICAL] *** LARGE WALLET-CACHE DRIFT ***", payload);
+      } else if (severity === "alert") {
+        summary.alerts += 1;
+        console.error("[WALLET-LEDGER RECONCILIATION ALERT]", payload);
+      } else if (severity === "warning") {
+        console.warn("[wallet-ledger-reconciliation] mismatch", payload);
+      } else {
+        console.log("[wallet-ledger-reconciliation] minor drift", payload);
+      }
+    }
+
+    const row: InsertWalletLedgerReconciliation = {
+      userId,
+      currency,
+      walletCachedBalance: cached,
+      ledgerSumBalance: ledgerSum,
+      driftAmount: drift.toFixed(8),
+      status,
+      severity,
+      notes,
+    };
+
+    await db.insert(walletLedgerReconciliations).values(row);
   }
 
   return summary;

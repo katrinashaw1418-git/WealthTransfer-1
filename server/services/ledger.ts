@@ -12,11 +12,24 @@
 //   4. The ledger is append-only. To "reverse" a transaction, post the OPPOSITE
 //      pair of entries against a fresh transaction row — never delete or update
 //      historical entries.
+//
+// Session 25 (Task #17) — LEDGER IS THE SOURCE OF TRUTH:
+//   The wallets.balance / wallets.availableBalance columns are a derived cache
+//   only. The ONLY sanctioned writer of those columns is
+//   refreshWalletCacheBalance() below. Every settlement path (deposit,
+//   withdrawal, ...) MUST post ledger entries first, then call
+//   refreshWalletCacheBalance() in the same DB transaction. Direct
+//   `tx.update(wallets).set({ balance, availableBalance })` is forbidden.
 // =============================================================================
 
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db";
-import { accounts, ledgerEntries } from "@shared/schema";
+import { accounts, ledgerEntries, wallets } from "@shared/schema";
+
+// Drizzle's transaction handle has the same query surface as `db`. We use a
+// loose alias so callers can pass either the global `db` or a `tx` from
+// `db.transaction()` without TS friction.
+type DbHandle = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 type Direction = "debit" | "credit";
 
@@ -63,14 +76,18 @@ function getPlatformUserId(): number {
 // ---------------------------------------------------------------------------
 // Account lookup / creation
 // ---------------------------------------------------------------------------
+// Each helper accepts an optional handle so it can be used either inside a
+// `db.transaction(async tx => ...)` block or against the global `db` (when
+// called outside a transaction, e.g. by reporting code).
 
 export async function getOrCreateClientAccount(
   userId: number,
-  currency: string
+  currency: string,
+  handle: DbHandle = db,
 ) {
   const cur = currency.toUpperCase();
 
-  const [existing] = await db
+  const [existing] = await (handle as any)
     .select()
     .from(accounts)
     .where(
@@ -84,7 +101,7 @@ export async function getOrCreateClientAccount(
 
   if (existing) return existing;
 
-  const [created] = await db
+  const [created] = await (handle as any)
     .insert(accounts)
     .values({
       userId,
@@ -97,11 +114,14 @@ export async function getOrCreateClientAccount(
   return created;
 }
 
-export async function getOrCreateSuspenseAccount(currency: string) {
+export async function getOrCreateSuspenseAccount(
+  currency: string,
+  handle: DbHandle = db,
+) {
   const platformUserId = getPlatformUserId();
   const cur = currency.toUpperCase();
 
-  const [existing] = await db
+  const [existing] = await (handle as any)
     .select()
     .from(accounts)
     .where(
@@ -115,7 +135,7 @@ export async function getOrCreateSuspenseAccount(currency: string) {
 
   if (existing) return existing;
 
-  const [created] = await db
+  const [created] = await (handle as any)
     .insert(accounts)
     .values({
       userId: platformUserId,
@@ -132,8 +152,11 @@ export async function getOrCreateSuspenseAccount(currency: string) {
 // Derived balance queries — never read from any stored balance column
 // ---------------------------------------------------------------------------
 
-export async function getAccountBalance(accountId: number): Promise<string> {
-  const [row] = await db
+export async function getAccountBalance(
+  accountId: number,
+  handle: DbHandle = db,
+): Promise<string> {
+  const [row] = await (handle as any)
     .select({
       balance: sql<string>`
         COALESCE(SUM(
@@ -152,10 +175,11 @@ export async function getAccountBalance(accountId: number): Promise<string> {
 
 export async function getUserCurrencyBalance(
   userId: number,
-  currency: string
+  currency: string,
+  handle: DbHandle = db,
 ): Promise<string> {
   const cur = currency.toUpperCase();
-  const [row] = await db
+  const [row] = await (handle as any)
     .select({
       balance: sql<string>`
         COALESCE(SUM(
@@ -193,7 +217,8 @@ const EPSILON = 1e-8;
 
 export async function postLedgerEntries(
   transactionId: number,
-  entries: LedgerEntryInput[]
+  entries: LedgerEntryInput[],
+  handle: DbHandle = db,
 ): Promise<void> {
   if (entries.length < 2) {
     throw new Error("Ledger transaction must have at least two entries");
@@ -227,7 +252,7 @@ export async function postLedgerEntries(
     );
   }
 
-  await db.insert(ledgerEntries).values(
+  await (handle as any).insert(ledgerEntries).values(
     entries.map((entry) => ({
       transactionId,
       accountId: entry.accountId,
@@ -238,4 +263,49 @@ export async function postLedgerEntries(
       description: entry.description,
     }))
   );
+}
+
+// ---------------------------------------------------------------------------
+// SESSION 25 (Task #17) — Wallet cache refresh
+// ---------------------------------------------------------------------------
+// The wallets table carries a denormalised display balance (`balance`,
+// `availableBalance`) used by the legacy UX layer for fast reads. After
+// task #17 it is a CACHE only — the ledger is the source of truth.
+//
+// This is the ONLY function that may write `wallets.balance` /
+// `wallets.availableBalance`. Every settlement path must call it inside the
+// same DB transaction in which it just posted ledger entries, so the cache
+// can never lag the ledger by more than the duration of that transaction.
+//
+// Behaviour:
+//   - Recomputes SUM(ledger_entries) for (userId, currency)
+//   - Locates the matching wallets row (one per (userId, currency) by unique
+//     index). If no wallet row exists yet for this currency, the cache update
+//     is a no-op — the wallet is auto-created by the wallet-creation paths;
+//     not here.
+//   - Writes the same value to both `balance` and `availableBalance`. We do
+//     not yet model "pending holds" as a distinct cache; that lands with the
+//     transaction-lifecycle work.
+//   - NEVER mutates ledger_entries, accounts, or transactions.
+// ---------------------------------------------------------------------------
+export async function refreshWalletCacheBalance(
+  handle: DbHandle,
+  userId: number,
+  currency: string,
+): Promise<{ balance: string } | null> {
+  const cur = currency.toUpperCase();
+  const ledgerSum = await getUserCurrencyBalance(userId, cur, handle);
+
+  const [updated] = await (handle as any)
+    .update(wallets)
+    .set({
+      balance: ledgerSum,
+      availableBalance: ledgerSum,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(wallets.userId, userId), eq(wallets.currency, cur)))
+    .returning();
+
+  if (!updated) return null;
+  return { balance: ledgerSum };
 }

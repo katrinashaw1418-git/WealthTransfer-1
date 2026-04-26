@@ -51,6 +51,7 @@ import AdminReports from "@/pages/admin/reports";
 import AdminCompliance from "@/pages/admin/compliance";
 import AdminFeeConsents from "@/pages/admin/fee-consents";
 import AdminFees from "@/pages/admin/fees";
+import AdminReconciliation from "@/pages/admin/reconciliation";
 import ClientInstructions from "@/pages/client-instructions";
 import ClientFeeConsents from "@/pages/client/fee-consents";
 import ClientFees from "@/pages/fees";
@@ -109,6 +110,7 @@ function AdminApp() {
         <Route path="/admin/compliance" component={AdminCompliance} />
         <Route path="/admin/fee-consents" component={AdminFeeConsents} />
         <Route path="/admin/fees" component={AdminFees} />
+        <Route path="/admin/reconciliation" component={AdminReconciliation} />
         <Route path="/legal" component={Legal} />
         <Route component={NotFound} />
       </Switch>

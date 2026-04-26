@@ -1345,6 +1345,50 @@ export type Reconciliation = typeof reconciliations.$inferSelect;
 export type InsertReconciliation = z.infer<typeof insertReconciliationSchema>;
 
 // =============================================================================
+// SESSION 25 (Task #17) — WALLET ↔ LEDGER RECONCILIATION
+// =============================================================================
+// The other half of the verification picture from `reconciliations` (which
+// compares ledger ↔ external custodian). This table compares the cached
+// wallet display balance against `SUM(ledger_entries)` for each
+// (userId, currency) — i.e. it watches for drift between the source of truth
+// (the ledger) and the cache (the wallets row).
+//
+// After Task #17, every settlement path posts ledger entries first and then
+// refreshes the wallet cache from the ledger sum in the same transaction, so
+// any non-zero drift recorded here is a SYMPTOM OF A BUG (or of a historical
+// transaction that pre-dates ledger enforcement) and must be investigated.
+// =============================================================================
+export const walletLedgerReconciliations = pgTable("wallet_ledger_reconciliations", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  currency: text("currency").notNull(),
+  // Cached value the UI / API layer was about to serve.
+  walletCachedBalance: decimal("wallet_cached_balance", { precision: 18, scale: 8 }).notNull(),
+  // Authoritative value derived from the ledger right now.
+  ledgerSumBalance: decimal("ledger_sum_balance", { precision: 18, scale: 8 }).notNull(),
+  // Signed: walletCachedBalance - ledgerSumBalance. Positive => cache claims
+  // MORE than the ledger has posted; negative => cache claims LESS.
+  driftAmount: decimal("drift_amount", { precision: 18, scale: 8 }).notNull(),
+  // match | mismatch
+  status: text("status").notNull(),
+  // none | info | warning | alert | critical — same convention as the
+  // ledger ↔ custodian reconciliation table so alerting code can be shared.
+  severity: text("severity").notNull().default("none"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  userCurrencyIdx: index("wallet_ledger_recon_user_currency_idx").on(table.userId, table.currency),
+  statusCreatedIdx: index("wallet_ledger_recon_status_created_idx").on(table.status, table.createdAt),
+}));
+
+export const insertWalletLedgerReconciliationSchema = createInsertSchema(walletLedgerReconciliations).omit({
+  id: true,
+  createdAt: true,
+});
+export type WalletLedgerReconciliation = typeof walletLedgerReconciliations.$inferSelect;
+export type InsertWalletLedgerReconciliation = z.infer<typeof insertWalletLedgerReconciliationSchema>;
+
+// =============================================================================
 // SESSION 9 — ADVISER ACCESS LAYER (read-only overlay for retail-AFSL partner)
 // =============================================================================
 // Purpose: let `role='adviser'` users (planners working under a partnered

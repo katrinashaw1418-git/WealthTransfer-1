@@ -47,6 +47,8 @@ import {
   adviceRecords,
   adviceAcknowledgements,
   insertInvestmentProductSchema,
+  // Session 25 (Task #17) — wallet-vs-ledger drift visibility
+  walletLedgerReconciliations,
 } from "@shared/schema";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
@@ -1183,6 +1185,92 @@ export function registerAdminRoutes(app: Express): void {
         limit,
         total: Number(totalRow[0]?.count ?? 0),
       };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // SESSION 25 (Task #17) — Wallet ↔ ledger reconciliation viewer
+  // -------------------------------------------------------------------------
+  // LEDGER IS THE SOURCE OF TRUTH — wallet cache is derived only.
+  //
+  // Returns the MOST RECENT reconciliation row per (userId, currency),
+  // joined with the user's username for display, with optional `status`
+  // (`match` / `mismatch`) and `currency` filters and pagination.
+  //
+  // Strictly read-only. Cannot mutate ledger entries, wallets, or
+  // reconciliation rows.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/wallet-ledger-reconciliations",
+    adminRoute(async (req) => {
+      const statusRaw = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const currencyRaw = typeof req.query.currency === "string" ? req.query.currency.trim().toUpperCase() : "";
+      const validStatus = statusRaw === "match" || statusRaw === "mismatch" ? statusRaw : null;
+      const validCurrency = /^[A-Z]{3,10}$/.test(currencyRaw) ? currencyRaw : null;
+
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+
+      // Build the filter chunk used in both the items query and the count
+      // query. Parameters are bound via the `sql` template tag so user input
+      // can never be concatenated into the SQL text.
+      const statusFilter = validStatus
+        ? sql`AND r.status = ${validStatus}`
+        : sql``;
+      const currencyFilter = validCurrency
+        ? sql`AND r.currency = ${validCurrency}`
+        : sql``;
+
+      // Pull the latest row per (userId, currency) using ROW_NUMBER. Volume
+      // is bounded by the number of distinct (user, currency) pairs, so this
+      // stays cheap even at 10k+ users. Mismatches are bubbled to the top
+      // so admins can triage drift first.
+      const itemsResult = await db.execute(sql`
+        WITH ranked AS (
+          SELECT
+            id, user_id, currency, wallet_cached_balance, ledger_sum_balance,
+            drift_amount, status, severity, notes, created_at,
+            ROW_NUMBER() OVER (PARTITION BY user_id, currency ORDER BY created_at DESC, id DESC) AS rn
+          FROM wallet_ledger_reconciliations
+        )
+        SELECT r.id,
+               r.user_id        AS "userId",
+               r.currency,
+               r.wallet_cached_balance AS "walletCachedBalance",
+               r.ledger_sum_balance    AS "ledgerSumBalance",
+               r.drift_amount   AS "driftAmount",
+               r.status, r.severity, r.notes,
+               r.created_at     AS "createdAt",
+               u.username       AS "username"
+          FROM ranked r
+          LEFT JOIN users u ON u.id = r.user_id
+         WHERE r.rn = 1
+         ${statusFilter}
+         ${currencyFilter}
+         ORDER BY (CASE WHEN r.status = 'mismatch' THEN 0 ELSE 1 END),
+                  r.created_at DESC
+         LIMIT ${limit}
+        OFFSET ${offset}
+      `);
+
+      const totalResult = await db.execute(sql`
+        WITH ranked AS (
+          SELECT user_id, currency, status,
+                 ROW_NUMBER() OVER (PARTITION BY user_id, currency ORDER BY created_at DESC, id DESC) AS rn
+          FROM wallet_ledger_reconciliations
+        )
+        SELECT COUNT(*)::int AS count
+          FROM ranked r
+         WHERE r.rn = 1
+         ${statusFilter}
+         ${currencyFilter}
+      `);
+
+      const items = (itemsResult as any).rows ?? [];
+      const total = Number(((totalResult as any).rows ?? [{ count: 0 }])[0]?.count ?? 0);
+
+      return { items, page, limit, total };
     }),
   );
 

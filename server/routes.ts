@@ -41,6 +41,12 @@ import {
 import { registerAdviserRoutes } from "./adviser-routes";
 import { registerAdminRoutes } from "./admin-routes";
 import { registerClientRoutes } from "./client-routes";
+import {
+  getOrCreateClientAccount,
+  getOrCreateSuspenseAccount,
+  postLedgerEntries,
+  refreshWalletCacheBalance,
+} from "./services/ledger";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -2949,6 +2955,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (idem.existing) return res.json({ ...(idem.response as object), idempotent: true });
       }
 
+      // -----------------------------------------------------------------
+      // LEDGER IS THE SOURCE OF TRUTH — wallet cache is derived only.
+      // Order inside the transaction:
+      //   1. Lock + verify the wallet row exists (cache must already exist
+      //      so the cache-refresh step at the end can update it).
+      //   2. Insert the `transactions` row (gives us a transactionId for FK).
+      //   3. Get-or-create the user's client account + the platform suspense
+      //      account for this currency.
+      //   4. Post a balanced ledger pair: DEBIT suspense / CREDIT client.
+      //   5. Refresh the wallet cache from SUM(ledger_entries) — the ONLY
+      //      sanctioned writer of `wallets.balance`.
+      // We never call `tx.update(wallets).set({ balance, availableBalance })`
+      // directly. Doing so would bypass the ledger and silently produce
+      // drift the daily reconciliation would then surface as a mismatch.
+      // -----------------------------------------------------------------
       let txRecord: any;
       await db.transaction(async (tx) => {
         await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
@@ -2957,11 +2978,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .for("update");
         if (!wallet) throw Object.assign(new Error("Wallet not found"), { status: 404 });
 
-        await tx.update(wallets).set({
-          balance: new Decimal(wallet.balance).plus(amount).toFixed(8),
-          availableBalance: new Decimal(wallet.availableBalance).plus(amount).toFixed(8),
-        }).where(eq(wallets.id, wallet.id));
-
         [txRecord] = await tx.insert(transactions).values({
           userId, type: "deposit", fromCurrency: null, toCurrency: currency,
           amount: amount.toFixed(8), fee: "0.00000000", exchangeRate: null,
@@ -2969,6 +2985,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
           description: description || `${currency} Deposit`,
           sourceExchange: null, blockchainTxHash: null,
         }).returning();
+
+        const clientAccount = await getOrCreateClientAccount(userId, currency, tx);
+        const suspenseAccount = await getOrCreateSuspenseAccount(currency, tx);
+
+        // Deposit: funds flow IN from the platform suspense (representing the
+        // external rail that delivered the money) into the user's client
+        // account. Debit suspense, credit client → balanced.
+        await postLedgerEntries(txRecord.id, [
+          {
+            accountId: suspenseAccount.id,
+            userId: suspenseAccount.userId,
+            currency,
+            direction: "debit",
+            amount: amount.toFixed(8),
+            description: `Deposit settlement (suspense leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: clientAccount.id,
+            userId,
+            currency,
+            direction: "credit",
+            amount: amount.toFixed(8),
+            description: `Deposit settlement (client leg) tx#${txRecord.id}`,
+          },
+        ], tx);
+
+        await refreshWalletCacheBalance(tx, userId, currency);
       });
 
       if (idemKey) await saveIdempotentResponse(userId, "/api/deposit", idemKey, payloadHash, txRecord);
@@ -2976,6 +3019,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(txRecord);
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error("[deposit] failed", error);
       res.status(500).json({ error: "Failed to process deposit" });
     }
   };
@@ -3034,6 +3078,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (idem.existing) return res.json({ ...(idem.response as object), idempotent: true });
       }
 
+      // -----------------------------------------------------------------
+      // LEDGER IS THE SOURCE OF TRUTH — wallet cache is derived only.
+      // Same shape as the deposit handler above, but the legs are reversed:
+      // DEBIT the user's client account, CREDIT the platform suspense
+      // account. The fee leg is bundled into the same posting because the
+      // dedicated fee engine remains gated; once Gate B lands the fee can
+      // be split into its own credit against a fee account.
+      // -----------------------------------------------------------------
       let txRecord: any;
       await db.transaction(async (tx) => {
         await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
@@ -3045,11 +3097,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const available = new Decimal(wallet.availableBalance);
         if (available.lt(totalDeduction)) throw Object.assign(new Error("Insufficient balance"), { status: 400 });
 
-        await tx.update(wallets).set({
-          balance: new Decimal(wallet.balance).minus(totalDeduction).toFixed(8),
-          availableBalance: available.minus(totalDeduction).toFixed(8),
-        }).where(eq(wallets.id, wallet.id));
-
         [txRecord] = await tx.insert(transactions).values({
           userId, type: "withdrawal", fromCurrency: currency, toCurrency: null,
           amount: amount.toFixed(8), fee: fee.toFixed(8), exchangeRate: null,
@@ -3057,6 +3104,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
           description: description || `${currency} Withdrawal`,
           sourceExchange: null, blockchainTxHash: null,
         }).returning();
+
+        const clientAccount = await getOrCreateClientAccount(userId, currency, tx);
+        const suspenseAccount = await getOrCreateSuspenseAccount(currency, tx);
+
+        await postLedgerEntries(txRecord.id, [
+          {
+            accountId: clientAccount.id,
+            userId,
+            currency,
+            direction: "debit",
+            amount: totalDeduction.toFixed(8),
+            description: `Withdrawal settlement (client leg) tx#${txRecord.id} (incl. fee ${fee.toFixed(8)})`,
+          },
+          {
+            accountId: suspenseAccount.id,
+            userId: suspenseAccount.userId,
+            currency,
+            direction: "credit",
+            amount: totalDeduction.toFixed(8),
+            description: `Withdrawal settlement (suspense leg) tx#${txRecord.id}`,
+          },
+        ], tx);
+
+        await refreshWalletCacheBalance(tx, userId, currency);
       });
 
       if (idemKey) await saveIdempotentResponse(userId, "/api/withdraw", idemKey, payloadHash, txRecord);
@@ -3064,6 +3135,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(txRecord);
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error("[withdraw] failed", error);
       res.status(500).json({ error: "Failed to process withdrawal" });
     }
   };

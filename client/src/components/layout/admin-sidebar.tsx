@@ -13,6 +13,7 @@ import {
   FileText,
   ShieldCheck,
   HandCoins,
+  Scale,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { to: "/admin/reports", label: "Report Requests", icon: FileText },
   { to: "/admin/fee-consents", label: "Fee Consents", icon: HandCoins },
   { to: "/admin/fees", label: "Fee Engine (Gate A)", icon: HandCoins },
+  { to: "/admin/reconciliation", label: "Reconciliation", icon: Scale },
   { to: "/admin/compliance", label: "Compliance", icon: ShieldCheck },
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
 ] as const;

@@ -1,3 +1,19 @@
+// =============================================================================
+// STORAGE LAYER — note on `wallets.balance` / `wallets.availableBalance`
+// =============================================================================
+// After Task #17 the ledger (`ledger_entries`) is the SOURCE OF TRUTH for
+// every balance. The wallets row is a denormalised display cache for the
+// existing UX layer.
+//
+// `updateWallet()` below MUST NOT be used to write `balance` or
+// `availableBalance`. Its `Partial<InsertWallet>` signature is intentionally
+// narrowed (see `WalletUpdatePayload`) so those fields cannot be passed at
+// the type level. The only sanctioned writer of those columns is
+// `refreshWalletCacheBalance()` in `server/services/ledger.ts`, which derives
+// the value from `SUM(ledger_entries)` inside the same transaction in which
+// the entries were just posted.
+// =============================================================================
+
 import { 
   users, wallets, portfolios, transactions, fxRates, aiRecommendations, investmentProducts, userInvestments, portfolioSnapshots, applications, leads,
   type User, type InsertUser, type Wallet, type InsertWallet, 
@@ -10,6 +26,10 @@ import {
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, sql, and } from "drizzle-orm";
+
+// Wallet update payload — `balance` and `availableBalance` are intentionally
+// excluded so callers cannot bypass the ledger-derived cache refresh.
+export type WalletUpdatePayload = Partial<Omit<InsertWallet, "balance" | "availableBalance">>;
 
 export interface IStorage {
   // Users
@@ -28,7 +48,7 @@ export interface IStorage {
   getWallets(userId: number): Promise<Wallet[]>;
   getWallet(userId: number, currency: string): Promise<Wallet | undefined>;
   createWallet(wallet: InsertWallet): Promise<Wallet>;
-  updateWallet(id: number, wallet: Partial<InsertWallet>): Promise<Wallet | undefined>;
+  updateWallet(id: number, wallet: WalletUpdatePayload): Promise<Wallet | undefined>;
 
   // Transactions
   getTransactions(userId: number, limit?: number): Promise<Transaction[]>;
@@ -3025,19 +3045,24 @@ export class MemStorage implements IStorage {
     return wallet;
   }
 
-  async updateWallet(id: number, updateWallet: Partial<InsertWallet>): Promise<Wallet | undefined> {
+  async updateWallet(id: number, updateWallet: WalletUpdatePayload): Promise<Wallet | undefined> {
+    // Per Task #17: balance / availableBalance are NOT writable here. The
+    // typed `WalletUpdatePayload` excludes them; this runtime guard catches
+    // any caller that resorts to a cast.
+    if ((updateWallet as any).balance !== undefined || (updateWallet as any).availableBalance !== undefined) {
+      throw new Error(
+        "updateWallet() cannot write balance/availableBalance — use refreshWalletCacheBalance() in server/services/ledger.ts instead.",
+      );
+    }
     for (const [userId, userWallets] of Array.from(this.wallets.entries())) {
       const walletIndex = userWallets.findIndex((w: Wallet) => w.id === id);
       if (walletIndex !== -1) {
         const currentWallet = userWallets[walletIndex];
-        // Ensure balance and availableBalance are properly handled as strings
-        const updatedWallet = { 
-          ...currentWallet, 
+        const updatedWallet = {
+          ...currentWallet,
           ...updateWallet,
-          balance: updateWallet.balance !== undefined ? updateWallet.balance.toString() : currentWallet.balance,
-          availableBalance: updateWallet.availableBalance !== undefined ? updateWallet.availableBalance.toString() : currentWallet.availableBalance,
-          updatedAt: new Date() 
-        };
+          updatedAt: new Date(),
+        } as Wallet;
         userWallets[walletIndex] = updatedWallet;
         this.wallets.set(userId, userWallets);
         return updatedWallet;
@@ -3376,7 +3401,16 @@ export class DatabaseStorage implements IStorage {
     return wallet;
   }
 
-  async updateWallet(id: number, updateWallet: Partial<InsertWallet>): Promise<Wallet | undefined> {
+  async updateWallet(id: number, updateWallet: WalletUpdatePayload): Promise<Wallet | undefined> {
+    // Per Task #17: balance / availableBalance are NOT writable here. Use
+    // refreshWalletCacheBalance() in server/services/ledger.ts to derive the
+    // cached value from SUM(ledger_entries) inside the same transaction in
+    // which the entries were just posted.
+    if ((updateWallet as any).balance !== undefined || (updateWallet as any).availableBalance !== undefined) {
+      throw new Error(
+        "updateWallet() cannot write balance/availableBalance — use refreshWalletCacheBalance() in server/services/ledger.ts instead.",
+      );
+    }
     const [wallet] = await db.update(wallets).set(updateWallet).where(eq(wallets.id, id)).returning();
     return wallet || undefined;
   }
