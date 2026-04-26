@@ -1,0 +1,149 @@
+## ✅ Final verified state (after your latest files)
+
+### 1. Planner / compliance system
+
+```txt
+✔ COMPLETE
+✔ VERIFIED
+✔ No missing components
+```
+
+You already have:
+
+```txt
+- audit logs (before/after)
+- review lock (423)
+- planner UI + documents
+- verification script (passes)
+```
+
+---
+
+### 2. Portfolio patch (your uploaded doc)
+
+Verdict:
+
+```txt
+✔ CORRECT technically
+✔ FIXES fake data / P&L / projections
+❌ NOT part of current sprint
+```
+
+Reason:
+
+```txt
+Touches:
+- routes.ts (valuation logic)
+- storage engine
+- charts / UI
+```
+
+👉 This is a **separate portfolio sprint** 
+
+---
+
+# 🎯 WHAT TO DO NEXT (FINAL SEQUENCE)
+
+## STEP 1 — Run verification (first thing)
+
+```bash
+npx tsx scripts/test-wealth-planner-compliance.ts
+```
+
+Must:
+
+```txt
+PASS
+```
+
+---
+
+## STEP 2 — Complete remaining tasks (you already queued them)
+
+```txt
+1. Admin audit log diff viewer   → build/finish
+2. #107 Lock banner              → build/finish
+3. #108 Audit-on-block           → build/finish
+```
+
+---
+
+## STEP 3 — Verify again
+
+```bash
+npx tsx scripts/test-wealth-planner-compliance.ts
+```
+
+Must:
+
+```txt
+PASS again
+```
+
+---
+
+## STEP 4 — Manual sanity check (quick)
+
+```txt
+✔ Edit plan → audit shows before/after
+✔ Set review_pending → UI shows lock
+✔ Try edit → blocked (423)
+✔ Check audit → block recorded
+```
+
+---
+
+## STEP 5 — STOP this sprint
+
+```txt
+Do NOT add more tasks
+```
+
+---
+
+# ⛔ DO NOT START (next sprint only)
+
+```txt
+- Portfolio snapshot patch
+- Monthly P&L fixes
+- Storage engine changes
+- Payout batch system
+- Ledger redesign
+- Commission engine
+```
+
+---
+
+# 📌 CREATE (but don’t build yet)
+
+```txt
+- Remove synthetic portfolio data
+- Pre-launch safety validation (idempotency + reconciliation + lifecycle)
+```
+
+---
+
+# 🧠 FINAL FLOW (clean)
+
+```txt
+Verify → Finish audit + lock UI → Verify → STOP
+```
+
+---
+
+# 🔥 Bottom line
+
+```txt
+Core system is DONE.
+You are only finishing:
+→ audit visibility
+→ compliance UX
+
+Portfolio fixes come AFTER this.
+```
+
+---
+
+If you want next step after this:
+👉 I can turn your **fintech launch checklist into an executable test script (30 mins run)**
+👉 or map the **portfolio truth layer (real valuation + snapshots)** properly so you don’t introduce new risk
