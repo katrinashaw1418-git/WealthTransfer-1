@@ -459,3 +459,61 @@ describe("postLedgerEntries — mixed-currency guard (Task #41)", () => {
     expect(leaked).toHaveLength(0);
   });
 });
+
+// ===========================================================================
+// Task #45 — automated test for the balanced-journal guard
+// ===========================================================================
+// Locks in the rule in postLedgerEntries() that every journal's credit and
+// debit totals must match within EPSILON. This is the core double-entry
+// invariant: if it ever silently regresses, every wallet balance the
+// platform reports becomes untrustworthy.
+//
+// The guard fires synchronously on the in-memory entries array BEFORE any
+// DB write (it sits between the mixed-currency guard and the same-tx
+// double-post guard), so this test does not need to create accounts,
+// transactions, or ledger rows — and therefore has nothing to clean up.
+// We deliberately use sentinel non-existent account/user ids: if a
+// regression ever lets execution reach the insert, the FK constraint on
+// ledger_entries.account_id will surface as a distinct (non-Error-message)
+// failure rather than a silent pass.
+// ===========================================================================
+describe("postLedgerEntries — balanced-journal guard (Task #45)", () => {
+  it("throws when credit and debit totals differ", async () => {
+    const SENTINEL_TX_ID = -3;
+    const SENTINEL_ACCT_ID = -1;
+    const SENTINEL_USER_ID = -1;
+
+    // Same currency on both legs (so we get past the mixed-currency guard)
+    // but mismatched amounts: 100 debit vs 50 credit.
+    const unbalancedJournal = [
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: TEST_CURRENCY,
+        direction: "debit" as const,
+        amount: "100.00000000",
+        description: "unbalanced test (debit leg)",
+      },
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: TEST_CURRENCY,
+        direction: "credit" as const,
+        amount: "50.00000000",
+        description: "unbalanced test (credit leg)",
+      },
+    ];
+
+    await expect(
+      postLedgerEntries(SENTINEL_TX_ID, unbalancedJournal),
+    ).rejects.toThrow("Ledger entries are not balanced");
+
+    // The guard fires before any DB access, so no ledger entries can have
+    // been inserted against our sentinel transactionId.
+    const leaked = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, SENTINEL_TX_ID));
+    expect(leaked).toHaveLength(0);
+  });
+});
