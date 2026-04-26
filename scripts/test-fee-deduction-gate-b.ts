@@ -1,0 +1,1320 @@
+// =============================================================================
+// FEE DEDUCTION GATE B — VERIFICATION ROLL-UP (Task #92)
+// =============================================================================
+// Single-shot, re-runnable script that proves the entire fee-deduction Gate B
+// safety surface end-to-end. This is the verification gate — if any assertion
+// fails, fee-deduction work must NOT proceed (and any in-flight follow-on
+// task that depends on Gate B should be paused).
+//
+// Each assertion is a hard PASS/FAIL with concrete evidence (row counts,
+// status values, ledger sums). The 10 assertions, in canonical order, are:
+//
+//   1. non-admin cannot deduct
+//        — A non-admin role hitting POST /api/admin/fee-deductions/:id/approve
+//          via the actual route handler (mock req/res) gets 403, NOT a money
+//          movement. Locks in `requireRole("admin")` at the route layer.
+//
+//   2. approved deduction posts once
+//        — settleApprovedDeduction on a pending row: status='settled',
+//          settledTransactionId is set, exactly one transactions row with the
+//          deterministic idempotency key `fee_deduction_<id>` exists, and
+//          its corresponding ledger_postings receipt row exists.
+//
+//   3. duplicate deduction blocked
+//        — A second settleApprovedDeduction call on the same row is the
+//          idempotent fast-path: returns the existing settled row and does
+//          NOT create a second transactions row, ledger entries, or
+//          ledger_postings receipt.
+//
+//   4. expired consent blocked
+//        — runDailyAccruals against a rule whose feeConsents.consentExpiryDate
+//          is in the past inserts a 0-amount accrual row with
+//          gateReason='consent_expired'. No deduction can ever roll up from
+//          a skipped accrual.
+//
+//   5. withdrawn consent blocked
+//        — runDailyAccruals against a rule whose feeConsents.withdrawnAt is
+//          set inserts a 0-amount accrual row with gateReason='consent_withdrawn'.
+//          Same cascade: no rolled-up deduction → no settlement possible.
+//
+//   6. insufficient ledger balance blocked
+//        — settleApprovedDeduction on a row whose totalAccrued exceeds the
+//          client's ledger-derived balance throws InsufficientFundsError,
+//          flips the row to status='insufficient_funds' with a populated
+//          failureReason, and writes ZERO transactions / ledger / receipt
+//          rows for the deterministic idempotency key.
+//
+//   7. ledger debit created
+//        — The settled deduction from #2 produced a balanced ledger triple
+//          (client DEBIT totalAccrued, adviser CREDIT adviserShare, platform
+//          CREDIT platformShare). The client debit specifically must equal
+//          totalAccrued at 8dp.
+//
+//   8. reversal ledger credit created
+//        — reverseSettledDeduction on the settled row: status='reversed',
+//          reversalTransactionId is set, the OPPOSITE balanced triple is
+//          posted against a NEW transactions row with deterministic
+//          idempotency key `fee_deduction_<id>_reversal`. The client credit
+//          on the reversal must equal the original totalAccrued.
+//
+//   9. wallet balance not directly mutated
+//        — The wallets cache for both the client and the adviser must equal
+//          their ledger-derived balance at every checkpoint (after top-up,
+//          after settle, after reversal). Drift would mean someone wrote
+//          wallets.balance directly instead of via refreshWalletCacheBalance,
+//          violating the "ledger is the only writer of the wallet cache"
+//          invariant.
+//
+//  10. reconciliation clean after post/reversal
+//        — runWalletLedgerReconciliation finds no drift > MATCH_EPSILON
+//          for either the client or the adviser in the test currency.
+//          Status='match' on both. The full settle-then-reverse cycle
+//          leaves the books exactly as it found them.
+//
+// Hard rules:
+//   - Scoped to deterministic test users; cleans its own rows on every run
+//     so re-runs are idempotent.
+//   - Does NOT touch any production user, advice record, fee consent, or
+//     fee rule.
+//   - Exits non-zero on any FAIL so a deploy gate can rely on it.
+//
+// Usage:
+//   npx tsx scripts/test-fee-deduction-gate-b.ts
+// =============================================================================
+
+import type { Express, Request } from "express";
+import { and, eq, sql, inArray } from "drizzle-orm";
+import { db } from "../server/db";
+import {
+  users,
+  wallets,
+  accounts,
+  ledgerEntries,
+  ledgerPostings,
+  transactions,
+  adviserClients,
+  adviceRecords,
+  feeConsents,
+  adviserFeeRules,
+  adviserFeeAccruals,
+  adviserFeeDeductions,
+  walletLedgerReconciliations,
+} from "../shared/schema";
+import {
+  getOrCreateClientAccount,
+  getOrCreateSuspenseAccount,
+  postLedgerEntries,
+  refreshWalletCacheBalance,
+  getUserCurrencyBalance,
+} from "../server/services/ledger";
+import {
+  settleApprovedDeduction,
+  reverseSettledDeduction,
+  runDailyAccruals,
+  InsufficientFundsError,
+} from "../server/services/fee-engine";
+import { runWalletLedgerReconciliation } from "../server/services/reconciliation";
+import { signToken } from "../server/auth";
+import { registerAdminRoutes } from "../server/admin-routes";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const CLIENT_USERNAME = "__gateb_test_client__";
+const ADVISER_USERNAME = "__gateb_test_adviser__";
+const CONSENT4_CLIENT_USERNAME = "__gateb_test_consent_expired_client__";
+const CONSENT5_CLIENT_USERNAME = "__gateb_test_consent_withdrawn_client__";
+const PLATFORM_FALLBACK_USERNAME = "__gateb_test_platform__";
+const TEST_CURRENCY = "AUD";
+
+// ---------------------------------------------------------------------------
+// Result tracking — keyed by canonical name so we can print in a stable order
+// regardless of execution order.
+// ---------------------------------------------------------------------------
+type TestResult = { passed: boolean; details: string };
+const CANONICAL_ORDER: string[] = [
+  "1. non-admin cannot deduct",
+  "2. approved deduction posts once",
+  "3. duplicate deduction blocked",
+  "4. expired consent blocked",
+  "5. withdrawn consent blocked",
+  "6. insufficient ledger balance blocked",
+  "7. ledger debit created",
+  "8. reversal ledger credit created",
+  "9. wallet balance not directly mutated",
+  "10. reconciliation clean after post/reversal",
+];
+const results = new Map<string, TestResult>();
+
+function record(name: string, passed: boolean, details: string): void {
+  if (!CANONICAL_ORDER.includes(name)) {
+    throw new Error(`Internal: unknown canonical test name '${name}'`);
+  }
+  results.set(name, { passed, details });
+}
+const pass = (name: string, details: string) => record(name, true, details);
+const fail = (name: string, details: string) => record(name, false, details);
+
+// ---------------------------------------------------------------------------
+// Fixture helpers
+// ---------------------------------------------------------------------------
+async function ensureUser(opts: {
+  username: string;
+  email: string;
+  role?: "client" | "adviser" | "admin";
+}): Promise<number> {
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(eq(users.username, opts.username));
+  if (existing) {
+    if (opts.role && existing.role !== opts.role) {
+      await db
+        .update(users)
+        .set({ role: opts.role })
+        .where(eq(users.id, existing.id));
+    }
+    return existing.id;
+  }
+  const [created] = await db
+    .insert(users)
+    .values({
+      username: opts.username,
+      email: opts.email,
+      password: "not-a-real-password",
+      firstName: "GateB",
+      lastName: "Test",
+      role: opts.role ?? "client",
+      kycStatus: "verified",
+      emailVerified: true,
+    })
+    .returning();
+  return created.id;
+}
+
+async function ensureFreshWallet(userId: number): Promise<void> {
+  const [existing] = await db
+    .select()
+    .from(wallets)
+    .where(and(eq(wallets.userId, userId), eq(wallets.currency, TEST_CURRENCY)));
+  if (existing) {
+    await db
+      .update(wallets)
+      .set({ balance: "0", availableBalance: "0" })
+      .where(eq(wallets.id, existing.id));
+    return;
+  }
+  await db.insert(wallets).values({
+    userId,
+    currency: TEST_CURRENCY,
+    balance: "0",
+    availableBalance: "0",
+    walletType: "fiat",
+  });
+}
+
+async function ensureAdviserClientLink(
+  adviserUserId: number,
+  clientUserId: number,
+): Promise<void> {
+  const [existing] = await db
+    .select()
+    .from(adviserClients)
+    .where(
+      and(
+        eq(adviserClients.adviserUserId, adviserUserId),
+        eq(adviserClients.clientUserId, clientUserId),
+      ),
+    );
+  if (existing) {
+    if (!existing.isActive) {
+      await db
+        .update(adviserClients)
+        .set({ isActive: true, unlinkedAt: null })
+        .where(eq(adviserClients.id, existing.id));
+    }
+    return;
+  }
+  await db.insert(adviserClients).values({
+    adviserUserId,
+    clientUserId,
+    relationshipType: "servicing",
+    isActive: true,
+  });
+}
+
+// All PKs we created in this run, so cleanup never bulk-deletes by table.
+const created = {
+  userIds: [] as number[],
+  adviceRecordIds: [] as number[],
+  consentIds: [] as number[],
+  ruleIds: [] as number[],
+};
+
+async function makeAdviceRecord(clientUserId: number): Promise<number> {
+  const [row] = await db
+    .insert(adviceRecords)
+    .values({ clientId: clientUserId })
+    .returning({ id: adviceRecords.id });
+  created.adviceRecordIds.push(row.id);
+  return row.id;
+}
+
+type ConsentOverrides = {
+  withdrawnAt?: Date | null;
+  consentExpiryDate?: Date;
+  renewalStatus?: string;
+};
+
+async function makeFeeConsent(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+  adviceRecordId: number;
+  overrides?: ConsentOverrides;
+}): Promise<number> {
+  const now = new Date();
+  const oneYearOut = new Date(now.getTime() + 365 * 86400 * 1000);
+  const [row] = await db
+    .insert(feeConsents)
+    .values({
+      adviceRecordId: opts.adviceRecordId,
+      clientId: opts.clientUserId,
+      adviserId: opts.adviserUserId,
+      feeType: "ongoing_service_fee",
+      amountType: "fixed",
+      amount: "100.0000",
+      accountNumber: "GATEB-TEST",
+      accountName: "GateB Test Account",
+      deductionFrequency: "monthly",
+      referenceDay: now,
+      renewalWindowStart: now,
+      renewalWindowEnd: oneYearOut,
+      consentExpiryDate: opts.overrides?.consentExpiryDate ?? oneYearOut,
+      renewalStatus: opts.overrides?.renewalStatus ?? "active",
+      clientSignatureName: "GateB Test Signature",
+      withdrawnAt: opts.overrides?.withdrawnAt ?? null,
+    })
+    .returning({ id: feeConsents.id });
+  created.consentIds.push(row.id);
+  return row.id;
+}
+
+async function makeFeeRule(opts: {
+  feeConsentId: number;
+  clientUserId: number;
+  adviserUserId: number;
+}): Promise<number> {
+  // Direct-insert (bypass createFeeRule) because the consent-gate tests need
+  // a rule against a withdrawn or expired consent — createFeeRule blocks
+  // withdrawn at the service boundary, but the gate we're verifying lives
+  // inside runDailyAccruals.
+  const [row] = await db
+    .insert(adviserFeeRules)
+    .values({
+      feeConsentId: opts.feeConsentId,
+      clientUserId: opts.clientUserId,
+      adviserUserId: opts.adviserUserId,
+      feeType: "ongoing_service_fee",
+      amountType: "fixed",
+      fixedAmount: "100.0000",
+      currency: TEST_CURRENCY,
+      adviserSplitBps: 8000,
+      platformSplitBps: 2000,
+      status: "active",
+    })
+    .returning({ id: adviserFeeRules.id });
+  created.ruleIds.push(row.id);
+  return row.id;
+}
+
+async function insertPendingDeduction(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+  totalAccrued: string;
+  adviserShare: string;
+}): Promise<number> {
+  const start = new Date(Date.UTC(2026, 3, 1));
+  const end = new Date(Date.UTC(2026, 3, 30));
+  const platformShare = (
+    Number(opts.totalAccrued) - Number(opts.adviserShare)
+  ).toFixed(4);
+  const [row] = await db
+    .insert(adviserFeeDeductions)
+    .values({
+      clientUserId: opts.clientUserId,
+      adviserUserId: opts.adviserUserId,
+      periodStart: start,
+      periodEnd: end,
+      totalAccrued: opts.totalAccrued,
+      adviserShareAmount: opts.adviserShare,
+      platformShareAmount: platformShare,
+      currency: TEST_CURRENCY,
+      accrualIds: [],
+    })
+    .returning({ id: adviserFeeDeductions.id });
+  return row.id;
+}
+
+// Synthetic top-up: posts a balanced credit-client / debit-suspense pair so
+// the client account's ledger-derived balance is positive — without touching
+// any deposit handler.
+async function topUpClient(userId: number, amount: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [txRow] = await (tx as any)
+      .insert(transactions)
+      .values({
+        userId,
+        type: "deposit",
+        fromCurrency: null,
+        toCurrency: TEST_CURRENCY,
+        amount,
+        fee: "0",
+        status: "completed",
+        description: "gateb test top-up",
+      })
+      .returning();
+
+    const clientAccount = await getOrCreateClientAccount(
+      userId,
+      TEST_CURRENCY,
+      tx,
+    );
+    const suspense = await getOrCreateSuspenseAccount(TEST_CURRENCY, tx);
+
+    await postLedgerEntries(
+      txRow.id,
+      [
+        {
+          accountId: suspense.id,
+          userId: suspense.userId,
+          currency: TEST_CURRENCY,
+          direction: "debit",
+          amount,
+          description: "gateb test top-up (suspense debit)",
+        },
+        {
+          accountId: clientAccount.id,
+          userId,
+          currency: TEST_CURRENCY,
+          direction: "credit",
+          amount,
+          description: "gateb test top-up (client credit)",
+        },
+      ],
+      tx,
+    );
+
+    await refreshWalletCacheBalance(tx, userId, TEST_CURRENCY);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup — drops everything we created (in FK order). Conservative: we only
+// touch the rows whose PKs we collected during this run plus rows owned by
+// the deterministic test users. Re-runs stay idempotent.
+// ---------------------------------------------------------------------------
+async function cleanupForUserIds(userIds: number[]): Promise<void> {
+  if (userIds.length === 0) return;
+  // 1. Drop adviser_fee_deductions where this user is client or adviser
+  //    BEFORE we touch the transactions they reference.
+  await db
+    .delete(adviserFeeDeductions)
+    .where(inArray(adviserFeeDeductions.clientUserId, userIds));
+  await db
+    .delete(adviserFeeDeductions)
+    .where(inArray(adviserFeeDeductions.adviserUserId, userIds));
+
+  // 2. Accruals + rules.
+  await db
+    .delete(adviserFeeAccruals)
+    .where(inArray(adviserFeeAccruals.clientUserId, userIds));
+  await db
+    .delete(adviserFeeAccruals)
+    .where(inArray(adviserFeeAccruals.adviserUserId, userIds));
+  await db
+    .delete(adviserFeeRules)
+    .where(inArray(adviserFeeRules.clientUserId, userIds));
+  await db
+    .delete(adviserFeeRules)
+    .where(inArray(adviserFeeRules.adviserUserId, userIds));
+
+  // 3. Consents + advice records (consents FK to advice records).
+  await db
+    .delete(feeConsents)
+    .where(inArray(feeConsents.clientId, userIds));
+  await db
+    .delete(adviceRecords)
+    .where(inArray(adviceRecords.clientId, userIds));
+
+  // 4. Adviser-client links.
+  await db
+    .delete(adviserClients)
+    .where(inArray(adviserClients.clientUserId, userIds));
+  await db
+    .delete(adviserClients)
+    .where(inArray(adviserClients.adviserUserId, userIds));
+
+  // 5. Ledger postings receipts → ledger entries → transactions.
+  //    Receipts FK to transactions(id), so they have to go first.
+  const userIdsCsv = userIds.join(",");
+  await db.execute(sql`
+    DELETE FROM ledger_postings
+    WHERE transaction_id IN (
+      SELECT id FROM transactions WHERE user_id IN (${sql.raw(userIdsCsv)})
+    )
+  `);
+  await db.execute(sql`
+    DELETE FROM ledger_entries
+    WHERE transaction_id IN (
+      SELECT id FROM transactions WHERE user_id IN (${sql.raw(userIdsCsv)})
+    )
+  `);
+  await db.execute(sql`
+    DELETE FROM ledger_entries
+    WHERE account_id IN (
+      SELECT id FROM accounts WHERE user_id IN (${sql.raw(userIdsCsv)})
+    )
+  `);
+  await db
+    .delete(transactions)
+    .where(inArray(transactions.userId, userIds));
+
+  // 6. Wallet-ledger reconciliations + wallets + accounts.
+  await db
+    .delete(walletLedgerReconciliations)
+    .where(inArray(walletLedgerReconciliations.userId, userIds));
+  await db.delete(wallets).where(inArray(wallets.userId, userIds));
+  await db.delete(accounts).where(inArray(accounts.userId, userIds));
+}
+
+// ---------------------------------------------------------------------------
+// Capture the actual admin route handler so test #1 calls the same wrapper
+// the production app uses — `adminRoute(...)` (auth + role + try/catch).
+// ---------------------------------------------------------------------------
+type CapturedHandler = (req: Request, res: any) => unknown;
+const captured = new Map<string, CapturedHandler>();
+
+function captureAdminRoutes(): void {
+  const fakeApp: Partial<Express> = {
+    get: ((path: string, handler: CapturedHandler) => {
+      captured.set(`GET ${path}`, handler);
+    }) as any,
+    post: ((path: string, handler: CapturedHandler) => {
+      captured.set(`POST ${path}`, handler);
+    }) as any,
+    patch: ((path: string, handler: CapturedHandler) => {
+      captured.set(`PATCH ${path}`, handler);
+    }) as any,
+    delete: ((path: string, handler: CapturedHandler) => {
+      captured.set(`DELETE ${path}`, handler);
+    }) as any,
+    put: ((path: string, handler: CapturedHandler) => {
+      captured.set(`PUT ${path}`, handler);
+    }) as any,
+  };
+  registerAdminRoutes(fakeApp as Express);
+}
+
+function makeMockReqRes(opts: { token: string; params: Record<string, string>; body: unknown }): {
+  req: Request;
+  res: any;
+  result: { statusCode: number; body: unknown };
+} {
+  const result = { statusCode: 200, body: undefined as unknown };
+  const req = {
+    headers: { authorization: `Bearer ${opts.token}` },
+    params: opts.params,
+    body: opts.body,
+    query: {},
+    path: "",
+    method: "POST",
+  } as unknown as Request;
+  const res = {
+    status(code: number) {
+      result.statusCode = code;
+      return this;
+    },
+    json(b: unknown) {
+      result.body = b;
+      return this;
+    },
+    send(b: unknown) {
+      result.body = b;
+      return this;
+    },
+  };
+  return { req, res, result };
+}
+
+// ---------------------------------------------------------------------------
+// Tests, executed in canonical order.
+// ---------------------------------------------------------------------------
+
+async function test1_nonAdminCannotDeduct(opts: {
+  clientUserId: number;
+  clientUsername: string;
+  clientEmail: string;
+  deductionId: number;
+}): Promise<void> {
+  const handler = captured.get("POST /api/admin/fee-deductions/:id/approve");
+  if (!handler) {
+    fail(
+      "1. non-admin cannot deduct",
+      "internal: approve route handler was not captured from registerAdminRoutes",
+    );
+    return;
+  }
+
+  const token = signToken({
+    userId: opts.clientUserId,
+    username: opts.clientUsername,
+    email: opts.clientEmail,
+    role: "client",
+  });
+  const { req, res, result } = makeMockReqRes({
+    token,
+    params: { id: String(opts.deductionId) },
+    body: {},
+  });
+
+  await handler(req, res);
+
+  // Snapshot the deduction afterwards so we can also prove no settlement
+  // happened as a side-effect of this attempt.
+  const [after] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, opts.deductionId));
+
+  const isForbidden = result.statusCode === 401 || result.statusCode === 403;
+  const stillPending = after?.status === "pending_approval";
+  if (isForbidden && stillPending) {
+    pass(
+      "1. non-admin cannot deduct",
+      `route returned ${result.statusCode}, deduction still status='${after.status}'`,
+    );
+  } else {
+    fail(
+      "1. non-admin cannot deduct",
+      `expected 401/403 + status='pending_approval', got status=${result.statusCode}, dedStatus='${after?.status}'`,
+    );
+  }
+}
+
+type SettleSnapshot = {
+  walletClient: string;
+  ledgerClient: string;
+  walletAdviser: string;
+  ledgerAdviser: string;
+};
+
+async function snapshotWalletVsLedger(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+}): Promise<SettleSnapshot> {
+  const [walletClient] = await db
+    .select({ balance: wallets.balance })
+    .from(wallets)
+    .where(
+      and(
+        eq(wallets.userId, opts.clientUserId),
+        eq(wallets.currency, TEST_CURRENCY),
+      ),
+    );
+  const [walletAdviser] = await db
+    .select({ balance: wallets.balance })
+    .from(wallets)
+    .where(
+      and(
+        eq(wallets.userId, opts.adviserUserId),
+        eq(wallets.currency, TEST_CURRENCY),
+      ),
+    );
+  const ledgerClient = await getUserCurrencyBalance(
+    opts.clientUserId,
+    TEST_CURRENCY,
+  );
+  const ledgerAdviser = await getUserCurrencyBalance(
+    opts.adviserUserId,
+    TEST_CURRENCY,
+  );
+  return {
+    walletClient: walletClient?.balance ?? "0",
+    ledgerClient,
+    walletAdviser: walletAdviser?.balance ?? "0",
+    ledgerAdviser,
+  };
+}
+
+async function test2_approvedDeductionPostsOnce(opts: {
+  deductionId: number;
+  approverUserId: number;
+}): Promise<void> {
+  const settled = await settleApprovedDeduction({
+    deductionId: opts.deductionId,
+    approverUserId: opts.approverUserId,
+  });
+
+  const idemKey = `fee_deduction_${opts.deductionId}`;
+  const txRows = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, idemKey));
+  const receiptRows = settled.settledTransactionId
+    ? await db
+        .select()
+        .from(ledgerPostings)
+        .where(eq(ledgerPostings.transactionId, settled.settledTransactionId))
+    : [];
+
+  const ok =
+    settled.status === "settled" &&
+    settled.settledTransactionId !== null &&
+    settled.settledTransactionId !== undefined &&
+    txRows.length === 1 &&
+    receiptRows.length === 1;
+  if (ok) {
+    pass(
+      "2. approved deduction posts once",
+      `status='settled', settledTransactionId=${settled.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
+    );
+  } else {
+    fail(
+      "2. approved deduction posts once",
+      `status='${settled.status}', settledTransactionId=${settled.settledTransactionId}, transactions=${txRows.length}, ledger_postings=${receiptRows.length}`,
+    );
+  }
+}
+
+async function test3_duplicateDeductionBlocked(opts: {
+  deductionId: number;
+  approverUserId: number;
+}): Promise<void> {
+  // Snapshot what exists before the second call so we can prove nothing new
+  // was written on the duplicate.
+  const idemKey = `fee_deduction_${opts.deductionId}`;
+  const txBefore = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, idemKey));
+  const settledTxId = txBefore[0]?.id;
+  if (!settledTxId) {
+    fail(
+      "3. duplicate deduction blocked",
+      "no settled transactions row found from test #2 — cannot evaluate duplicate guard",
+    );
+    return;
+  }
+  const entriesBefore = await db
+    .select()
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, settledTxId));
+  const receiptsBefore = await db
+    .select()
+    .from(ledgerPostings)
+    .where(eq(ledgerPostings.transactionId, settledTxId));
+
+  // Re-call the settlement.
+  const second = await settleApprovedDeduction({
+    deductionId: opts.deductionId,
+    approverUserId: opts.approverUserId,
+  });
+
+  const txAfter = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, idemKey));
+  const entriesAfter = await db
+    .select()
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, settledTxId));
+  const receiptsAfter = await db
+    .select()
+    .from(ledgerPostings)
+    .where(eq(ledgerPostings.transactionId, settledTxId));
+
+  const ok =
+    second.status === "settled" &&
+    second.id === opts.deductionId &&
+    txAfter.length === txBefore.length &&
+    entriesAfter.length === entriesBefore.length &&
+    receiptsAfter.length === receiptsBefore.length;
+  if (ok) {
+    pass(
+      "3. duplicate deduction blocked",
+      `re-settle returned same row; transactions ${txBefore.length}→${txAfter.length}, ledger_entries ${entriesBefore.length}→${entriesAfter.length}, ledger_postings ${receiptsBefore.length}→${receiptsAfter.length}`,
+    );
+  } else {
+    fail(
+      "3. duplicate deduction blocked",
+      `second.status='${second.status}', transactions ${txBefore.length}→${txAfter.length}, entries ${entriesBefore.length}→${entriesAfter.length}, receipts ${receiptsBefore.length}→${receiptsAfter.length}`,
+    );
+  }
+}
+
+async function test4_expiredConsentBlocked(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+}): Promise<void> {
+  const accrualDate = new Date(Date.UTC(2026, 5, 1));
+  const expiredAt = new Date(Date.UTC(2026, 0, 1));
+  const adviceRecordId = await makeAdviceRecord(opts.clientUserId);
+  const consentId = await makeFeeConsent({
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+    adviceRecordId,
+    overrides: { consentExpiryDate: expiredAt },
+  });
+  const ruleId = await makeFeeRule({
+    feeConsentId: consentId,
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+  });
+
+  await runDailyAccruals({ accrualDate });
+
+  const [accrual] = await db
+    .select()
+    .from(adviserFeeAccruals)
+    .where(
+      and(
+        eq(adviserFeeAccruals.feeRuleId, ruleId),
+        eq(adviserFeeAccruals.accrualDate, accrualDate),
+      ),
+    );
+
+  const ok =
+    accrual?.gateReason === "consent_expired" &&
+    Number(accrual.accrualAmount) === 0;
+  if (ok) {
+    pass(
+      "4. expired consent blocked",
+      `accrual rule#${ruleId} accrualDate=${accrualDate.toISOString().slice(0, 10)} gateReason='${accrual.gateReason}', amount=${accrual.accrualAmount}`,
+    );
+  } else {
+    fail(
+      "4. expired consent blocked",
+      `expected gateReason='consent_expired' + amount=0, got gateReason='${accrual?.gateReason}', amount='${accrual?.accrualAmount}'`,
+    );
+  }
+}
+
+async function test5_withdrawnConsentBlocked(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+}): Promise<void> {
+  const accrualDate = new Date(Date.UTC(2026, 5, 2));
+  const adviceRecordId = await makeAdviceRecord(opts.clientUserId);
+  const consentId = await makeFeeConsent({
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+    adviceRecordId,
+    overrides: { withdrawnAt: new Date(Date.UTC(2026, 4, 1)) },
+  });
+  const ruleId = await makeFeeRule({
+    feeConsentId: consentId,
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+  });
+
+  await runDailyAccruals({ accrualDate });
+
+  const [accrual] = await db
+    .select()
+    .from(adviserFeeAccruals)
+    .where(
+      and(
+        eq(adviserFeeAccruals.feeRuleId, ruleId),
+        eq(adviserFeeAccruals.accrualDate, accrualDate),
+      ),
+    );
+
+  const ok =
+    accrual?.gateReason === "consent_withdrawn" &&
+    Number(accrual.accrualAmount) === 0;
+  if (ok) {
+    pass(
+      "5. withdrawn consent blocked",
+      `accrual rule#${ruleId} accrualDate=${accrualDate.toISOString().slice(0, 10)} gateReason='${accrual.gateReason}', amount=${accrual.accrualAmount}`,
+    );
+  } else {
+    fail(
+      "5. withdrawn consent blocked",
+      `expected gateReason='consent_withdrawn' + amount=0, got gateReason='${accrual?.gateReason}', amount='${accrual?.accrualAmount}'`,
+    );
+  }
+}
+
+async function test6_insufficientLedgerBlocked(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+  approverUserId: number;
+}): Promise<number> {
+  // Pick an amount that comfortably exceeds the client's current balance so
+  // the gate fires regardless of where in the test sequence we land.
+  const currentBalance = Number(
+    await getUserCurrencyBalance(opts.clientUserId, TEST_CURRENCY),
+  );
+  const amount = (currentBalance + 1_000_000).toFixed(4);
+  const adviserShare = (Number(amount) * 0.8).toFixed(4);
+  const deductionId = await insertPendingDeduction({
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+    totalAccrued: amount,
+    adviserShare,
+  });
+
+  const idemKey = `fee_deduction_${deductionId}`;
+
+  let caught: unknown = null;
+  try {
+    await settleApprovedDeduction({
+      deductionId,
+      approverUserId: opts.approverUserId,
+    });
+  } catch (err) {
+    caught = err;
+  }
+
+  const [after] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, deductionId));
+
+  const txRows = await db
+    .select({ n: sql<number>`COUNT(*)::int` })
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, idemKey));
+  const receiptCount = await db.execute(sql`
+    SELECT COUNT(*)::int AS n
+    FROM ledger_postings p
+    JOIN transactions t ON t.id = p.transaction_id
+    WHERE t.idempotency_key = ${idemKey}
+  `);
+  const receiptN = Number(((receiptCount as any).rows ?? [])[0]?.n ?? 0);
+
+  const ok =
+    caught instanceof InsufficientFundsError &&
+    after?.status === "insufficient_funds" &&
+    !!after.failureReason &&
+    Number(txRows[0]?.n ?? 0) === 0 &&
+    receiptN === 0;
+  if (ok) {
+    pass(
+      "6. insufficient ledger balance blocked",
+      `InsufficientFundsError thrown, deduction status='insufficient_funds', failureReason set, transactions=0, ledger_postings=0`,
+    );
+  } else {
+    fail(
+      "6. insufficient ledger balance blocked",
+      `caught=${caught instanceof Error ? caught.constructor.name : String(caught)}, status='${after?.status}', failureReason='${after?.failureReason ?? ""}', transactions=${txRows[0]?.n ?? 0}, ledger_postings=${receiptN}`,
+    );
+  }
+  return deductionId;
+}
+
+async function test7_ledgerDebitCreated(opts: {
+  deductionId: number;
+  expectedAmount: string;
+  clientUserId: number;
+}): Promise<void> {
+  const [deduction] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, opts.deductionId));
+  if (!deduction?.settledTransactionId) {
+    fail(
+      "7. ledger debit created",
+      `deduction#${opts.deductionId} has no settledTransactionId — settle from test #2 didn't land`,
+    );
+    return;
+  }
+  const entries = await db
+    .select()
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, deduction.settledTransactionId));
+
+  const clientDebits = entries.filter(
+    (e) => e.userId === opts.clientUserId && e.direction === "debit",
+  );
+  const totalDebits = entries
+    .filter((e) => e.direction === "debit")
+    .reduce((s, e) => s + Number(e.amount), 0);
+  const totalCredits = entries
+    .filter((e) => e.direction === "credit")
+    .reduce((s, e) => s + Number(e.amount), 0);
+
+  const expected = Number(opts.expectedAmount);
+  const ok =
+    entries.length === 3 &&
+    Math.abs(totalDebits - totalCredits) < 1e-8 &&
+    Math.abs(totalDebits - expected) < 1e-8 &&
+    clientDebits.length === 1 &&
+    Math.abs(Number(clientDebits[0].amount) - expected) < 1e-8;
+  if (ok) {
+    pass(
+      "7. ledger debit created",
+      `tx#${deduction.settledTransactionId}: 3 entries, debits=${totalDebits}, credits=${totalCredits}, client debit=${clientDebits[0].amount}`,
+    );
+  } else {
+    fail(
+      "7. ledger debit created",
+      `tx#${deduction.settledTransactionId}: entries=${entries.length}, debits=${totalDebits}, credits=${totalCredits}, clientDebits=${clientDebits.length} (expected ${expected})`,
+    );
+  }
+}
+
+async function test8_reversalLedgerCreditCreated(opts: {
+  deductionId: number;
+  reverserUserId: number;
+  expectedAmount: string;
+  clientUserId: number;
+}): Promise<void> {
+  const reversed = await reverseSettledDeduction({
+    deductionId: opts.deductionId,
+    reverserUserId: opts.reverserUserId,
+    reason: "Gate B verification roll-up: reversal credit assertion",
+  });
+
+  if (
+    reversed.status !== "reversed" ||
+    !reversed.reversalTransactionId
+  ) {
+    fail(
+      "8. reversal ledger credit created",
+      `reverse returned status='${reversed.status}', reversalTransactionId=${reversed.reversalTransactionId}`,
+    );
+    return;
+  }
+
+  const idemKey = `fee_deduction_${opts.deductionId}_reversal`;
+  const reversalTxRows = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, idemKey));
+  const entries = await db
+    .select()
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, reversed.reversalTransactionId));
+
+  const clientCredits = entries.filter(
+    (e) => e.userId === opts.clientUserId && e.direction === "credit",
+  );
+  const expected = Number(opts.expectedAmount);
+  const totalDebits = entries
+    .filter((e) => e.direction === "debit")
+    .reduce((s, e) => s + Number(e.amount), 0);
+  const totalCredits = entries
+    .filter((e) => e.direction === "credit")
+    .reduce((s, e) => s + Number(e.amount), 0);
+
+  const ok =
+    reversalTxRows.length === 1 &&
+    entries.length === 3 &&
+    Math.abs(totalDebits - totalCredits) < 1e-8 &&
+    clientCredits.length === 1 &&
+    Math.abs(Number(clientCredits[0].amount) - expected) < 1e-8;
+  if (ok) {
+    pass(
+      "8. reversal ledger credit created",
+      `reversal tx#${reversed.reversalTransactionId}: status='reversed', client credit=${clientCredits[0].amount}, debits=${totalDebits}, credits=${totalCredits}`,
+    );
+  } else {
+    fail(
+      "8. reversal ledger credit created",
+      `reversalTransactions=${reversalTxRows.length}, entries=${entries.length}, debits=${totalDebits}, credits=${totalCredits}, clientCredits=${clientCredits.length}`,
+    );
+  }
+}
+
+async function test9_walletNotDirectlyMutated(
+  snapshots: { label: string; snap: SettleSnapshot }[],
+): Promise<void> {
+  // The hard rule: wallets.balance must equal the ledger-derived balance at
+  // EVERY checkpoint. If it ever drifts, someone bypassed
+  // refreshWalletCacheBalance and wrote wallets.balance directly.
+  const driftLines: string[] = [];
+  for (const { label, snap } of snapshots) {
+    const driftClient = Math.abs(
+      Number(snap.walletClient) - Number(snap.ledgerClient),
+    );
+    const driftAdviser = Math.abs(
+      Number(snap.walletAdviser) - Number(snap.ledgerAdviser),
+    );
+    if (driftClient >= 0.01 || driftAdviser >= 0.01) {
+      driftLines.push(
+        `[${label}] client wallet=${snap.walletClient} ledger=${snap.ledgerClient} drift=${driftClient.toFixed(8)}; adviser wallet=${snap.walletAdviser} ledger=${snap.ledgerAdviser} drift=${driftAdviser.toFixed(8)}`,
+      );
+    }
+  }
+
+  if (driftLines.length === 0) {
+    pass(
+      "9. wallet balance not directly mutated",
+      `${snapshots.length} checkpoints; wallet cache == ledger sum at each (client + adviser)`,
+    );
+  } else {
+    fail(
+      "9. wallet balance not directly mutated",
+      driftLines.join(" | "),
+    );
+  }
+}
+
+async function test10_reconciliationClean(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+}): Promise<void> {
+  await runWalletLedgerReconciliation();
+
+  const fetchLatest = async (userId: number) => {
+    const [row] = await db
+      .select()
+      .from(walletLedgerReconciliations)
+      .where(
+        and(
+          eq(walletLedgerReconciliations.userId, userId),
+          eq(walletLedgerReconciliations.currency, TEST_CURRENCY),
+        ),
+      )
+      .orderBy(sql`${walletLedgerReconciliations.createdAt} DESC`)
+      .limit(1);
+    return row;
+  };
+
+  const clientRow = await fetchLatest(opts.clientUserId);
+  const adviserRow = await fetchLatest(opts.adviserUserId);
+
+  const ok =
+    clientRow?.status === "match" &&
+    adviserRow?.status === "match" &&
+    Math.abs(Number(clientRow.driftAmount ?? 0)) < 0.01 &&
+    Math.abs(Number(adviserRow.driftAmount ?? 0)) < 0.01;
+  if (ok) {
+    pass(
+      "10. reconciliation clean after post/reversal",
+      `client status='${clientRow.status}' drift=${clientRow.driftAmount}; adviser status='${adviserRow.status}' drift=${adviserRow.driftAmount}`,
+    );
+  } else {
+    fail(
+      "10. reconciliation clean after post/reversal",
+      `client=${JSON.stringify({ status: clientRow?.status, drift: clientRow?.driftAmount })}, adviser=${JSON.stringify({ status: adviserRow?.status, drift: adviserRow?.driftAmount })}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Runner
+// ---------------------------------------------------------------------------
+async function main(): Promise<void> {
+  console.log("=== Fee Deduction GATE B verification roll-up (Task #92) ===\n");
+
+  // Capture the actual admin route handlers so test #1 calls the same
+  // adminRoute() wrapper the production app uses.
+  captureAdminRoutes();
+
+  // PLATFORM_USER_ID must be set for getOrCreateSuspenseAccount/getOrCreateFeeAccount
+  // during the top-up + settle paths. If it's missing, mint a deterministic
+  // platform user and pin it.
+  if (!process.env.PLATFORM_USER_ID) {
+    const platformId = await ensureUser({
+      username: PLATFORM_FALLBACK_USERNAME,
+      email: "gateb-platform@test.invalid",
+      role: "admin",
+    });
+    process.env.PLATFORM_USER_ID = String(platformId);
+    created.userIds.push(platformId);
+  }
+
+  // Main pair (used by tests 1, 2, 3, 6, 7, 8, 9, 10).
+  const clientUserId = await ensureUser({
+    username: CLIENT_USERNAME,
+    email: "gateb-client@test.invalid",
+    role: "client",
+  });
+  const adviserUserId = await ensureUser({
+    username: ADVISER_USERNAME,
+    email: "gateb-adviser@test.invalid",
+    role: "adviser",
+  });
+  // Approver for settle/reverse — production hits these via an admin route,
+  // but the service-layer functions only need a user id to write into
+  // approvedByUserId / reversedByUserId. We use the adviser to keep the
+  // PLATFORM_USER_ID as the platform-only counterparty.
+  const approverUserId = adviserUserId;
+
+  // Isolated client per consent-gate test so the consent rows stay scoped
+  // and cleanup never touches the main pair's rules/accruals.
+  const consent4ClientUserId = await ensureUser({
+    username: CONSENT4_CLIENT_USERNAME,
+    email: "gateb-consent-expired@test.invalid",
+    role: "client",
+  });
+  const consent5ClientUserId = await ensureUser({
+    username: CONSENT5_CLIENT_USERNAME,
+    email: "gateb-consent-withdrawn@test.invalid",
+    role: "client",
+  });
+
+  created.userIds.push(
+    clientUserId,
+    adviserUserId,
+    consent4ClientUserId,
+    consent5ClientUserId,
+  );
+
+  // Wipe any residual rows from a prior run BEFORE we touch fixtures so
+  // assertions about row counts are deterministic.
+  await cleanupForUserIds([
+    clientUserId,
+    adviserUserId,
+    consent4ClientUserId,
+    consent5ClientUserId,
+  ]);
+
+  await ensureFreshWallet(clientUserId);
+  await ensureFreshWallet(adviserUserId);
+  await ensureAdviserClientLink(adviserUserId, clientUserId);
+  await ensureAdviserClientLink(adviserUserId, consent4ClientUserId);
+  await ensureAdviserClientLink(adviserUserId, consent5ClientUserId);
+
+  // Pre-create deduction A used by tests 1, 2, 3, 7, 8.
+  const deductionAId = await insertPendingDeduction({
+    clientUserId,
+    adviserUserId,
+    totalAccrued: "100.0000",
+    adviserShare: "80.0000",
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 1 — non-admin cannot deduct (BEFORE any top-up so we also prove a
+  // non-admin can't sneak through even if other state is in place).
+  // -----------------------------------------------------------------------
+  await test1_nonAdminCannotDeduct({
+    clientUserId,
+    clientUsername: CLIENT_USERNAME,
+    clientEmail: "gateb-client@test.invalid",
+    deductionId: deductionAId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Top up the client so the settle path has funds to debit.
+  // -----------------------------------------------------------------------
+  await topUpClient(clientUserId, "500.00");
+  const snapAfterTopUp = await snapshotWalletVsLedger({
+    clientUserId,
+    adviserUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 2 — settle deduction A.
+  // -----------------------------------------------------------------------
+  await test2_approvedDeductionPostsOnce({
+    deductionId: deductionAId,
+    approverUserId,
+  });
+  const snapAfterSettle = await snapshotWalletVsLedger({
+    clientUserId,
+    adviserUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 3 — duplicate settle is a no-op.
+  // -----------------------------------------------------------------------
+  await test3_duplicateDeductionBlocked({
+    deductionId: deductionAId,
+    approverUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Tests 4 + 5 — consent gates inside runDailyAccruals. Each runs against
+  // its own client so the rule rows stay scoped.
+  // -----------------------------------------------------------------------
+  await test4_expiredConsentBlocked({
+    clientUserId: consent4ClientUserId,
+    adviserUserId,
+  });
+  await test5_withdrawnConsentBlocked({
+    clientUserId: consent5ClientUserId,
+    adviserUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 6 — insufficient ledger balance blocked. Creates its own deduction
+  // with totalAccrued > current client balance.
+  // -----------------------------------------------------------------------
+  await test6_insufficientLedgerBlocked({
+    clientUserId,
+    adviserUserId,
+    approverUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 7 — ledger debit on the test #2 settled transaction.
+  // -----------------------------------------------------------------------
+  await test7_ledgerDebitCreated({
+    deductionId: deductionAId,
+    expectedAmount: "100.0000",
+    clientUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 8 — reverse the settled deduction A; expect a balanced opposite triple.
+  // -----------------------------------------------------------------------
+  await test8_reversalLedgerCreditCreated({
+    deductionId: deductionAId,
+    reverserUserId: approverUserId,
+    expectedAmount: "100.0000",
+    clientUserId,
+  });
+  const snapAfterReverse = await snapshotWalletVsLedger({
+    clientUserId,
+    adviserUserId,
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 9 — wallet cache == ledger sum at every checkpoint.
+  // -----------------------------------------------------------------------
+  await test9_walletNotDirectlyMutated([
+    { label: "after_topup", snap: snapAfterTopUp },
+    { label: "after_settle", snap: snapAfterSettle },
+    { label: "after_reverse", snap: snapAfterReverse },
+  ]);
+
+  // -----------------------------------------------------------------------
+  // Test 10 — full reconciliation pass leaves both sides clean.
+  // -----------------------------------------------------------------------
+  await test10_reconciliationClean({ clientUserId, adviserUserId });
+
+  // -----------------------------------------------------------------------
+  // Print canonical-order summary.
+  // -----------------------------------------------------------------------
+  console.log("");
+  for (const name of CANONICAL_ORDER) {
+    const r = results.get(name);
+    if (!r) {
+      console.log(`MISSING ${name} — assertion was not recorded`);
+      continue;
+    }
+    const tag = r.passed ? "PASS" : "FAIL";
+    console.log(`${tag} ${name} — ${r.details}`);
+  }
+
+  const failedCount = Array.from(results.values()).filter((r) => !r.passed)
+    .length;
+  const missingCount = CANONICAL_ORDER.filter((n) => !results.has(n)).length;
+  if (failedCount > 0 || missingCount > 0) {
+    console.error(
+      `\n${failedCount} fail(s), ${missingCount} missing assertion(s) in Gate B verification roll-up.`,
+    );
+    process.exit(1);
+  }
+
+  console.log("\nALL GATE B FEE DEDUCTION TESTS PASSED \u2705");
+  process.exit(0);
+}
+
+main().catch((err) => {
+  console.error("Gate B verification roll-up crashed:", err);
+  process.exit(1);
+});
