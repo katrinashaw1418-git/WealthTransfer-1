@@ -1,0 +1,137 @@
+Short answer: **No — you don’t have to do the core work manually.**
+But you **do need to trigger and verify it manually.**
+
+Let me be precise.
+
+---
+
+# ✅ What is already automated
+
+From your state:
+
+```txt
+✔ Planner system built
+✔ Review lock implemented
+✔ Audit logging implemented
+✔ Tasks (#107, #108, diff viewer) are running
+```
+
+👉 The **heavy lifting is already done by the agent/dev system**
+You are **NOT coding everything yourself**
+
+---
+
+# 🟡 What YOU must do manually (light work)
+
+## 1. Run the verification script
+
+```bash
+npx tsx scripts/test-wealth-planner-compliance.ts
+```
+
+👉 This is **manual by design** (it’s your safety gate)
+
+---
+
+## 2. Do a quick UI check (2–3 minutes)
+
+```txt
+- Edit a plan → audit log shows before/after
+- Set review_pending → lock banner appears
+- Try editing → blocked (423)
+- Check audit → blocked write recorded
+```
+
+👉 This cannot be automated fully — you must visually confirm
+
+---
+
+## 3. Decide “stop or continue”
+
+```txt
+IF everything works → STOP sprint
+IF something wrong → fix
+```
+
+---
+
+# ❌ What you should NOT do manually
+
+```txt
+❌ Do NOT apply portfolio patches now
+❌ Do NOT edit routes.ts / storage.ts
+❌ Do NOT rebuild architecture
+❌ Do NOT start payout / ledger changes
+```
+
+Those patches you uploaded are:
+
+```txt
+✔ Correct fixes
+❌ Different sprint (portfolio engine)
+```
+
+
+
+---
+
+# 🔴 Important clarification (this is where you were confused)
+
+You saw this:
+
+```txt
+"COMPLETE PATCHES — AMAX-V1"
+```
+
+And assumed:
+
+```txt
+"I must implement all this now"
+```
+
+👉 That is WRONG timing
+
+Correct interpretation:
+
+```txt
+Planner sprint → DONE
+Portfolio patch → NEXT sprint
+```
+
+---
+
+# 🎯 What you actually do next (simple)
+
+```txt
+1. Run verification script
+2. Do 2-minute UI check
+3. If all good → STOP
+```
+
+---
+
+# 🧠 Bottom line
+
+```txt
+You are no longer building.
+
+You are:
+✔ validating
+✔ confirming
+✔ closing sprint
+```
+
+---
+
+# 🔥 One-line answer
+
+```txt
+You don’t do the heavy work manually.
+You only run the gate and confirm it works.
+```
+
+---
+
+If you want next step after this:
+👉 I can convert your **launch checklist into a 30-min test script**
+👉 or guide you into the **portfolio truth layer (next sprint)**
