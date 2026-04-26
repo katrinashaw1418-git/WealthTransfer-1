@@ -59,6 +59,8 @@ import {
   operatorAlerts,
   // Task #59 — operator alert retention prune run history
   operatorAlertPruneRuns,
+  // Task #79 — generic background-job run history
+  backgroundJobRuns,
 } from "@shared/schema";
 import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
 import {
@@ -1755,6 +1757,56 @@ export function registerAdminRoutes(app: Express): void {
         .orderBy(desc(operatorAlertPruneRuns.startedAt), desc(operatorAlertPruneRuns.id))
         .limit(30);
 
+      return { items: rows };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // TASK #79 — Background job health snapshot
+  // -------------------------------------------------------------------------
+  // One-stop health view for every scheduled background job: last run, last
+  // successful run, outcome, and whether the job is overdue (default
+  // threshold: > 36h since last start). Backed by `background_job_runs`
+  // (one row per cron tick) plus the static catalogue in
+  // server/services/background-jobs.ts so a job that has NEVER run still
+  // shows up in the dashboard as "never ran" instead of being silently absent.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/background-jobs",
+    adminRoute(async () => {
+      const { getBackgroundJobsHealth } = await import(
+        "./services/background-jobs"
+      );
+      return await getBackgroundJobsHealth();
+    }),
+  );
+
+  // Recent run history for one specific job. Used by the Background Jobs
+  // page to expand a job into its last N invocations. Capped at 50.
+  app.get(
+    "/api/admin/background-jobs/:jobName/runs",
+    adminRoute(async (req) => {
+      const jobName = String(req.params.jobName ?? "").trim();
+      if (!jobName) {
+        const err: any = new Error("jobName is required");
+        err.status = 400;
+        throw err;
+      }
+      const rows = await db
+        .select({
+          id: backgroundJobRuns.id,
+          jobName: backgroundJobRuns.jobName,
+          startedAt: backgroundJobRuns.startedAt,
+          finishedAt: backgroundJobRuns.finishedAt,
+          status: backgroundJobRuns.status,
+          summary: backgroundJobRuns.summary,
+          errorMessage: backgroundJobRuns.errorMessage,
+          durationMs: backgroundJobRuns.durationMs,
+        })
+        .from(backgroundJobRuns)
+        .where(eq(backgroundJobRuns.jobName, jobName))
+        .orderBy(desc(backgroundJobRuns.startedAt), desc(backgroundJobRuns.id))
+        .limit(50);
       return { items: rows };
     }),
   );

@@ -58,16 +58,25 @@ app.use((req, res, next) => {
   // never mutates the ledger or the wallet cache; it only observes.
   // ---------------------------------------------------------------------------
   const { runWalletLedgerReconciliation } = await import("./services/reconciliation");
+  // Task #79 — generic background-job run record. Each cron's tick is wrapped
+  // in `withBackgroundJobRunRecord` so the admin "Background Jobs" page can
+  // show a uniform "last run + overdue" view without grepping logs. The
+  // existing job-specific tables (`fee_accrual_runs`, `operator_alert_prune_runs`)
+  // are unchanged and continue to back their own surfaces.
+  const { withBackgroundJobRunRecord } = await import("./services/background-jobs");
 
   async function runWalletReconciliation() {
     try {
-      const summary = await runWalletLedgerReconciliation();
-      log(
-        `[wallet-ledger-reconciliation] completed: ${summary.pairsChecked} pair(s), ` +
-          `${summary.matches} match, ${summary.mismatches} mismatch, ` +
-          `${summary.alerts} alert, ${summary.criticals} critical, ` +
-          `${summary.operatorNotifications} operator notification(s) dispatched`
-      );
+      await withBackgroundJobRunRecord("wallet-ledger-reconciliation", async () => {
+        const summary = await runWalletLedgerReconciliation();
+        const line =
+          `${summary.pairsChecked} pair(s), ${summary.matches} match, ` +
+          `${summary.mismatches} mismatch, ${summary.alerts} alert, ` +
+          `${summary.criticals} critical, ` +
+          `${summary.operatorNotifications} operator notification(s) dispatched`;
+        log(`[wallet-ledger-reconciliation] completed: ${line}`);
+        return line;
+      });
     } catch (e) {
       console.error("[wallet-ledger-reconciliation] cron error", e);
     }
@@ -94,13 +103,15 @@ app.use((req, res, next) => {
 
   async function runLedgerReconciliationCron() {
     try {
-      const summary = await runLedgerReconciliation();
-      log(
-        `[ledger-reconciliation] completed: ${summary.pairsChecked} pair(s), ` +
-          `${summary.matches} match, ${summary.mismatches} mismatch, ` +
-          `${summary.externalUnavailable} unavailable, ` +
-          `${summary.alerts} alert, ${summary.criticals} critical`
-      );
+      await withBackgroundJobRunRecord("ledger-reconciliation", async () => {
+        const summary = await runLedgerReconciliation();
+        const line =
+          `${summary.pairsChecked} pair(s), ${summary.matches} match, ` +
+          `${summary.mismatches} mismatch, ${summary.externalUnavailable} unavailable, ` +
+          `${summary.alerts} alert, ${summary.criticals} critical`;
+        log(`[ledger-reconciliation] completed: ${line}`);
+        return line;
+      });
     } catch (e) {
       console.error("[ledger-reconciliation] cron error", e);
     }
@@ -129,18 +140,21 @@ app.use((req, res, next) => {
 
   async function runAdviserTaskAutomationCron() {
     try {
-      const s = await runAdviserTaskAutomation();
-      // Aggregate skipped = open-task duplicates + 90-day cadence suppression.
-      // We log both components so reviewers can tell idempotency hits from
-      // quarterly-review cadence skips at a glance.
-      const skipped = s.idempotencySkips + s.cadenceSkips;
-      log(
-        `[adviser-task-automation] completed: ${s.linksScanned} link(s) scanned, ` +
+      await withBackgroundJobRunRecord("adviser-task-automation", async () => {
+        const s = await runAdviserTaskAutomation();
+        // Aggregate skipped = open-task duplicates + 90-day cadence suppression.
+        // We log both components so reviewers can tell idempotency hits from
+        // quarterly-review cadence skips at a glance.
+        const skipped = s.idempotencySkips + s.cadenceSkips;
+        const line =
+          `${s.linksScanned} link(s) scanned, ` +
           `${s.kycFollowupsCreated} kyc_followup, ` +
           `${s.feeConsentRenewalsCreated} fee_consent_renewal, ` +
           `${s.portfolioReviewsCreated} portfolio_review created, ` +
-          `${skipped} skipped (idempotency=${s.idempotencySkips}, cadence=${s.cadenceSkips})`
-      );
+          `${skipped} skipped (idempotency=${s.idempotencySkips}, cadence=${s.cadenceSkips})`;
+        log(`[adviser-task-automation] completed: ${line}`);
+        return line;
+      });
     } catch (e) {
       console.error("[adviser-task-automation] cron error", e);
     }
@@ -202,7 +216,7 @@ app.use((req, res, next) => {
     );
   }
 
-  async function runDailyFeeAccrualsCron() {
+  async function runDailyFeeAccrualsCronInner() {
     const today = startOfUtcDay(new Date());
 
     // Decide which UTC dates to run. Default: today only. If a previous
@@ -291,13 +305,14 @@ app.use((req, res, next) => {
       plannedDates.length === 1 &&
       plannedDates[0].toISOString().slice(0, 10) === todayIso;
 
+    let summaryLine: string;
     if (plannedTodayOnly) {
-      log(
-        `[fee-accruals] completed for ${todayIso} (today only): ` +
-          `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
-          `${totalDuplicates} duplicate(s)${failedSuffix}`,
-      );
-    } else if (datesRun.length > 0 || datesFailed.length > 0) {
+      summaryLine =
+        `for ${todayIso} (today only): ` +
+        `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
+        `${totalDuplicates} duplicate(s)${failedSuffix}`;
+      log(`[fee-accruals] completed ${summaryLine}`);
+    } else {
       const firstPlanned = plannedDates[0].toISOString().slice(0, 10);
       const lastPlanned = plannedDates[plannedDates.length - 1]
         .toISOString()
@@ -308,12 +323,29 @@ app.use((req, res, next) => {
       const backfilled = plannedDates.filter(
         (d) => d.toISOString().slice(0, 10) !== todayIso,
       ).length;
-      log(
-        `[fee-accruals] completed for ${firstPlanned}..${lastPlanned} ` +
-          `(backfilled ${backfilled} day(s)): ` +
-          `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
-          `${totalDuplicates} duplicate(s)${failedSuffix}`,
+      summaryLine =
+        `for ${firstPlanned}..${lastPlanned} (backfilled ${backfilled} day(s)): ` +
+        `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
+        `${totalDuplicates} duplicate(s)${failedSuffix}`;
+      if (datesRun.length > 0 || datesFailed.length > 0) {
+        log(`[fee-accruals] completed ${summaryLine}`);
+      }
+    }
+    return summaryLine;
+  }
+
+  // Outer wrapper so a clean per-tick summary lands in `background_job_runs`.
+  // The inner function intentionally never throws (each per-date failure is
+  // caught), so the wrapper records 'success' even on partial-failure ticks;
+  // the summary string carries the failed-dates suffix in that case so the
+  // dashboard still shows what went wrong.
+  async function runDailyFeeAccrualsCron() {
+    try {
+      await withBackgroundJobRunRecord("fee-accruals", () =>
+        runDailyFeeAccrualsCronInner(),
       );
+    } catch (e) {
+      console.error("[fee-accruals] cron error", e);
     }
   }
 
@@ -354,7 +386,16 @@ app.use((req, res, next) => {
       // per attempt (success or failure) so the freshness watchdog below
       // has a durable signal to read. The wrapper still re-throws on
       // failure, preserving this try/catch's existing logging contract.
-      await pruneOperatorAlertsAndRecord();
+      // Task #79: also records a generic row in `background_job_runs` so the
+      // admin "Background Jobs" page sees this job alongside the others.
+      await withBackgroundJobRunRecord("operator-alerts-prune", async () => {
+        const r = await pruneOperatorAlertsAndRecord();
+        // r.prune is null only when the call threw, in which case the
+        // wrapper has already re-thrown — by the time we reach this line
+        // it must be populated.
+        const p = r.prune!;
+        return `${p.deleted} deleted, retention=${p.retentionDays}d, ${p.durationMs}ms`;
+      });
     } catch (e) {
       console.error("[operator-alerts-prune] cron error", e);
     }
@@ -391,14 +432,18 @@ app.use((req, res, next) => {
   // ---------------------------------------------------------------------------
   async function runOperatorAlertsPruneWatchdog() {
     try {
-      const result = await checkOperatorAlertsPruneFreshness();
-      if (result.fired) {
-        log(
-          `[operator-alerts-prune-watchdog] alerted: reason=${result.reason}, ` +
-            `mostRecentSuccessAt=${result.mostRecentSuccessAt?.toISOString() ?? "none"}, ` +
-            `ageMs=${result.ageMs ?? "n/a"}, thresholdMs=${result.thresholdMs}`,
-        );
-      }
+      await withBackgroundJobRunRecord("operator-alerts-prune-watchdog", async () => {
+        const result = await checkOperatorAlertsPruneFreshness();
+        if (result.fired) {
+          log(
+            `[operator-alerts-prune-watchdog] alerted: reason=${result.reason}, ` +
+              `mostRecentSuccessAt=${result.mostRecentSuccessAt?.toISOString() ?? "none"}, ` +
+              `ageMs=${result.ageMs ?? "n/a"}, thresholdMs=${result.thresholdMs}`,
+          );
+          return `alert fired: reason=${result.reason}`;
+        }
+        return `ok (mostRecentSuccessAt=${result.mostRecentSuccessAt?.toISOString() ?? "none"})`;
+      });
     } catch (e) {
       console.error("[operator-alerts-prune-watchdog] watchdog error", e);
     }
@@ -440,7 +485,18 @@ app.use((req, res, next) => {
       // Output line + audit logs are written by the service itself; the cron
       // wrapper only needs to swallow errors so a single failure doesn't
       // crash the server.
-      await runInsufficientFundsSweep();
+      await withBackgroundJobRunRecord("insufficient-funds-sweep", async () => {
+        const r = await runInsufficientFundsSweep();
+        // The service returns a structured summary; surface the key counts so
+        // the dashboard's "summary" cell tells operators what happened.
+        const parts: string[] = [];
+        if (r && typeof r === "object") {
+          for (const [k, v] of Object.entries(r)) {
+            if (typeof v === "number") parts.push(`${k}=${v}`);
+          }
+        }
+        return parts.length > 0 ? parts.join(", ") : "completed";
+      });
     } catch (e) {
       console.error("[insufficient-funds-sweep] cron error", e);
     }
@@ -476,6 +532,7 @@ app.use((req, res, next) => {
 
   async function runPostingReceiptInvariantCron() {
     try {
+      await withBackgroundJobRunRecord("posting-receipt-invariant", async () => {
       const r = await runPostingReceiptInvariantCheck();
       // Treat ANY non-zero divergence as such in the log (matches the
       // alert dispatch logic, which fires in both directions). Negative
@@ -502,6 +559,15 @@ app.use((req, res, next) => {
             `${r.receipts} receipts (${r.durationMs}ms)`,
         );
       }
+      // Compact summary for the Background Jobs dashboard.
+      if (r.missingCount > 0) {
+        return `DIVERGENCE: ${r.missingCount} missing receipt(s), tx=${r.txWithEntries}, receipts=${r.receipts}`;
+      }
+      if (r.missingCount < 0) {
+        return `DIVERGENCE: ${Math.abs(r.missingCount)} orphan receipt(s), tx=${r.txWithEntries}, receipts=${r.receipts}`;
+      }
+      return `ok: ${r.txWithEntries} tx == ${r.receipts} receipts`;
+      });
     } catch (e) {
       console.error("[posting-receipt-invariant] cron error", e);
     }

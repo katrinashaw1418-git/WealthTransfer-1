@@ -16,6 +16,7 @@ import {
   HandCoins,
   Scale,
   Coins,
+  Activity,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -40,6 +41,7 @@ const NAV_ITEMS = [
   { to: "/admin/compliance", label: "Compliance", icon: ShieldCheck },
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
   { to: "/admin/operator-alerts", label: "Operator Alerts", icon: Siren },
+  { to: "/admin/background-jobs", label: "Background Jobs", icon: Activity },
 ] as const;
 
 export default function AdminSidebar({ open, onClose }: AdminSidebarProps) {

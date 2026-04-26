@@ -2099,6 +2099,68 @@ export type InsertOperatorAlertPruneRun = z.infer<
   typeof insertOperatorAlertPruneRunSchema
 >;
 
+// ---------------------------------------------------------------------------
+// Task #79 — Background job run history
+// ---------------------------------------------------------------------------
+// One row per invocation of any scheduled background job (wallet/ledger
+// reconciliation, adviser-task automation, fee accruals, operator-alert
+// prune, insufficient-funds sweep, posting-receipt invariant, etc).
+//
+// Two existing tables — `fee_accrual_runs` and `operator_alert_prune_runs` —
+// already capture rich per-job detail with job-specific columns and are
+// kept as-is (the fee-accrual admin page and the prune watchdog read them
+// directly). This table is the *generic* operational health log, written
+// IN ADDITION to those, so the admin "Background Jobs" health panel can
+// answer one question for every job in one query: "did it run, when, did
+// it succeed, and is it overdue?"
+//
+// Kept deliberately small (one row per cron tick): each row is a job
+// invocation, not a per-item record. At ~7 jobs × 1 run/day = 50 rows/wk.
+// No retention policy needed for years; if the table ever needs trimming,
+// a separate prune cron can target jobName + age.
+// ---------------------------------------------------------------------------
+export const backgroundJobRuns = pgTable(
+  "background_job_runs",
+  {
+    id: serial("id").primaryKey(),
+    // Stable machine-readable identifier — see KNOWN_BACKGROUND_JOBS in
+    // server/services/background-jobs.ts for the canonical list.
+    jobName: text("job_name").notNull(),
+    // When the job invocation began. Defaulted server-side so callers can
+    // never accidentally backdate a row and fool the overdue check.
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    // Null until the job completes (or errors). A row whose finishedAt is
+    // null minutes after startedAt indicates a job that crashed without
+    // its wrapper catching the throw — useful diagnostic.
+    finishedAt: timestamp("finished_at"),
+    // 'success' | 'error'. Anything else is rejected by the inserter.
+    status: text("status").notNull(),
+    // Short human summary the job emitted (e.g. "12 inserted, 3 skipped").
+    // Kept compact — full structured detail still lives in the job-specific
+    // tables (feeAccrualRuns, operatorAlertPruneRuns, etc.) where applicable.
+    summary: text("summary"),
+    // Truncated error message for failed runs; null on success.
+    errorMessage: text("error_message"),
+    durationMs: integer("duration_ms"),
+  },
+  (table) => ({
+    // The dashboard reads "most recent run per jobName" — a composite index
+    // on (jobName, startedAt DESC) lets that be a cheap index-only scan.
+    jobNameStartedAtIdx: index("background_job_runs_job_name_started_at_idx").on(
+      table.jobName,
+      table.startedAt,
+    ),
+  }),
+);
+
+export const insertBackgroundJobRunSchema = createInsertSchema(
+  backgroundJobRuns,
+).omit({ id: true, startedAt: true });
+export type BackgroundJobRun = typeof backgroundJobRuns.$inferSelect;
+export type InsertBackgroundJobRun = z.infer<
+  typeof insertBackgroundJobRunSchema
+>;
+
 // =============================================================================
 // TASK #94 — Wealth planner compliance gaps
 // -----------------------------------------------------------------------------

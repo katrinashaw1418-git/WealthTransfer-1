@@ -21,6 +21,29 @@ The admin audit-log page (`/admin/audit-logs`) previously rendered the `metadata
 **Files**:
 - `client/src/pages/admin/audit-logs.tsx` — only file touched.
 
+## Recent Changes (April 2026) — Task #79: Background-jobs health page
+
+Single admin surface that lists every scheduled background job with last run, last successful run, summary/error, duration, and an **Overdue** flag (default threshold: > 36h since last start). Replaces the previous "grep server logs" workflow for confirming the daily crons ran.
+
+**Schema** (`shared/schema.ts`) — one new table:
+- `background_job_runs` — generic operational health log. One row per cron tick (success or error) with `jobName`, `startedAt` (server-defaulted, cannot be backdated by callers), `finishedAt`, `status`, `summary`, `errorMessage`, `durationMs`. Composite index on `(jobName, startedAt)` makes the dashboard's "most recent row per job" a cheap `DISTINCT ON` scan. Sits ALONGSIDE the existing job-specific tables (`fee_accrual_runs`, `operator_alert_prune_runs`) — those are kept as-is because the fee-accrual admin page and the prune watchdog read them directly.
+
+**Service** (`server/services/background-jobs.ts`):
+- `KNOWN_BACKGROUND_JOBS` — static catalogue of the 8 jobs the server runs (wallet-ledger-reconciliation, ledger-reconciliation, adviser-task-automation, fee-accruals, operator-alerts-prune, operator-alerts-prune-watchdog, insufficient-funds-sweep, posting-receipt-invariant). Listing them up front means a job that has NEVER run still appears in the dashboard as "never ran" instead of being silently absent.
+- `withBackgroundJobRunRecord(jobName, fn)` — wrapper used by every cron in `server/index.ts`. Records a 'success' row with the string returned by `fn` as the summary, or an 'error' row with the truncated error message. **Re-throws on failure** so each cron's existing `try { ... } catch (e) { console.error }` keeps logging exactly as before. Persistence failures are swallowed with `console.error` so a transient DB blip cannot crash the cron itself. Rejects unknown `jobName` loudly so a typo cannot orphan rows that never appear in the dashboard.
+- `getBackgroundJobsHealth({overdueAfterMs?, now?})` — single round-trip via two `DISTINCT ON (job_name)` queries: one for the most recent row per job (any status), one for the most recent SUCCESSFUL row per job. Returns one entry per known job with `lastRun`, `lastSuccessAt`, `ageMs`, `neverRan`, `isOverdue`. The `now` parameter is the deterministic-test seam used by the test file.
+
+**Wiring** (`server/index.ts`) — every cron tick is now wrapped in `withBackgroundJobRunRecord(...)`:
+- wallet/ledger reconciliations, adviser-task-automation, fee-accruals (outer wrapper around the existing `runDailyFeeAccrualsCronInner` so backfill semantics are unchanged), operator-alerts-prune (records BOTH `operator_alert_prune_runs` AND the generic table), operator-alerts-prune-watchdog, insufficient-funds-sweep, posting-receipt-invariant. Each wrapper returns a short summary string consumed verbatim into the dashboard "Summary" cell.
+
+**Routes** (`server/admin-routes.ts`):
+- `GET /api/admin/background-jobs` — returns `{generatedAt, overdueAfterMs, jobs: [...]}`.
+- `GET /api/admin/background-jobs/:jobName/runs` — last 50 runs of one job, used by the page's expand-row drawer.
+
+**UI** — new admin page `/admin/background-jobs` (`client/src/pages/admin/background-jobs.tsx`) with summary tiles (Tracked / Overdue / Last run failed), a full status table (Job, Status badge, Last run + relative time, Last success, Summary or error, Duration), and a click-to-expand sheet showing the recent run history. Auto-refreshes every 60s. Wired into `client/src/App.tsx` and the admin sidebar (`client/src/components/layout/admin-sidebar.tsx`) with an `Activity` icon.
+
+**Verification** — `server/services/background-jobs.test.ts` (10 tests, all passing): success & error rows are recorded with the right shape; errors re-thrown verbatim; unknown jobName rejected; every known job appears in the snapshot; overdue threshold works against an injected `now`; `lastSuccessAt` survives a subsequent failure (so the dashboard distinguishes "ran but crashed" from "never succeeded").
+
 ## Recent Changes (April 2026) — Task #96: Review-pending lock on advice-record writes
 
 When an advice record is in `status='review_pending'`, the adviser's structured write paths into that record are now hard-locked. The lock returns **HTTP 423** with `reason='record_locked_under_review'` so the client UI can render an explicit lock banner instead of a generic error.
