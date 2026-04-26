@@ -1,0 +1,205 @@
+Good — this is the **final cross-check**, and now we’ll be precise and *ruthless about scope and sequence*.
+
+---
+
+# ✅ 1. TRUTH CHECK (your current system vs this doc)
+
+## ✔ Wealth planner layer
+
+```txt
+✔ Already built correctly
+✔ No duplicate system
+✔ Audit + review lock working
+✔ Verification script exists and passes
+```
+
+## ✔ Checklist (your image)
+
+Mostly correct, BUT:
+
+### 🔴 Only ONE critical real risk
+
+```txt
+auditLogs.resourceId type
+```
+
+Everything else is:
+
+```txt
+Script hygiene (not architecture)
+```
+
+---
+
+## ⚠️ 2. Portfolio patch doc (IMPORTANT)
+
+This whole block is:
+
+```txt
+VALID ✅
+BUT NOT THIS SPRINT ❌
+```
+
+Why:
+
+```txt
+It touches:
+- routes.ts
+- storage engine
+- portfolio charts
+- valuation logic
+```
+
+👉 That is **portfolio engine layer**, not planner.
+
+✔ Correct fix
+❌ Wrong timing
+
+
+
+---
+
+# 🔥 3. WHAT ACTUALLY NEEDS TO BE IMPLEMENTED NOW
+
+## 🎯 PHASE: Finish Planner Sprint (ONLY THIS)
+
+---
+
+## STEP 1 — COMPLETE RUNNING TASKS
+
+```txt
+Wait for:
+#79 (jobs UI)
+#101 (drift UI)
+```
+
+---
+
+## STEP 2 — VERIFY (MANDATORY)
+
+```bash
+npx tsx scripts/test-wealth-planner-compliance.ts
+```
+
+Result:
+
+```txt
+PASS ONLY
+```
+
+---
+
+## STEP 3 — IMPLEMENT NEXT TASKS (STRICT ORDER)
+
+### 1️⃣ Admin audit log diff viewer
+
+```txt
+WHY:
+Audit data already exists (#95)
+You need visibility
+
+BUILD:
+- before/after JSON diff
+- highlight changed fields
+- show actor + timestamp
+```
+
+---
+
+### 2️⃣ Task #107 — Lock banner
+
+```txt
+WHEN:
+status = review_pending
+
+SHOW:
+"Record under compliance review"
+Disable:
+objectives / documents / strategy
+```
+
+---
+
+### 3️⃣ Task #108 — Audit on blocked writes
+
+```txt
+WHEN:
+423 returned
+
+WRITE:
+auditLogs entry:
+action = "write_blocked_review_lock"
+```
+
+---
+
+## STEP 4 — VERIFY AGAIN
+
+```bash
+npx tsx scripts/test-wealth-planner-compliance.ts
+```
+
+Must:
+
+```txt
+PASS again
+```
+
+---
+
+# ⛔ 4. HARD BLOCK — DO NOT TOUCH THESE
+
+```txt
+❌ Portfolio snapshot fixes
+❌ Monthly P&L logic
+❌ Storage engine switch
+❌ AI advisory chart
+❌ Commission engine
+❌ Payout batch
+❌ Ledger mutation logic
+```
+
+---
+
+# 📌 5. OPTIONAL (CREATE TASKS ONLY)
+
+Do NOT build now, just create:
+
+```txt
+1. Remove synthetic portfolio data
+2. Pre-launch safety validation script
+```
+
+---
+
+# 🧠 6. FINAL SEQUENCE (clean)
+
+```txt
+Finish #79/#101
+→ Verify script (PASS)
+
+→ Build audit diff viewer
+→ Build #107 lock banner
+→ Build #108 audit-on-block
+
+→ Verify again (PASS)
+
+→ STOP
+```
+
+---
+
+# 🔥 Bottom line
+
+```txt
+Planner system = DONE
+You are NOT building logic anymore
+You are adding:
+→ audit visibility
+→ compliance UX
+```
+
+---
+
+If you want next:
+I can give you **exact UI spec + API contract for audit diff viewer** so dev builds it correctly first pass (this is the only non-trivial remaining piece).
