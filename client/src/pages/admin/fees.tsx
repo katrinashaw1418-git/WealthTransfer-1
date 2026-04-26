@@ -238,7 +238,11 @@ interface FeeReconciliationResp {
   };
   insufficientFunds: { count: number; totalAccrued: string };
   pendingApproval: { count: number; totalAccrued: string };
-  walletLedgerDrift: { count: number; matchEpsilon: number };
+  walletLedgerDrift: {
+    count: number;
+    matchEpsilon: number;
+    pairs: { userId: number; currency: string }[];
+  };
 }
 interface AdviserPayoutRow {
   adviserUserId: number;
@@ -1921,27 +1925,72 @@ export default function AdminFeesPage() {
                         </div>
                       </CardContent>
                     </Card>
-                    <Card data-testid="card-recon-drift">
-                      <CardHeader className="pb-2">
-                        <CardTitle className="text-sm font-medium text-muted-foreground">
-                          Wallet vs ledger drift
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="text-2xl font-semibold flex items-center gap-2">
-                          {reconQ.data.walletLedgerDrift.count}
-                          {reconQ.data.walletLedgerDrift.count > 0 && (
-                            <AlertTriangle className="h-5 w-5 text-amber-500" />
-                          )}
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-1">
-                          Distinct (user, currency) pairs whose latest recon row
-                          drifts by more than {reconQ.data.walletLedgerDrift.matchEpsilon}.
-                          Restricted to users involved in fee deductions in this
-                          period.
-                        </div>
-                      </CardContent>
-                    </Card>
+                    {(() => {
+                      const drift = reconQ.data.walletLedgerDrift;
+                      const hasDrift = drift.count > 0;
+                      // Build a `userId:CCY,...` filter mirroring the exact
+                      // pairs that produced the count above. The recon page
+                      // applies this filter against the same MATCH_EPSILON,
+                      // so the row count there always matches this card.
+                      const pairsParam = drift.pairs
+                        .map((p) => `${p.userId}:${p.currency}`)
+                        .join(",");
+                      const drilldownHref = pairsParam
+                        ? `/admin/reconciliation?status=mismatch&pairs=${encodeURIComponent(pairsParam)}`
+                        : "/admin/reconciliation?status=mismatch";
+                      const cardBody = (
+                        <Card
+                          data-testid="card-recon-drift"
+                          className={
+                            hasDrift
+                              ? "transition hover:border-amber-400 hover:shadow-sm cursor-pointer"
+                              : ""
+                          }
+                        >
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center justify-between">
+                              <span>Wallet vs ledger drift</span>
+                              {hasDrift && (
+                                <ExternalLink
+                                  className="h-3.5 w-3.5 text-muted-foreground"
+                                  aria-hidden
+                                />
+                              )}
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent>
+                            <div className="text-2xl font-semibold flex items-center gap-2">
+                              {drift.count}
+                              {hasDrift && (
+                                <AlertTriangle className="h-5 w-5 text-amber-500" />
+                              )}
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              Distinct (user, currency) pairs whose latest recon row
+                              drifts by more than {drift.matchEpsilon}.
+                              Restricted to users involved in fee deductions in this
+                              period.
+                              {hasDrift && (
+                                <span className="block mt-1 text-violet-700">
+                                  View drifted pairs in Reconciliation →
+                                </span>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      );
+                      return hasDrift ? (
+                        <Link
+                          href={drilldownHref}
+                          data-testid="link-recon-drift-drilldown"
+                          aria-label={`View ${drift.count} drifted (user, currency) pair(s) in Reconciliation`}
+                        >
+                          {cardBody}
+                        </Link>
+                      ) : (
+                        cardBody
+                      );
+                    })()}
                   </div>
                 )}
               </TabsContent>

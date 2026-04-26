@@ -1239,6 +1239,40 @@ export function registerAdminRoutes(app: Express): void {
       const page = Math.max(Number(req.query.page) || 1, 1);
       const offset = (page - 1) * limit;
 
+      // Optional drill-down filter: a comma-separated list of `userId:CCY`
+      // pairs. Used by the fees-tab drift card so a click lands on exactly
+      // the same source rows the card counted. Pairs are validated and
+      // bound parametrically — never interpolated as raw SQL.
+      //
+      // We deliberately do NOT cap the number of pairs here: the card's
+      // contract is "the count never disagrees with what the recon page
+      // shows", so silently truncating the filter would break parity.
+      // Volume is bounded by the number of distinct (user, currency) pairs
+      // touched by fee deductions in the period — small in practice, and
+      // the surrounding URL/HTTP layer will reject inputs that exceed
+      // their own limits before we get here.
+      const pairsRaw = typeof req.query.pairs === "string" ? req.query.pairs.trim() : "";
+      const pairFilters: { userId: number; currency: string }[] = [];
+      const seenPairKeys = new Set<string>();
+      if (pairsRaw) {
+        for (const part of pairsRaw.split(",")) {
+          const [uidStr, ccyStr] = part.split(":");
+          const uid = Number(uidStr);
+          const ccy = (ccyStr ?? "").trim().toUpperCase();
+          if (
+            Number.isInteger(uid) &&
+            uid > 0 &&
+            /^[A-Z]{3,10}$/.test(ccy)
+          ) {
+            const key = `${uid}|${ccy}`;
+            if (!seenPairKeys.has(key)) {
+              seenPairKeys.add(key);
+              pairFilters.push({ userId: uid, currency: ccy });
+            }
+          }
+        }
+      }
+
       // Build the filter chunk used in both the items query and the count
       // query. Parameters are bound via the `sql` template tag so user input
       // can never be concatenated into the SQL text.
@@ -1247,6 +1281,16 @@ export function registerAdminRoutes(app: Express): void {
         : sql``;
       const currencyFilter = validCurrency
         ? sql`AND r.currency = ${validCurrency}`
+        : sql``;
+      // When `pairs` is provided but parses to zero valid pairs, force an
+      // empty result rather than silently returning everything.
+      const pairsFilter = pairsRaw
+        ? pairFilters.length === 0
+          ? sql`AND FALSE`
+          : sql`AND (r.user_id, r.currency) IN (${sql.join(
+              pairFilters.map((p) => sql`(${p.userId}, ${p.currency})`),
+              sql`, `,
+            )})`
         : sql``;
 
       // Pull the latest row per (userId, currency) using ROW_NUMBER. Volume
@@ -1275,6 +1319,7 @@ export function registerAdminRoutes(app: Express): void {
          WHERE r.rn = 1
          ${statusFilter}
          ${currencyFilter}
+         ${pairsFilter}
          ORDER BY (CASE WHEN r.status = 'mismatch' THEN 0 ELSE 1 END),
                   r.created_at DESC
          LIMIT ${limit}
@@ -1292,6 +1337,7 @@ export function registerAdminRoutes(app: Express): void {
          WHERE r.rn = 1
          ${statusFilter}
          ${currencyFilter}
+         ${pairsFilter}
       `);
 
       const items = (itemsResult as any).rows ?? [];
@@ -3332,13 +3378,15 @@ export function registerAdminRoutes(app: Express): void {
             ON tp.user_id = r.user_id AND tp.currency = r.currency
           ORDER BY r.user_id, r.currency, r.created_at DESC, r.id DESC
         )
-        SELECT count(*)::int AS drift_count
+        SELECT user_id AS "userId", currency
         FROM latest_recon
         WHERE abs(drift_amount) > ${MATCH_EPSILON}
+        ORDER BY user_id, currency
       `);
-      const driftCount = Number(
-        rowsFrom<{ drift_count: number }>(driftRow)[0]?.drift_count ?? 0,
-      );
+      const driftPairs = rowsFrom<{ userId: number; currency: string }>(
+        driftRow,
+      ).map((r) => ({ userId: Number(r.userId), currency: String(r.currency) }));
+      const driftCount = driftPairs.length;
 
       return {
         period: { from: from.toISOString(), to: to.toISOString() },
@@ -3367,6 +3415,11 @@ export function registerAdminRoutes(app: Express): void {
           // Surfaced so the UI can explain the number without the admin
           // having to hunt down where the tolerance lives.
           matchEpsilon: MATCH_EPSILON,
+          // The exact (userId, currency) pairs counted above. The drift
+          // card uses these to drill down into the reconciliation page
+          // showing the SAME source rows — so the count never disagrees
+          // with what the recon page itself displays.
+          pairs: driftPairs,
         },
       };
     }),

@@ -7,9 +7,9 @@
 // (user, currency). It is read-only — it cannot heal drift, only report it.
 // =============================================================================
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -110,16 +110,40 @@ function severityBadge(sev: ReconSeverity, status: ReconStatus) {
 }
 
 export default function AdminReconciliation() {
-  // Default to "mismatch" — the whole point of this page is to surface drift,
-  // not show admins a wall of green.
-  const [status, setStatus] = useState<"all" | ReconStatus>("mismatch");
-  const [currency, setCurrency] = useState("");
+  // Drill-down from the fees-tab drift card: `?pairs=userId:CCY,...`
+  // pins the table to exactly the (user, currency) pairs that produced
+  // the card's count, so the row count here always matches the card.
+  const searchString = useSearch();
+  const pairsParam = useMemo(() => {
+    const raw = new URLSearchParams(searchString).get("pairs") ?? "";
+    return raw.trim();
+  }, [searchString]);
+  const pairsCount = useMemo(() => {
+    if (!pairsParam) return 0;
+    return pairsParam.split(",").filter((p) => /^\d+:[A-Za-z]{3,10}$/.test(p.trim())).length;
+  }, [pairsParam]);
+
+  // Hydrate filter state from the URL on first render so deep-links from
+  // the fees drift card (or any bookmark) land with the same view they
+  // would after manually choosing the filters. Default to "mismatch" —
+  // the whole point of this page is to surface drift, not show admins a
+  // wall of green.
+  const initialStatus = (() => {
+    const v = new URLSearchParams(searchString).get("status");
+    return v === "match" || v === "mismatch" || v === "all" ? v : "mismatch";
+  })();
+  const initialCurrency = (() => {
+    const v = new URLSearchParams(searchString).get("currency") ?? "";
+    return /^[A-Za-z]{3,10}$/.test(v.trim()) ? v.trim().toUpperCase() : "";
+  })();
+  const [status, setStatus] = useState<"all" | ReconStatus>(initialStatus);
+  const [currency, setCurrency] = useState(initialCurrency);
   const [page, setPage] = useState(1);
   const limit = 50;
 
   const queryKey = [
     "/api/admin/wallet-ledger-reconciliations",
-    { status, currency, page },
+    { status, currency, page, pairs: pairsParam },
   ];
 
   const { data, isLoading, isFetching } = useQuery<ReconPage>({
@@ -128,6 +152,7 @@ export default function AdminReconciliation() {
       const params = new URLSearchParams();
       if (status !== "all") params.set("status", status);
       if (currency.trim()) params.set("currency", currency.trim().toUpperCase());
+      if (pairsParam) params.set("pairs", pairsParam);
       params.set("page", String(page));
       params.set("limit", String(limit));
       const token = (() => {
@@ -154,6 +179,21 @@ export default function AdminReconciliation() {
     setPage(1);
   }
 
+  // Strips ?pairs=... from the URL so the admin can return to the full
+  // table after using the drill-down. We rebuild the search string
+  // explicitly rather than mutating it in place so wouter's useSearch
+  // re-subscribes cleanly.
+  function clearPairsFilter() {
+    const sp = new URLSearchParams(searchString);
+    sp.delete("pairs");
+    const next = sp.toString();
+    const url = `${window.location.pathname}${next ? `?${next}` : ""}`;
+    window.history.replaceState(null, "", url);
+    // useSearch tracks the live query string via popstate; nudge it.
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    setPage(1);
+  }
+
   return (
     <div className="space-y-4 max-w-7xl">
       <div>
@@ -164,6 +204,30 @@ export default function AdminReconciliation() {
           historical transaction that pre-dates ledger enforcement.
         </p>
       </div>
+
+      {pairsParam && (
+        <div
+          className="flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+          data-testid="banner-pairs-filter"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-600" />
+            <span>
+              Filtered to {pairsCount} drifted (user, currency) pair
+              {pairsCount === 1 ? "" : "s"} from the fees reconciliation card.
+            </span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={clearPairsFilter}
+            data-testid="button-clear-pairs-filter"
+          >
+            <X className="h-4 w-4 mr-1" />
+            Clear drill-down
+          </Button>
+        </div>
+      )}
 
       <Card>
         <CardHeader>
