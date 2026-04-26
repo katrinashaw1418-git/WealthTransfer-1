@@ -36,12 +36,15 @@
 //   the same DB transaction handle that did/will refresh the wallet cache.
 //   The same-transaction posting guard in postLedgerEntries() additionally
 //   refuses to insert a second balanced pair against an existing
-//   transactionId — see LedgerDoublePostError below.
+//   transactionId — see LedgerDoublePostError below. As of Task #37 that
+//   guard is enforced by the database itself (PRIMARY KEY on the
+//   ledger_postings receipt table), so it holds even across concurrent
+//   connections at the default READ COMMITTED isolation level.
 // =============================================================================
 
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db";
-import { accounts, ledgerEntries, wallets } from "@shared/schema";
+import { accounts, ledgerEntries, ledgerPostings, wallets } from "@shared/schema";
 
 // Drizzle's transaction handle has the same query surface as `db`. We use a
 // loose alias so callers can pass either the global `db` or a `tx` from
@@ -336,42 +339,56 @@ export async function postLedgerEntries(
   }
 
   // -----------------------------------------------------------------------
-  // Task #22 — same-transaction posting guard.
-  // We perform this check INSIDE the caller's transaction handle so the
-  // COUNT and the INSERT live in the same snapshot. We deliberately count
-  // rows for this transactionId rather than relying on a unique index,
-  // because the schema permits N entries per transaction (a balanced pair
-  // is two, future FX flows may be more) — uniqueness lives at the
-  // transactionId level, not the per-row level.
+  // Task #22 / Task #37 — DB-enforced same-transaction posting guard.
   //
-  // SCOPE OF PROTECTION:
-  //   - Catches the realistic failure modes this task targets: a retry of
-  //     the same settlement step, a refactor that accidentally calls
-  //     postLedgerEntries twice for one transaction row, or a stray
-  //     reposting from a job/handler that already settled.
-  //   - Both current callers (handleDeposit, handleWithdraw in
-  //     server/routes.ts) wrap this call in `db.transaction(...)` and
-  //     create the parent `transactions` row inside the same tx, so a
-  //     concurrent second poster on a parallel connection would not yet
-  //     see — let alone target — the same transactionId.
+  // We claim a per-transactionId lock by inserting a row into the
+  // ledger_postings receipt table (PRIMARY KEY = transactionId) with
+  // ON CONFLICT DO NOTHING. Postgres serialises concurrent inserts of the
+  // same primary key value: the second poster blocks until the first
+  // commits or rolls back, then either silently no-ops (if first
+  // committed — we detect this via the empty .returning() result) or
+  // succeeds (if first rolled back). This closes the TOCTOU window the
+  // previous COUNT-then-INSERT guard left open at READ COMMITTED, where
+  // two concurrent posts on different connections targeting the same
+  // pre-existing transactionId could both pass the COUNT check before
+  // either inserted.
   //
-  // KNOWN LIMITATION:
-  //   - The default Postgres isolation level is READ COMMITTED. If a
-  //     future caller invokes postLedgerEntries from two concurrent
-  //     connections against the SAME pre-existing transactionId, there is
-  //     a TOCTOU window between this COUNT and the INSERT below where
-  //     both could pass the guard. To close that window properly, run the
-  //     caller's tx at SERIALIZABLE / REPEATABLE READ, or add a
-  //     DB-enforced unique constraint at the transactionId level (e.g. a
-  //     posting-receipt table with `UNIQUE(transaction_id)` written in
-  //     the same tx as the ledger inserts).
+  // We deliberately use ON CONFLICT DO NOTHING + RETURNING (instead of
+  // catching a 23505 unique_violation) because catching a unique
+  // violation inside an open Postgres transaction aborts the whole
+  // transaction — leaving us no clean path to translate the error to a
+  // typed LedgerDoublePostError. With ON CONFLICT DO NOTHING the receipt
+  // insert resolves cleanly either way, and we throw our typed error
+  // explicitly so the outer caller's tx unwinds via a normal exception.
+  //
+  // We keep the receipt in its own table rather than putting a unique
+  // index on ledger_entries.transactionId because the schema permits N
+  // entries per transactionId (a balanced pair is two; future FX flows
+  // may be more) — uniqueness lives at the transactionId level, not the
+  // per-row level.
+  //
+  // SCOPE OF PROTECTION (after Task #37):
+  //   - Catches retry-style double-posts (single connection re-runs).
+  //   - Catches refactor-bug double-posts (two callers in one tx).
+  //   - Catches concurrent double-posts (two transactions on different
+  //     connections targeting the same pre-existing transactionId), which
+  //     the COUNT-only guard could miss.
   // -----------------------------------------------------------------------
-  const [existing] = await (handle as any)
-    .select({ count: sql<number>`COUNT(*)::int` })
-    .from(ledgerEntries)
-    .where(eq(ledgerEntries.transactionId, transactionId));
-  const existingCount = Number(existing?.count ?? 0);
-  if (existingCount > 0) {
+  const claim = await (handle as any)
+    .insert(ledgerPostings)
+    .values({ transactionId })
+    .onConflictDoNothing()
+    .returning({ transactionId: ledgerPostings.transactionId });
+
+  if (claim.length === 0) {
+    // Another tx already posted entries for this transactionId. Look up
+    // the surviving entry count so the typed error carries an accurate
+    // existingEntryCount for callers / reconciliation tooling.
+    const [existing] = await (handle as any)
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, transactionId));
+    const existingCount = Number(existing?.count ?? 0);
     throw new LedgerDoublePostError(transactionId, existingCount);
   }
 

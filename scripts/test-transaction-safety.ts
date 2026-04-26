@@ -16,6 +16,13 @@
 //                                   the ledger sum surfaces as
 //                                   `status='mismatch'` in
 //                                   wallet_ledger_reconciliations
+//   7. concurrent post race       — two parallel postLedgerEntries() calls on
+//                                   different connections targeting the same
+//                                   pre-existing transactionId — exactly one
+//                                   wins, the other rejects with
+//                                   LedgerDoublePostError, and only ONE
+//                                   balanced pair is persisted (Task #37
+//                                   DB-enforced guard)
 //
 // Hard rules:
 //   - This script does NOT touch any production user. All work is scoped to a
@@ -125,9 +132,16 @@ async function ensureFreshTestWallet(userId: number): Promise<void> {
 }
 
 async function cleanupTestUser(userId: number): Promise<void> {
-  // Order matters: ledger_entries → transactions (FK), then everything else.
+  // Order matters: ledger_entries / ledger_postings → transactions (FK), then
+  // everything else.
   await db.execute(sql`
     DELETE FROM ledger_entries
+    WHERE transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})
+  `);
+  // Task #37 — drop the matching ledger_postings receipts so the FK from
+  // ledger_postings.transaction_id doesn't block the transactions delete.
+  await db.execute(sql`
+    DELETE FROM ledger_postings
     WHERE transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})
   `);
   await db.delete(transactions).where(eq(transactions.userId, userId));
@@ -567,6 +581,108 @@ async function test6_reconciliationMismatch(userId: number) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 7 — Task #37: concurrent double-post protection.
+//
+// Background: until Task #37, postLedgerEntries() guarded against double
+// posts with a COUNT-then-INSERT inside the caller's transaction. At the
+// default Postgres READ COMMITTED isolation level, two concurrent posters
+// on different connections targeting the same pre-existing transactionId
+// could both pass the COUNT check before either inserted — a silent
+// double-post that would only surface as drift on the next reconciliation.
+//
+// The fix is a `ledger_postings` receipt table whose primary key is
+// `transaction_id`, written in the same DB tx as the ledger inserts. This
+// test reproduces the race directly: pre-create a parent transactions row
+// outside any tx so both posters see it, then fire two postLedgerEntries
+// calls in parallel — each in its own `db.transaction(...)` so they take
+// distinct connections from the pool. Exactly one must win, the other must
+// reject with LedgerDoublePostError, and the surviving entry count must be
+// 2 (a single balanced pair).
+// ---------------------------------------------------------------------------
+async function test7_concurrentDoublePost(userId: number) {
+  const [tx] = await db
+    .insert(transactions)
+    .values({
+      userId,
+      type: "deposit",
+      fromCurrency: null,
+      toCurrency: TEST_CURRENCY,
+      amount: "300.00",
+      fee: "0",
+      status: "completed",
+      description: "txsafety concurrent",
+    })
+    .returning();
+
+  const client = await getOrCreateClientAccount(userId, TEST_CURRENCY);
+  const suspense = await getOrCreateSuspenseAccount(TEST_CURRENCY);
+
+  const pair = [
+    {
+      accountId: suspense.id,
+      userId: suspense.userId,
+      currency: TEST_CURRENCY,
+      direction: "debit" as const,
+      amount: "300.00000000",
+      description: "concurrent suspense leg",
+    },
+    {
+      accountId: client.id,
+      userId,
+      currency: TEST_CURRENCY,
+      direction: "credit" as const,
+      amount: "300.00000000",
+      description: "concurrent client leg",
+    },
+  ];
+
+  const attempt = () =>
+    db.transaction(async (innerTx) => {
+      await postLedgerEntries(tx.id, pair, innerTx);
+    });
+
+  const settled = await Promise.allSettled([attempt(), attempt()]);
+  const fulfilled = settled.filter((r) => r.status === "fulfilled").length;
+  const rejected = settled.filter(
+    (r): r is PromiseRejectedResult => r.status === "rejected",
+  );
+  const doublePostErrors = rejected.filter(
+    (r) =>
+      r.reason instanceof LedgerDoublePostError ||
+      (r.reason as any)?.name === "LedgerDoublePostError",
+  ).length;
+
+  const [{ n: entryCount }] = await db
+    .select({ n: sql<number>`COUNT(*)::int` })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, tx.id));
+
+  const ok =
+    fulfilled === 1 &&
+    doublePostErrors === 1 &&
+    Number(entryCount) === 2 &&
+    rejected.length === 1;
+
+  if (ok) {
+    pass(
+      "concurrent post race",
+      `tx#${tx.id}: 1 fulfilled, 1 LedgerDoublePostError, ${entryCount} entries`,
+    );
+  } else {
+    const otherErr = rejected[0]?.reason
+      ? `${(rejected[0].reason as any)?.name ?? "Error"}: ${
+          (rejected[0].reason as any)?.message ?? rejected[0].reason
+        }`
+      : "n/a";
+    fail(
+      "concurrent post race",
+      `fulfilled=${fulfilled}, doublePostErrors=${doublePostErrors}, ` +
+        `entries=${entryCount} (expected 1/1/2). first rejection: ${otherErr}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
@@ -583,6 +699,7 @@ async function main() {
   await test4_failedNoLedger(userId);
   await test5_reversalOffset(userId);
   await test6_reconciliationMismatch(userId);
+  await test7_concurrentDoublePost(userId);
 
   console.log("");
   for (const r of results) {

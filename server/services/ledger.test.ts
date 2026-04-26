@@ -22,11 +22,12 @@
 // =============================================================================
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   accounts,
   ledgerEntries,
+  ledgerPostings,
   transactions,
   users,
   wallets,
@@ -166,6 +167,11 @@ afterAll(async () => {
     await db
       .delete(ledgerEntries)
       .where(inArray(ledgerEntries.transactionId, createdTxIds));
+    // Task #37 — drop the matching ledger_postings receipts so the FK to
+    // transactions doesn't block the transactions delete below.
+    await db
+      .delete(ledgerPostings)
+      .where(inArray(ledgerPostings.transactionId, createdTxIds));
     await db.delete(transactions).where(inArray(transactions.id, createdTxIds));
   }
   if (testUserId !== undefined) {
@@ -284,6 +290,70 @@ describe("postLedgerEntries — double-post guard (Task #22)", () => {
         .where(eq(ledgerEntries.transactionId, innerTxId));
       expect(survivingEntries).toHaveLength(0);
     }
+  });
+
+  // ---------------------------------------------------------------------
+  // Task #37 — concurrent double-post protection.
+  //
+  // The previous COUNT-then-INSERT guard had a TOCTOU window at the
+  // default READ COMMITTED isolation level: two concurrent posters on
+  // different connections targeting the same pre-existing transactionId
+  // could both pass the COUNT check before either INSERT, silently
+  // double-posting. The ledger_postings receipt table closes that window
+  // by giving Postgres a primary key to lock on.
+  //
+  // This test reproduces the race directly. We pre-create a parent
+  // transactions row OUTSIDE any tx, then fire two postLedgerEntries
+  // calls in parallel — each inside its own `db.transaction(...)` — and
+  // assert that EXACTLY one balanced pair (2 entries) lands and the
+  // other call rejects with LedgerDoublePostError.
+  // ---------------------------------------------------------------------
+  it("serialises concurrent posts on different connections — exactly one wins", async () => {
+    const txId = await insertSettledTx(testUserId);
+    createdTxIds.push(txId);
+
+    const clientAcct = await getOrCreateClientAccount(testUserId, TEST_CURRENCY);
+    const suspenseAcct = await resolveSuspenseAccount();
+    const pair = balancedPair(
+      clientAcct.id,
+      testUserId,
+      suspenseAcct.id,
+      suspenseAcct.userId,
+    );
+
+    // Two parallel attempts, each in its own connection-bound tx. The
+    // pool default size is large enough for two concurrent
+    // db.transaction() handles to acquire distinct connections.
+    const attempt = () =>
+      db.transaction(async (tx) => {
+        await postLedgerEntries(txId, pair, tx);
+      });
+
+    const results = await Promise.allSettled([attempt(), attempt()]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === "rejected",
+    );
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(LedgerDoublePostError);
+    expect((rejected[0].reason as LedgerDoublePostError).transactionId).toBe(txId);
+
+    // Exactly one balanced pair landed, and exactly one posting receipt
+    // was claimed.
+    const [{ entryCount }] = await db
+      .select({ entryCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, txId));
+    expect(Number(entryCount)).toBe(2);
+
+    const [{ receiptCount }] = await db
+      .select({ receiptCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerPostings)
+      .where(eq(ledgerPostings.transactionId, txId));
+    expect(Number(receiptCount)).toBe(1);
   });
 });
 

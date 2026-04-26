@@ -1297,6 +1297,35 @@ export const insertLedgerEntrySchema = createInsertSchema(ledgerEntries).omit({
 export type LedgerEntry = typeof ledgerEntries.$inferSelect;
 export type InsertLedgerEntry = z.infer<typeof insertLedgerEntrySchema>;
 
+// ---------------------------------------------------------------------------
+// Task #37 — ledger posting receipts (DB-enforced double-post lock)
+// ---------------------------------------------------------------------------
+// One row per settlement transaction that has had its ledger pair posted.
+// Inserted in the SAME database transaction as the matching ledger_entries
+// rows by postLedgerEntries(). Because transaction_id is the PRIMARY KEY,
+// Postgres itself refuses a second posting against the same transactionId —
+// even when the two posters are concurrent connections at the default
+// READ COMMITTED isolation level, where the previous COUNT-then-INSERT
+// guard left a TOCTOU window open.
+//
+// The application never reads from this table; its only role is to give the
+// database a unique key to lock on so that the second concurrent
+// postLedgerEntries() call can never silently succeed. Keeping the receipt
+// in its own table (rather than e.g. a unique index on
+// ledger_entries.transactionId) preserves the schema invariant that a single
+// transactionId may carry N entries — a balanced pair today, more for FX
+// flows tomorrow — while still enforcing one-posting-per-transaction at the
+// database level.
+// ---------------------------------------------------------------------------
+export const ledgerPostings = pgTable("ledger_postings", {
+  transactionId: integer("transaction_id")
+    .primaryKey()
+    .references(() => transactions.id),
+  postedAt: timestamp("posted_at").defaultNow().notNull(),
+});
+
+export type LedgerPosting = typeof ledgerPostings.$inferSelect;
+
 // =============================================================================
 // SESSION 8 — RECONCILIATION
 // =============================================================================
