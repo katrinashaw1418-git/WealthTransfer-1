@@ -45,6 +45,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import { accounts, ledgerEntries, ledgerPostings, wallets } from "@shared/schema";
+import { notifyOperator } from "./operator-alerts";
 
 // Drizzle's transaction handle has the same query surface as `db`. We use a
 // loose alias so callers can pass either the global `db` or a `tx` from
@@ -301,6 +302,126 @@ export class LedgerDoublePostError extends Error {
   }
 }
 
+/**
+ * Task #54 — thrown by postLedgerEntries() when the in-memory entries fail
+ * the credit==debit balance invariant (within EPSILON). The previous code
+ * threw a plain `Error("Ledger entries are not balanced: ...")` which
+ * surfaced to the user as a generic 500 from whichever route triggered the
+ * unbalanced journal. The typed error gives every caller a way to:
+ *   1. Map this specific failure to a stable 422 + clean user message
+ *      (instead of leaking the internal credit/debit numbers to the client).
+ *   2. Fan out an operator alert with the structured numbers so an unbalanced
+ *      journal in production is paged within minutes — drift from a silent
+ *      regression here is the worst-case outcome of the ledger.
+ *
+ * The error carries `status=422` so admin-route helpers that already key
+ * off `error.status` route it correctly without a special case. Callers
+ * SHOULD prefer `mapLedgerUnbalancedToHttpResponse()` (or call
+ * `notifyLedgerUnbalanced()` directly) so the operator alert is fired
+ * exactly once per occurrence.
+ */
+export class LedgerUnbalancedError extends Error {
+  readonly transactionId: number;
+  readonly totalCredits: number;
+  readonly totalDebits: number;
+  readonly difference: number;
+  readonly currency: string;
+  readonly entryCount: number;
+  readonly status = 422 as const;
+
+  constructor(
+    transactionId: number,
+    totalCredits: number,
+    totalDebits: number,
+    currency: string,
+    entryCount: number,
+  ) {
+    super(
+      `Ledger entries are not balanced: credits=${totalCredits}, debits=${totalDebits}`,
+    );
+    this.name = "LedgerUnbalancedError";
+    this.transactionId = transactionId;
+    this.totalCredits = totalCredits;
+    this.totalDebits = totalDebits;
+    this.difference = totalCredits - totalDebits;
+    this.currency = currency;
+    this.entryCount = entryCount;
+  }
+}
+
+// Stable user-facing strings for the unbalanced-journal failure mode. Kept
+// at module scope (and exported) so route-level tests can assert on the
+// exact same constants the production response uses, instead of duplicating
+// the message text.
+export const LEDGER_UNBALANCED_USER_MESSAGE =
+  "We could not complete this action because an internal accounting check " +
+  "failed. Operations have been notified and will investigate.";
+export const LEDGER_UNBALANCED_ERROR_CODE = "ledger_unbalanced";
+
+/**
+ * Fire a critical operator alert for a tripped balance guard. Best-effort:
+ * any failure dispatching the alert is swallowed (logged to stderr) so the
+ * caller's HTTP response path is never blocked by a flaky alert backend.
+ *
+ * `source` should identify the originating call site (e.g. `"deposit"`,
+ * `"withdrawal"`, `"fee_deduction_settlement"`) so a downstream router can
+ * fan out by code path.
+ */
+export async function notifyLedgerUnbalanced(opts: {
+  source: string;
+  err: LedgerUnbalancedError;
+  context?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await notifyOperator({
+      source: `ledger-balance-guard.${opts.source}`,
+      severity: "critical",
+      title: "Unbalanced ledger journal blocked at posting time",
+      details: {
+        callSite: opts.source,
+        transactionId: opts.err.transactionId,
+        currency: opts.err.currency,
+        totalCredits: opts.err.totalCredits,
+        totalDebits: opts.err.totalDebits,
+        difference: opts.err.difference,
+        entryCount: opts.err.entryCount,
+        ...(opts.context ?? {}),
+      },
+    });
+  } catch (alertErr) {
+    console.error(
+      `[ledger] failed to dispatch unbalanced-journal operator alert for source=${opts.source}`,
+      alertErr,
+    );
+  }
+}
+
+/**
+ * Express-aware mapping helper. If `error` is a `LedgerUnbalancedError`,
+ * fires the operator alert (best-effort) and writes a stable 422 JSON
+ * response, then returns true so the caller's catch block can early-return.
+ * Otherwise returns false and writes nothing — the caller should fall back
+ * to its existing error handling.
+ *
+ * Centralising both the alert dispatch AND the response shape here means
+ * every call site (deposit, withdrawal, fee settlement, future flows) maps
+ * the same way without copy-pasting the JSON payload.
+ */
+export async function mapLedgerUnbalancedToHttpResponse(
+  res: { status: (code: number) => { json: (body: unknown) => unknown } },
+  error: unknown,
+  source: string,
+  context?: Record<string, unknown>,
+): Promise<boolean> {
+  if (!(error instanceof LedgerUnbalancedError)) return false;
+  await notifyLedgerUnbalanced({ source, err: error, context });
+  res.status(422).json({
+    error: LEDGER_UNBALANCED_USER_MESSAGE,
+    code: LEDGER_UNBALANCED_ERROR_CODE,
+  });
+  return true;
+}
+
 export async function postLedgerEntries(
   transactionId: number,
   entries: LedgerEntryInput[],
@@ -333,8 +454,18 @@ export async function postLedgerEntries(
   }
 
   if (Math.abs(totalCredits - totalDebits) > EPSILON) {
-    throw new Error(
-      `Ledger entries are not balanced: credits=${totalCredits}, debits=${totalDebits}`
+    // Task #54 — typed error so callers can map this specific failure to a
+    // 422 + clean user message and fire an operator alert. The throw must
+    // happen BEFORE any DB write (no claim row, no entries, no cache
+    // refresh) — that ordering is depended on by the route-level mapping
+    // (it's safe to early-return without rolling back state) and by the
+    // ledger.test.ts assertion that no entries leak.
+    throw new LedgerUnbalancedError(
+      transactionId,
+      totalCredits,
+      totalDebits,
+      currency,
+      entries.length,
     );
   }
 

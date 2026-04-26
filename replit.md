@@ -3,6 +3,29 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Task #54: Typed unbalanced-ledger error + 422 mapping + operator alert
+
+The balanced-journal guard inside `postLedgerEntries()` (server/services/ledger.ts) used to throw a plain `Error("Ledger entries are not balanced: …")`. Whichever route triggered the bad journal would surface that as a generic 500 to the user with the raw credit/debit numbers leaked into the response, and ops would only learn about it from log scraping. This task fixes the surface and the visibility.
+
+**Ledger service (`server/services/ledger.ts`)**:
+- New typed error `LedgerUnbalancedError` (`{transactionId, totalCredits, totalDebits, difference, currency, entryCount, status: 422}`) replaces the plain `Error` at the balance-guard throw site. The throw still happens BEFORE any DB write — no claim row, no entries, no cache refresh — so callers can early-return without any rollback concern.
+- Two reusable helpers:
+  - `notifyLedgerUnbalanced({source, err, context})` — fires a `critical` operator alert via `notifyOperator` with structured details (transactionId, totals, difference, currency, entryCount + caller-supplied context). Best-effort; alert dispatch failures are swallowed and logged.
+  - `mapLedgerUnbalancedToHttpResponse(res, error, source, context?)` — express-aware: detects `LedgerUnbalancedError`, fires the alert, writes a 422 JSON `{error: LEDGER_UNBALANCED_USER_MESSAGE, code: "ledger_unbalanced"}`, and returns true so the caller's catch block can early-return. Returns false for any other error so existing 500/status-aware handling stays reachable.
+- Stable user-facing constants `LEDGER_UNBALANCED_USER_MESSAGE` and `LEDGER_UNBALANCED_ERROR_CODE` are exported so route-level tests assert the production string instead of duplicating it.
+
+**Route wiring**:
+- `server/routes.ts` — `handleDeposit` and `handleWithdraw` catch blocks call `mapLedgerUnbalancedToHttpResponse` BEFORE the generic `error.status` branch. The user gets the stable 422 + operations is paged automatically.
+- `server/admin-routes.ts` — `/api/admin/fee-deductions/:id/approve` (the `settleApprovedDeduction` caller) detects the typed error in its catch, fires the alert via `notifyLedgerUnbalanced`, and re-throws a sanitized 422 (`Object.assign(new Error(LEDGER_UNBALANCED_USER_MESSAGE), {status: 422, body: {code: "ledger_unbalanced"}})`) so `handleError` returns the same response shape. The pre-existing `fee_deduction_settle_failed` audit row is unchanged.
+
+**Tests** — two suites locked in:
+1. `server/services/ledger.test.ts` (existing balanced-journal guard test) — now also asserts `instanceof LedgerUnbalancedError` and the structured fields (`transactionId`, `totalCredits`, `totalDebits`, `difference`, `currency`, `entryCount`, `status: 422`). If a future refactor silently downgrades back to a plain Error, this test fails.
+2. `server/services/ledger-unbalanced-mapping.test.ts` (new) — 5 tests covering: (a) helper writes 422 + stable body and persists exactly one critical alert with the structured details, (b) the user-facing body does NOT leak credit/debit/numbers, (c) helper returns false for unrelated errors and writes nothing, (d) helper still returns 422 even if the alert backend is degraded, (e) `notifyLedgerUnbalanced` swallows alert-dispatch failures so the calling route is never blocked. Cleanup query is namespaced to `ledger-balance-guard.task54-%` so reruns don't touch unrelated alert rows on the shared dev DB.
+
+**Side fix** — `server/services/wallet-cache.test.ts` cleanup now also deletes `ledger_postings` rows (parity with `ledger.test.ts`) so the FK from `ledger_postings → transactions` doesn't block the existing transactions delete. This was a latent issue that surfaced once the dev DB had the `ledger_postings` table populated.
+
+**Verified**: `npx vitest run` is 16/16 green across the four suites.
+
 ## Recent Changes (April 2026) — Task #38: Vitest test runner for money-movement tests
 
 Money-movement coverage was being added one tsx script at a time (`scripts/test-transaction-safety.ts`, the now-removed `scripts/test-ledger-double-post.ts`). That doesn't scale as we add cases for balanced-pair enforcement, multi-currency rejection, wallet cache refresh, withdrawal fee handling, etc. This task wires up vitest as the project's real test runner.

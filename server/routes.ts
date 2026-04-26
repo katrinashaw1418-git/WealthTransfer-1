@@ -47,6 +47,7 @@ import {
   postLedgerEntries,
   refreshWalletCacheBalance,
   getUserLedgerSumsByCurrency,
+  mapLedgerUnbalancedToHttpResponse,
 } from "./services/ledger";
 import { MATCH_EPSILON } from "./services/reconciliation";
 
@@ -3065,6 +3066,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "deposit", "transaction", String(txRecord?.id), { currency, amount: rawAmount }, req.ip || null);
       res.json(txRecord);
     } catch (error: any) {
+      // Task #54 — unbalanced ledger journal (the double-entry invariant
+      // tripped) maps to a stable 422 + clean message and pages an
+      // operator. We check this BEFORE the generic `error.status` branch
+      // because the typed error already carries status=422 — calling the
+      // helper here also fires the operator alert (the generic branch
+      // would not).
+      if (
+        await mapLedgerUnbalancedToHttpResponse(res, error, "deposit", {
+          route: "/api/deposit",
+          ipAddress: req.ip ?? null,
+        })
+      ) {
+        return;
+      }
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("[deposit] failed", error);
       res.status(500).json({ error: "Failed to process deposit" });
@@ -3181,6 +3196,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "withdrawal", "transaction", String(txRecord?.id), { currency, amount: rawAmount }, req.ip || null);
       res.json(txRecord);
     } catch (error: any) {
+      // Task #54 — unbalanced ledger journal mapping (see deposit handler
+      // above for rationale). The withdrawal path can produce a different
+      // unbalanced shape (the fee leg is bundled into the same posting
+      // until the dedicated fee engine ships), so this is a real risk
+      // surface, not a theoretical one.
+      if (
+        await mapLedgerUnbalancedToHttpResponse(res, error, "withdrawal", {
+          route: "/api/withdraw",
+          ipAddress: req.ip ?? null,
+        })
+      ) {
+        return;
+      }
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("[withdraw] failed", error);
       res.status(500).json({ error: "Failed to process withdrawal" });

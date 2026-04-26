@@ -34,6 +34,7 @@ import {
 } from "@shared/schema";
 import {
   LedgerDoublePostError,
+  LedgerUnbalancedError,
   getOrCreateClientAccount,
   getOrCreateSuspenseAccount,
   postLedgerEntries,
@@ -504,9 +505,24 @@ describe("postLedgerEntries — balanced-journal guard (Task #45)", () => {
       },
     ];
 
-    await expect(
-      postLedgerEntries(SENTINEL_TX_ID, unbalancedJournal),
-    ).rejects.toThrow("Ledger entries are not balanced");
+    // Task #54 — capture the typed error so we can assert on its identity
+    // and structured fields (transactionId / totals / difference / currency
+    // / entryCount), not just the message text. The route-level mapping
+    // depends on `instanceof LedgerUnbalancedError` to fire the operator
+    // alert and return a 422; if the throw ever silently downgrades back
+    // to a plain Error, this test fails.
+    const promise = postLedgerEntries(SENTINEL_TX_ID, unbalancedJournal);
+    await expect(promise).rejects.toBeInstanceOf(LedgerUnbalancedError);
+    await expect(promise).rejects.toThrow("Ledger entries are not balanced");
+    await expect(promise).rejects.toMatchObject({
+      transactionId: SENTINEL_TX_ID,
+      totalCredits: 50,
+      totalDebits: 100,
+      difference: -50,
+      currency: TEST_CURRENCY,
+      entryCount: 2,
+      status: 422,
+    });
 
     // The guard fires before any DB access, so no ledger entries can have
     // been inserted against our sentinel transactionId.

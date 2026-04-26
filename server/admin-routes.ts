@@ -2781,6 +2781,8 @@ export function registerAdminRoutes(app: Express): void {
       // deduction id — a retry of an already-settled deduction returns the
       // existing row without re-posting.
       const { settleApprovedDeduction } = await import("./services/fee-engine");
+      const { LedgerUnbalancedError, notifyLedgerUnbalanced, LEDGER_UNBALANCED_USER_MESSAGE } =
+        await import("./services/ledger");
       let settled;
       try {
         settled = await settleApprovedDeduction({
@@ -2800,9 +2802,30 @@ export function registerAdminRoutes(app: Express): void {
           {
             error: err?.message ? String(err.message) : String(err),
             status: err?.status ?? null,
+            errorName: err?.name ?? null,
           },
           req.ip ?? null,
         );
+        // Task #54 — if the failure was specifically the balanced-journal
+        // guard tripping, page an operator and re-throw a sanitized 422
+        // so the admin sees a clean message instead of the raw internal
+        // credits/debits numbers from the technical Error message.
+        if (err instanceof LedgerUnbalancedError) {
+          await notifyLedgerUnbalanced({
+            source: "fee_deduction_settlement",
+            err,
+            context: {
+              route: "/api/admin/fee-deductions/:id/approve",
+              deductionId: id,
+              approverUserId: auth.userId,
+              ipAddress: req.ip ?? null,
+            },
+          });
+          throw Object.assign(new Error(LEDGER_UNBALANCED_USER_MESSAGE), {
+            status: 422,
+            body: { code: "ledger_unbalanced" },
+          });
+        }
         throw err;
       }
 
