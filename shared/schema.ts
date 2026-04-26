@@ -729,3 +729,171 @@ export const insertRoaDocumentSchema = createInsertSchema(roaDocuments).omit({
 });
 export type RoaDocument = typeof roaDocuments.$inferSelect;
 export type InsertRoaDocument = z.infer<typeof insertRoaDocumentSchema>;
+
+// ============================================================================
+// Phase 2.3 — Fee Consents, Advice Acknowledgements, Execution Authorisations
+// (schema-only; no routes, services, UI, triggers, or ledger work in this phase)
+// ============================================================================
+
+export const feeConsents = pgTable("fee_consents", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  clientId: integer("client_id")
+    .references(() => users.id)
+    .notNull(),
+
+  adviserId: integer("adviser_id")
+    .references(() => users.id),
+
+  feeType: text("fee_type").notNull(),
+  // ongoing_service_fee | advice_fee | platform_fee
+
+  amountType: text("amount_type").notNull(),
+  // fixed | percentage | calculation_method
+
+  amount: decimal("amount", { precision: 14, scale: 4 }),
+
+  calculationMethod: text("calculation_method"),
+
+  accountNumber: text("account_number").notNull(),
+  accountName: text("account_name"),
+
+  deductionFrequency: text("deduction_frequency").notNull(),
+  // monthly | quarterly | annually
+
+  referenceDay: timestamp("reference_day").notNull(),
+
+  renewalWindowStart: timestamp("renewal_window_start").notNull(),
+  renewalWindowEnd: timestamp("renewal_window_end").notNull(),
+  consentExpiryDate: timestamp("consent_expiry_date").notNull(),
+
+  renewalStatus: text("renewal_status").notNull().default("active"),
+  // active | renewal_due | expired | withdrawn | renewed
+
+  clientSignatureName: text("client_signature_name").notNull(),
+
+  consentedAt: timestamp("consented_at").defaultNow(),
+
+  withdrawnAt: timestamp("withdrawn_at"),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const adviceAcknowledgements = pgTable("advice_acknowledgements", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  soaDocumentId: integer("soa_document_id")
+    .references(() => soaDocuments.id),
+
+  clientId: integer("client_id")
+    .references(() => users.id)
+    .notNull(),
+
+  adviserId: integer("adviser_id")
+    .references(() => users.id),
+
+  confirmPersonalDetails: boolean("confirm_personal_details").notNull().default(false),
+  confirmFinancialInfo: boolean("confirm_financial_info").notNull().default(false),
+  confirmObjectives: boolean("confirm_objectives").notNull().default(false),
+  confirmRiskProfile: boolean("confirm_risk_profile").notNull().default(false),
+  confirmScopeUnderstood: boolean("confirm_scope_understood").notNull().default(false),
+  confirmSoaViewed: boolean("confirm_soa_viewed").notNull().default(false),
+  confirmFeesUnderstood: boolean("confirm_fees_understood").notNull().default(false),
+  confirmFeesConsented: boolean("confirm_fees_consented").notNull().default(false),
+  confirmValuesMayFall: boolean("confirm_values_may_fall").notNull().default(false),
+  confirmReturnsNotGuaranteed: boolean("confirm_returns_not_guaranteed").notNull().default(false),
+  confirmFsgReceived: boolean("confirm_fsg_received").notNull().default(false),
+
+  signatureName: text("signature_name").notNull(),
+
+  acceptedAt: timestamp("accepted_at").defaultNow(),
+
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const executionAuthorisations = pgTable("execution_authorisations", {
+  id: serial("id").primaryKey(),
+
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id)
+    .notNull(),
+
+  clientId: integer("client_id")
+    .references(() => users.id)
+    .notNull(),
+
+  adviserId: integer("adviser_id")
+    .references(() => users.id),
+
+  authorised: boolean("authorised").notNull().default(false),
+
+  executionScope: jsonb("execution_scope")
+    .$type<string[]>()
+    .notNull()
+    .default([]),
+
+  signatureName: text("signature_name").notNull(),
+
+  // Snapshot of compliance gate at the moment of authorisation.
+  // The actual gate must still be recalculated live before allowing execution.
+  gateSoaIssued: boolean("gate_soa_issued").notNull().default(false),
+  gateSoaViewed: boolean("gate_soa_viewed").notNull().default(false),
+  gateAdviceAccepted: boolean("gate_advice_accepted").notNull().default(false),
+  gateFeeConsentValid: boolean("gate_fee_consent_valid").notNull().default(false),
+
+  authorisedAt: timestamp("authorised_at").defaultNow(),
+
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+
+  retentionUntil: timestamp("retention_until").defaultNow(),
+  deletionLocked: boolean("deletion_locked").notNull().default(true),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertFeeConsentSchema = createInsertSchema(feeConsents).omit({
+  id: true,
+  retentionUntil: true,
+  deletionLocked: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type FeeConsent = typeof feeConsents.$inferSelect;
+export type InsertFeeConsent = z.infer<typeof insertFeeConsentSchema>;
+
+export const insertAdviceAcknowledgementSchema = createInsertSchema(adviceAcknowledgements).omit({
+  id: true,
+  retentionUntil: true,
+  deletionLocked: true,
+  createdAt: true,
+});
+export type AdviceAcknowledgement = typeof adviceAcknowledgements.$inferSelect;
+export type InsertAdviceAcknowledgement = z.infer<typeof insertAdviceAcknowledgementSchema>;
+
+export const insertExecutionAuthorisationSchema = createInsertSchema(executionAuthorisations).omit({
+  id: true,
+  retentionUntil: true,
+  deletionLocked: true,
+  createdAt: true,
+});
+export type ExecutionAuthorisation = typeof executionAuthorisations.$inferSelect;
+export type InsertExecutionAuthorisation = z.infer<typeof insertExecutionAuthorisationSchema>;

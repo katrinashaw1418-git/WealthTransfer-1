@@ -14,6 +14,31 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 6 (Phase 2.3): Fee Consents + Advice Acknowledgements + Execution Authorisations Schema
+
+**Schema-only.** No routes, no services, no UI. DB triggers, ledger tables, and the live execution-gate recalculation are explicitly deferred to later phases.
+
+Schema changes (`shared/schema.ts`, ~899 lines now):
+1. **`feeConsents`** new table (23 cols) — captures the client's standing instruction to deduct ongoing service fees / advice fees / platform fees. Columns: `adviceRecordId` FK NOT NULL → `advice_records.id`, `clientId` FK NOT NULL → `users.id`, optional `adviserId` FK → `users.id`, `feeType` (`ongoing_service_fee|advice_fee|platform_fee`), `amountType` (`fixed|percentage|calculation_method`), `amount` (decimal 14,4), `calculationMethod`, `accountNumber` + optional `accountName`, `deductionFrequency` (`monthly|quarterly|annually`), `referenceDay`, `renewalWindowStart` + `renewalWindowEnd` + `consentExpiryDate` (all NOT NULL timestamps for the FY24 ongoing-fee renewal cycle), `renewalStatus` (default `active` — `active|renewal_due|expired|withdrawn|renewed`), `clientSignatureName`, `consentedAt` (default now), `withdrawnAt`, `createdAt` + `updatedAt`, plus retention scaffolding.
+2. **`adviceAcknowledgements`** new table (23 cols) — captures the client's pre-acceptance attestations. Columns: `adviceRecordId` FK NOT NULL, optional `soaDocumentId` FK → `soa_documents.id`, `clientId` FK NOT NULL, optional `adviserId` FK, **eleven** boolean confirm-flags all defaulting false (`confirmPersonalDetails`, `confirmFinancialInfo`, `confirmObjectives`, `confirmRiskProfile`, `confirmScopeUnderstood`, `confirmSoaViewed`, `confirmFeesUnderstood`, `confirmFeesConsented`, `confirmValuesMayFall`, `confirmReturnsNotGuaranteed`, `confirmFsgReceived`), `signatureName`, `acceptedAt` (default now), `ipAddress`, `userAgent`, plus retention scaffolding.
+3. **`executionAuthorisations`** new table (17 cols) — explicit go-ahead for trade execution. Columns: `adviceRecordId` FK NOT NULL, `clientId` FK NOT NULL, optional `adviserId` FK, `authorised` (default false), `executionScope` (jsonb string[] default `'[]'`), `signatureName`, plus a **snapshot of the compliance gate at the moment of authorisation** (`gateSoaIssued`, `gateSoaViewed`, `gateAdviceAccepted`, `gateFeeConsentValid` — all default false), `authorisedAt` (default now), `ipAddress`, `userAgent`, plus retention scaffolding. **Note:** the live gate must still be recalculated server-side before any actual execution; the snapshot fields are an audit record, not the enforcement mechanism.
+4. Insert schemas use `.omit()` for system-managed fields (`id`, `retentionUntil`, `deletionLocked`, `createdAt`, plus `updatedAt` on feeConsents); `Insert*` and select types added for all 3 tables.
+
+One intentional spec deviation: spec wrote `numeric(...)` for `feeConsents.amount`; used `decimal(...)` instead because (a) `numeric` is not imported in this schema file, (b) all prior phases use `decimal`, (c) Postgres treats them identically (DB column came back as `numeric` regardless).
+
+DB migration: `drizzle-kit push --force` succeeded, schema verified via `information_schema`:
+- `fee_consents` (23 cols), `advice_acknowledgements` (23 cols), `execution_authorisations` (17 cols) all present ✓
+- All 10 FKs correctly resolved (3 from fee_consents, 4 from advice_acknowledgements, 3 from execution_authorisations) ✓
+- All NOT NULL constraints, defaults (`'active'`, `false`, `'[]'::jsonb`, `true`, `now()`) match spec exactly ✓
+
+Typecheck: clean except for the same 2 pre-existing `server/storage.ts` errors at 3276/3299 (out of scope).
+
+Server restart: clean (port 5000 serving).
+
+Code review: PASS first pass — every column, FK target, jsonb shape, default and nullability matches spec; insert schemas correctly omit auto-generated fields; `decimal` vs `numeric` deviation explicitly endorsed; no scope creep.
+
+**No scope creep:** zero new routes / services / UI; no DB triggers; no live execution-gate recalculation; no ledger / accounting tables; no separate clients table.
+
 ## Recent Changes (April 2026) — Session 5 (Phase 2.2): Advice Records + SOA + ROA Schema
 
 **Schema-only.** No routes, no services, no UI. Fee consents, advice acknowledgements, execution authorisations and the DB triggers (execution gate + 7-year retention) are explicitly deferred to Phase 2.3+.
