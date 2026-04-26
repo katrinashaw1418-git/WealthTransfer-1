@@ -1,0 +1,35 @@
+verify and cross check and give me the update list of advicesincluidng architecht design , and patches of codes etc.
+
+5:13 PM
+Claude responded: Let me do a thorough read of all critical files before producing anything.
+Let me do a thorough read of all critical files before producing anything.
+
+
+Ran 16 commands
+Ran 16 commands
+Now I have the complete, verified picture. Let me produce the comprehensive report.
+
+
+Ran 2 commands, created a file, read a file
+Ran 2 commands, created a file, read a file
+Here's the complete verified audit of your AMAX-V2 codebase.
+
+What V2 confirmed ✅ (actually done)
+Good news — several major previous fixes are verified present: fake snapshot seeding is gone, monthlyPnlSource is live, DatabaseStorage is active, idempotency keys are wired to money routes, reconciliation cron runs every 24h, and AUSTRAC fields are complete.
+
+Critical gaps found ❌ (9 confirmed issues)
+GAP 1 — password: text("password").notNull() — still blocking all OAuth. This is the single biggest issue. Any Google/Apple/Phone user will crash at createUser().
+
+GAP 2 — No googleId, appleId, or role columns in schema. The entire Google auth flow and entire adviser layer are impossible without these.
+
+GAP 3–5 — Google, Apple, Phone sign-in are still "Coming soon" toasts. main.tsx has no GoogleOAuthProvider, register.tsx still calls setSocialNotice("google"), and there's no /api/auth/google route anywhere in routes.ts.
+
+GAP 6 — Adviser layer is 100% missing. No tables, no routes, no UI — nothing from the previous adviser design exists in V2.
+
+GAP 7 — inArray not imported in routes.ts. The adviser dashboard query would crash immediately with a ReferenceError.
+
+GAP 8 — Login page has no Google button. Users who registered via Google have no way to sign back in.
+
+GAP 9 — Admin auth is still a shared API key. After role is added, this should migrate to JWT-based role checks.
+
+The document has 12 precise patches in the correct build order — Patches 1–7 are the minimum to get Google login working. Patches 9–12 add the complete adviser layer.
