@@ -35,6 +35,7 @@ import {
 } from "@shared/schema";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
+import { storage } from "./storage";
 
 // ---------------------------------------------------------------------------
 // Registration-invite helpers (Session 14)
@@ -349,6 +350,22 @@ export function registerAdminRoutes(app: Express): void {
         );
       }
 
+      // Mirror the activation-time username/email pair check from
+      // /api/auth/registration-invites/complete: that endpoint sets
+      // username = email on the new user row, so a pre-existing user whose
+      // username happens to equal the applicant's email will trigger a 409
+      // at /complete via the username UNIQUE constraint. Catching it here
+      // avoids the confusing "approved but the invitee still can't activate"
+      // dead-end. Residual races where a username==email user is created
+      // AFTER this check are caught at /complete.
+      const usernameTaken = await storage.getUserByUsername(existing.email);
+      if (usernameTaken) {
+        throw Object.assign(
+          new Error("A user with this email already exists"),
+          { status: 409 },
+        );
+      }
+
       // Mint registration invite in the same tx as the approval + audit. This
       // closes the loop from "approved application" → "user can actually activate"
       // (Session 14). Without an invite, an approved applicant has no path forward.
@@ -597,6 +614,24 @@ export function registerAdminRoutes(app: Express): void {
             { status: 400 },
           );
         }
+      }
+
+      // Mirror the activation-time username/email pair check from
+      // /api/auth/registration-invites/complete: that endpoint sets
+      // username = email on the new user row, so a pre-existing user whose
+      // username happens to equal the invitee's email will trigger a 409 at
+      // /complete via the username UNIQUE constraint. Without this guard,
+      // admins would see "invitation issued" only for the invitee to hit a
+      // dead-end 409 after typing a password. The atomicity guarantee for
+      // the rare race where a username==email user is created AFTER this
+      // check but BEFORE /complete is still owed to the activation tx,
+      // exactly as for the email check below.
+      const usernameTaken = await storage.getUserByUsername(normalisedEmail);
+      if (usernameTaken) {
+        throw Object.assign(
+          new Error("A user with this email already exists"),
+          { status: 409 },
+        );
       }
 
       const { raw: rawInvite, hash: inviteHash } = mintRegistrationInvite();
