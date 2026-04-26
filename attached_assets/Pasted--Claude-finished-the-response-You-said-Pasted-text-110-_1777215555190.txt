@@ -1,0 +1,1571 @@
+
+Claude finished the response
+You said: Pasted text(110).
+
+Next build: Gate B — Fee Deduction Execution Only proceed because: Ledger source of truth ✅ Reconciliation ✅ Posting safeguards ✅ Transaction safety tests ✅ Idempotency service extracted ✅ Replit prompt Proceed with Gate B — Fee Deduction Execution. Purpose: Enable admin-approved
+
+pasted
+
+Pasted text(110).txt
+Document
+verify and cross check. then let me know all the next builds 
+Thought for a couple of seconds
+Verified and cross-checked. The sequence is consistent and safe. Your next builds should be:
+1. Gate B — Fee Deduction Execution
+Build only after ledger, reconciliation, posting safeguards, transaction safety tests, and idempotency service are already merged.
+Core build:
+
+feeDeductionJournals table
+POST /api/admin/fee-deductions/:id/deduct
+POST /api/admin/fee-deductions/:id/reverse
+GET /api/admin/fee-deduction-journals
+update /admin/fees UI
+Hard controls:
+
+admin/compliance_admin only
+approved deduction only
+re-check active signed consent immediately before posting
+block expired / withdrawn consent
+block insufficient ledger balance
+prevent duplicate journal
+ledger debit only through ledger service
+atomic writes + audit logs
+no wallet mutation
+no automatic deduction
+no adviser-triggered deduction
+no external payout / bank transfer
+Gate B Verification + Safety Test Script
+Before moving to reporting, build:
+scripts/test-fee-deduction-gate-b.ts
+Required tests:
+
+non-admin cannot deduct
+approved deduction posts once
+duplicate deduction blocked
+expired consent blocked
+withdrawn consent blocked
+insufficient balance blocked
+ledger debit created
+reversal ledger credit created
+wallet balance not directly mutated
+reconciliation clean after post/reversal Expected final output:
+ALL GATE B FEE DEDUCTION TESTS PASSED ✅
+Hard stop: if any test fails, do not proceed.
+3. Fee Reconciliation + Payout Reporting
+Only after Gate B tests pass.
+Build:
+
+GET /api/admin/fee-reconciliation
+GET /api/admin/adviser-payouts
+GET /api/admin/platform-fee-revenue
+GET /api/admin/fee-exceptions
+UI tabs in /admin/fees:
+
+Reconciliation
+Adviser Payouts
+Platform Revenue
+Exceptions
+Important: this is reporting only.
+Do not build yet:
+
+bank transfer
+external payout
+automatic monthly sweep
+commission tiers Final verified build order:
+1. Gate B — Fee Deduction Execution
+2. Gate B Verification + Safety Test Script
+3. Fee Reconciliation + Payout Reporting
+4. Hard stop before payout execution
+anything to be added on wealth planner layer
+Yes — add a Wealth Planner layer, but keep it planning + consent + records only, not advice execution.
+Add after Fee Reporting
+Wealth Planner Layer — Advice Records & Client Planning
+Build:
+
+wealthPlans table
+wealthPlanRecommendations table
+wealthPlanReviews table
+clientObjectives / riskProfile snapshot
+adviceDisclaimerAcknowledgements
+planner notes + file upload records
+admin/adviser UI: /adviser/planner and client view /wealth/plan
+Core rules:
+
+no product execution
+no managed discretionary account logic
+no automatic rebalancing
+no “personal advice” wording unless AFSL/AR framework is ready
+every recommendation must show general advice / information-only disclaimer
+client must acknowledge disclaimer before viewing plan
+keep immutable snapshots of:
+objectives
+risk profile
+time horizon
+liquidity needs
+source of funds / wealth summary
+selected model portfolio
+adviser/planner notes Best build order
+1. Gate B — Fee Deduction Execution
+2. Gate B Verification + Safety Test Script
+3. Fee Reconciliation + Payout Reporting
+4. Wealth Planner Layer — Advice Records & Client Planning
+5. Wealth Planner Verification Script
+6. Only later: AFSL/AR-controlled advice execution workflow
+Key thing to add: planner layer should create records and recommendations, not execute investments.
+verify and cross check, and then let me know what to be fixed and what to be added on wealth planner layer
+
+Show more
+12:28 AM
+Claude responded: I'll do a thorough cross-check of the entire build sequence and the wealth planner layer specifically.
+I'll do a thorough cross-check of the entire build sequence and the wealth planner layer specifically.
+
+Here's a thorough cross-check across the entire build sequence, then a detailed breakdown of what's missing or needs fixing in the wealth planner layer.
+
+
+
+Cross-check verdict: The Gate B and Fee Reporting builds are internally consistent and safe. The wealth planner layer has real gaps that need fixing. Here's the full breakdown.
+
+What needs to be fixed in the wealth planner layer
+Critical gaps — missing tables and fields
+1. wealthPlanVersions — you need immutable versioning The current spec says "keep immutable snapshots" but doesn't define how. You need a version table that locks a plan at a point in time. Without it, any edit to a wealthPlan silently overwrites the historical record.
+
+Add:
+
+ts
+export const wealthPlanVersions = pgTable("wealth_plan_versions", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  versionNumber: integer("version_number").notNull(),
+  snapshotData: jsonb("snapshot_data").notNull(),
+  // Full plan state at this point in time
+  createdBy: integer("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+  changeReason: text("change_reason"),
+});
+2. riskProfileSnapshots needs to be its own table, not just a column A risk profile stored as a column on wealthPlans will get mutated when the plan is updated. It needs to be a separate append-only table:
+
+ts
+export const riskProfileSnapshots = pgTable("risk_profile_snapshots", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id),
+  riskTolerance: text("risk_tolerance").notNull(), // conservative | balanced | growth | aggressive
+  timeHorizonYears: integer("time_horizon_years").notNull(),
+  liquidityNeedsText: text("liquidity_needs_text"),
+  sourceOfWealth: text("source_of_wealth"),
+  capturedBy: integer("captured_by").references(() => users.id),
+  capturedAt: timestamp("captured_at").defaultNow(),
+});
+3. clientObjectives is named but not defined The spec mentions it but gives no schema. At minimum you need:
+
+ts
+export const clientObjectives = pgTable("client_objectives", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id),
+  objectiveType: text("objective_type").notNull(), // retirement | education | property | estate | income | other
+  targetAmount: decimal("target_amount", { precision: 15, scale: 2 }),
+  targetDate: date("target_date"),
+  priority: text("priority").notNull().default("primary"), // primary | secondary
+  notes: text("notes"),
+  createdBy: integer("created_by").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+4. adviceDisclaimerAcknowledgements needs strict fields This is a compliance record — it needs to capture exactly what disclaimer text was shown, not just that the client clicked "agree."
+
+Add:
+
+ts
+export const adviceDisclaimerAcknowledgements = pgTable("advice_disclaimer_acknowledgements", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id),
+  disclaimerVersion: text("disclaimer_version").notNull(), // e.g. "general-advice-v1.2"
+  disclaimerText: text("disclaimer_text").notNull(), // full text shown, locked at time of ack
+  acknowledgedAt: timestamp("acknowledged_at").defaultNow(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+});
+Logic gaps — rules not defined
+5. Disclaimer gate must be enforced server-side, not just UI The spec mentions "client must acknowledge disclaimer before viewing plan" but this needs to be enforced by the API. Every GET /wealth/plan/:id must verify a valid adviceDisclaimerAcknowledgement exists before returning plan data. A UI-only gate is bypassed by direct API calls.
+
+6. wealthPlanRecommendations needs an explicit "general advice only" flag Every recommendation record must carry a adviceType field locked to "general" until AFSL/AR is in place. This prevents any recommendation from accidentally being classified or displayed as personal advice.
+
+Add to the recommendations table:
+
+ts
+adviceType: text("advice_type").notNull().default("general"),
+// Must be "general" — "personal" is blocked until AFSL/AR framework ready
+generalAdviceDisclaimer: text("general_advice_disclaimer").notNull(),
+// disclaimer text attached to this specific recommendation
+7. Planner notes need audit trail fields Notes that can be edited need a lastEditedAt and lastEditedBy, not just createdAt. Better: make notes append-only (new row per edit, never update in place).
+
+8. File upload records need to reference what they are The spec says "planner notes + file upload records" but doesn't define the file record schema. You need:
+
+ts
+export const wealthPlanDocuments = pgTable("wealth_plan_documents", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  uploadedBy: integer("uploaded_by").references(() => users.id).notNull(),
+  documentType: text("document_type").notNull(), // statement_of_advice | fact_find | risk_questionnaire | correspondence | other
+  fileName: text("file_name").notNull(),
+  storageKey: text("storage_key").notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+});
+What needs to be added (not just fixed)
+9. wealthPlanReviews needs a formal review cycle schema Reviews should record who conducted the review, what changed, what the prior state was, and when the next review is due. Without this, regulatory audit trails are incomplete.
+
+10. Role access rules need to be explicit The spec says advisers use /adviser/planner and clients use /wealth/plan but doesn't state the API-level access rules. You need to explicitly define:
+
+Adviser can read/write their own clients' plans only
+Client can read their own plan only (no write)
+Admin can read all, write none (except flagging exceptions)
+Compliance_admin can read all and flag plans for review
+11. selectedModelPortfolio snapshot is mentioned but has no home The spec says to snapshot "selected model portfolio" but there's no modelPortfolios table referenced anywhere in the build sequence. Either define the table now or store it as a locked jsonb column on the risk profile snapshot. Don't leave it as an implied field — it will drift.
+
+12. The verification script needs specific tests defined Unlike Gate B which lists all 10 tests explicitly, the wealth planner verification script is vague ("Wealth Planner Verification Script"). Before you build, define these tests:
+
+Non-adviser cannot create a plan
+Client cannot access another client's plan
+Plan cannot be viewed without acknowledged disclaimer
+Disclaimer acknowledgement records the full disclaimer text
+Risk profile snapshot is immutable after capture
+Recommendation adviceType cannot be set to "personal"
+Plan version is created on every update
+File upload creates an audit record
+Admin can read but not mutate a plan
+Reconciliation: no ledger side effects from planner actions
+Summary: what to do before building
+Issue	Action
+wealthPlanVersions table missing	Add before building
+riskProfileSnapshots as column not table	Fix — separate append-only table
+clientObjectives schema undefined	Define schema
+adviceDisclaimerAcknowledgements too thin	Add version, full text, IP, user-agent
+Disclaimer gate UI-only	Enforce server-side on every plan API call
+wealthPlanRecommendations no advice type lock	Add adviceType field locked to "general"
+Planner notes no audit trail	Make append-only
+File upload schema missing	Add wealthPlanDocuments table
+wealthPlanReviews schema vague	Define review cycle fields
+Role access rules implicit	Make explicit per-role per-endpoint
+selectedModelPortfolio snapshot has no home	Assign to riskProfileSnapshots as jsonb or define modelPortfolios table
+Verification script tests not listed	Define all 10 tests before building
+The Gate B sequence is clean. The wealth planner layer needs these 12 items resolved in schema before any code is written.
+
+You said: Verified and cross-checked.
+Verified and cross-checked. Claude’s review is correct. The Gate B / fee sequence is clean, but the Wealth Planner layer needs more compliance-grade structure before build.
+Add these before building:
+
+1. wealthPlanVersions
+2. riskProfileSnapshots
+3. clientObjectives
+4. adviceDisclaimerAcknowledgements with full disclaimer text/version/IP/user agent
+5. wealthPlanDocuments
+6. append-only plannerNotes
+7. formal wealthPlanReviews
+8. selectedModelPortfolio snapshot
+9. API-level disclaimer gate
+10. strict role access rules
+11. adviceType locked to "general"
+12. Wealth Planner verification script
+Best corrected build order:
+
+1. Gate B — Fee Deduction Execution
+2. Gate B Verification + Safety Test Script
+3. Fee Reconciliation + Payout Reporting
+4. Wealth Planner Schema Foundation
+5. Wealth Planner API + Server-Side Compliance Gates
+6. Wealth Planner UI
+7. Wealth Planner Verification Script
+8. Hard stop before personal advice / execution / rebalancing
+Main fix: do not build the Wealth Planner as a simple editable plan page. Build it as an append-only, versioned, disclaimer-gated planning record system.
+
+Show more
+12:32 AM
+Claude responded: Confirmed.
+Confirmed. Here is the full corrected build specification before any code is written.
+
+Below is the complete corrected build specification — all schema, all API rules, all compliance gates, all verification tests — written as a single production-ready Replit prompt ready to hand off.
+
+Wealth Planner — full corrected build specification
+Build order (steps 4–8 of the full sequence)
+4. Wealth Planner Schema Foundation
+5. Wealth Planner API + Server-Side Compliance Gates
+6. Wealth Planner UI
+7. Wealth Planner Verification Script
+8. Hard stop — no personal advice / execution / rebalancing until AFSL/AR framework
+Step 4 — Wealth Planner Schema Foundation
+Replit prompt
+
+Proceed with Step 4 — Wealth Planner Schema Foundation.
+
+Purpose: Build the append-only, versioned, disclaimer-gated schema for the wealth planner. No editable mutable plan records. Every write creates a new row or version. No advice execution, no rebalancing, no personal advice fields.
+
+Add to shared/schema.ts:
+
+ts
+// Core plan record — one per client/adviser relationship
+export const wealthPlans = pgTable("wealth_plans", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  status: text("status").notNull().default("active"),
+  // active | closed | under_review
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  closedAt: timestamp("closed_at"),
+  closedBy: integer("closed_by").references(() => users.id),
+  closureReason: text("closure_reason"),
+}, (table) => ({
+  uniqClientAdviser: uniqueIndex("wealth_plans_client_adviser_uidx")
+    .on(table.clientUserId, table.adviserUserId),
+}));
+
+// Immutable version snapshot — created on every plan update, never overwritten
+export const wealthPlanVersions = pgTable("wealth_plan_versions", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  versionNumber: integer("version_number").notNull(),
+  snapshotData: jsonb("snapshot_data").notNull(),
+  // Full serialised state of the plan at this version
+  changeReason: text("change_reason").notNull(),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  uniqPlanVersion: uniqueIndex("wealth_plan_versions_plan_ver_uidx")
+    .on(table.wealthPlanId, table.versionNumber),
+}));
+
+// Append-only risk profile — new row on every capture, never updated in place
+export const riskProfileSnapshots = pgTable("risk_profile_snapshots", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  riskTolerance: text("risk_tolerance").notNull(),
+  // conservative | balanced | growth | aggressive
+  timeHorizonYears: integer("time_horizon_years").notNull(),
+  liquidityNeedsText: text("liquidity_needs_text").notNull(),
+  sourceOfWealth: text("source_of_wealth").notNull(),
+  employmentStatus: text("employment_status"),
+  annualIncomeRange: text("annual_income_range"),
+  netWorthRange: text("net_worth_range"),
+  investmentExperience: text("investment_experience"),
+  // none | limited | moderate | experienced
+  selectedModelPortfolio: jsonb("selected_model_portfolio"),
+  // Full locked snapshot of the model portfolio at time of capture
+  // { name, assetAllocation, benchmarkIndex, lastReviewedAt }
+  capturedBy: integer("captured_by").references(() => users.id).notNull(),
+  capturedAt: timestamp("captured_at").defaultNow(),
+});
+
+// Client objectives — append-only, one row per objective entry
+export const clientObjectives = pgTable("client_objectives", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  objectiveType: text("objective_type").notNull(),
+  // retirement | education | property | estate | income | liquidity | other
+  description: text("description").notNull(),
+  targetAmount: decimal("target_amount", { precision: 15, scale: 2 }),
+  targetDate: date("target_date"),
+  priority: text("priority").notNull().default("primary"),
+  // primary | secondary | aspirational
+  currency: text("currency").notNull().default("AUD"),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  supersededAt: timestamp("superseded_at"),
+  // set when a newer objective replaces this one — never deleted
+  supersededBy: integer("superseded_by"),
+  // id of the newer clientObjectives row
+});
+
+// Disclaimer acknowledgements — compliance record, never deleted or updated
+export const adviceDisclaimerAcknowledgements = pgTable("advice_disclaimer_acknowledgements", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  disclaimerVersion: text("disclaimer_version").notNull(),
+  // e.g. "general-advice-v1.0" — bump when text changes
+  disclaimerText: text("disclaimer_text").notNull(),
+  // Full text shown at time of acknowledgement — locked, not a reference
+  acknowledgedAt: timestamp("acknowledged_at").defaultNow(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  sessionId: text("session_id"),
+});
+
+// Recommendations — general advice only, locked field, append-only
+export const wealthPlanRecommendations = pgTable("wealth_plan_recommendations", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  adviceType: text("advice_type").notNull().default("general"),
+  // LOCKED to "general" — personal blocked until AFSL/AR framework
+  generalAdviceDisclaimer: text("general_advice_disclaimer").notNull(),
+  // Full disclaimer text attached to this specific recommendation
+  recommendationText: text("recommendation_text").notNull(),
+  assetClassFocus: text("asset_class_focus"),
+  // equities | fixed_income | property | cash | alternatives | mixed
+  riskProfileSnapshotId: integer("risk_profile_snapshot_id")
+    .references(() => riskProfileSnapshots.id).notNull(),
+  // Recommendation must link to the risk profile at the time of advice
+  status: text("status").notNull().default("draft"),
+  // draft | presented | acknowledged | superseded
+  presentedAt: timestamp("presented_at"),
+  acknowledgedAt: timestamp("acknowledged_at"),
+  supersededAt: timestamp("superseded_at"),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Append-only planner notes — never updated in place
+export const plannerNotes = pgTable("planner_notes", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  noteText: text("note_text").notNull(),
+  noteType: text("note_type").notNull().default("general"),
+  // general | review | client_instruction | compliance | follow_up
+  visibility: text("visibility").notNull().default("adviser_only"),
+  // adviser_only | shared_with_client | admin_only
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  // No updatedAt — append-only. New note supersedes old.
+});
+
+// Plan reviews — formal review cycle records
+export const wealthPlanReviews = pgTable("wealth_plan_reviews", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  reviewType: text("review_type").notNull().default("annual"),
+  // annual | triggered | compliance | initial
+  reviewedBy: integer("reviewed_by").references(() => users.id).notNull(),
+  reviewedAt: timestamp("reviewed_at").defaultNow(),
+  priorVersionId: integer("prior_version_id").references(() => wealthPlanVersions.id),
+  newVersionId: integer("new_version_id").references(() => wealthPlanVersions.id),
+  riskProfileSnapshotId: integer("risk_profile_snapshot_id")
+    .references(() => riskProfileSnapshots.id),
+  objectivesChanged: boolean("objectives_changed").notNull().default(false),
+  riskProfileChanged: boolean("risk_profile_changed").notNull().default(false),
+  recommendationsChanged: boolean("recommendations_changed").notNull().default(false),
+  reviewSummary: text("review_summary").notNull(),
+  nextReviewDue: date("next_review_due"),
+  clientAcknowledgedAt: timestamp("client_acknowledged_at"),
+  clientAcknowledgedBy: integer("client_acknowledged_by").references(() => users.id),
+});
+
+// Document records — file upload audit trail
+export const wealthPlanDocuments = pgTable("wealth_plan_documents", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id").references(() => wealthPlans.id).notNull(),
+  uploadedBy: integer("uploaded_by").references(() => users.id).notNull(),
+  documentType: text("document_type").notNull(),
+  // statement_of_advice | fact_find | risk_questionnaire |
+  // correspondence | review_report | compliance_record | other
+  fileName: text("file_name").notNull(),
+  fileSizeBytes: integer("file_size_bytes"),
+  mimeType: text("mime_type"),
+  storageKey: text("storage_key").notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+  description: text("description"),
+});
+Step 5 — Wealth Planner API + Server-Side Compliance Gates
+Endpoints to build:
+
+POST   /api/adviser/wealth-plans
+GET    /api/adviser/wealth-plans/:id
+POST   /api/adviser/wealth-plans/:id/risk-profiles
+POST   /api/adviser/wealth-plans/:id/objectives
+POST   /api/adviser/wealth-plans/:id/recommendations
+POST   /api/adviser/wealth-plans/:id/notes
+POST   /api/adviser/wealth-plans/:id/reviews
+POST   /api/adviser/wealth-plans/:id/documents
+
+GET    /api/client/wealth-plan
+GET    /api/client/wealth-plan/recommendations
+
+GET    /api/admin/wealth-plans
+GET    /api/admin/wealth-plans/:id
+POST   /api/admin/wealth-plans/:id/flag
+Server-side compliance gates — enforced on every request, not just UI:
+
+1. Disclaimer gate
+   - GET /api/client/wealth-plan and GET /api/client/wealth-plan/recommendations
+     must verify a valid adviceDisclaimerAcknowledgement exists
+     for the requesting client and plan before returning any data.
+   - If no acknowledgement: return 403 with { code: "DISCLAIMER_REQUIRED" }
+   - Client must POST /api/client/wealth-plan/acknowledge-disclaimer first.
+   - Disclaimer version must match the current active version in config.
+   - If version mismatch: return 403 with { code: "DISCLAIMER_VERSION_OUTDATED" }
+
+2. Role access rules
+   - Adviser:
+     can create and read plans for their own assigned clients only
+     cannot read another adviser's plans
+     cannot write to admin-only fields
+     cannot set adviceType to anything other than "general"
+   - Client:
+     can read their own plan only (no write access to any plan table)
+     cannot read planner notes with visibility = adviser_only or admin_only
+   - Admin:
+     can read all plans
+     cannot mutate plan records directly
+     can flag a plan for compliance review via POST /api/admin/wealth-plans/:id/flag
+   - Compliance_admin:
+     can read all plans and all notes
+     can flag, can override review status
+     cannot create or mutate plan records
+
+3. Advice type lock
+   - Every POST to /api/adviser/wealth-plans/:id/recommendations must
+     reject any body where adviceType !== "general".
+   - Return 400 with { code: "PERSONAL_ADVICE_BLOCKED",
+     message: "Personal advice requires AFSL/AR framework. adviceType must be general." }
+   - This is enforced server-side. UI selection is irrelevant.
+
+4. Append-only enforcement
+   - No PUT or PATCH on plannerNotes, riskProfileSnapshots, clientObjectives,
+     adviceDisclaimerAcknowledgements, wealthPlanVersions, wealthPlanDocuments.
+   - Only POST (new row) is permitted on these tables.
+   - Objective updates: POST a new objective row, then set supersededAt on the old one
+     in the same DB transaction.
+
+5. Version on every plan update
+   - Any write to wealthPlans, riskProfileSnapshots, clientObjectives, or
+     wealthPlanRecommendations must atomically create a new wealthPlanVersions row
+     with versionNumber = prior max + 1 and snapshotData = full plan state at that moment.
+
+6. Audit log on every write
+   - All plan writes must be recorded in the existing audit log with:
+     userId, action, resourceType, resourceId, timestamp, ipAddress.
+Step 6 — Wealth Planner UI
+Routes to build:
+
+/adviser/planner              adviser plan list
+/adviser/planner/:planId      plan detail — tabs below
+/wealth/plan                  client plan view (read-only)
+Adviser plan detail tabs:
+
+Overview        plan summary, status, next review date
+Risk profile    current snapshot + history (append-only list, no edit button)
+Objectives      objective list + add new (supersedes prior)
+Recommendations list + add new recommendation (general advice only badge always visible)
+Notes           append-only note feed, visibility tag on each note
+Reviews         formal review history + initiate review
+Documents       upload + list
+Versions        full version history with snapshot diff view
+UI rules:
+
+- Every recommendations tab must show a persistent banner:
+  "These are general advice recommendations only and do not constitute personal advice.
+   You should consider your own circumstances before acting."
+- Deduct button: does not exist anywhere in the planner UI.
+- No "execute", "invest", "trade", "rebalance" buttons anywhere.
+- Client /wealth/plan view shows only: overview, recommendations (if ack'd),
+  objectives (read-only), review history.
+- Client cannot see adviser-only notes.
+- Disclaimer modal blocks /wealth/plan entirely until acknowledged.
+  Modal must display the full disclaimer text, not a summary.
+  Client must scroll to the bottom before the acknowledge button activates.
+- Version history tab: adviser and admin only.
+Step 7 — Wealth Planner Verification Script
+Create scripts/test-wealth-planner.ts
+
+Required tests — all 12 must pass before proceeding:
+
+1.  PASS  non-adviser cannot create a wealth plan
+2.  PASS  adviser cannot create a plan for another adviser's client
+3.  PASS  client cannot view plan without acknowledged disclaimer
+4.  PASS  disclaimer acknowledgement records full text, version, IP, user-agent
+5.  PASS  outdated disclaimer version blocks plan access
+6.  PASS  risk profile snapshot is immutable — no update permitted
+7.  PASS  objective supersession creates new row and sets supersededAt on prior
+8.  PASS  recommendation adviceType cannot be set to personal — server rejects
+9.  PASS  plan update creates a new version snapshot atomically
+10. PASS  planner note is append-only — no update or delete permitted
+11. PASS  admin can read plan but cannot mutate it
+12. PASS  no ledger side effects from any planner action
+
+ALL WEALTH PLANNER TESTS PASSED ✅
+Required final output format:
+
+PASS non-adviser cannot create a wealth plan
+PASS adviser cannot create plan for another adviser's client
+PASS client blocked without acknowledged disclaimer
+PASS disclaimer ack records full text, version, IP, user-agent
+PASS outdated disclaimer version blocked
+PASS risk profile snapshot immutable
+PASS objective supersession correct
+PASS personal advice type blocked server-side
+PASS plan update creates version snapshot
+PASS planner note append-only
+PASS admin read-only enforced
+PASS no ledger side effects from planner
+
+ALL WEALTH PLANNER TESTS PASSED ✅
+Hard stop — if any test fails, do not proceed to AFSL/AR framework.
+
+Step 8 — Hard stop boundary
+Do not build any of the following until a separate AFSL/AR build sequence is approved:
+
+- Personal advice workflow
+- Statement of Advice generation
+- Managed discretionary account logic
+- Automatic rebalancing
+- Portfolio execution
+- Trade instructions
+- External fund manager integration
+- Commission or ongoing advice fee automation tied to the planner
+The planner is a planning record system only. It creates records, captures snapshots, and gates access. It does not execute anything.
+
+Here is the full data model so you can see how every table connects before writing a line of code.
+
+
+
+This is the complete corrected specification. A few things worth calling out before you build:
+
+selectedModelPortfolio is stored as jsonb on riskProfileSnapshots, not as a foreign key to a modelPortfolios table. This is deliberate — the snapshot must lock the exact model portfolio data at the time of capture. If you later build a modelPortfolios table and a record changes, the snapshot must remain unchanged. A FK reference would leak updated data back into a historical record.
+
+Objective supersession happens in one transaction. POST new objective row + set supersededAt on the prior row in the same DB write. Never delete the old row. The full history must be traversable for compliance review.
+
+The disclaimer gate is enforced at the API layer on every request, not just at login. A client who acknowledges, logs out, and logs back in with a new session will be re-checked. If the disclaimer version in config has been bumped since their last acknowledgement, they get a 403 and must re-acknowledge before the plan is served.
+
+The plannerNotes table has no updatedAt column by design. If you add one during migration, remove it. The absence of an update column is the signal to future developers that this table is append-only.
+
+Verification script must exit non-zero if any test fails. Same pattern as Gate B. Do not proceed to AFSL/AR work until all 12 tests output PASS.
+
+You said: verify and cross check
+
+This is a very strong design — you’re now at ~institutional-grade. I’ll be precise and critical so you don’t carry hidden risk forward. ✅ Overall Verdict Gate B + reporting layer: clean, no conflicts Wealth planner structure: ~90–95% correct Compliance posture: strong (AUSTRAC + pre-AFSL safe) Main
+
+pasted
+
+verify and cross check
+
+12:49 AM
+Claude responded: Verified and cross-checked against the full build specification.
+Verified and cross-checked against the full build specification. The review is accurate. Here is the precise assessment of every point.
+
+Cross-check verdict: confirmed accurate, with two precision corrections
+Every finding in the review is correct and warrants action. Nothing is overstated. The 5 "fix before build" items are real architectural risks, not stylistic preferences. Here is the full assessment item by item, including two points that need slight precision corrections before you hand this to a developer.
+
+What is confirmed correct — no change needed
+All 5 items in the "what you got right" section are verified:
+
+The append-only architecture on riskProfileSnapshots, plannerNotes, and wealthPlanVersions is correct as specified. The plannerNotes table having no updatedAt column is intentional and correct — the review confirms this. The adviceType lock to "general" with server-side enforcement is confirmed correct and is the most important single compliance control in the entire planner layer. The objective supersession model (new row + supersededAt, no deletes) is confirmed the right pattern for a financial advice audit trail. The absence of any execution path or ledger coupling is confirmed correct.
+
+What must be fixed — confirmed, plus precision corrections
+Fix 1 — Version integrity not enforced (confirmed critical)
+
+The review is correct. The spec says "version created on every write" but the current schema and API spec have no mechanism preventing a developer from writing directly to a plan table without the versioning wrapper. The fix is correct: wrap all plan writes in a writeWithVersioning service function and make it the only permitted write path. Direct ORM calls to plan tables must not be allowed outside that wrapper.
+
+One precision correction here: the review suggests a DB trigger as "optional but strongly recommended." This should be rephrased as "strongly recommended as a belt-and-suspenders backstop, not a substitute for service-layer enforcement." Triggers are hard to test and can be bypassed by superuser connections. Service-layer enforcement is the primary control; the trigger is the fallback catch.
+
+Fix 2 — Disclaimer gate missing version binding (confirmed critical)
+
+The review is correct. The current spec ties the disclaimer acknowledgement to wealthPlanId but not to a specific plan version. A client who acknowledged version 3 of the disclaimer would pass the gate even after a material plan update creates version 8. The fix is correct: add wealthPlanVersionId to adviceDisclaimerAcknowledgements and make the gate check that the client has acknowledged the current version, not just any version.
+
+One precision correction: the review says "bind acknowledgement to plan version." To be completely precise, there are two distinct version concepts in this system — the wealthPlanVersions row (which tracks plan state over time) and the disclaimerVersion text field (which tracks which disclaimer text was shown). The gate needs to check both: the client must have acknowledged (a) the current disclaimerVersion string and (b) a wealthPlanVersionId that matches or post-dates the last substantive plan change. If the plan is updated in a way that creates a new version, the prior disclaimer acknowledgement should be considered stale and require re-acknowledgement. Both fields are needed on the acknowledgement record.
+
+Fix 3 — Plan lock during review (confirmed critical)
+
+Correct. The status: under_review field exists but no enforcement logic blocks writes during that state. The fix is correct: when wealthPlan.status = under_review, the API must reject any POST to recommendations, objectives, or risk profile snapshots with a 423 Locked or 409 Conflict response and a clear error message. Only notes, compliance actions, and review resolution are permitted during a review.
+
+Fix 4 — selectedModelPortfolio needs a validated shape (confirmed critical)
+
+Correct. Raw jsonb with no shape contract will produce unreadable history within months. The ModelPortfolioSnapshot type definition in the review is the right shape. Add version to it (the review includes this) and validate against it on insert. Reject any POST to riskProfileSnapshots where selectedModelPortfolio does not conform to the expected shape.
+
+Fix 5 — Recommendation must link to plan version (confirmed critical)
+
+Correct. A recommendation linked only to a riskProfileSnapshotId but not to a wealthPlanVersionId means you cannot reconstruct the exact plan state that existed when a recommendation was made. This is the gap that matters most in a regulatory review — "what did you recommend, when, and in what context." The fix is correct: add wealthPlanVersionId to wealthPlanRecommendations.
+
+What must also be fixed — the other five items
+Fix 6 — Notes supersession field (confirmed)
+
+Correct. Adding supersedesNoteId makes the audit chain traversable. This is not cosmetic. Without it, you have a chronological list of notes with no explicit chain of custody. The fix is to add the field. It is nullable (first note in any chain has no predecessor), but every note that is intended to supersede a prior note must set it.
+
+Fix 7 — Admin write prohibition must be centralised (confirmed)
+
+Correct. The current spec states the rule in prose but does not enforce it architecturally. A future developer adding an admin route has no code-level signal that writes are prohibited. The fix is to centralise write permission assertions: assertWriteRole(user, ["adviser"]) must be the only permitted path to any plan write. No exceptions.
+
+Fix 8 — Soft delete prohibition (confirmed)
+
+Correct. The spec never explicitly bans DELETE. Without a stated and enforced prohibition, a developer may add a delete route thinking it is helpful. The fix is to either revoke DELETE at the DB level on all planner tables, or enforce at the ORM/service layer that no delete operation is permitted. Explicit prohibition is better than hoping no one adds it.
+
+Fix 9 — Audit log needs before/after state (confirmed)
+
+Correct. Logging action and resourceId without before and after state is not regulator-grade. A regulator reviewing a complaint about a recommendation change needs to see exactly what changed, not just that a change occurred. The fix is correct: add metadata: { before: {...}, after: {...} } to every audit log write in the planner layer.
+
+Fix 10 — Client acknowledgement of recommendation needs acknowledgedBy (confirmed)
+
+Correct. The acknowledged_at timestamp without acknowledgedBy: integer(clientUserId) means you cannot prove which client clicked acknowledge, only that something was set. The fix is to add acknowledgedBy as a foreign key to users.id on wealthPlanRecommendations.
+
+What should be added to future-proof — assessment
+Addition 1 — Plan freeze endpoint (confirmed, add to Step 5)
+
+POST /api/adviser/wealth-plans/:id/freeze creating a version snapshot and setting status = under_review is correct and should be added to the Step 5 API build. It is not optional — without it, the "plan lock during review" fix has no explicit trigger. A compliance_admin or admin must be able to call this endpoint.
+
+Addition 2 — Compliance flag severity (confirmed, add to schema)
+
+flagSeverity: low | medium | high | critical on the compliance flag record is correct. Without severity, all flags look equal and compliance triage becomes impossible. Add it.
+
+Addition 3 — Recommendation risk alignment check (confirmed, add to Step 5 gates)
+
+Before inserting a recommendation, the API must compare the recommendation's assetClassFocus and implied risk level against the client's current riskProfileSnapshot.riskTolerance. If the recommendation risk exceeds the client risk profile, block with a 400 and a clear error. This is the kind of check that, if missing, becomes a regulatory finding. Add it as a server-side gate in Step 5.
+
+Addition 4 — No financial product reference guard (confirmed, add as soft filter)
+
+Blocking wording like "buy", "allocate to", or specific fund names in recommendationText until AFSL/AR is in place is a reasonable guardrail. This should be implemented as a server-side content check that flags or rejects recommendations containing prohibited terminology. It does not need to be a hard block at this stage — a flag returned in the API response that requires the adviser to confirm is sufficient. Do not let this slip to "optional" — it is the last line of defence before a general advice record accidentally contains personal advice language.
+
+Here is the final corrected pre-build checklist with all items consolidated.
+
+
+
+Two precision corrections to the original review worth noting before you write the Replit prompt:
+
+The first is on version integrity. The review suggests a DB trigger as "strongly recommended." That framing slightly overstates it. Service-layer enforcement via writeWithVersioning() is the primary and sufficient control. A DB trigger is a useful backstop but it can be bypassed by superuser migration scripts and is harder to test in isolation. Build the service wrapper first; add the trigger as a secondary catch if your team wants belt-and-suspenders. Do not let the trigger give anyone confidence that the service wrapper can be skipped.
+
+The second is on the disclaimer gate. The review says "bind acknowledgement to plan version" as a single instruction, but there are actually two distinct version concepts in your system that both need to be checked. The disclaimerVersion text field tracks which disclaimer wording was shown — this must match the currently active disclaimer version in config. The wealthPlanVersionId tracks which plan state the client was looking at when they acknowledged — if the plan is materially updated after acknowledgement, the gate must treat the prior acknowledgement as stale. Both fields must be present on the adviceDisclaimerAcknowledgements record and both must be checked on every plan data request.
+
+Everything else in the review is confirmed accurate as written. The 5 hard-stop fixes are real architectural risks. The 5 additional schema fixes are required before schema is finalised. The 4 additions should be built as part of Step 5, not deferred. Do not proceed to code until all 10 fixes are incorporated into the schema and API spec documents.
+
+You said: Verified.
+Verified. This checklist is correct and stronger than the prior version. Do not build until these are incorporated.
+The two most important precision points are:
+
+Versioning
+Primary control = writeWithVersioning()
+DB trigger = backup only, not the main control
+Disclaimer gate
+Must check both:
+disclaimerVersion
+wealthPlanVersionId
+A client acknowledgement must become stale after a material plan version change Final pre-build rule:
+No code until:
+- 5 critical fixes are applied
+- 5 additional schema/API fixes are applied
+- 4 Step 5 additions are included
+Final confirmed build path:
+
+4. Wealth Planner Schema Foundation — with all fixes
+5. Wealth Planner API + Compliance Gates — including freeze, risk gate, flags, product language guard
+6. Wealth Planner UI
+7. Wealth Planner Verification Script
+8. HARD STOP before personal advice / execution / rebalancing
+Your diagram is now directionally right. The main thing is to make the controls enforced in code, not just described in the spec.  Verified. This checklist is correct and stronger than the prior version. Do not build until these are incorporated.
+The two most important precision points are:
+
+Versioning
+Primary control = writeWithVersioning()
+DB trigger = backup only, not the main control
+Disclaimer gate
+Must check both:
+disclaimerVersion
+wealthPlanVersionId
+A client acknowledgement must become stale after a material plan version change Final pre-build rule:
+No code until:
+- 5 critical fixes are applied
+- 5 additional schema/API fixes are applied
+- 4 Step 5 additions are included
+Final confirmed build path:
+
+4. Wealth Planner Schema Foundation — with all fixes
+5. Wealth Planner API + Compliance Gates — including freeze, risk gate, flags, product language guard
+6. Wealth Planner UI
+7. Wealth Planner Verification Script
+8. HARD STOP before personal advice / execution / rebalancing
+Your diagram is now directionally right. The main thing is to make the controls enforced in code, not just described in the spec.
+
+Show more
+12:53 AM
+Claude responded: Confirmed.
+Confirmed. Here is the complete, final, code-ready build specification incorporating every fix — written so a developer can execute it without referring back to any prior document.
+
+Step 4 — Wealth Planner Schema Foundation (final, all fixes applied)
+Replit prompt
+
+Proceed with Step 4 — Wealth Planner Schema Foundation.
+
+Purpose: Build the complete append-only, versioned, disclaimer-gated schema for the wealth planner. Every fix from the pre-build checklist is incorporated here. No editable mutable plan records. No personal advice fields. No execution paths.
+
+Add to shared/schema.ts:
+
+ts
+// ─── Core plan ────────────────────────────────────────────────────────────────
+
+export const wealthPlans = pgTable("wealth_plans", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id).notNull(),
+  status: text("status").notNull().default("active"),
+  // active | under_review | closed
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  closedAt: timestamp("closed_at"),
+  closedBy: integer("closed_by").references(() => users.id),
+  closureReason: text("closure_reason"),
+}, (table) => ({
+  uniqClientAdviser: uniqueIndex("wealth_plans_client_adviser_uidx")
+    .on(table.clientUserId, table.adviserUserId),
+}));
+
+// Append-only. Created atomically on every plan write. Never updated directly.
+export const wealthPlanVersions = pgTable("wealth_plan_versions", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  versionNumber: integer("version_number").notNull(),
+  snapshotData: jsonb("snapshot_data").notNull(),
+  // Full serialised state of the plan at this version
+  changeReason: text("change_reason").notNull(),
+  isMaterialChange: boolean("is_material_change").notNull().default(false),
+  // true = stales all prior disclaimer acknowledgements for this plan
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  uniqPlanVersion: uniqueIndex("wealth_plan_versions_plan_ver_uidx")
+    .on(table.wealthPlanId, table.versionNumber),
+}));
+
+// ─── Risk profile ─────────────────────────────────────────────────────────────
+
+// Enforced shape for selectedModelPortfolio jsonb field.
+// Validated at service layer before insert — reject if shape does not conform.
+// type ModelPortfolioSnapshot = {
+//   name: string;
+//   assetAllocation: Record<string, number>; // must sum to 100
+//   benchmark: string;
+//   riskLevel: "conservative" | "balanced" | "growth" | "aggressive";
+//   version: string; // e.g. "v2024-03"
+// }
+
+// Append-only. New row on every capture. Never mutated.
+export const riskProfileSnapshots = pgTable("risk_profile_snapshots", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id).notNull(),
+  riskTolerance: text("risk_tolerance").notNull(),
+  // conservative | balanced | growth | aggressive
+  timeHorizonYears: integer("time_horizon_years").notNull(),
+  liquidityNeedsText: text("liquidity_needs_text").notNull(),
+  sourceOfWealth: text("source_of_wealth").notNull(),
+  employmentStatus: text("employment_status"),
+  annualIncomeRange: text("annual_income_range"),
+  netWorthRange: text("net_worth_range"),
+  investmentExperience: text("investment_experience"),
+  // none | limited | moderate | experienced
+  selectedModelPortfolio: jsonb("selected_model_portfolio"),
+  // Must conform to ModelPortfolioSnapshot shape — validated before insert
+  capturedBy: integer("captured_by").references(() => users.id).notNull(),
+  capturedAt: timestamp("captured_at").defaultNow(),
+});
+
+// ─── Objectives ───────────────────────────────────────────────────────────────
+
+// Append-only. Updates = new row + set supersededAt on prior, in one transaction.
+export const clientObjectives = pgTable("client_objectives", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id).notNull(),
+  objectiveType: text("objective_type").notNull(),
+  // retirement | education | property | estate | income | liquidity | other
+  description: text("description").notNull(),
+  targetAmount: decimal("target_amount", { precision: 15, scale: 2 }),
+  targetDate: date("target_date"),
+  priority: text("priority").notNull().default("primary"),
+  // primary | secondary | aspirational
+  currency: text("currency").notNull().default("AUD"),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  supersededAt: timestamp("superseded_at"),
+  supersededBy: integer("superseded_by"),
+  // id of the newer clientObjectives row that replaces this one
+});
+
+// ─── Disclaimer acknowledgements ──────────────────────────────────────────────
+
+// Compliance record. Never deleted or updated.
+// Gate checks: disclaimerVersion matches current config AND
+// wealthPlanVersionId post-dates the last material plan change.
+// A material wealthPlanVersions row (isMaterialChange = true) stales all
+// prior acknowledgements — client must re-acknowledge before plan data is served.
+export const adviceDisclaimerAcknowledgements = pgTable(
+  "advice_disclaimer_acknowledgements",
+  {
+    id: serial("id").primaryKey(),
+    clientUserId: integer("client_user_id")
+      .references(() => users.id).notNull(),
+    wealthPlanId: integer("wealth_plan_id")
+      .references(() => wealthPlans.id).notNull(),
+    wealthPlanVersionId: integer("wealth_plan_version_id")
+      .references(() => wealthPlanVersions.id).notNull(),
+    // Plan version the client was viewing when they acknowledged
+    disclaimerVersion: text("disclaimer_version").notNull(),
+    // e.g. "general-advice-v1.0" — must match ACTIVE_DISCLAIMER_VERSION in config
+    disclaimerText: text("disclaimer_text").notNull(),
+    // Full text shown at time of acknowledgement — locked, not a reference
+    acknowledgedAt: timestamp("acknowledged_at").defaultNow(),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    sessionId: text("session_id"),
+  }
+);
+
+// ─── Recommendations ──────────────────────────────────────────────────────────
+
+// adviceType LOCKED to "general". Server rejects any other value.
+// No personal advice until AFSL/AR framework is approved.
+export const wealthPlanRecommendations = pgTable("wealth_plan_recommendations", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id).notNull(),
+  // Version of the plan at time of recommendation — required for audit trail
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id).notNull(),
+  adviceType: text("advice_type").notNull().default("general"),
+  // HARD LOCK — server returns 400 PERSONAL_ADVICE_BLOCKED if any other value
+  generalAdviceDisclaimer: text("general_advice_disclaimer").notNull(),
+  // Full disclaimer text attached to this specific recommendation
+  recommendationText: text("recommendation_text").notNull(),
+  // Server checks for prohibited terms before insert (buy, allocate to, fund names)
+  // Returns flag in response if found — adviser must explicitly confirm before insert
+  assetClassFocus: text("asset_class_focus"),
+  // equities | fixed_income | property | cash | alternatives | mixed
+  riskProfileSnapshotId: integer("risk_profile_snapshot_id")
+    .references(() => riskProfileSnapshots.id).notNull(),
+  // Risk profile active at time of recommendation
+  // Server gate: recommendation risk level must not exceed client risk tolerance
+  status: text("status").notNull().default("draft"),
+  // draft | presented | acknowledged | superseded
+  presentedAt: timestamp("presented_at"),
+  acknowledgedAt: timestamp("acknowledged_at"),
+  acknowledgedBy: integer("acknowledged_by").references(() => users.id),
+  // Must be the clientUserId — server validates this on write
+  supersededAt: timestamp("superseded_at"),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ─── Planner notes ────────────────────────────────────────────────────────────
+
+// Append-only. No updatedAt column — absence is intentional and enforced.
+// New note supersedes prior. supersedesNoteId makes chain traversable.
+export const plannerNotes = pgTable("planner_notes", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  supersedesNoteId: integer("supersedes_note_id"),
+  // FK to plannerNotes.id — nullable for first note in any chain
+  noteText: text("note_text").notNull(),
+  noteType: text("note_type").notNull().default("general"),
+  // general | review | client_instruction | compliance | follow_up
+  visibility: text("visibility").notNull().default("adviser_only"),
+  // adviser_only | shared_with_client | admin_only
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  // No updatedAt. Append-only. Adding one is a schema violation.
+});
+
+// ─── Reviews ──────────────────────────────────────────────────────────────────
+
+export const wealthPlanReviews = pgTable("wealth_plan_reviews", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  reviewType: text("review_type").notNull().default("annual"),
+  // annual | triggered | compliance | initial
+  reviewedBy: integer("reviewed_by").references(() => users.id).notNull(),
+  reviewedAt: timestamp("reviewed_at").defaultNow(),
+  priorVersionId: integer("prior_version_id")
+    .references(() => wealthPlanVersions.id),
+  newVersionId: integer("new_version_id")
+    .references(() => wealthPlanVersions.id),
+  riskProfileSnapshotId: integer("risk_profile_snapshot_id")
+    .references(() => riskProfileSnapshots.id),
+  objectivesChanged: boolean("objectives_changed").notNull().default(false),
+  riskProfileChanged: boolean("risk_profile_changed").notNull().default(false),
+  recommendationsChanged: boolean("recommendations_changed").notNull().default(false),
+  reviewSummary: text("review_summary").notNull(),
+  nextReviewDue: date("next_review_due"),
+  clientAcknowledgedAt: timestamp("client_acknowledged_at"),
+  clientAcknowledgedBy: integer("client_acknowledged_by")
+    .references(() => users.id),
+});
+
+// ─── Compliance flags ─────────────────────────────────────────────────────────
+
+export const wealthPlanComplianceFlags = pgTable("wealth_plan_compliance_flags", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  wealthPlanVersionId: integer("wealth_plan_version_id")
+    .references(() => wealthPlanVersions.id),
+  flaggedBy: integer("flagged_by").references(() => users.id).notNull(),
+  flaggedAt: timestamp("flagged_at").defaultNow(),
+  flagReason: text("flag_reason").notNull(),
+  flagSeverity: text("flag_severity").notNull().default("medium"),
+  // low | medium | high | critical
+  resolvedBy: integer("resolved_by").references(() => users.id),
+  resolvedAt: timestamp("resolved_at"),
+  resolutionNote: text("resolution_note"),
+});
+
+// ─── Documents ────────────────────────────────────────────────────────────────
+
+export const wealthPlanDocuments = pgTable("wealth_plan_documents", {
+  id: serial("id").primaryKey(),
+  wealthPlanId: integer("wealth_plan_id")
+    .references(() => wealthPlans.id).notNull(),
+  uploadedBy: integer("uploaded_by").references(() => users.id).notNull(),
+  documentType: text("document_type").notNull(),
+  // statement_of_advice | fact_find | risk_questionnaire |
+  // correspondence | review_report | compliance_record | other
+  fileName: text("file_name").notNull(),
+  fileSizeBytes: integer("file_size_bytes"),
+  mimeType: text("mime_type"),
+  storageKey: text("storage_key").notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+  description: text("description"),
+});
+Step 5 — Wealth Planner API + Compliance Gates (final, all gates enforced in code)
+Replit prompt
+
+Proceed with Step 5 — Wealth Planner API + Compliance Gates.
+
+Purpose: Build all planner endpoints with every compliance gate enforced server-side in code. Spec descriptions are not enforcement. Every gate listed here must produce a rejection if the condition is not met.
+
+Core service wrapper — required before any endpoint is built
+ts
+// services/wealthPlannerService.ts
+//
+// ALL writes to any planner table must go through this wrapper.
+// Direct ORM writes outside this function are prohibited.
+// assertWriteRole must be called at the top of every write path.
+
+export async function writeWithVersioning(
+  db: DbClient,
+  planId: number,
+  actorUserId: number,
+  changeReason: string,
+  isMaterialChange: boolean,
+  writeFn: (tx: Transaction) => Promise<void>
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    // 1. Verify plan is not under_review before any non-compliance write
+    //    (freeze endpoint is exempt from this check)
+    const plan = await tx.query.wealthPlans.findFirst({
+      where: eq(wealthPlans.id, planId)
+    });
+    if (!plan) throw new NotFoundError("wealth_plan_not_found");
+    if (plan.status === "under_review") {
+      throw new LockedError("plan_under_review");
+    }
+
+    // 2. Run the caller's write operations
+    await writeFn(tx);
+
+    // 3. Always create a version snapshot — no exceptions
+    const prior = await tx.query.wealthPlanVersions.findFirst({
+      where: eq(wealthPlanVersions.wealthPlanId, planId),
+      orderBy: desc(wealthPlanVersions.versionNumber),
+    });
+    const nextVersion = (prior?.versionNumber ?? 0) + 1;
+    const snapshot = await buildPlanSnapshot(tx, planId);
+
+    await tx.insert(wealthPlanVersions).values({
+      wealthPlanId: planId,
+      versionNumber: nextVersion,
+      snapshotData: snapshot,
+      changeReason,
+      isMaterialChange,
+      createdBy: actorUserId,
+    });
+
+    // 4. Write audit log with before + after state
+    await writeAuditLog(tx, {
+      userId: actorUserId,
+      action: changeReason,
+      resourceType: "wealth_plan",
+      resourceId: planId,
+      metadata: {
+        before: prior?.snapshotData ?? null,
+        after: snapshot,
+        versionNumber: nextVersion,
+        isMaterialChange,
+      },
+    });
+  });
+}
+
+// Role assertion — called at top of every write path, no exceptions
+export function assertWriteRole(user: User): void {
+  if (user.role !== "adviser") {
+    throw new ForbiddenError("write_role_required");
+  }
+}
+
+// Role assertion for reads — client sees own plan only, adviser sees own clients
+export function assertReadAccess(user: User, plan: WealthPlan): void {
+  if (user.role === "client" && plan.clientUserId !== user.id) {
+    throw new ForbiddenError("plan_access_denied");
+  }
+  if (user.role === "adviser" && plan.adviserUserId !== user.id) {
+    throw new ForbiddenError("plan_access_denied");
+  }
+  // admin and compliance_admin can read all — no additional check
+}
+Disclaimer gate — enforced as middleware, not a one-time check
+ts
+// middleware/disclaimerGate.ts
+//
+// Applied to: GET /api/client/wealth-plan and all client plan data routes.
+// Checks both: disclaimerVersion AND wealthPlanVersionId staleness.
+
+export async function requireDisclaimerAcknowledgement(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  const { planId, userId } = req;
+
+  // Get current active disclaimer version from config
+  const activeDisclaimerVersion = config.ACTIVE_DISCLAIMER_VERSION;
+
+  // Get the most recent material change version for this plan
+  const lastMaterialVersion = await db.query.wealthPlanVersions.findFirst({
+    where: and(
+      eq(wealthPlanVersions.wealthPlanId, planId),
+      eq(wealthPlanVersions.isMaterialChange, true)
+    ),
+    orderBy: desc(wealthPlanVersions.versionNumber),
+  });
+
+  // Get the client's most recent acknowledgement for this plan
+  const ack = await db.query.adviceDisclaimerAcknowledgements.findFirst({
+    where: and(
+      eq(adviceDisclaimerAcknowledgements.clientUserId, userId),
+      eq(adviceDisclaimerAcknowledgements.wealthPlanId, planId)
+    ),
+    orderBy: desc(adviceDisclaimerAcknowledgements.acknowledgedAt),
+  });
+
+  // Gate 1: no acknowledgement at all
+  if (!ack) {
+    return res.status(403).json({ code: "DISCLAIMER_REQUIRED" });
+  }
+
+  // Gate 2: disclaimer text version is outdated
+  if (ack.disclaimerVersion !== activeDisclaimerVersion) {
+    return res.status(403).json({ code: "DISCLAIMER_VERSION_OUTDATED" });
+  }
+
+  // Gate 3: a material plan change occurred after the client's last acknowledgement
+  // The ack is stale if any material version was created after it was acknowledged
+  if (lastMaterialVersion) {
+    const ackVersion = await db.query.wealthPlanVersions.findFirst({
+      where: eq(wealthPlanVersions.id, ack.wealthPlanVersionId)
+    });
+    if (!ackVersion || ackVersion.versionNumber < lastMaterialVersion.versionNumber) {
+      return res.status(403).json({ code: "DISCLAIMER_STALE_AFTER_MATERIAL_CHANGE" });
+    }
+  }
+
+  next();
+}
+Endpoints
+POST   /api/adviser/wealth-plans
+POST   /api/adviser/wealth-plans/:id/freeze
+GET    /api/adviser/wealth-plans/:id
+POST   /api/adviser/wealth-plans/:id/risk-profiles
+POST   /api/adviser/wealth-plans/:id/objectives
+POST   /api/adviser/wealth-plans/:id/recommendations
+POST   /api/adviser/wealth-plans/:id/notes
+POST   /api/adviser/wealth-plans/:id/reviews
+POST   /api/adviser/wealth-plans/:id/documents
+
+POST   /api/client/wealth-plan/acknowledge-disclaimer
+GET    /api/client/wealth-plan                         ← disclaimer gate middleware
+GET    /api/client/wealth-plan/recommendations         ← disclaimer gate middleware
+
+GET    /api/admin/wealth-plans
+GET    /api/admin/wealth-plans/:id
+POST   /api/admin/wealth-plans/:id/flag
+Per-endpoint logic
+POST /api/adviser/wealth-plans/:id/freeze
+
+1. assertWriteRole(user) — adviser only
+2. assertReadAccess(user, plan) — adviser must own this plan
+3. Verify plan.status = active — cannot freeze an already-frozen or closed plan
+4. Call writeWithVersioning with:
+   - changeReason: "plan_frozen_for_review"
+   - isMaterialChange: false
+   - writeFn: set plan.status = under_review
+5. Return the new version id and plan state
+POST /api/adviser/wealth-plans/:id/risk-profiles
+
+1. assertWriteRole(user)
+2. assertReadAccess(user, plan)
+3. Validate selectedModelPortfolio shape if present:
+   - Must have: name (string), assetAllocation (Record<string, number>),
+     benchmark (string), riskLevel (enum), version (string)
+   - assetAllocation values must sum to 100 (±0.01 tolerance)
+   - Return 400 MODEL_PORTFOLIO_SHAPE_INVALID if not conformant
+4. Call writeWithVersioning with isMaterialChange: true
+   (a new risk profile is always a material change)
+POST /api/adviser/wealth-plans/:id/recommendations
+
+1. assertWriteRole(user)
+2. assertReadAccess(user, plan)
+3. Hard reject: if body.adviceType !== "general"
+   → 400 { code: "PERSONAL_ADVICE_BLOCKED",
+            message: "adviceType must be general. Personal advice requires AFSL/AR framework." }
+4. Risk alignment gate:
+   - Load riskProfileSnapshot by riskProfileSnapshotId from body
+   - Derive implied risk level from assetClassFocus or explicit field
+   - If recommendation risk > client risk tolerance → 400 RISK_ALIGNMENT_EXCEEDED
+   - Risk order: conservative < balanced < growth < aggressive
+5. Product language guard:
+   - Scan recommendationText for prohibited terms:
+     ["buy", "purchase", "invest in", "allocate to", "switch to",
+      and any string matching a known fund name pattern]
+   - If found: do NOT reject — return 200 with:
+     { warning: "PROHIBITED_LANGUAGE_DETECTED", terms: [...], requiresConfirmation: true }
+   - Only insert if request includes confirmedProhibitedLanguage: true in body
+6. Attach wealthPlanVersionId from the current plan version
+7. Call writeWithVersioning with isMaterialChange: true
+POST /api/adviser/wealth-plans/:id/objectives
+
+1. assertWriteRole(user)
+2. assertReadAccess(user, plan)
+3. If superseding an existing objective:
+   - In the same transaction (inside writeWithVersioning):
+     a. Insert new objective row
+     b. Set supersededAt = now(), supersededBy = new row id on prior objective
+   - Never delete the prior row
+4. isMaterialChange: true
+POST /api/adviser/wealth-plans/:id/notes
+
+1. assertWriteRole(user) — adviser only
+2. assertReadAccess(user, plan)
+3. Plan status check: notes ARE allowed when status = under_review
+   (notes are the one write permitted during a review lock)
+4. If supersedesNoteId is provided:
+   - Verify the referenced note belongs to the same wealthPlanId
+5. writeWithVersioning with isMaterialChange: false
+   (notes do not trigger disclaimer staleness)
+POST /api/admin/wealth-plans/:id/flag
+
+1. Require role: admin | compliance_admin
+2. No assertWriteRole — flag is a compliance action, not a plan write
+3. Insert into wealthPlanComplianceFlags
+4. flagSeverity must be one of: low | medium | high | critical
+5. Audit log the flag action
+6. Do NOT call writeWithVersioning — flags are not plan versions
+POST /api/client/wealth-plan/acknowledge-disclaimer
+
+1. Require role: client
+2. Load current plan for this client
+3. Verify disclaimerVersion in body matches config.ACTIVE_DISCLAIMER_VERSION
+   → 400 DISCLAIMER_VERSION_MISMATCH if not
+4. Load the current latest wealthPlanVersions id for this plan
+5. Insert adviceDisclaimerAcknowledgements with:
+   - wealthPlanVersionId = current latest version id
+   - disclaimerVersion = config.ACTIVE_DISCLAIMER_VERSION
+   - disclaimerText = full text from config (not from client body)
+   - ipAddress, userAgent, sessionId from request
+6. Never allow client to supply the disclaimerText in the body
+   — always write the server's canonical text
+What no endpoint does
+No endpoint touches wallet.balance
+No endpoint creates a ledger entry
+No endpoint executes a trade or instruction
+No endpoint writes to any fee deduction table
+No endpoint exists for rebalancing
+No endpoint accepts adviceType = "personal"
+No PUT or PATCH on: plannerNotes, riskProfileSnapshots, clientObjectives,
+  adviceDisclaimerAcknowledgements, wealthPlanVersions, wealthPlanDocuments
+DELETE is not implemented on any planner table
+Admin cannot call writeWithVersioning — the function rejects non-adviser callers
+Step 7 — Wealth Planner Verification Script (final, all 16 tests)
+Create scripts/test-wealth-planner.ts
+
+ts
+type TestResult = { name: string; passed: boolean; details?: string };
+const results: TestResult[] = [];
+function pass(name: string, details?: string) { results.push({ name, passed: true, details }); }
+function fail(name: string, details?: string) { results.push({ name, passed: false, details }); }
+
+async function run() {
+  // Setup: create admin, adviser, second_adviser, client users
+  // Create active wealth plan for adviser + client
+  // Seed initial risk profile, objectives
+
+  // ── Access control ────────────────────────────────────────────────────────
+
+  // 1. Non-adviser cannot create a plan
+  // 2. Adviser cannot access another adviser's client plan
+  // 3. Client cannot write to any plan table
+  // 4. Admin can read plan but writeWithVersioning rejects admin role
+  // 5. Client cannot view plan without acknowledged disclaimer
+
+  // ── Disclaimer gate ───────────────────────────────────────────────────────
+
+  // 6. Disclaimer acknowledgement records full text, version, IP, user-agent, sessionId
+  // 7. Outdated disclaimerVersion string blocks plan access (DISCLAIMER_VERSION_OUTDATED)
+  // 8. Material plan change stales the prior acknowledgement
+  //    - Adviser posts a new risk profile (isMaterialChange = true)
+  //    - Client's prior ack now references an older version
+  //    - GET /api/client/wealth-plan returns 403 DISCLAIMER_STALE_AFTER_MATERIAL_CHANGE
+  //    - Client re-acknowledges → access restored
+  // 9. Non-material plan change (e.g. note) does NOT stale the acknowledgement
+
+  // ── Versioning ────────────────────────────────────────────────────────────
+
+  // 10. Every plan write creates a new wealthPlanVersions row atomically
+  // 11. Direct ORM write to wealthPlans outside writeWithVersioning
+  //     → verify no version was created (i.e., the wrapper is the only write path)
+  // 12. Risk profile snapshot is immutable — no update permitted
+  // 13. Objective supersession: new row created, supersededAt set on prior, in one tx
+
+  // ── Compliance gates ──────────────────────────────────────────────────────
+
+  // 14. adviceType = "personal" is rejected server-side (400 PERSONAL_ADVICE_BLOCKED)
+  // 15. Recommendation risk exceeding client risk profile is blocked (400 RISK_ALIGNMENT_EXCEEDED)
+  // 16. Prohibited language in recommendationText returns warning + requiresConfirmation
+  //     and is not inserted without confirmedProhibitedLanguage: true
+
+  // ── Plan lock ─────────────────────────────────────────────────────────────
+
+  // 17. POST /freeze sets status = under_review and creates a version row
+  // 18. While under_review: POST to recommendations → 423 Locked
+  // 19. While under_review: POST to risk-profiles → 423 Locked
+  // 20. While under_review: POST to notes → 200 OK (notes allowed during review)
+
+  // ── Append-only ───────────────────────────────────────────────────────────
+
+  // 21. PUT/PATCH on plannerNotes → 405 Method Not Allowed
+  // 22. DELETE on any planner table → 405 Method Not Allowed
+  // 23. plannerNotes table has no updatedAt column (schema inspection)
+  // 24. supersedesNoteId chain: note B supersedesNoteId = note A id — traversable
+
+  // ── Audit log ────────────────────────────────────────────────────────────
+
+  // 25. Every plan write produces an audit log entry with before + after state
+
+  // ── No side effects ───────────────────────────────────────────────────────
+
+  // 26. No ledger entry created by any planner write
+  // 27. No wallet.balance mutation by any planner write
+
+  // ── ModelPortfolio shape ──────────────────────────────────────────────────
+
+  // 28. Risk profile with malformed selectedModelPortfolio → 400 MODEL_PORTFOLIO_SHAPE_INVALID
+  // 29. Risk profile with assetAllocation not summing to 100 → 400 MODEL_PORTFOLIO_SHAPE_INVALID
+
+  for (const r of results) {
+    console.log(
+      `${r.passed ? "PASS" : "FAIL"} ${r.name}${r.details ? ` — ${r.details}` : ""}`
+    );
+  }
+
+  const failed = results.filter(r => !r.passed);
+  if (failed.length > 0) {
+    console.error(`\n${failed.length} wealth planner test(s) failed.`);
+    process.exit(1);
+  }
+  console.log("\nALL WEALTH PLANNER TESTS PASSED ✅");
+}
+
+run().catch((err) => {
+  console.error("Wealth planner test crashed:", err);
+  process.exit(1);
+});
+Required final output:
+
+PASS  non-adviser cannot create a plan
+PASS  adviser blocked from another adviser's client
+PASS  client cannot write to any plan table
+PASS  admin write blocked by writeWithVersioning
+PASS  client blocked without disclaimer acknowledgement
+PASS  disclaimer ack records full text, version, IP, user-agent, sessionId
+PASS  outdated disclaimer version blocked
+PASS  material plan change stales prior acknowledgement
+PASS  non-material change does not stale acknowledgement
+PASS  every plan write creates a version row atomically
+PASS  direct ORM write produces no version row
+PASS  risk profile snapshot is immutable
+PASS  objective supersession is atomic new-row + supersededAt
+PASS  personal adviceType blocked server-side
+PASS  recommendation risk exceeding client risk blocked
+PASS  prohibited language returns warning, not inserted without confirmation
+PASS  freeze sets under_review and creates version
+PASS  recommendations blocked while under_review
+PASS  risk profiles blocked while under_review
+PASS  notes allowed while under_review
+PASS  PUT/PATCH on plannerNotes rejected
+PASS  DELETE on planner tables rejected
+PASS  plannerNotes has no updatedAt column
+PASS  supersedesNoteId chain is traversable
+PASS  every plan write produces audit log with before/after state
+PASS  no ledger entry from any planner write
+PASS  no wallet balance mutation from any planner write
+PASS  malformed modelPortfolio shape rejected
+PASS  assetAllocation not summing to 100 rejected
+
+ALL WEALTH PLANNER TESTS PASSED ✅
+Hard stop. If any of the 29 tests fails, do not proceed to Step 6 UI build and do not proceed toward AFSL/AR work.
+
+Here is the final complete architecture map for handoff.
+
+
+
+This is the complete, final, handoff-ready specification. Three things a developer needs to understand before touching the keyboard:
+
+writeWithVersioning is not a helper function — it is the only write path. Every planner write goes through it. There is no "quick fix" route that bypasses it. If a future endpoint needs to write to a plan table and someone considers skipping the wrapper for simplicity, that is the exact failure mode this architecture prevents.
+
+The disclaimer gate runs on every request to client plan data, not just on first login. A client who acknowledged at 9am, then the adviser posted a new risk profile (material change) at 10am, will get a 403 DISCLAIMER_STALE_AFTER_MATERIAL_CHANGE at 10:01am even with a valid session. This is intentional. The gate must never be converted to a one-time session check.
+
+The verification script has 29 tests, not 12. The expanded count reflects all the fixes incorporated in this final version. If any test fails, do not proceed to the UI build. The test script is the proof that the controls are enforced in code, not just described in comments.
+
+
+You want me to verify the attached design review against the actual codebase. Let me check what wealth planner code actually exists, and what Task #94's spec says, so I can give you an honest cross-check rather than a paper review. 6 actions I have the key context. The attached reviews critiqu
+
+pasted
+
+
+This changes things quite a bit — and in a good way. I’ve cross-checked this properly. --- # ✅ **New Verdict (based on actual codebase, not just design)** 👉 The previous “wealth planner schema build” is **NOT the right path for your system** The latest review is **correct**: > You al
+
+pasted
+
+
+This changes things quite a bit — and in a good way. I’ve cross-checked this properly. ✅ New Verdict (based on actual codebase, not just design) 👉 The previous “wealth planner schema build” is NOT the right path for your system The latest review is correct: You already have a fully built advice
+
+pasted
+
+12:57 AM
+Claude responded: This is a significant and correct course correction.
+This is a significant and correct course correction. Let me do a precise cross-check before confirming anything.
+
+Cross-check verdict: the codebase review is correct. Here is the exact assessment.
+What the codebase review gets exactly right
+The central finding is accurate and important. All prior wealth planner design work — including the schema, versioning, disclaimer gates, and recommendation tables specified in this conversation — was designed in a vacuum, without knowledge of what Phase 2.2/2.3 already shipped. The result was a parallel system that would have created duplicate source of truth, which is a worse compliance risk than any of the individual gaps the reviews were trying to fix.
+
+Specifically confirmed correct:
+
+adviceRecords already carries recommendation, portfolio, rationale, and allocation. Building wealthPlanRecommendations on top of it would create two legally binding recommendation sources with no defined precedence. In a regulatory dispute, "which record controls?" has no answer. That is an actual compliance failure, not a theoretical one.
+
+adviceAcknowledgements already carries clientId, signatureName, acceptedAt, ipAddress, userAgent. The proposed adviceDisclaimerAcknowledgements table would have been a weaker duplicate of something already stronger.
+
+recommendedAllocation is already typed at the ORM layer. The ModelPortfolioSnapshot shape constraint specified earlier was solving a problem that does not exist.
+
+The adviceType = "personal" default with a live executionGate is correct for an AFSL-enabled system. The instruction to lock adviceType to "general" was appropriate for a system without AFSL framework — which is not what this codebase is. Applying it here would have broken compliance, not protected it.
+
+The adviceRecords.status = superseded chain already handles version binding implicitly. The FK to a superseded record forces a new advice record and therefore a new acknowledgement. The explicit wealthPlanVersionId field on the acknowledgement table was solving a problem already solved differently.
+
+What the codebase review gets right but needs one precision correction
+The review states "building the duplicate tables is the problem" and this is correct. However it should be stated more precisely: the problem is not that the design work was wrong in principle — it was correct design for a greenfield system. The problem is that the design work was done without reading the existing schema first. The correct process going forward is: read the schema before specifying any new table.
+
+The Gate B JWT issue is a real separate problem and should be fixed before Task 94 proceeds. A verification script that cannot run is not a passing verification script.
+
+What the codebase review raises that is genuinely worth acting on
+Two real gaps confirmed in the existing system:
+
+Audit log before/after standardisation. The auditLogs.metadata field is unstructured. Existing writes capture rich payloads but not in a consistent { before, after } shape. This is not blocking Task 94 but it is worth a dedicated task post-94 because regulators reviewing a complaint need to reconstruct state changes from the log alone, and inconsistent shapes make that unreliable.
+
+Review lock enforcement. adviceRecords.status includes review_pending but nothing in the routes blocks writes during that state. An adviser can edit a record while it is under compliance review. This is a real gap in the existing advice flow. It should be addressed as part of Task 94 or immediately after.
+
+What should be completely dropped from prior specifications
+Every table, endpoint, middleware, and verification test specified in this conversation that maps to something already in Phase 2.2/2.3:
+
+DROP — wealthPlans
+DROP — wealthPlanVersions
+DROP — wealthPlanRecommendations
+DROP — riskProfileSnapshots
+DROP — adviceDisclaimerAcknowledgements
+DROP — wealthPlanComplianceFlags (no complianceFlags table exists to extend)
+DROP — POST /api/adviser/wealth-plans/:id/freeze
+DROP — disclaimerGate middleware as specified
+DROP — writeWithVersioning wrapper as specified
+DROP — adviceType lock to "general"
+DROP — ModelPortfolioSnapshot shape validation (already enforced)
+DROP — 29-test verification script as written (tests non-existent tables)
+None of this gets deleted from the conversation history — it was correct design reasoning. It just does not apply to this codebase.
+
+Confirmed correct build path
+Here is the revised path, grounded in what actually exists.
+
+Immediate — before Task 94:
+
+Fix the Gate B verification script JWT env issue. Two lines. Ship it. Gate B is not verified until the script runs clean.
+
+Task 94 — four additions only:
+
+ts
+// 1. clientObjectives
+// New — complements adviceRecords, does not duplicate it
+// Fields: clientUserId, adviceRecordId (FK), objectiveType,
+//         description, targetAmount, targetDate, priority,
+//         currency, createdBy, createdAt,
+//         supersededAt, supersededBy (append-only, same pattern)
+
+// 2. clientDocuments
+// New — fact find, uploads, correspondence
+// Fields: clientUserId, adviceRecordId (FK, nullable),
+//         documentType, fileName, storageKey,
+//         uploadedBy, uploadedAt, description
+
+// 3. adviserNotes
+// Partially designed — add previousNoteId
+// Fields: adviceRecordId (FK), noteText, noteType,
+//         visibility, previousNoteId (nullable, audit chain),
+//         createdBy, createdAt
+//         NO updatedAt — append-only
+
+// 4. adviceRecordVersions
+// New — snapshot on every adviceRecords status change
+// Fields: adviceRecordId (FK), versionNumber,
+//         snapshotJsonb, changeReason, createdBy, createdAt
+//         Written atomically in same tx as the status flip — no exceptions
+Task 94 — two fixes to existing system:
+
+1. adviceRecords route guard: if status = review_pending,
+   block any write to the record with 423 Locked.
+   Notes and compliance actions exempt.
+
+2. auditLogs.metadata standardisation helper:
+   All advice/planner writes must call writeAuditLog({ before, after })
+   using a shared helper, not inline JSON construction.
+   This is a follow-up task, not blocking 94.
+Task 94 — UI:
+
+Build the planner UI layer on top of adviceRecords. Map every screen to existing fields. Do not introduce any state or data that lives outside the existing advice layer plus the four new tables. If a screen needs data that does not exist in adviceRecords, the answer is to add a field to one of the four new tables — not to create a fifth table.
+
+Hard stop — unchanged:
+
+No personal advice execution, no rebalancing, no bank transfer, no external payout. The executionGate already controls this. Do not build around it.
+
+Here is the corrected architecture on a single diagram.
+
+
+
+
+
+You are out of free messages until 5:20 AM
+Get more
+
+
+
+Claude is AI and can make mistakes. Please double-check responses.
