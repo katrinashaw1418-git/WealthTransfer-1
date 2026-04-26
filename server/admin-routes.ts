@@ -73,6 +73,10 @@ import {
   MATCH_EPSILON,
 } from "./services/reconciliation";
 import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
+// Task #95 — standardised audit-log writer (before/after snapshots) for the
+// advice + fee-engine surfaces. Other admin paths still use auditTx; only the
+// fee-deduction settle/reverse routes below have been migrated.
+import { writeAuditLog } from "./services/audit";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
 import { storage } from "./storage";
@@ -2435,23 +2439,33 @@ export function registerAdminRoutes(app: Express): void {
           }
           throw err;
         }
-        await auditTx(
-          tx,
-          auth.userId,
-          "fee_rule_created",
-          "adviser_fee_rule",
-          String(row.id),
-          {
-            feeConsentId: parsed.feeConsentId,
-            clientUserId: parsed.clientUserId,
-            adviserUserId: parsed.adviserUserId,
+        // Task #95 — fresh insert: no prior state, so `before` is null.
+        // `after` carries the durable state-machine fields auditors expect
+        // to see flip later (status, pausedAt). Per-rule economics live
+        // in `extra`.
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_rule_created",
+          entityType: "adviser_fee_rule",
+          entityId: String(row.id),
+          before: null,
+          after: {
+            id: row.id,
+            status: row.status,
+            feeConsentId: row.feeConsentId,
+            clientUserId: row.clientUserId,
+            adviserUserId: row.adviserUserId,
+            pausedAt: row.pausedAt,
+          },
+          extra: {
             feeType: parsed.feeType,
             amountType: parsed.amountType,
             adviserSplitBps: parsed.adviserSplitBps,
             platformSplitBps: parsed.platformSplitBps,
           },
-          req.ip ?? null,
-        );
+          ipAddress: req.ip ?? null,
+        });
         return row;
       });
       return created;
@@ -2521,6 +2535,20 @@ export function registerAdminRoutes(app: Express): void {
       }
       const reason = typeof req.body?.reason === "string" ? req.body.reason : null;
       const updated = await db.transaction(async (tx) => {
+        // Task #95 — pre-fetch the row inside the same tx so the before
+        // snapshot is consistent with the update we're about to apply.
+        const [beforeRow] = await tx
+          .select({
+            status: adviserFeeRules.status,
+            pausedAt: adviserFeeRules.pausedAt,
+            pausedReason: adviserFeeRules.pausedReason,
+          })
+          .from(adviserFeeRules)
+          .where(eq(adviserFeeRules.id, ruleId))
+          .limit(1);
+        if (!beforeRow) {
+          throw Object.assign(new Error("Fee rule not found"), { status: 404 });
+        }
         const [row] = await tx
           .update(adviserFeeRules)
           .set({
@@ -2531,18 +2559,25 @@ export function registerAdminRoutes(app: Express): void {
           })
           .where(eq(adviserFeeRules.id, ruleId))
           .returning();
-        if (!row) {
-          throw Object.assign(new Error("Fee rule not found"), { status: 404 });
-        }
-        await auditTx(
-          tx,
-          auth.userId,
-          "fee_rule_paused",
-          "adviser_fee_rule",
-          String(ruleId),
-          { reason },
-          req.ip ?? null,
-        );
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_rule_paused",
+          entityType: "adviser_fee_rule",
+          entityId: String(ruleId),
+          before: {
+            status: beforeRow.status,
+            pausedAt: beforeRow.pausedAt,
+            pausedReason: beforeRow.pausedReason,
+          },
+          after: {
+            status: row.status,
+            pausedAt: row.pausedAt,
+            pausedReason: row.pausedReason,
+          },
+          extra: { reason },
+          ipAddress: req.ip ?? null,
+        });
         return row;
       });
       return updated;
@@ -2573,16 +2608,19 @@ export function registerAdminRoutes(app: Express): void {
         trigger: "manual",
         triggeredByUserId: auth.userId,
       });
-      await db.insert(auditLogs).values({
+      // Task #95 — bulk pipeline run: there is no single entity whose
+      // before/after state we are flipping. The "entity" is the run row
+      // itself (`fee_accrual_runs`), which is a fresh insert from the
+      // service above — so `before` is null and `after` carries the run
+      // identity + status. Per-rule outcomes live in `extra.summary`.
+      await writeAuditLog({
         userId: auth.userId,
         action: "fee_accruals_run",
-        entityType: "adviser_fee_accruals",
-        entityId: null,
-        metadata: {
-          accrualDate: accrualDate.toISOString(),
-          feeAccrualRunId: run.id,
-          ...summary,
-        } as any,
+        entityType: "fee_accrual_run",
+        entityId: String(run.id),
+        before: null,
+        after: { id: run.id, trigger: "manual", accrualDate: accrualDate.toISOString() },
+        extra: { summary },
         ipAddress: req.ip ?? null,
       });
       return { accrualDate: accrualDate.toISOString(), feeAccrualRunId: run.id, ...summary };
@@ -2685,16 +2723,23 @@ export function registerAdminRoutes(app: Express): void {
       }
       const { generatePendingDeductions } = await import("./services/fee-engine");
       const summary = await generatePendingDeductions({ periodStart, periodEnd });
-      await db.insert(auditLogs).values({
+      // Task #95 — same shape as fee_accruals_run above. The deduction
+      // generator inserts many `adviser_fee_deductions` rows in one pass;
+      // we capture the bulk run as a single audit row keyed by the
+      // billing period. There is no pre-existing entity to snapshot, so
+      // `before` is null and `after` carries the period identity. The
+      // per-deduction outcomes (count, total) live in `extra.summary`.
+      await writeAuditLog({
         userId: auth.userId,
         action: "fee_deductions_generated",
-        entityType: "adviser_fee_deductions",
-        entityId: null,
-        metadata: {
+        entityType: "adviser_fee_deductions_run",
+        entityId: `${periodStart.toISOString()}_${periodEnd.toISOString()}`,
+        before: null,
+        after: {
           periodStart: periodStart.toISOString(),
           periodEnd: periodEnd.toISOString(),
-          ...summary,
-        } as any,
+        },
+        extra: { summary },
         ipAddress: req.ip ?? null,
       });
       return {
@@ -2820,6 +2865,28 @@ export function registerAdminRoutes(app: Express): void {
       const { settleApprovedDeduction } = await import("./services/fee-engine");
       const { LedgerUnbalancedError, notifyLedgerUnbalanced, LEDGER_UNBALANCED_USER_MESSAGE } =
         await import("./services/ledger");
+
+      // Task #95 — capture the row state BEFORE the settle attempt so the
+      // audit row can show exactly what changed (or what was about to change
+      // when the attempt failed). We pick the small set of fields that flip
+      // during settlement; capturing the full row would bloat the metadata
+      // jsonb without making the diff any clearer.
+      const [beforeRow] = await db
+        .select()
+        .from(adviserFeeDeductions)
+        .where(eq(adviserFeeDeductions.id, id))
+        .limit(1);
+      const beforeSnapshot = beforeRow
+        ? {
+            status: beforeRow.status,
+            settledTransactionId: beforeRow.settledTransactionId,
+            settledAt: beforeRow.settledAt,
+            approvedByUserId: beforeRow.approvedByUserId,
+            approvedAt: beforeRow.approvedAt,
+            failureReason: beforeRow.failureReason,
+          }
+        : null;
+
       let settled;
       try {
         settled = await settleApprovedDeduction({
@@ -2830,19 +2897,45 @@ export function registerAdminRoutes(app: Express): void {
         // Audit the failed attempt so the operator trail is continuous.
         // We do NOT rollback the audit row on the (already-rolled-back)
         // settlement attempt — auditing a failure is the whole point.
-        await auditTx(
-          db,
-          auth.userId,
-          "fee_deduction_settle_failed",
-          "adviser_fee_deduction",
-          String(id),
-          {
+        //
+        // Task #95 (post-review fix): settleApprovedDeduction's catch block
+        // performs a SEPARATE persisted update on the deduction row even
+        // when the ledger-posting tx rolls back — it flips
+        // `failureReason` (and, for insufficient funds, `status` →
+        // 'insufficient_funds') so admins can see why the attempt failed.
+        // That mutation IS visible after the throw, so we must re-read
+        // the row to capture the real post-failure state in `after`.
+        // Recording `after: null` here would have hidden a real DB
+        // mutation from regulators.
+        const [afterRow] = await db
+          .select()
+          .from(adviserFeeDeductions)
+          .where(eq(adviserFeeDeductions.id, id))
+          .limit(1);
+        const afterSnapshot = afterRow
+          ? {
+              status: afterRow.status,
+              settledTransactionId: afterRow.settledTransactionId,
+              settledAt: afterRow.settledAt,
+              approvedByUserId: afterRow.approvedByUserId,
+              approvedAt: afterRow.approvedAt,
+              failureReason: afterRow.failureReason,
+            }
+          : null;
+        await writeAuditLog({
+          userId: auth.userId,
+          action: "fee_deduction_settle_failed",
+          entityType: "adviser_fee_deduction",
+          entityId: String(id),
+          before: beforeSnapshot,
+          after: afterSnapshot,
+          extra: {
             error: err?.message ? String(err.message) : String(err),
             status: err?.status ?? null,
             errorName: err?.name ?? null,
           },
-          req.ip ?? null,
-        );
+          ipAddress: req.ip ?? null,
+        });
         // Task #54 — if the failure was specifically the balanced-journal
         // guard tripping, page an operator and re-throw a sanitized 422
         // so the admin sees a clean message instead of the raw internal
@@ -2867,23 +2960,32 @@ export function registerAdminRoutes(app: Express): void {
       }
 
       // Successful settlement → audit the posting (with the transaction id
-      // so the auditor can walk straight to the ledger entries).
-      await auditTx(
-        db,
-        auth.userId,
-        "fee_deduction_settled",
-        "adviser_fee_deduction",
-        String(id),
-        {
+      // so the auditor can walk straight to the ledger entries). The
+      // before/after diff makes the status flip + settled-transaction
+      // attachment explicit; total/share/currency live in `extra` because
+      // they are immutable invariants of the deduction, not state changes.
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_deduction_settled",
+        entityType: "adviser_fee_deduction",
+        entityId: String(id),
+        before: beforeSnapshot,
+        after: {
+          status: settled.status,
           settledTransactionId: settled.settledTransactionId,
+          settledAt: settled.settledAt,
+          approvedByUserId: settled.approvedByUserId,
+          approvedAt: settled.approvedAt,
+          failureReason: settled.failureReason,
+        },
+        extra: {
           totalAccrued: settled.totalAccrued,
           adviserShareAmount: settled.adviserShareAmount,
           platformShareAmount: settled.platformShareAmount,
           currency: settled.currency,
-          status: settled.status,
         },
-        req.ip ?? null,
-      );
+        ipAddress: req.ip ?? null,
+      });
       return settled;
     }),
   );
@@ -2919,6 +3021,27 @@ export function registerAdminRoutes(app: Express): void {
       }
 
       const { reverseSettledDeduction } = await import("./services/fee-engine");
+
+      // Task #95 — capture the row state BEFORE the reversal attempt so the
+      // audit row carries an explicit "settled → reversed" diff rather than
+      // just "the new reversed values". Pulled from a one-shot SELECT (the
+      // service does its own FOR UPDATE inside its tx).
+      const [beforeRow] = await db
+        .select()
+        .from(adviserFeeDeductions)
+        .where(eq(adviserFeeDeductions.id, id))
+        .limit(1);
+      const beforeSnapshot = beforeRow
+        ? {
+            status: beforeRow.status,
+            settledTransactionId: beforeRow.settledTransactionId,
+            reversedAt: beforeRow.reversedAt,
+            reversedByUserId: beforeRow.reversedByUserId,
+            reversedReason: beforeRow.reversedReason,
+            reversalTransactionId: beforeRow.reversalTransactionId,
+          }
+        : null;
+
       let reversed;
       try {
         reversed = await reverseSettledDeduction({
@@ -2927,40 +3050,46 @@ export function registerAdminRoutes(app: Express): void {
           reason,
         });
       } catch (err: any) {
-        await auditTx(
-          db,
-          auth.userId,
-          "fee_deduction_reverse_failed",
-          "adviser_fee_deduction",
-          String(id),
-          {
+        await writeAuditLog({
+          userId: auth.userId,
+          action: "fee_deduction_reverse_failed",
+          entityType: "adviser_fee_deduction",
+          entityId: String(id),
+          before: beforeSnapshot,
+          after: null,
+          extra: {
             reason,
             error: err?.message ? String(err.message) : String(err),
             status: err?.status ?? null,
           },
-          req.ip ?? null,
-        );
+          ipAddress: req.ip ?? null,
+        });
         throw err;
       }
 
-      await auditTx(
-        db,
-        auth.userId,
-        "fee_deduction_reversed",
-        "adviser_fee_deduction",
-        String(id),
-        {
-          reason,
-          reversalTransactionId: reversed.reversalTransactionId,
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_deduction_reversed",
+        entityType: "adviser_fee_deduction",
+        entityId: String(id),
+        before: beforeSnapshot,
+        after: {
+          status: reversed.status,
           settledTransactionId: reversed.settledTransactionId,
+          reversedAt: reversed.reversedAt,
+          reversedByUserId: reversed.reversedByUserId,
+          reversedReason: reversed.reversedReason,
+          reversalTransactionId: reversed.reversalTransactionId,
+        },
+        extra: {
+          reason,
           totalAccrued: reversed.totalAccrued,
           adviserShareAmount: reversed.adviserShareAmount,
           platformShareAmount: reversed.platformShareAmount,
           currency: reversed.currency,
-          status: reversed.status,
         },
-        req.ip ?? null,
-      );
+        ipAddress: req.ip ?? null,
+      });
       return reversed;
     }),
   );

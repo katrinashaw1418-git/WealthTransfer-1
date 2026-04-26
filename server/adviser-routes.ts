@@ -19,6 +19,10 @@ import { db } from "./db";
 import {
   auditLogs,
   reportRequests,
+  // Task #95 — keep the legacy `auditLogs` import: the local audit() helper
+  // below still uses direct inserts for non-fee/advice surfaces (adviser
+  // tasks, report requests, etc.). Fee-consent + advice-record paths have
+  // been migrated to writeAuditLog (see import below).
   adviserNotificationDismissals,
   feeConsentRequests,
   feeConsents,
@@ -70,6 +74,11 @@ import {
   transitionAdviceStatus,
 } from "./services/wealth-planner";
 import { adviceRecords } from "@shared/schema";
+// Task #95 — standardised audit-log writer (before/after snapshots) for the
+// advice + fee-engine surfaces. Other adviser routes still use the local
+// audit() helper below; only fee-consent + advice-record paths have been
+// migrated.
+import { writeAuditLog } from "./services/audit";
 
 // Both `clientUserId` (the established adviser-route convention used by
 // fee-rules / fee-deductions / etc.) AND `clientId` (the spec wording for the
@@ -737,18 +746,28 @@ export function registerAdviserRoutes(app: Express): void {
               status: "pending",
             })
             .returning();
-          await tx.insert(auditLogs).values({
+          // Task #95 — fresh insert: no prior state to record, so `before`
+          // is null. `after` carries the durable state-machine fields the
+          // request will move through; per-fee economics live in `extra`.
+          await writeAuditLog({
+            executor: tx,
             userId: auth.userId,
             action: "fee_consent_requested",
             entityType: "fee_consent_request",
             entityId: String(row.id),
-            metadata: {
+            before: null,
+            after: {
+              status: row.status,
               clientUserId: row.clientUserId,
+              adviserUserId: row.adviserUserId,
+              adviceRecordId: row.adviceRecordId,
+            },
+            extra: {
               feeType: row.feeType,
               amountType: row.amountType,
               amount: row.amount,
               deductionFrequency: row.deductionFrequency,
-            } as any,
+            },
             ipAddress: req.ip || null,
           });
           return row;
@@ -867,15 +886,28 @@ export function registerAdviserRoutes(app: Express): void {
               { status: 409 },
             );
           }
-          await tx.insert(auditLogs).values({
+          // Task #95 — capture the explicit pending → withdrawn flip plus
+          // the decline reason being attached on the same row.
+          await writeAuditLog({
+            executor: tx,
             userId: auth.userId,
             action: "fee_consent_request_withdrawn",
             entityType: "fee_consent_request",
             entityId: String(id),
-            metadata: {
+            before: {
+              status: existing.status,
+              declineReason: existing.declineReason,
+              respondedAt: existing.respondedAt,
+            },
+            after: {
+              status: row.status,
+              declineReason: row.declineReason,
+              respondedAt: row.respondedAt,
+            },
+            extra: {
               clientUserId: existing.clientUserId,
               reason: parsed.data.reason ?? null,
-            } as any,
+            },
             ipAddress: req.ip || null,
           });
           return row;
@@ -1175,8 +1207,19 @@ export function registerAdviserRoutes(app: Express): void {
       }
 
       // Adviser must own the client this advice record belongs to.
+      // Task #95 — also pull the prior status / soaIssued state so we can
+      // record an explicit before/after diff in the audit row below. The
+      // SELECT runs OUTSIDE the transition tx; the live row state is
+      // re-loaded inside the tx by transitionAdviceStatus, so this snapshot
+      // is purely for the audit metadata.
       const [advice] = await db
-        .select({ id: adviceRecords.id, clientId: adviceRecords.clientId })
+        .select({
+          id: adviceRecords.id,
+          clientId: adviceRecords.clientId,
+          status: adviceRecords.status,
+          soaIssued: adviceRecords.soaIssued,
+          soaIssuedAt: adviceRecords.soaIssuedAt,
+        })
         .from(adviceRecords)
         .where(eq(adviceRecords.id, adviceRecordId))
         .limit(1);
@@ -1185,8 +1228,13 @@ export function registerAdviserRoutes(app: Express): void {
       }
       await assertAdviserClientLink(auth.userId, advice.clientId);
 
+      // Task #95 — write the audit row INSIDE the same db.transaction as
+      // the status flip + version snapshot so an audit-insert failure
+      // rolls back the whole change. Previously the audit ran AFTER the
+      // tx with fire-and-forget semantics, which meant a regulator could
+      // see an issued SOA with no audit trail. writeAuditLog is fail-closed.
       const out = await db.transaction(async (tx) => {
-        return transitionAdviceStatus({
+        const result = await transitionAdviceStatus({
           adviceRecordId,
           newStatus: parsed.data.newStatus,
           issuedByUserId: auth.userId,
@@ -1196,20 +1244,31 @@ export function registerAdviserRoutes(app: Express): void {
             soaIssuedAt: parsed.data.soaIssuedAt ?? undefined,
           },
         });
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: `advice_record.transition.${parsed.data.newStatus}`,
+          entityType: "advice_record",
+          entityId: String(adviceRecordId),
+          before: {
+            status: advice.status,
+            soaIssued: advice.soaIssued,
+            soaIssuedAt: advice.soaIssuedAt,
+          },
+          after: {
+            status: result.advice.status,
+            soaIssued: result.advice.soaIssued,
+            soaIssuedAt: result.advice.soaIssuedAt,
+          },
+          extra: {
+            versionId: result.version.id,
+            versionNumber: result.version.versionNumber,
+            clientId: advice.clientId,
+          },
+          ipAddress: req.ip ?? null,
+        });
+        return result;
       });
-
-      audit(
-        auth.userId,
-        `advice_record.transition.${parsed.data.newStatus}`,
-        "advice_record",
-        String(adviceRecordId),
-        {
-          versionId: out.version.id,
-          versionNumber: out.version.versionNumber,
-          clientId: advice.clientId,
-        },
-        req.ip ?? null,
-      );
 
       return { advice: out.advice, version: out.version };
     }),

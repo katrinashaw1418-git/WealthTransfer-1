@@ -33,13 +33,13 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   adviserFeeDeductions,
-  auditLogs,
   users,
 } from "../../shared/schema";
 import {
   settleApprovedDeduction,
   InsufficientFundsError,
 } from "./fee-engine";
+import { writeAuditLog } from "./audit";
 import { sendInsufficientFundsEmail } from "../email";
 
 // Default 7-day re-notification debounce. Override with the
@@ -149,17 +149,28 @@ export async function runInsufficientFundsSweep(
           .update(adviserFeeDeductions)
           .set({ lastRecheckedAt: now })
           .where(eq(adviserFeeDeductions.id, d.id));
-        await db.insert(auditLogs).values({
+        await writeAuditLog({
           userId: approverUserId,
           action: "fee_deduction.auto_resettled",
           entityType: "adviser_fee_deduction",
           entityId: String(d.id),
-          metadata: {
+          before: {
+            status: d.status,
+            failureReason: d.failureReason,
+            settledTransactionId: d.settledTransactionId,
+            settledAt: d.settledAt,
+          },
+          after: {
+            status: result.status,
+            settledTransactionId: result.settledTransactionId,
+            settledAt: result.settledAt,
+            failureReason: result.failureReason,
+          },
+          extra: {
             clientUserId: d.clientUserId,
             adviserUserId: d.adviserUserId,
             totalAccrued: d.totalAccrued,
             currency: d.currency,
-            settledTransactionId: result.settledTransactionId,
             trigger: "insufficient_funds_sweep",
           },
           ipAddress: null,
@@ -260,14 +271,30 @@ export async function runInsufficientFundsSweep(
         summary.notificationsFailed++;
       }
 
-      await db.insert(auditLogs).values({
+      await writeAuditLog({
         userId: approverUserId,
         action: dispatch.sent
           ? "fee_deduction.client_notified"
           : "fee_deduction.client_notification_failed",
         entityType: "adviser_fee_deduction",
         entityId: String(d.id),
-        metadata: {
+        // Notification bookkeeping is the actual state change here — capture
+        // the debounce-relevant columns before/after so an auditor can see
+        // when the client was last notified and that the count incremented
+        // exactly once per due-for-notification visit.
+        before: {
+          clientNotifiedAt: d.clientNotifiedAt,
+          clientNotificationCount: d.clientNotificationCount,
+          lastRecheckedAt: d.lastRecheckedAt,
+          status: d.status,
+        },
+        after: {
+          clientNotifiedAt: now,
+          clientNotificationCount: (d.clientNotificationCount ?? 0) + 1,
+          lastRecheckedAt: now,
+          status: d.status,
+        },
+        extra: {
           clientUserId: d.clientUserId,
           adviserUserId: d.adviserUserId,
           required: settleErr.required,

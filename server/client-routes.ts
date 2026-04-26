@@ -46,6 +46,11 @@ import {
   requireAcknowledgedAdvice,
 } from "./services/wealth-planner";
 import { adviceRecords } from "@shared/schema";
+// Task #95 — standardised audit-log writer (before/after snapshots) for the
+// advice + fee-engine surfaces. The local audit() helper below is still
+// used for non-fee/advice paths (instruction consent/reject); only the
+// fee-consent sign/decline writes have been migrated to writeAuditLog.
+import { writeAuditLog } from "./services/audit";
 
 async function audit(
   userId: number,
@@ -289,35 +294,55 @@ export function registerClientRoutes(app: Express): void {
             { status: 409 },
           );
         }
-        // Two audit rows so each artefact (request + executed consent) has its
-        // own searchable trail.
-        await tx.insert(auditLogs).values([
-          {
-            userId: auth.userId,
-            action: "fee_consent_signed",
-            entityType: "fee_consent_request",
-            entityId: String(id),
-            metadata: {
-              feeConsentId: executed.id,
-              adviserUserId: request.adviserUserId,
-              signatureName: parsed.data.signatureName,
-            } as any,
-            ipAddress: (req as Request).ip || null,
+        // Task #95 — two audit rows so each artefact (request + executed
+        // consent) has its own searchable trail. The signed request flips
+        // pending → consented; the executed consent is a fresh insert
+        // (before: null) so an auditor can see the explicit creation.
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_consent_signed",
+          entityType: "fee_consent_request",
+          entityId: String(id),
+          before: {
+            status: request.status,
+            signedFeeConsentId: request.signedFeeConsentId,
+            respondedAt: request.respondedAt,
           },
-          {
-            userId: auth.userId,
-            action: "fee_consent_created",
-            entityType: "fee_consent",
-            entityId: String(executed.id),
-            metadata: {
-              feeConsentRequestId: id,
-              adviserUserId: request.adviserUserId,
-              feeType: executed.feeType,
-              amount: executed.amount,
-            } as any,
-            ipAddress: (req as Request).ip || null,
+          after: {
+            status: updated.status,
+            signedFeeConsentId: updated.signedFeeConsentId,
+            respondedAt: updated.respondedAt,
           },
-        ]);
+          extra: {
+            feeConsentId: executed.id,
+            adviserUserId: request.adviserUserId,
+            signatureName: parsed.data.signatureName,
+          },
+          ipAddress: (req as Request).ip || null,
+        });
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_consent_created",
+          entityType: "fee_consent",
+          entityId: String(executed.id),
+          before: null,
+          after: {
+            id: executed.id,
+            adviceRecordId: executed.adviceRecordId,
+            clientId: executed.clientId,
+            adviserId: executed.adviserId,
+            feeType: executed.feeType,
+            amount: executed.amount,
+            renewalStatus: executed.renewalStatus,
+            consentExpiryDate: executed.consentExpiryDate,
+          },
+          extra: {
+            feeConsentRequestId: id,
+          },
+          ipAddress: (req as Request).ip || null,
+        });
         return { request: updated, feeConsent: executed };
       });
       res.json(result);
@@ -386,15 +411,28 @@ export function registerClientRoutes(app: Express): void {
             { status: 409 },
           );
         }
-        await tx.insert(auditLogs).values({
+        // Task #95 — explicit pending → declined diff plus the decline
+        // reason being attached on the same row.
+        await writeAuditLog({
+          executor: tx,
           userId: auth.userId,
           action: "fee_consent_declined",
           entityType: "fee_consent_request",
           entityId: String(id),
-          metadata: {
+          before: {
+            status: request.status,
+            declineReason: request.declineReason,
+            respondedAt: request.respondedAt,
+          },
+          after: {
+            status: row.status,
+            declineReason: row.declineReason,
+            respondedAt: row.respondedAt,
+          },
+          extra: {
             adviserUserId: request.adviserUserId,
             reason: parsed.data.reason ?? null,
-          } as any,
+          },
           ipAddress: (req as Request).ip || null,
         });
         return row;
