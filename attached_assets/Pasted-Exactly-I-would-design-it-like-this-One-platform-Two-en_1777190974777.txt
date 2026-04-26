@@ -1,0 +1,762 @@
+Exactly. I would design it like this:
+
+One platform
+Two entry paths
+Shared backend
+Different dashboards
+1. Landing page
+
+Top navigation:
+
+AMAX Wealth
+Personal Investors
+Wealth Planners
+Investment Products
+Security & Compliance
+Contact
+
+Hero section:
+
+AMAX Wealth
+A modern wealth platform for investors and financial planners.
+
+Personal investors can access portfolio tools, FX, digital assets and curated investment opportunities.
+Financial planners can onboard clients, view portfolios, manage fee consent, generate reports and recommend AMAX-approved investment products.
+
+Two main buttons:
+
+I am an Investor
+I am a Wealth Planner
+2. Landing page split
+Personal investor tab
+Apply for Access
+Complete KYC
+View portfolio
+Access investment opportunities
+Manage FX / wallets
+
+CTA:
+
+Apply for Access
+Wealth planner tab
+Partner with AMAX Wealth
+Serve clients through a modern adviser platform.
+
+Features:
+- Linked client dashboard
+- Portfolio visibility
+- Product menu
+- Client instructions
+- Fee consent tracking
+- Reports
+- Compliance workflow
+
+CTA:
+
+Register Adviser Interest
+3. Auth flow
+Login / Register
+↓
+Role check
+↓
+client → /dashboard
+adviser → /adviser/dashboard
+admin → /admin
+4. Client side pages
+
+Keep existing app:
+
+/dashboard
+/wallets
+/fx
+/portfolio
+/transactions
+/compliance
+/reports
+/ai-advisory
+
+Client also needs new adviser-related pages:
+
+/client/instructions
+/client/fee-consents
+/client/documents
+
+Client can:
+
+approve adviser instruction
+reject adviser instruction
+view adviser fee consent
+download reports
+5. Adviser side pages
+
+Add new portal:
+
+/adviser/dashboard
+/adviser/clients
+/adviser/clients/:id
+/adviser/products
+/adviser/instructions
+/adviser/fees
+/adviser/tasks
+/adviser/reports
+/adviser/settings
+6. Adviser dashboard
+
+Widgets:
+
+Total linked clients
+AUM under advice
+Pending client instructions
+Fee consents expiring
+KYC pending
+Open tasks
+Reports generated
+
+Quick actions:
+
+Add client
+Create instruction
+Generate report
+Review fee consent
+7. Adviser clients page
+
+Table:
+
+Client name
+KYC status
+Portfolio value
+Risk profile status
+Fee consent status
+Last review date
+Actions
+
+Actions:
+
+View client
+Create instruction
+Generate report
+8. Adviser client detail page
+
+Sections:
+
+Client profile
+KYC / onboarding status
+Portfolio summary
+Holdings
+Transactions
+Documents
+Fee consent
+Instructions
+Tasks
+Reports
+
+Important rule:
+
+Read-only financial data.
+No fund movement by adviser.
+9. Investment products page
+
+This is your revenue core.
+
+/adviser/products
+
+Show AMAX-controlled product menu:
+
+Product name
+Category
+Risk rating
+Minimum investment
+Management fee
+Performance fee
+PDS / IM link
+Status
+
+Product categories:
+
+Managed funds
+Fixed income
+Multi-asset portfolios
+FX strategies
+Private opportunities
+Cash / yield products
+
+Adviser action:
+
+Recommend / Create client instruction
+10. Instruction flow
+Adviser selects product
+↓
+Creates instruction for linked client
+↓
+Client receives pending instruction
+↓
+Client approves or rejects
+↓
+Only after approval can system process
+
+Statuses:
+
+pending_consent
+consented
+processing
+completed
+rejected
+cancelled
+11. Fee page
+/adviser/fees
+
+Show:
+
+Active fee consents
+Expiring fee consents
+Fee type
+Client
+Reference day
+Expiry date
+Amount / percentage
+Status
+
+Rules:
+
+No fee deduction without active client consent.
+Fee consent expires automatically if not renewed.
+12. Tasks page
+/adviser/tasks
+
+Task types:
+
+KYC pending
+Fee consent expiring
+Portfolio review due
+Client instruction pending
+Report required
+13. Reports page
+/adviser/reports
+
+Reports:
+
+Client portfolio report
+Fee consent report
+Adviser revenue report
+Client activity report
+Investment product exposure report
+
+Rule:
+
+No fake performance.
+Show “insufficient history” if not enough real data.
+14. Admin / AFSL partner layer
+
+You also need admin pages:
+
+/admin/advisers
+/admin/products
+/admin/fee-rules
+/admin/instructions
+/admin/reports
+/admin/compliance
+
+Admin can:
+
+approve adviser
+link adviser to clients
+create products
+set fee split
+approve product availability
+review instructions
+audit activity
+Final architecture
+Landing Page
+├── Personal Investor
+│   └── Client App
+│       ├── Dashboard
+│       ├── Wallets / FX
+│       ├── Portfolio
+│       ├── Transactions
+│       ├── Reports
+│       └── Pending adviser instructions
+│
+└── Wealth Planner
+    └── Adviser Portal
+        ├── Dashboard
+        ├── Clients
+        ├── Investment Products
+        ├── Instructions
+        ├── Fees
+        ├── Tasks
+        └── Reports
+
+Admin / AFSL Partner
+└── Controls advisers, products, fees, compliance
+
+My advice: build the adviser portal + product instruction flow + fee consent layer first. That is the real Netwealth-style B2B2C engine.
+
+Pasted text(103).txt
+Document
+VERIFY AND CROSS CHECK
+
+Good — I’ve fully cross-checked your architecture, Netwealth reference, and your AMAX V2 direction. You are very close, but there are a few critical gaps and sequencing risks you must fix.
+
+Below is a clean, institutional-grade verification + patch list (architecture + product + backend + frontend + compliance).
+
+✅ 1. CORE ARCHITECTURE — VERIFIED (CORRECT)
+
+Your current model:
+
+B2C client app (existing)
++ Adviser layer (new)
++ Shared backend
+
+✔ This is 100% correct and aligned with Netwealth
+
+✔ Your diagram logic is correct:
+
+Role-based routing
+Adviser read-only
+Shared APIs
+
+✔ Confirmed in your file:
+
+
+⚠️ 2. CRITICAL ARCHITECTURE FIXES (YOU MISSED THESE)
+❗ Missing Layer 1: PRODUCT ENGINE (CORE OF NETWEALTH)
+
+Right now you designed:
+
+Adviser dashboard
+Clients
+Tasks
+Reports
+
+But Netwealth is NOT built on dashboards.
+
+It is built on:
+
+Product → Allocation → Fee → Reporting
+✅ REQUIRED FIX
+
+Add:
+
+Investment Product Engine (central layer)
+❗ Missing Layer 2: CASH / WALLET LINKAGE
+
+Your design:
+
+Portfolio
+Products
+Instructions
+
+But you did NOT define:
+
+Where money comes from
+Where fees are deducted
+✅ REQUIRED FIX
+
+You must anchor everything to:
+
+Client Cash Account (wallet)
+❗ Missing Layer 3: CONSENT ENGINE AS CORE SERVICE
+
+Right now:
+
+Instructions → consent
+Fees → consent
+
+But these are not unified
+
+✅ REQUIRED FIX
+
+Create a central:
+
+Consent Engine
+
+Used by:
+
+feeConsents
+investmentInstructions
+future documents
+🧱 3. FINAL CORRECT ARCHITECTURE (PATCHED)
+AMAX Platform
+│
+├── B2C Client Layer (UNCHANGED)
+│   ├── Wallets (SOURCE OF TRUTH)
+│   ├── FX / Crypto
+│   ├── Portfolio
+│   └── Reports
+│
+├── Investment Product Engine (NEW CORE)
+│   ├── Products
+│   ├── Holdings
+│   ├── Valuation
+│
+├── Adviser Layer (NEW)
+│   ├── Dashboard
+│   ├── Clients
+│   ├── Products
+│   ├── Instructions
+│   ├── Fees
+│   ├── Tasks
+│   └── Reports
+│
+├── Consent Engine (CRITICAL)
+│   ├── Fee consent
+│   ├── Investment consent
+│   └── Audit trail
+│
+└── Fee Engine
+    ├── Daily accrual
+    ├── Monthly deduction
+    └── Split logic
+🎯 4. LANDING PAGE — VERIFICATION
+
+Your idea:
+
+Toggle: Investor / Adviser
+
+✔ Correct
+✔ Matches Netwealth conceptually
+
+❗ BUT YOU MISSED THIS:
+
+Netwealth does NOT mix them visually.
+
+✅ FIXED LANDING STRUCTURE
+Landing page
+├── Section 1: For Investors
+├── Section 2: For Financial Advisers
+
+NOT just a toggle — it must be:
+
+Two separate funnels
+💻 5. FRONTEND PATCHES (REACT)
+✅ Add role-based routing
+// middleware.ts or auth guard
+
+if (user.role === "adviser") {
+  redirect("/adviser/dashboard");
+} else {
+  redirect("/dashboard");
+}
+✅ Landing split component
+export default function Landing() {
+  return (
+    <div>
+      <Hero />
+
+      <section>
+        <h2>For Investors</h2>
+        <Button href="/apply">Apply for Access</Button>
+      </section>
+
+      <section>
+        <h2>For Financial Advisers</h2>
+        <Button href="/adviser/register">Partner with AMAX</Button>
+      </section>
+    </div>
+  );
+}
+✅ Adviser layout wrapper
+// /adviser/layout.tsx
+
+export default function AdviserLayout({ children }) {
+  return (
+    <div className="adviser-shell">
+      <Sidebar />
+      <main>{children}</main>
+    </div>
+  );
+}
+🔧 6. BACKEND PATCHES (CRITICAL)
+✅ 6.1 Permission middleware (NON-NEGOTIABLE)
+function requireAdviser(req, res, next) {
+  if (req.user.role !== "adviser") {
+    return res.status(403).send("Forbidden");
+  }
+  next();
+}
+✅ 6.2 Adviser-client access control
+function adviserCanAccessClient(adviserId, clientId) {
+  return db.query.adviserClients.findFirst({
+    where: {
+      adviserUserId: adviserId,
+      clientUserId: clientId
+    }
+  });
+}
+✅ 6.3 Instruction → execution flow
+if (instruction.status !== "consented") {
+  throw new Error("Client consent required");
+}
+✅ 6.4 Fee deduction guard
+if (!activeConsent) {
+  throw new Error("Fee consent expired");
+}
+⚠️ 7. COMPLIANCE GAPS (VERY IMPORTANT)
+
+You are very close to breaching ASIC rules if you ignore this:
+
+❌ DO NOT DO
+Adviser executes trades
+Adviser deducts fees without consent
+Adviser introduces external products
+✅ MUST DO
+Client always approves
+Adviser never moves money
+All fees linked to consent
+Products controlled by AMAX
+🧠 8. PRODUCT STRATEGY CORRECTION
+
+You said:
+
+“multiple investment products”
+
+✔ Correct
+But you must structure them like:
+
+Product = controlled container
+NOT free trading
+✅ Correct product types
+Managed portfolio
+Fixed income pool
+FX yield strategy
+Multi-asset model
+Private deal (later)
+🚀 9. PRIORITY BUILD ORDER (YOU MUST FOLLOW)
+
+You are trying to build everything at once — wrong.
+
+✅ Phase 1 (MANDATORY)
+Adviser portal shell
+Client linking
+Product registry
+Instruction + consent
+✅ Phase 2
+Fee engine
+Fee consent
+Fee deduction
+❌ Phase 3 (NOT NOW)
+Managed accounts automation
+Rebalancing engine
+SOA generation
+🧾 FINAL VERDICT
+✔ What you got right
+B2B2C model
+Adviser layer separation
+Read-only adviser
+Shared backend
+❗ What you must fix immediately
+Add product engine (missing core)
+Add cash wallet linkage
+Centralise consent engine
+Separate landing funnels properly
+Enforce permission + compliance guards
+🔥 BOTTOM LINE
+
+You are not building an app.
+
+You are building:
+
+A regulated wealth operating system
+
+And the correct foundation is:
+
+Products + Consent + Fees
+NOT dashboards
+
+If you want next step, I can:
+
+✅ Map this directly to your AMAX-V2 repo structure
+✅ Or design exact UI screens matching Netwealth flows
+✅ Or simulate full client → adviser → fee lifecycle
+
+Just tell me.
+
+✅ Map this directly to your AMAX-V2 repo structure
+Thought for 1m 17s
+
+Yes. Mapped directly to your AMAX-V2 repo, this should be added as a new adviser layer, not a rebuild. Your current app already has the client routes in client/src/App.tsx, but no adviser routes, no users.role, and no adviser tables in shared/schema.ts. The uploaded reference notes also confirm the correct direction: keep B2C, add a Netwealth-style adviser layer on top.
+
+1. Frontend file map
+Update existing files
+client/src/App.tsx
+
+Add adviser page imports and routes:
+
+import AdviserDashboard from "@/pages/adviser/adviser-dashboard";
+import AdviserClients from "@/pages/adviser/adviser-clients";
+import AdviserClientDetail from "@/pages/adviser/adviser-client-detail";
+import AdviserProducts from "@/pages/adviser/adviser-products";
+import AdviserInstructions from "@/pages/adviser/adviser-instructions";
+import AdviserFees from "@/pages/adviser/adviser-fees";
+import AdviserTasks from "@/pages/adviser/adviser-tasks";
+import AdviserReports from "@/pages/adviser/adviser-reports";
+
+Add routes inside the protected area:
+
+<Route path="/adviser/dashboard" component={AdviserDashboard} />
+<Route path="/adviser/clients" component={AdviserClients} />
+<Route path="/adviser/clients/:id" component={AdviserClientDetail} />
+<Route path="/adviser/products" component={AdviserProducts} />
+<Route path="/adviser/instructions" component={AdviserInstructions} />
+<Route path="/adviser/fees" component={AdviserFees} />
+<Route path="/adviser/tasks" component={AdviserTasks} />
+<Route path="/adviser/reports" component={AdviserReports} />
+Add new folder
+client/src/pages/adviser/
+
+Create:
+
+adviser-dashboard.tsx
+adviser-clients.tsx
+adviser-client-detail.tsx
+adviser-products.tsx
+adviser-instructions.tsx
+adviser-fees.tsx
+adviser-tasks.tsx
+adviser-reports.tsx
+Update landing page
+client/src/pages/landing.tsx
+
+Add section:
+
+For Financial Planners & AFSL Partners
+
+Buttons:
+
+Investor: Apply for Access → /register
+Adviser: Partner with AMAX → /adviser/register or /contact
+
+Do not remove the existing client landing flow.
+
+Update sidebar
+client/src/components/layout/sidebar.tsx
+
+Show adviser menu only if user.role === "adviser":
+
+Adviser Dashboard
+Clients
+Investment Products
+Instructions
+Fees
+Tasks
+Reports
+
+Keep existing client menu unchanged.
+
+2. Backend / schema file map
+Update
+shared/schema.ts
+
+Add inside users:
+
+role: text("role").notNull().default("client"),
+
+Add new tables:
+
+adviserClients
+feeConsents
+adviserTasks
+reportRequests
+investmentProducts
+clientProductHoldings
+investmentInstructions
+adviserFeeRules
+adviserFeeDeductions
+
+Use decimal, not numeric, because your schema imports decimal.
+
+Update
+server/index.ts
+
+Add startup migrations for:
+
+users.role
+adviser_clients
+fee_consents
+adviser_tasks
+report_requests
+investment_products
+client_product_holdings
+investment_instructions
+adviser_fee_rules
+adviser_fee_deductions
+Update
+server/routes.ts
+
+Add adviser APIs:
+
+GET  /api/adviser/dashboard
+GET  /api/adviser/clients
+GET  /api/adviser/clients/:id
+GET  /api/adviser/products
+GET  /api/adviser/clients/:id/holdings
+POST /api/adviser/instructions
+GET  /api/adviser/instructions
+GET  /api/adviser/tasks
+PATCH /api/adviser/tasks/:id
+GET  /api/adviser/fees
+GET  /api/adviser/reports
+POST /api/adviser/reports/client-portfolio
+
+Add client consent APIs:
+
+GET  /api/client/instructions/pending
+POST /api/client/instructions/:id/consent
+POST /api/client/instructions/:id/reject
+3. Permission rules
+
+Add helper in server/routes.ts:
+
+async function adviserCanAccessClient(adviserUserId: number, clientUserId: number) {
+  const [link] = await db
+    .select()
+    .from(adviserClients)
+    .where(and(
+      eq(adviserClients.adviserUserId, adviserUserId),
+      eq(adviserClients.clientUserId, clientUserId)
+    ));
+
+  return !!link;
+}
+
+Every adviser client route must check this.
+
+4. Final page architecture
+Landing Page
+├── Personal Investor section
+│   └── Existing client app
+│       ├── Dashboard
+│       ├── Wallets
+│       ├── FX
+│       ├── Crypto
+│       ├── Portfolio
+│       ├── Transactions
+│       └── Compliance
+│
+└── Financial Planner section
+    └── New adviser portal
+        ├── Dashboard
+        ├── Clients
+        ├── Client Detail
+        ├── Investment Products
+        ├── Instructions
+        ├── Fees
+        ├── Tasks
+        └── Reports
+5. Build order
+1. Add users.role
+2. Add adviserClients
+3. Add adviser dashboard + sidebar
+4. Add investmentProducts
+5. Add clientProductHoldings
+6. Add investmentInstructions with client consent
+7. Add feeConsents + adviserFeeRules
+8. Add reports
+Do not build yet
+Full SOA engine
+full Netwealth managed-account rebalancing
+commission tier engine before fee data exists
+adviser-executed trading
+adviser fund movement
+
+Bottom line: add a parallel adviser portal beside the current client app, with role-based routing and strict linked-client access.

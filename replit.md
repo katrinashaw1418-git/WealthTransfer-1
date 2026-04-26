@@ -52,6 +52,23 @@ User confirmed AMAX is a **retail AFSL** platform (not wholesale Path B), with e
 ### Conservative copy on landing page
 After the architect flagged that the adviser-section copy overstated current capability, the lead paragraph and feature list were softened to make explicit that 10A is read-only and that instruction + fee-consent workflows are on the roadmap (10B / 10C).
 
+### Cross-check pass against external advisory doc (still 10A scope — no money, no execution)
+Verified the long-form advisory doc against the actual codebase and applied only the items that were (a) correctly identified as real gaps and (b) safe within 10A's read-only envelope:
+
+- **Login post-auth redirect now role-aware.** `client/src/pages/login.tsx` previously hard-coded `navigate("/dashboard")` regardless of role, forcing advisers to manually navigate to `/adviser/dashboard`. Now: `adviser` → `/adviser/dashboard`, `admin` → `/admin`, default → `/dashboard`. Reads `user.role` from `useAuth()`.
+- **Landing hero retargeted at the dual audience.** Headline shifted from "Institutional-grade wealth management for wholesale investors" to the doc's "A modern wealth platform for investors and financial planners". Hero now exposes two role-routing CTAs ("I am an Investor" → `/login`, "I am a Wealth Planner" → scrolls to `#for-advisers`) plus a tertiary "How It Works" anchor. Wholesale-eligibility framing is preserved on the products and apply sections where it accurately applies.
+
+Items from the doc that were already in place (no change required):
+- Adviser permission middleware → `requireRole(auth, "adviser")` in `server/adviser-routes.ts`
+- Adviser-client access guard → `assertAdviserClientLink` in `server/services/adviser-access.ts`
+- Investment Product Engine → `investmentProducts` + `userInvestments` + the new `/adviser/products` page
+- Adviser sidebar layout → already conditionally rendered via `adviserNav` in `sidebar.tsx`
+
+Items from the doc deferred to 10B / 10C and admin work (still require explicit user go-ahead):
+- Investment instruction flow with client consent gate (10B)
+- Fee engine — `adviserFeeRules`, `adviserFeeDeductions`, accrual + deduction (10C)
+- `/admin/*` shell, `/client/instructions`, `/client/fee-consents`, `/adviser/register`
+
 ### What's deferred to 10B / 10C (require explicit user go-ahead)
 - **Session 10B** — Investment instruction flow (adviser proposes allocation → client consents → execution gate). Recommendation: reuse `executionAuthorisations` + `adviceRecords` rather than introducing a new `investmentInstructions` table.
 - **Session 10C** — Fee engine (`adviserFeeRules`, `adviserFeeDeductions`). Real money movement; needs reviewer sign-off before any cash-wallet debit code lands.

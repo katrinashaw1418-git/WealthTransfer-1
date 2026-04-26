@@ -731,7 +731,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const token = signToken({ userId: user.id, username: user.username, email: user.email, role: user.role });
       await writeAuditLog(user.id, "login", "user", String(user.id), { username }, req.ip || null);
-      res.json({ token, user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier } });
+      res.json({ token, user: { id: user.id, username: user.username, email: user.email, firstName: user.firstName, lastName: user.lastName, kycStatus: user.kycStatus, userTier: user.userTier, role: user.role } });
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Login failed" });

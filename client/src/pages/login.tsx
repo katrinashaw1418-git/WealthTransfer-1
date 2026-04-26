@@ -10,7 +10,7 @@ import { Loader2, Shield, ArrowLeft } from "lucide-react";
 import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
 export default function Login() {
-  const { login, isAuthenticated } = useAuth();
+  const { login, isAuthenticated, user } = useAuth();
   const [, navigate] = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -18,10 +18,20 @@ export default function Login() {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    if (isAuthenticated) {
-      navigate("/dashboard", { replace: true });
+    // Gate on the resolved user object as well as isAuthenticated for
+    // defensive clarity — isAuthenticated is derived from !!user but this
+    // makes the data dependency explicit for the role branch below.
+    if (isAuthenticated && user) {
+      // Role-based landing: advisers go to the adviser portal, everyone
+      // else (clients, admins until /admin shell exists, undefined role)
+      // falls through to the standard client dashboard. No dead-end routes.
+      if (user.role === "adviser") {
+        navigate("/adviser/dashboard", { replace: true });
+      } else {
+        navigate("/dashboard", { replace: true });
+      }
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, user?.role]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

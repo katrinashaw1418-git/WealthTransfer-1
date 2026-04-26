@@ -74,27 +74,41 @@ export default function Landing() {
               Authorised Representative under AFSL
             </Badge>
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold leading-tight mb-6">
-              Institutional-grade wealth management for wholesale investors
+              A modern wealth platform for investors and financial planners
             </h1>
             <p className="text-lg md:text-xl text-sky-700 mb-8 max-w-2xl">
-              Consolidated portfolio reporting, structured investment access, and advisory services — 
-              delivered through a secure, compliance-first platform.
+              Eligible Australian investors access portfolio tools, FX, digital assets and curated
+              investment opportunities. Authorised representatives view linked-client portfolios and
+              advice records, and browse the AMAX product shelf — read-only today, with consent-gated
+              instruction workflows on the roadmap.
             </p>
             <div className="flex flex-col sm:flex-row gap-4">
-              <Button 
-                size="lg" 
+              <Button
+                size="lg"
                 className="bg-sky-500 hover:bg-sky-600 text-white font-semibold"
-                onClick={() => navigate("/invest")}
+                onClick={() => navigate("/login")}
+                data-testid="button-hero-investor"
               >
-                Get my recommendation
+                I am an Investor
                 <ArrowRight className="w-4 h-4 ml-2" />
               </Button>
-              <Button 
-                size="lg" 
-                className="bg-sky-100 text-sky-900 hover:bg-sky-200 font-semibold"
+              <Button
+                size="lg"
+                className="bg-sky-900 hover:bg-sky-950 text-white font-semibold"
                 onClick={() => {
-                  const el = document.getElementById('how-it-works');
-                  el?.scrollIntoView({ behavior: 'smooth' });
+                  document.getElementById("for-advisers")?.scrollIntoView({ behavior: "smooth" });
+                }}
+                data-testid="button-hero-adviser"
+              >
+                I am a Wealth Planner
+                <ArrowRight className="w-4 h-4 ml-2" />
+              </Button>
+              <Button
+                size="lg"
+                variant="outline"
+                className="border-sky-300 text-sky-900 hover:bg-sky-100 font-semibold bg-transparent"
+                onClick={() => {
+                  document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" });
                 }}
               >
                 How It Works
