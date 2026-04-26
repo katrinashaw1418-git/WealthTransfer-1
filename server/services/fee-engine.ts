@@ -184,6 +184,7 @@ export async function runDailyAccruals(opts: {
 }): Promise<{
   inserted: number;
   skipped: number;
+  duplicates: number;
   byGateReason: Record<string, number>;
 }> {
   const accrualDate = startOfUtcDay(opts.accrualDate);
@@ -191,6 +192,7 @@ export async function runDailyAccruals(opts: {
   const rules = await db.select().from(adviserFeeRules);
   let inserted = 0;
   let skipped = 0;
+  let duplicates = 0;
   const byGateReason: Record<string, number> = {};
 
   for (const rule of rules) {
@@ -275,14 +277,17 @@ export async function runDailyAccruals(opts: {
         String(err?.code) === "23505" ||
         /unique/i.test(String(err?.message ?? ""))
       ) {
-        // intentional no-op
+        // Idempotent re-run: a row for (rule, date) already exists. Count it
+        // separately from `inserted` / `skipped` so the cron / admin trigger
+        // can surface "we re-ran today and N rows were already there".
+        duplicates++;
       } else {
         throw err;
       }
     }
   }
 
-  return { inserted, skipped, byGateReason };
+  return { inserted, skipped, duplicates, byGateReason };
 }
 
 // ---------------------------------------------------------------------------

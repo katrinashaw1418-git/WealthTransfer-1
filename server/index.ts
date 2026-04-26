@@ -150,6 +150,54 @@ app.use((req, res, next) => {
     setInterval(runAdviserTaskAutomationCron, 24 * 60 * 60 * 1000);
   }, 120 * 1000);
 
+  // ---------------------------------------------------------------------------
+  // SESSION 26 (Task #13) — Daily fee accrual sweep
+  // ---------------------------------------------------------------------------
+  // Runs `runDailyAccruals` once per day for the current UTC date so the
+  // adviser fee engine no longer relies on an admin pressing the "Run today's
+  // accruals" button. Gate A invariants are unchanged: the service writes
+  // ONLY to `adviser_fee_accruals` and never moves money or posts to the
+  // ledger. The "Run today's accruals" admin trigger remains in place for
+  // manual catch-up (e.g. backfilling a missed day).
+  //
+  // Idempotent by construction — `adviser_fee_accruals` has a unique index on
+  // (`feeRuleId`, `accrualDate`), and `runDailyAccruals` returns explicit
+  // `inserted` / `skipped` (gated rows) / `duplicates` counts so the cron log
+  // line tells operators at a glance whether today was a fresh run or a
+  // safe re-run on top of an earlier run.
+  //
+  // Failures are surfaced via `console.error` (matching the other crons in
+  // this file) so the platform's log-based alerting picks them up; we never
+  // swallow exceptions or retry blindly here, because the unique index makes
+  // a same-day re-run free — the next scheduled tick is the natural retry.
+  //
+  // Staggered 180s after start so the four daily crons (wallet recon, ledger
+  // recon, adviser-task automation, fee accruals) don't pile up on first boot.
+  // ---------------------------------------------------------------------------
+  const { runDailyAccruals } = await import("./services/fee-engine");
+
+  async function runDailyFeeAccrualsCron() {
+    const accrualDate = new Date();
+    try {
+      const s = await runDailyAccruals({ accrualDate });
+      const gateBreakdown = Object.entries(s.byGateReason)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(",") || "none";
+      log(
+        `[fee-accruals] completed for ${accrualDate.toISOString().slice(0, 10)}: ` +
+          `${s.inserted} inserted, ${s.skipped} gated (${gateBreakdown}), ` +
+          `${s.duplicates} duplicate(s)`
+      );
+    } catch (e) {
+      console.error("[fee-accruals] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runDailyFeeAccrualsCron();
+    setInterval(runDailyFeeAccrualsCron, 24 * 60 * 60 * 1000);
+  }, 180 * 1000);
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.
