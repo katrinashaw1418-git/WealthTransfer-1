@@ -55,7 +55,12 @@ function fmt(d: string | null): string {
 }
 
 export default function AdminDashboard() {
-  const { data, isLoading } = useQuery<DashboardData>({ queryKey: ["/api/admin/dashboard"] });
+  const { data, isLoading } = useQuery<DashboardData>({
+    queryKey: ["/api/admin/dashboard"],
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    staleTime: 30_000,
+  });
   const { data: alertsSummary, isLoading: alertsLoading } = useQuery<OperatorAlertsSummary>({
     queryKey: ["/api/admin/operator-alerts/summary"],
     refetchInterval: 60_000,
