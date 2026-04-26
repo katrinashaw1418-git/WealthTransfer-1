@@ -51,19 +51,29 @@ import {
   ledgerEntries,
   idempotencyKeys,
   walletLedgerReconciliations,
+  adviserFeeDeductions,
+  adviserFeeAccruals,
 } from "../shared/schema";
 import {
   getOrCreateClientAccount,
+  getOrCreateFeeAccount,
   getOrCreateSuspenseAccount,
   postLedgerEntries,
   getUserCurrencyBalance,
+  getAccountBalance,
   refreshWalletCacheBalance,
   LedgerDoublePostError,
 } from "../server/services/ledger";
 import { runWalletLedgerReconciliation } from "../server/services/reconciliation";
+import {
+  settleApprovedDeduction,
+  reverseSettledDeduction,
+} from "../server/services/fee-engine";
 
 const TEST_USERNAME = "__txsafety_test_user__";
 const TEST_EMAIL = "txsafety@test.invalid";
+const TEST_ADVISER_USERNAME = "__txsafety_adviser_user__";
+const TEST_ADVISER_EMAIL = "txsafety-adviser@test.invalid";
 const TEST_CURRENCY = "AUD";
 
 type TestResult = { name: string; passed: boolean; details?: string };
@@ -108,7 +118,30 @@ async function ensureTestUser(): Promise<number> {
   return created.id;
 }
 
-async function ensureFreshTestWallet(userId: number): Promise<void> {
+async function ensureAdviserTestUser(): Promise<number> {
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(eq(users.username, TEST_ADVISER_USERNAME));
+  if (existing) return existing.id;
+
+  const [created] = await db
+    .insert(users)
+    .values({
+      username: TEST_ADVISER_USERNAME,
+      email: TEST_ADVISER_EMAIL,
+      password: "not-a-real-password",
+      firstName: "TxSafety",
+      lastName: "Adviser",
+      kycStatus: "verified",
+      emailVerified: true,
+    })
+    .returning();
+
+  return created.id;
+}
+
+async function ensureFreshWalletFor(userId: number): Promise<void> {
   const [existing] = await db
     .select()
     .from(wallets)
@@ -131,9 +164,22 @@ async function ensureFreshTestWallet(userId: number): Promise<void> {
   });
 }
 
+async function ensureFreshTestWallet(userId: number): Promise<void> {
+  await ensureFreshWalletFor(userId);
+}
+
 async function cleanupTestUser(userId: number): Promise<void> {
-  // Order matters: ledger_entries / ledger_postings → transactions (FK), then
-  // everything else.
+  // Order matters: adviser_fee_deductions has FK references to transactions
+  // (settled_transaction_id, reversal_transaction_id) so we must drop those
+  // rows BEFORE deleting transactions. Same goes for adviser_fee_accruals,
+  // which we drop alongside since they're scoped to the test user-pair.
+  await db
+    .delete(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.clientUserId, userId));
+  await db
+    .delete(adviserFeeAccruals)
+    .where(eq(adviserFeeAccruals.clientUserId, userId));
+
   await db.execute(sql`
     DELETE FROM ledger_entries
     WHERE transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})
@@ -149,6 +195,20 @@ async function cleanupTestUser(userId: number): Promise<void> {
   await db
     .delete(walletLedgerReconciliations)
     .where(eq(walletLedgerReconciliations.userId, userId));
+}
+
+async function cleanupAdviserTestUser(adviserUserId: number): Promise<void> {
+  // The adviser is the credit/debit counterparty in adviser-fee deductions.
+  // The settled / reversal transactions are owned by the CLIENT (so they're
+  // already cleaned by cleanupTestUser), but any deduction rows whose
+  // adviserUserId matches must be cleared too in case a previous run left
+  // them behind. Same for any standalone accruals.
+  await db
+    .delete(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.adviserUserId, adviserUserId));
+  await db
+    .delete(adviserFeeAccruals)
+    .where(eq(adviserFeeAccruals.adviserUserId, adviserUserId));
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +743,456 @@ async function test7_concurrentDoublePost(userId: number) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 8 — Task #62: reverseSettledDeduction must fully unwind the ledger.
+//
+// Background: Task #33 added an admin-driven reversal of a settled adviser
+// fee deduction. The reversal posts the OPPOSITE balanced ledger triple
+// against a NEW transactions row whose deterministic idempotency key is
+// `fee_deduction_<id>_reversal`, and flips the deduction.status to
+// 'reversed' inside the same DB transaction. The hand-tested smoke run
+// confirmed the invariants but no automated test guards them — a future
+// refactor of `server/services/fee-engine.ts` could silently break the
+// triple-mirror or the idempotency contract and only surface as drift on
+// the next reconciliation. This test pins the contract end-to-end:
+//
+//   1. Seed a real settle path: pre-fund the client, insert a
+//      `pending_approval` deduction (totalAccrued=120, adviserShare=80,
+//      platformShare=40 in TEST_CURRENCY), call settleApprovedDeduction()
+//      and snapshot per-account ledger sums + wallet caches.
+//   2. Call reverseSettledDeduction() and assert:
+//        a. status flips to 'reversed' and reversalTransactionId is set.
+//        b. A NEW transactions row exists with type
+//           'adviser_fee_deduction_reversal' and idempotency_key
+//           `fee_deduction_<id>_reversal`.
+//        c. The reversal's ledger entries are an EXACT mirror of the
+//           settlement entries (same accounts + amounts, opposite
+//           directions).
+//        d. Per-user/per-account ledger sums for client / adviser / fee
+//           net back to their PRE-settlement values.
+//        e. The cached wallet balance for client and adviser equals the
+//           authoritative ledger sum (refreshWalletCacheBalance ran
+//           inside the same DB tx as the reversing pair).
+//   3. Idempotency: a second reverseSettledDeduction() call with the same
+//      deductionId returns the same row, posts NO additional transactions
+//      and NO additional ledger entries.
+//   4. Negative case: calling reverseSettledDeduction on a fresh
+//      `pending_approval` deduction throws a 409.
+// ---------------------------------------------------------------------------
+async function test8_reverseSettledDeductionUnwindsLedger(
+  clientUserId: number,
+  adviserUserId: number,
+) {
+  // (0) Resolve / create the accounts the deduction will touch and the
+  // platform fee account. We snapshot pre-settle ledger sums on each so
+  // assertions are delta-based and robust to whatever the earlier tests
+  // in this run left behind.
+  const clientAccount = await getOrCreateClientAccount(
+    clientUserId,
+    TEST_CURRENCY,
+  );
+  const adviserAccount = await getOrCreateClientAccount(
+    adviserUserId,
+    TEST_CURRENCY,
+  );
+  const feeAccount = await getOrCreateFeeAccount(TEST_CURRENCY);
+  const suspense = await getOrCreateSuspenseAccount(TEST_CURRENCY);
+
+  const TOTAL = 120;
+  const ADVISER_SHARE = 80;
+  const PLATFORM_SHARE = TOTAL - ADVISER_SHARE; // 40
+  const PRE_FUND = 500;
+
+  // (1) Pre-fund the client so they can absorb the debit. Suspense ↓500,
+  // client ↑500. This is just stage dressing for the deduction; we don't
+  // rely on any specific starting balance, only on the deltas around
+  // settle / reverse.
+  const [fundTx] = await db
+    .insert(transactions)
+    .values({
+      userId: clientUserId,
+      type: "deposit",
+      fromCurrency: null,
+      toCurrency: TEST_CURRENCY,
+      amount: PRE_FUND.toFixed(8),
+      fee: "0",
+      status: "completed",
+      description: "txsafety pre-fund for reversal test",
+    })
+    .returning();
+  await postLedgerEntries(fundTx.id, [
+    {
+      accountId: suspense.id,
+      userId: suspense.userId,
+      currency: TEST_CURRENCY,
+      direction: "debit",
+      amount: PRE_FUND.toFixed(8),
+      description: "pre-fund (suspense leg)",
+    },
+    {
+      accountId: clientAccount.id,
+      userId: clientUserId,
+      currency: TEST_CURRENCY,
+      direction: "credit",
+      amount: PRE_FUND.toFixed(8),
+      description: "pre-fund (client leg)",
+    },
+  ]);
+  await db.transaction(async (tx) => {
+    await refreshWalletCacheBalance(tx, clientUserId, TEST_CURRENCY);
+  });
+
+  // Snapshot AT THE PRE-SETTLEMENT BOUNDARY — i.e. after pre-funding but
+  // before any deduction posting. The reversal must drive every one of
+  // these back to its current value.
+  const preSettleClientUserSum = Number(
+    await getUserCurrencyBalance(clientUserId, TEST_CURRENCY),
+  );
+  const preSettleAdviserUserSum = Number(
+    await getUserCurrencyBalance(adviserUserId, TEST_CURRENCY),
+  );
+  const preSettleClientAcctBal = Number(await getAccountBalance(clientAccount.id));
+  const preSettleAdviserAcctBal = Number(
+    await getAccountBalance(adviserAccount.id),
+  );
+  const preSettleFeeAcctBal = Number(await getAccountBalance(feeAccount.id));
+
+  // (2) Insert the deduction in pending_approval — the canonical entry
+  // state for settleApprovedDeduction(). 7-day period ending today is
+  // arbitrary but realistic.
+  const periodEnd = new Date();
+  const periodStart = new Date(periodEnd.getTime() - 7 * 24 * 3600 * 1000);
+  const [deduction] = await db
+    .insert(adviserFeeDeductions)
+    .values({
+      clientUserId,
+      adviserUserId,
+      periodStart,
+      periodEnd,
+      totalAccrued: TOTAL.toFixed(4),
+      adviserShareAmount: ADVISER_SHARE.toFixed(4),
+      platformShareAmount: PLATFORM_SHARE.toFixed(4),
+      currency: TEST_CURRENCY,
+      accrualIds: [],
+      status: "pending_approval",
+    })
+    .returning();
+
+  // (3) Settle through the production path so the reversal really has to
+  // mirror what the engine wrote (rather than something we hand-crafted).
+  const settled = await settleApprovedDeduction({
+    deductionId: deduction.id,
+    approverUserId: clientUserId, // approverUserId is just an audit pointer
+  });
+  if (settled.status !== "settled" || !settled.settledTransactionId) {
+    fail(
+      "reverseSettledDeduction unwinds ledger",
+      `settle failed: status=${settled.status}, settledTxId=${settled.settledTransactionId}`,
+    );
+    return;
+  }
+  const settleTxId = settled.settledTransactionId;
+  const settleEntries = await db
+    .select()
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, settleTxId));
+
+  // (4) Call the function under test.
+  const reversed = await reverseSettledDeduction({
+    deductionId: deduction.id,
+    reverserUserId: clientUserId,
+    reason: "txsafety automated reversal",
+  });
+
+  // (5a) Status / metadata assertions on the deduction row.
+  const okStatus =
+    reversed.status === "reversed" &&
+    reversed.reversalTransactionId !== null &&
+    reversed.reversedAt !== null &&
+    reversed.reversedReason === "txsafety automated reversal";
+  if (!okStatus) {
+    fail(
+      "reverseSettledDeduction unwinds ledger (status flip)",
+      `status=${reversed.status}, reversalTxId=${reversed.reversalTransactionId}, ` +
+        `reversedAt=${reversed.reversedAt}, reason=${reversed.reversedReason}`,
+    );
+  } else {
+    pass(
+      "reverseSettledDeduction unwinds ledger (status flip)",
+      `deduction#${deduction.id} → reversed (reversalTx#${reversed.reversalTransactionId})`,
+    );
+  }
+
+  // (5b) Reversal transaction row + deterministic idempotency key.
+  const reversalTxId = reversed.reversalTransactionId!;
+  const [reversalTxRow] = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.id, reversalTxId));
+  const expectedKey = `fee_deduction_${deduction.id}_reversal`;
+  const okTxRow =
+    reversalTxRow &&
+    reversalTxRow.type === "adviser_fee_deduction_reversal" &&
+    reversalTxRow.idempotencyKey === expectedKey &&
+    reversalTxRow.status === "completed" &&
+    reversalTxRow.userId === clientUserId;
+  if (!okTxRow) {
+    fail(
+      "reverseSettledDeduction unwinds ledger (reversal tx row)",
+      `tx#${reversalTxId}: type=${reversalTxRow?.type}, key=${reversalTxRow?.idempotencyKey} ` +
+        `(expected ${expectedKey})`,
+    );
+  } else {
+    pass(
+      "reverseSettledDeduction unwinds ledger (reversal tx row)",
+      `tx#${reversalTxId} type=${reversalTxRow.type} key=${reversalTxRow.idempotencyKey}`,
+    );
+  }
+
+  // (5c) The reversal entries must be an EXACT mirror of the settlement
+  // entries: same (accountId, |amount|), opposite direction. There must
+  // be no extra leg and no missing leg.
+  const reversalEntries = await db
+    .select()
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, reversalTxId));
+
+  type Leg = { accountId: number; direction: string; amount: string };
+  const normalize = (e: Leg) => `${e.accountId}|${e.direction}|${Number(e.amount).toFixed(8)}`;
+  const flip = (e: Leg) =>
+    `${e.accountId}|${e.direction === "debit" ? "credit" : "debit"}|${Number(e.amount).toFixed(8)}`;
+
+  const settleSig = settleEntries.map(normalize).sort();
+  const reversalAsFlipped = reversalEntries.map(flip).sort();
+
+  const sameLength = settleEntries.length === reversalEntries.length;
+  const sameSet =
+    sameLength &&
+    settleSig.every((s, i) => s === reversalAsFlipped[i]);
+
+  if (!sameSet) {
+    fail(
+      "reverseSettledDeduction unwinds ledger (mirror entries)",
+      `settle=${JSON.stringify(settleSig)} vs reversal(flipped)=${JSON.stringify(reversalAsFlipped)}`,
+    );
+  } else {
+    pass(
+      "reverseSettledDeduction unwinds ledger (mirror entries)",
+      `${reversalEntries.length} reversal legs exactly mirror ${settleEntries.length} settle legs`,
+    );
+  }
+
+  // (5d) Per-user / per-account ledger sums net back to the
+  // pre-settlement snapshot.
+  const postClientUserSum = Number(
+    await getUserCurrencyBalance(clientUserId, TEST_CURRENCY),
+  );
+  const postAdviserUserSum = Number(
+    await getUserCurrencyBalance(adviserUserId, TEST_CURRENCY),
+  );
+  const postClientAcctBal = Number(await getAccountBalance(clientAccount.id));
+  const postAdviserAcctBal = Number(
+    await getAccountBalance(adviserAccount.id),
+  );
+  const postFeeAcctBal = Number(await getAccountBalance(feeAccount.id));
+
+  const close = (a: number, b: number) => Math.abs(a - b) < 0.0001;
+  const sumsRestored =
+    close(postClientUserSum, preSettleClientUserSum) &&
+    close(postAdviserUserSum, preSettleAdviserUserSum) &&
+    close(postClientAcctBal, preSettleClientAcctBal) &&
+    close(postAdviserAcctBal, preSettleAdviserAcctBal) &&
+    close(postFeeAcctBal, preSettleFeeAcctBal);
+
+  if (!sumsRestored) {
+    fail(
+      "reverseSettledDeduction unwinds ledger (ledger sums restored)",
+      `client user ${preSettleClientUserSum}→${postClientUserSum}, ` +
+        `adviser user ${preSettleAdviserUserSum}→${postAdviserUserSum}, ` +
+        `client acct ${preSettleClientAcctBal}→${postClientAcctBal}, ` +
+        `adviser acct ${preSettleAdviserAcctBal}→${postAdviserAcctBal}, ` +
+        `fee acct ${preSettleFeeAcctBal}→${postFeeAcctBal}`,
+    );
+  } else {
+    pass(
+      "reverseSettledDeduction unwinds ledger (ledger sums restored)",
+      `all five sums back to pre-settle baseline`,
+    );
+  }
+
+  // (5e) Wallet caches for both client and adviser equal their ledger
+  // sums. reverseSettledDeduction calls refreshWalletCacheBalance inside
+  // the same DB tx; we just compare the cached value to the
+  // authoritative ledger sum.
+  const [clientWallet] = await db
+    .select()
+    .from(wallets)
+    .where(
+      and(
+        eq(wallets.userId, clientUserId),
+        eq(wallets.currency, TEST_CURRENCY),
+      ),
+    );
+  const [adviserWallet] = await db
+    .select()
+    .from(wallets)
+    .where(
+      and(
+        eq(wallets.userId, adviserUserId),
+        eq(wallets.currency, TEST_CURRENCY),
+      ),
+    );
+  const cacheOk =
+    clientWallet &&
+    adviserWallet &&
+    close(Number(clientWallet.balance), postClientUserSum) &&
+    close(Number(adviserWallet.balance), postAdviserUserSum);
+  if (!cacheOk) {
+    fail(
+      "reverseSettledDeduction unwinds ledger (wallet cache matches)",
+      `client cache=${clientWallet?.balance} vs sum=${postClientUserSum}; ` +
+        `adviser cache=${adviserWallet?.balance} vs sum=${postAdviserUserSum}`,
+    );
+  } else {
+    pass(
+      "reverseSettledDeduction unwinds ledger (wallet cache matches)",
+      `client ${clientWallet.balance} == ${postClientUserSum}, ` +
+        `adviser ${adviserWallet.balance} == ${postAdviserUserSum}`,
+    );
+  }
+
+  // (6) Idempotency: a second reverse call MUST be a no-op — same row
+  // back, no new transaction, no new ledger entries.
+  //
+  // We measure deltas TWO ways to defend against a pathological future
+  // bug that might write rows under a different userId or skip the
+  // deterministic key entirely:
+  //   (a) global count of transactions whose idempotency_key matches
+  //       `fee_deduction_<id>_reversal` — must stay at exactly 1.
+  //   (b) global count of ledger_entries on the reversal transaction id
+  //       — must stay at the same value as after the first call.
+  //   (c) per-client transactions / ledger_entries — must not increase.
+  const txCountBefore = await countClientTransactions(clientUserId);
+  const entryCountBefore = await countClientLedgerEntries(clientUserId);
+  const reversalKeyCountBefore = await countTxByIdempotencyKey(expectedKey);
+  const reversalEntriesBefore = await countLedgerEntriesByTxId(reversalTxId);
+
+  const second = await reverseSettledDeduction({
+    deductionId: deduction.id,
+    reverserUserId: clientUserId,
+    reason: "txsafety automated reversal (retry)",
+  });
+
+  const txCountAfter = await countClientTransactions(clientUserId);
+  const entryCountAfter = await countClientLedgerEntries(clientUserId);
+  const reversalKeyCountAfter = await countTxByIdempotencyKey(expectedKey);
+  const reversalEntriesAfter = await countLedgerEntriesByTxId(reversalTxId);
+
+  const idempotent =
+    second.id === reversed.id &&
+    second.reversalTransactionId === reversalTxId &&
+    txCountAfter === txCountBefore &&
+    entryCountAfter === entryCountBefore &&
+    reversalKeyCountBefore === 1 &&
+    reversalKeyCountAfter === 1 &&
+    reversalEntriesAfter === reversalEntriesBefore;
+  if (!idempotent) {
+    fail(
+      "reverseSettledDeduction is idempotent",
+      `txCount ${txCountBefore}→${txCountAfter}, ` +
+        `entries ${entryCountBefore}→${entryCountAfter}, ` +
+        `key '${expectedKey}' rows ${reversalKeyCountBefore}→${reversalKeyCountAfter} (expected 1→1), ` +
+        `reversal-tx entries ${reversalEntriesBefore}→${reversalEntriesAfter}, ` +
+        `reversalTxId ${reversalTxId} vs ${second.reversalTransactionId}`,
+    );
+  } else {
+    pass(
+      "reverseSettledDeduction is idempotent",
+      `2nd call returned same row, +0 transactions, +0 ledger entries; ` +
+        `exactly 1 row with idempotency_key '${expectedKey}'`,
+    );
+  }
+
+  // (7) Negative case: a non-settled deduction must reject with 409.
+  // We seed a fresh pending_approval deduction (no settle), then attempt
+  // to reverse it.
+  const [stub] = await db
+    .insert(adviserFeeDeductions)
+    .values({
+      clientUserId,
+      adviserUserId,
+      periodStart,
+      periodEnd,
+      totalAccrued: "10.0000",
+      adviserShareAmount: "6.0000",
+      platformShareAmount: "4.0000",
+      currency: TEST_CURRENCY,
+      accrualIds: [],
+      status: "pending_approval",
+    })
+    .returning();
+
+  let threw = false;
+  let status: number | undefined;
+  let message = "";
+  try {
+    await reverseSettledDeduction({
+      deductionId: stub.id,
+      reverserUserId: clientUserId,
+      reason: "should not succeed",
+    });
+  } catch (err: any) {
+    threw = true;
+    status = err?.status;
+    message = String(err?.message ?? err);
+  }
+  if (threw && status === 409) {
+    pass(
+      "reverseSettledDeduction rejects non-settled (409)",
+      `threw status=409: ${message.slice(0, 100)}`,
+    );
+  } else {
+    fail(
+      "reverseSettledDeduction rejects non-settled (409)",
+      `threw=${threw}, status=${status}, message=${message}`,
+    );
+  }
+}
+
+async function countClientTransactions(userId: number): Promise<number> {
+  const [{ n }] = await db
+    .select({ n: sql<number>`COUNT(*)::int` })
+    .from(transactions)
+    .where(eq(transactions.userId, userId));
+  return Number(n);
+}
+
+async function countClientLedgerEntries(userId: number): Promise<number> {
+  const [{ n }] = await db
+    .select({ n: sql<number>`COUNT(*)::int` })
+    .from(ledgerEntries)
+    .where(
+      sql`${ledgerEntries.transactionId} IN (SELECT id FROM transactions WHERE user_id = ${userId})`,
+    );
+  return Number(n);
+}
+
+async function countTxByIdempotencyKey(key: string): Promise<number> {
+  const [{ n }] = await db
+    .select({ n: sql<number>`COUNT(*)::int` })
+    .from(transactions)
+    .where(eq(transactions.idempotencyKey, key));
+  return Number(n);
+}
+
+async function countLedgerEntriesByTxId(txId: number): Promise<number> {
+  const [{ n }] = await db
+    .select({ n: sql<number>`COUNT(*)::int` })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.transactionId, txId));
+  return Number(n);
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
@@ -690,8 +1200,15 @@ async function main() {
   console.log("=== Transaction Safety Test ===\n");
 
   const userId = await ensureTestUser();
+  const adviserUserId = await ensureAdviserTestUser();
+  // Order matters: cleanup the adviser-side deduction rows first (they FK
+  // into transactions belonging to the client), then run the standard
+  // client-scoped cleanup which drops the client deductions and the
+  // transactions themselves.
+  await cleanupAdviserTestUser(adviserUserId);
   await cleanupTestUser(userId);
   await ensureFreshTestWallet(userId);
+  await ensureFreshWalletFor(adviserUserId);
 
   await test1_depositIdempotency(userId);
   await test2_pendingNoLedger(userId);
@@ -700,6 +1217,7 @@ async function main() {
   await test5_reversalOffset(userId);
   await test6_reconciliationMismatch(userId);
   await test7_concurrentDoublePost(userId);
+  await test8_reverseSettledDeductionUnwindsLedger(userId, adviserUserId);
 
   console.log("");
   for (const r of results) {
