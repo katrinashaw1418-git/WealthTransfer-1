@@ -83,7 +83,7 @@ export default function AdviserLayout({ children }: AdviserLayoutProps) {
               {/* Role badge */}
               <Badge
                 variant="outline"
-                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 border-amber-300 bg-amber-50 text-amber-800"
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 border-slate-300 bg-white text-slate-700"
                 data-testid="badge-role"
               >
                 <Shield className="h-3 w-3" />

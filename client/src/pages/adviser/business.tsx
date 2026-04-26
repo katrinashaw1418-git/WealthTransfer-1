@@ -181,7 +181,7 @@ export default function AdviserBusiness() {
         <Card data-testid="card-fee-consents">
           <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
             <CardTitle className="text-sm font-medium text-slate-600">Active fee consents</CardTitle>
-            <AlertCircle className="h-4 w-4 text-amber-500" />
+            <AlertCircle className="h-4 w-4 text-slate-500" />
           </CardHeader>
           <CardContent>
             {isLoading ? (

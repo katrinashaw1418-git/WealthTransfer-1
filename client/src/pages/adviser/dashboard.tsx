@@ -93,7 +93,7 @@ function priorityChip(priority: string) {
     priority === "urgent"
       ? "bg-rose-100 text-rose-800"
       : priority === "high"
-        ? "bg-amber-100 text-amber-800"
+        ? "bg-slate-200 text-slate-800"
         : priority === "low"
           ? "bg-slate-100 text-slate-700"
           : "bg-sky-100 text-sky-800";
@@ -194,7 +194,7 @@ export default function AdviserDashboard() {
           value={summary.data?.feeConsentsExpiringSoon}
           icon={AlertTriangle}
           href="/adviser/clients"
-          accent="text-amber-500"
+          accent="text-slate-500"
           isLoading={summary.isLoading}
           testId="card-fee-expiring"
         />
@@ -215,7 +215,7 @@ export default function AdviserDashboard() {
         <Card className="lg:col-span-2">
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-base flex items-center gap-2">
-              <ClipboardList className="h-4 w-4 text-amber-500" />
+              <ClipboardList className="h-4 w-4 text-slate-500" />
               Workflow priority
             </CardTitle>
             <Link href="/adviser/workflow">
@@ -265,7 +265,7 @@ export default function AdviserDashboard() {
             {/* Priority tasks */}
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <ClipboardList className="h-3.5 w-3.5 text-amber-500" />
+                <ClipboardList className="h-3.5 w-3.5 text-slate-500" />
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Top open tasks
                 </p>

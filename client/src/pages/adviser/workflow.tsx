@@ -135,7 +135,7 @@ export default function AdviserWorkflow() {
     <div className="p-6 space-y-6" data-testid="page-adviser-workflow">
       <div>
         <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-          <ListChecks className="h-6 w-6 text-amber-500" />
+          <ListChecks className="h-6 w-6 text-slate-500" />
           Workflow
         </h1>
         <p className="text-sm text-slate-500 mt-1 max-w-2xl">
@@ -146,10 +146,10 @@ export default function AdviserWorkflow() {
 
       {/* Priority strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card className="border-amber-200 bg-amber-50/40">
+        <Card className="border-slate-200 bg-white">
           <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
             <CardTitle className="text-sm font-medium text-slate-600">Open tasks</CardTitle>
-            <ListChecks className="h-4 w-4 text-amber-500" />
+            <ListChecks className="h-4 w-4 text-slate-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-slate-900" data-testid="metric-open-tasks">
@@ -261,7 +261,7 @@ export default function AdviserWorkflow() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="text-base flex items-center gap-2">
-            <ListChecks className="h-4 w-4 text-amber-500" />
+            <ListChecks className="h-4 w-4 text-slate-500" />
             Open tasks (priority order)
           </CardTitle>
           <Link href="/adviser/tasks">
@@ -294,7 +294,7 @@ export default function AdviserWorkflow() {
                     t.priority === "urgent"
                       ? "bg-rose-100 text-rose-800"
                       : t.priority === "high"
-                        ? "bg-amber-100 text-amber-800"
+                        ? "bg-slate-200 text-slate-800"
                         : t.priority === "low"
                           ? "bg-slate-100 text-slate-700"
                           : "bg-sky-100 text-sky-800";

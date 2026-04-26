@@ -79,7 +79,7 @@ function SidebarBody() {
           <img src={amaxLogo} alt="AMAX Wealth" className="w-11 h-11 rounded-md ring-1 ring-slate-700" />
           <div>
             <h1 className="text-base font-bold tracking-wide text-white">AMAX WEALTH</h1>
-            <p className="text-[11px] uppercase tracking-wider text-amber-400/90">Adviser Portal</p>
+            <p className="text-[11px] uppercase tracking-wider text-white/80">Adviser Portal</p>
           </div>
         </div>
       </div>
@@ -106,7 +106,7 @@ function SidebarBody() {
                     className={cn(
                       "w-full justify-start text-left font-medium gap-3 h-10 rounded-md",
                       isActive
-                        ? "bg-amber-500/15 text-amber-300 hover:bg-amber-500/20 hover:text-amber-200"
+                        ? "bg-white/10 text-white hover:bg-white/15 hover:text-white"
                         : "text-slate-300 hover:bg-slate-800 hover:text-white",
                     )}
                     data-testid={`nav-${item.href.replace(/\//g, "-")}`}
@@ -124,7 +124,7 @@ function SidebarBody() {
       {/* User pill */}
       <div className="p-4 border-t border-slate-800">
         <div className="flex items-center gap-3 p-3 bg-slate-800/60 rounded-lg">
-          <div className="w-8 h-8 bg-amber-500 rounded-full flex items-center justify-center">
+          <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center">
             <User className="w-4 h-4 text-slate-900" />
           </div>
           <div className="flex-1 min-w-0">

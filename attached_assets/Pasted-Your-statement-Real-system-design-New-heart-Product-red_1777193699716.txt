@@ -1,0 +1,439 @@
+Your statement → Real system design
+🫀 “New heart” = Product redesign (UI / structure)
+Landing page
+Adviser dashboard
+Client pages
+UX flows
+
+👉 This is what you’re actively rebuilding
+
+⭐ “Energy from the stars” = Continuous activity engine
+Events (client activity)
+Tasks (adviser actions)
+Compliance triggers
+Revenue signals
+
+👉 This is what keeps the system alive
+
+⚫ “Black hole” = What happens if you only redesign UI
+No engagement
+No daily usage
+No revenue loop
+Platform dies quietly
+🔬 The correct “surgery plan” (this is where people get it wrong)
+
+Most teams do:
+
+Redesign UI → launch → nothing happens
+
+You must do:
+
+Keep energy running → replace heart → reconnect → scale
+⚙️ Your system must have TWO layers (always)
+🫀 Layer 1 — The Heart (what you can change)
+AdviserOS UI
+Page layouts
+Navigation
+Branding
+
+👉 You CAN replace this anytime
+
+⭐ Layer 2 — The Stars (what you must protect)
+
+This is your real system:
+
+Events → Tasks → Actions → Outcomes → Revenue
+Example:
+Client deposits funds
+→ Event created
+→ Task: “Review portfolio”
+→ Adviser acts
+→ Report generated
+→ Fee tracked
+
+👉 That loop = your electricity
+
+⚡ Design rule you must follow
+
+Every new page you design must answer:
+
+👉 “What energy does this page generate or consume?”
+
+🧭 Apply this to your pages (practical)
+❌ Bad page (dead)
+Portfolio page showing allocations only
+Product page listing funds
+Dashboard with charts only
+
+👉 These don’t create energy
+
+✅ Good page (alive)
+Dashboard → shows tasks
+Client page → shows events + actions
+Fees page → shows revenue impact
+Reports → creates new tasks
+
+👉 These generate movement
+
+🔁 Your core loop (this is your universe)
+Client Activity (stars)
+        ↓
+Event Engine
+        ↓
+Task Creation
+        ↓
+Adviser Action
+        ↓
+Client Outcome
+        ↓
+Revenue Tracking
+        ↓
+Back to Dashboard
+🚨 The biggest mistake to avoid
+
+You’re very close to doing this:
+
+👉 “Let’s redesign everything to match Netwealth UI”
+
+That’s dangerous.
+
+Because:
+
+❌ Netwealth is NOT UI
+✔ Netwealth is workflow + compliance + adviser habits
+
+🧠 My real advice to you
+1. Do the surgery — BUT don’t disconnect energy
+
+You can:
+✔ redesign dashboard
+✔ rebuild pages
+✔ add adviser layer
+
+But you must:
+✔ keep events flowing
+✔ keep tasks alive
+✔ keep data updating
+
+2. Build invisible systems before visible polish
+
+Before:
+
+dark theme
+animations
+fancy layouts
+
+You must have:
+
+tasks
+events
+alerts
+activity logs
+3. Think like a system, not screens
+
+You are not building:
+
+❌ a website
+❌ an app
+
+You are building:
+
+👉 a living financial operating system
+
+🧬 Final truth (this is your guiding principle)
+
+You can replace the heart,
+but if you lose the stars,
+the system collapses.
+
+Translated:
+
+👉 You can redesign UI anytime
+👉 But if you lose activity + workflow + incentives,
+👉 your platform dies
+
+🚀 If you want the next step
+
+I can now:
+
+✔ Design your Event + Task engine (production-level)
+✔ Map which events trigger which actions across all pages
+✔ Or build AdviserOS flow exactly like Netwealth (end-to-end)
+
+Just tell me where you want to go next 👍
+
+✔ Or build AdviserOS flow exactly like Netwealth (end-to-end)
+
+I’ll map the full AdviserOS flow as a living operating loop, not just pages: landing → adviser login → client book → workflow → product recommendation → client consent → reporting → business metrics.
+
+Thought for 16s
+
+Yes — build AdviserOS end-to-end, but build it as a daily operating loop, not a set of disconnected pages.
+
+Netwealth’s adviser platform is built around simplifying advice delivery, workflow, portfolio tools, digital consent, client reporting, practice management, research and customer tools. It also separates adviser/business functionality from personal investor access, which is the model AMAX should copy conceptually.
+
+AdviserOS end-to-end flow
+Landing page
+↓
+Adviser entry
+↓
+Adviser login / role check
+↓
+AdviserOS dashboard
+↓
+Today’s workflow
+↓
+Client command centre
+↓
+Portfolio / transactions / products / fees / reports
+↓
+Client consent where needed
+↓
+Report / task / revenue tracking
+↓
+Back to dashboard
+1. Landing page
+
+Add two clear paths:
+
+Personal Investors
+Wealth Planners / AFSL Partners
+
+Adviser CTA:
+
+Adviser Login
+Register Adviser Interest
+
+Copy:
+
+AMAX Wealth gives financial planners and AFSL partners a platform layer for client onboarding, portfolio visibility, AMAX-approved investment products, fee consent tracking, workflow management and reporting.
+2. Adviser login
+
+Separate route:
+
+/adviser/login
+
+After login:
+
+role = adviser → /adviser/dashboard
+role = client → /dashboard
+role = admin → /admin
+3. AdviserOS dashboard
+
+This page should feel like “mission control”.
+
+Sections:
+
+Today’s Actions
+- KYC pending
+- Fee consent expiring
+- Reports pending
+- Portfolio review due
+
+Business Snapshot
+- FUM
+- linked clients
+- active fee consents
+- revenue estimate
+
+Client Alerts
+- new client onboarded
+- client account funded
+- client needs review
+
+Netwealth emphasises workflow, practice management and business reporting, so your dashboard should prioritise tasks and business signals, not just charts.
+
+4. Workflow page
+
+Route:
+
+/adviser/workflow
+
+Columns:
+
+Overdue
+Due Today
+Waiting on Client
+Completed
+
+Task types:
+
+KYC pending
+Fee consent expiring
+Portfolio review due
+Client report required
+Instruction awaiting consent
+
+This is the “electricity”. No workflow = dead platform.
+
+5. Clients page
+
+Route:
+
+/adviser/clients
+
+Table:
+
+Client
+KYC
+FUM
+Fee consent status
+Last activity
+Next review
+Actions
+
+Filters:
+
+All
+Pending KYC
+Consent expiring
+Needs review
+High value
+6. Client command centre
+
+Route:
+
+/adviser/clients/:id
+
+Tabs:
+
+Overview
+Portfolio
+Transactions
+Fees & Consent
+Activity Timeline
+Reports
+Documents later
+
+Most important tab:
+
+Activity Timeline
+
+Example:
+
+KYC submitted
+Account funded
+Portfolio report generated
+Fee consent issued
+Review task created
+
+This creates the “alive” feeling.
+
+7. Products page
+
+Route:
+
+/adviser/products
+
+Show AMAX-approved product shelf:
+
+Managed portfolios
+Fixed income
+FX strategies
+Multi-asset portfolios
+Cash / yield products
+Private opportunities later
+
+Fields:
+
+Product
+Category
+Risk rating
+Minimum investment
+Management fee
+PDS / IM
+Status
+
+Advisers can view/recommend only. AMAX/admin controls the shelf.
+
+8. Instructions page
+
+Route:
+
+/adviser/instructions
+
+Flow:
+
+Adviser creates instruction
+↓
+status = pending_client_consent
+↓
+client approves/rejects
+↓
+system processes only after approval
+
+Do not allow adviser direct execution.
+
+9. Fees & Consent page
+
+Route:
+
+/adviser/fees
+
+Show:
+
+Fee type
+Client
+Amount / %
+Reference day
+Expiry date
+Status
+Renewal action
+
+Netwealth’s fee model is consent-heavy; their help material says fee consent is required for certain ongoing and non-ongoing arrangements, and ongoing arrangements require annual renewal.
+
+10. Reports page
+
+Route:
+
+/adviser/reports
+
+Reports:
+
+Client portfolio report
+Fee consent report
+Client activity report
+Product exposure report
+Adviser book report
+
+Netwealth positions reporting as a major adviser value layer, with customisable templates, bulk reporting and business KPI reports.
+
+11. Business page
+
+Route:
+
+/adviser/business
+
+Show:
+
+FUM by client segment
+Revenue estimate
+Fee consents active / expiring
+Clients added this month
+Reports generated
+Product exposure
+
+This is what keeps adviser principals interested.
+
+Final design principle
+Client event
+→ workflow task
+→ adviser action
+→ client outcome
+→ report / revenue signal
+→ dashboard updates
+
+That is AdviserOS.
+
+Build this order:
+
+1. Landing adviser entry
+2. Adviser login + role routing
+3. AdviserOS dashboard
+4. Workflow engine
+5. Client command centre + activity timeline
+6. Products shelf
+7. Instructions with client consent
+8. Fees & consent
+9. Reports
+10. Business metrics
