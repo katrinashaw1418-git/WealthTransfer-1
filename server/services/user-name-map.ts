@@ -2,7 +2,7 @@
 // for a set of user IDs in a single query. Used by the fee engine list
 // endpoints so the frontend can render human names instead of raw IDs.
 
-import { inArray } from "drizzle-orm";
+import { inArray, ilike, or, sql } from "drizzle-orm";
 import { db } from "../db";
 import { users } from "@shared/schema";
 
@@ -40,4 +40,29 @@ export async function getUserNameMap(
     map[r.id] = r;
   }
   return map;
+}
+
+// Find user IDs whose first name, last name, full name or email match the
+// given search string (case-insensitive substring). Used by admin list
+// endpoints so the frontend can drive a single search box that filters by
+// either client or adviser identity, server-side.
+export async function findUserIdsByQuery(q: string): Promise<number[]> {
+  const trimmed = q.trim();
+  if (!trimmed) return [];
+  const pattern = `%${trimmed.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  const rows = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      or(
+        ilike(users.firstName, pattern),
+        ilike(users.lastName, pattern),
+        ilike(users.email, pattern),
+        ilike(
+          sql`coalesce(${users.firstName}, '') || ' ' || coalesce(${users.lastName}, '')`,
+          pattern,
+        ),
+      ),
+    );
+  return rows.map((r) => r.id);
 }

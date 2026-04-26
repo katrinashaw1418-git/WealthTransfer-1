@@ -22,7 +22,7 @@
 
 import type { Express, Request } from "express";
 import { z } from "zod";
-import { and, asc, desc, eq, ilike, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { db } from "./db";
 import {
@@ -53,7 +53,7 @@ import {
   feeAccrualRuns,
 } from "@shared/schema";
 import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
-import { getUserNameMap } from "./services/user-name-map";
+import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
 import { storage } from "./storage";
@@ -2034,8 +2034,25 @@ export function registerAdminRoutes(app: Express): void {
       const page = Math.max(Number(req.query.page) || 1, 1);
       const offset = (page - 1) * limit;
       const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const adviserId = Number(req.query.adviserUserId);
+      const clientId = Number(req.query.clientUserId);
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const filters: any[] = [];
       if (status) filters.push(eq(adviserFeeRules.status, status));
+      if (Number.isInteger(adviserId) && adviserId > 0) filters.push(eq(adviserFeeRules.adviserUserId, adviserId));
+      if (Number.isInteger(clientId) && clientId > 0) filters.push(eq(adviserFeeRules.clientUserId, clientId));
+      if (q) {
+        const ids = await findUserIdsByQuery(q);
+        if (ids.length === 0) {
+          return { items: [], page, limit, total: 0, users: {} };
+        }
+        filters.push(
+          or(
+            inArray(adviserFeeRules.clientUserId, ids),
+            inArray(adviserFeeRules.adviserUserId, ids),
+          ),
+        );
+      }
       const where = filters.length ? and(...filters) : undefined;
       const [rows, totalRow] = await Promise.all([
         db
@@ -2180,10 +2197,23 @@ export function registerAdminRoutes(app: Express): void {
       const ruleId = Number(req.query.ruleId);
       const adviserId = Number(req.query.adviserUserId);
       const clientId = Number(req.query.clientUserId);
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const filters: any[] = [];
       if (Number.isInteger(ruleId) && ruleId > 0) filters.push(eq(adviserFeeAccruals.feeRuleId, ruleId));
       if (Number.isInteger(adviserId) && adviserId > 0) filters.push(eq(adviserFeeAccruals.adviserUserId, adviserId));
       if (Number.isInteger(clientId) && clientId > 0) filters.push(eq(adviserFeeAccruals.clientUserId, clientId));
+      if (q) {
+        const ids = await findUserIdsByQuery(q);
+        if (ids.length === 0) {
+          return { items: [], page, limit, total: 0, users: {} };
+        }
+        filters.push(
+          or(
+            inArray(adviserFeeAccruals.clientUserId, ids),
+            inArray(adviserFeeAccruals.adviserUserId, ids),
+          ),
+        );
+      }
       const where = filters.length ? and(...filters) : undefined;
 
       const [rows, totalRow] = await Promise.all([
@@ -2251,8 +2281,25 @@ export function registerAdminRoutes(app: Express): void {
       const page = Math.max(Number(req.query.page) || 1, 1);
       const offset = (page - 1) * limit;
       const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const adviserId = Number(req.query.adviserUserId);
+      const clientId = Number(req.query.clientUserId);
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const filters: any[] = [];
       if (status) filters.push(eq(adviserFeeDeductions.status, status));
+      if (Number.isInteger(adviserId) && adviserId > 0) filters.push(eq(adviserFeeDeductions.adviserUserId, adviserId));
+      if (Number.isInteger(clientId) && clientId > 0) filters.push(eq(adviserFeeDeductions.clientUserId, clientId));
+      if (q) {
+        const ids = await findUserIdsByQuery(q);
+        if (ids.length === 0) {
+          return { items: [], page, limit, total: 0, users: {} };
+        }
+        filters.push(
+          or(
+            inArray(adviserFeeDeductions.clientUserId, ids),
+            inArray(adviserFeeDeductions.adviserUserId, ids),
+          ),
+        );
+      }
       const where = filters.length ? and(...filters) : undefined;
 
       const [rows, totalRow] = await Promise.all([

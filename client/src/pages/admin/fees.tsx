@@ -10,7 +10,7 @@
 // that NO money moves here yet.
 // =============================================================================
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -35,9 +35,71 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2, Clock, AlertCircle } from "lucide-react";
+import { ShieldAlert, HandCoins, Play, Pause, Plus, CheckCircle2, Clock, AlertCircle, Search, X } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+
+const TOKEN_KEY = "amax_jwt";
+
+async function fetchPaginated<T>(url: string): Promise<T> {
+  const token = (() => {
+    try {
+      return localStorage.getItem(TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  })();
+  const res = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json();
+}
+
+function useDebounced<T>(value: T, delay = 300): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
+function SearchBox({
+  value,
+  onChange,
+  placeholder,
+  testId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  testId: string;
+}) {
+  return (
+    <div className="relative max-w-md">
+      <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="pl-8 pr-8"
+        data-testid={testId}
+      />
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          className="absolute right-2 top-2 text-muted-foreground hover:text-foreground"
+          aria-label="Clear search"
+          data-testid={`${testId}-clear`}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      )}
+    </div>
+  );
+}
 
 interface FeeRuleRow {
   id: number;
@@ -351,13 +413,37 @@ export default function AdminFeesPage() {
     }
   }
 
+  // -------- Search state (one box per tab, debounced server-side filter) --------
+  const [rulesSearch, setRulesSearch] = useState("");
+  const [accrualsSearch, setAccrualsSearch] = useState("");
+  const [deductionsSearch, setDeductionsSearch] = useState("");
+  const debouncedRulesSearch = useDebounced(rulesSearch);
+  const debouncedAccrualsSearch = useDebounced(accrualsSearch);
+  const debouncedDeductionsSearch = useDebounced(deductionsSearch);
+
   // -------- Queries --------
   const rulesQ = useQuery<Paginated<FeeRuleRow>>({
-    queryKey: ["/api/admin/fee-rules"],
+    queryKey: ["/api/admin/fee-rules", { q: debouncedRulesSearch }],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (debouncedRulesSearch.trim()) params.set("q", debouncedRulesSearch.trim());
+      const qs = params.toString();
+      return fetchPaginated<Paginated<FeeRuleRow>>(
+        `/api/admin/fee-rules${qs ? `?${qs}` : ""}`,
+      );
+    },
   });
 
   const accrualsQ = useQuery<Paginated<FeeAccrualRow>>({
-    queryKey: ["/api/admin/fee-accruals"],
+    queryKey: ["/api/admin/fee-accruals", { q: debouncedAccrualsSearch }],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (debouncedAccrualsSearch.trim()) params.set("q", debouncedAccrualsSearch.trim());
+      const qs = params.toString();
+      return fetchPaginated<Paginated<FeeAccrualRow>>(
+        `/api/admin/fee-accruals${qs ? `?${qs}` : ""}`,
+      );
+    },
   });
   // Session 27 (Task #23): poll the latest run summary every 30s so the
   // displayed timestamp doesn't go stale once the page is open. The query is
@@ -367,7 +453,15 @@ export default function AdminFeesPage() {
     refetchInterval: 30_000,
   });
   const deductionsQ = useQuery<Paginated<FeeDeductionRow>>({
-    queryKey: ["/api/admin/fee-deductions"],
+    queryKey: ["/api/admin/fee-deductions", { q: debouncedDeductionsSearch }],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (debouncedDeductionsSearch.trim()) params.set("q", debouncedDeductionsSearch.trim());
+      const qs = params.toString();
+      return fetchPaginated<Paginated<FeeDeductionRow>>(
+        `/api/admin/fee-deductions${qs ? `?${qs}` : ""}`,
+      );
+    },
   });
 
   return (
@@ -509,6 +603,14 @@ export default function AdminFeesPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
+              <div className="mb-4">
+                <SearchBox
+                  value={rulesSearch}
+                  onChange={setRulesSearch}
+                  placeholder="Search by client or adviser name / email"
+                  testId="input-search-rules"
+                />
+              </div>
               {rulesQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
               ) : rulesQ.data && rulesQ.data.items.length > 0 ? (
@@ -573,7 +675,11 @@ export default function AdminFeesPage() {
                   </TableBody>
                 </Table>
               ) : (
-                <p className="text-sm text-muted-foreground">No fee rules yet.</p>
+                <p className="text-sm text-muted-foreground">
+                  {debouncedRulesSearch.trim()
+                    ? "No fee rules match your search."
+                    : "No fee rules yet."}
+                </p>
               )}
             </CardContent>
           </Card>
@@ -640,8 +746,22 @@ export default function AdminFeesPage() {
           <Card>
             <CardHeader><CardTitle className="text-base">Recent accruals</CardTitle></CardHeader>
             <CardContent>
+              <div className="mb-4">
+                <SearchBox
+                  value={accrualsSearch}
+                  onChange={setAccrualsSearch}
+                  placeholder="Search by client or adviser name / email"
+                  testId="input-search-accruals"
+                />
+              </div>
               {accrualsQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
+              ) : accrualsQ.data && accrualsQ.data.items.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {debouncedAccrualsSearch.trim()
+                    ? "No accruals match your search."
+                    : "No accruals yet."}
+                </p>
               ) : (
                 <Table>
                   <TableHeader>
@@ -724,8 +844,22 @@ export default function AdminFeesPage() {
           <Card>
             <CardHeader><CardTitle className="text-base">Deductions</CardTitle></CardHeader>
             <CardContent>
+              <div className="mb-4">
+                <SearchBox
+                  value={deductionsSearch}
+                  onChange={setDeductionsSearch}
+                  placeholder="Search by client or adviser name / email"
+                  testId="input-search-deductions"
+                />
+              </div>
               {deductionsQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
+              ) : deductionsQ.data && deductionsQ.data.items.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {debouncedDeductionsSearch.trim()
+                    ? "No deductions match your search."
+                    : "No deductions yet."}
+                </p>
               ) : (
                 <Table>
                   <TableHeader>
