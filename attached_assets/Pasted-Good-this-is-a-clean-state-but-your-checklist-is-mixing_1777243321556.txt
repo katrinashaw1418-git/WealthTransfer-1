@@ -1,0 +1,135 @@
+Good — this is a clean state, but your checklist is mixing 3 different layers:
+
+✅ Wealth planner (CURRENT sprint — already mostly done)
+⚠️ Pre-run script fixes (only if you run test-planner.ts)
+❌ Portfolio engine patches (separate — DO NOT mix now)
+
+I’ll strip the noise and give you exact tasks + sequence based on actual current state.
+
+✅ VERIFIED CURRENT STATE (truth)
+
+From your board + logs:
+
+#92 ✅ Gate B complete
+#93 ✅ Fee reconciliation complete
+#94 ✅ Planner schema + hooks complete
+#96 ✅ Review lock complete
+#98 ✅ Planner UI built
+#99 ✅ Document storage wired
+
+Running:
+
+#79 (jobs UI)
+#101 (drift UI)
+
+👉 This means:
+
+Core planner system = COMPLETE
+You are in “verification + visibility” phase
+⚠️ WHAT IN YOUR CHECKLIST IS STILL RELEVANT
+
+From your image, ONLY these matter:
+
+🔴 Critical (must verify once)
+1. auditLogs.resourceId type
+
+Why:
+
+Silent failure risk (your checklist is correct here)
+
+👉 Action:
+
+// CHECK schema
+auditLogs.resourceId
+
+IF text:
+  eq(auditLogs.resourceId, String(adviceRecordId))
+
+IF integer:
+  eq(auditLogs.resourceId, adviceRecordId)
+🟠 Only if running test-planner.ts
+2. wallets export
+3. clientUserId placeholder
+4. route names
+6. dotenv import
+
+👉 IMPORTANT:
+These are NOT system tasks
+These are script hygiene fixes
+
+👉 Only do them IF:
+
+You plan to run scripts/test-planner.ts
+
+Otherwise:
+
+SKIP
+❌ WHAT TO IGNORE (WRONG LAYER)
+
+From your files:
+
+- Snapshot seeding removal
+- Monthly P&L fixes
+- Portfolio charts
+- AI advisory performance
+
+👉 These belong to:
+
+Portfolio engine sprint (NOT planner)
+
+🎯 CORRECT NEXT TASK SEQUENCE
+STEP 1 — Finish running tasks (no interruption)
+Wait:
+#79
+#101
+STEP 2 — Run verification (MANDATORY)
+npx tsx scripts/test-wealth-planner-compliance.ts
+
+Expected:
+
+PASS (11/11)
+
+If fail:
+
+STOP
+STEP 3 — Accept ONLY these next tasks
+1️⃣ Admin audit log diff viewer
+Purpose:
+Visualise before/after snapshots already stored in #95
+2️⃣ Task #107 — Lock indicator (UI)
+Show:
+"Record under compliance review"
+3️⃣ Task #108 — Audit on blocked writes
+Every 423 → log event
+STEP 4 — Run verification AGAIN
+npx tsx scripts/test-wealth-planner-compliance.ts
+
+Must still:
+
+PASS
+⛔ DO NOT DO NEXT (very important)
+❌ Payout batch system
+❌ Ledger changes
+❌ Portfolio snapshot/P&L fixes
+❌ Commission engine
+❌ Payments / bank rails
+📌 OPTIONAL (create but don’t build yet)
+- Pre-launch safety validation script
+- Remove synthetic portfolio data (later sprint)
+🧠 FINAL EXECUTION FLOW
+Finish #79/#101
+→ Verify script (PASS)
+→ Build audit diff viewer
+→ Build #107 + #108
+→ Verify again (PASS)
+→ STOP
+🔥 Bottom line (no fluff)
+You are NOT building core anymore
+You are finishing:
+→ audit visibility
+→ compliance UX
+
+System is already structurally complete
+
+If you want next:
+I can give you exact spec for audit diff viewer (# next task) so dev builds it correctly first pass.
