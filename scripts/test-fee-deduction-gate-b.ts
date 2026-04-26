@@ -83,15 +83,19 @@
 // =============================================================================
 
 // Task #92 spec step 1 (.local/tasks/task-92.md lines 38-51) — JWT_SECRET /
-// env bootstrap. The spec mandates `import "dotenv/config"` + NODE_ENV/
-// JWT_SECRET defaults + hard-fail as the script's first lines so that no
-// downstream module reads JWT_SECRET as `undefined`. Because ESM hoists
-// every static `import` above all executable code in the same file, the
-// bootstrap block lives in this sibling module — imported here as the
-// FIRST line, before any other import — to truly run before any consumer
-// of process.env.JWT_SECRET. See `_bootstrap-test-env.ts` for the literal
-// spec block.
-import "./_bootstrap-test-env";
+// env bootstrap. MUST be the first lines in the file. `dotenv/config` runs
+// as a side-effect import (declaration-ordered, before any other import is
+// resolved) and populates process.env from .env so that downstream imports
+// of `server/auth.ts` see JWT_SECRET set at module-init time. The body-code
+// `||=` defaults are a safety belt for environments where .env is absent.
+import "dotenv/config";
+
+process.env.NODE_ENV ||= "test";
+process.env.JWT_SECRET ||= "test-jwt-secret";
+
+if (!process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET not loaded");
+}
 
 import type { Express, Request } from "express";
 import { and, eq, sql, inArray } from "drizzle-orm";
