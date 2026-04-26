@@ -1615,15 +1615,56 @@ async function test13_postingReceiptInvariantHolds(): Promise<void> {
 // contract.
 type RunStatus = { exitCode: number };
 
+// Console buffer used to silence production code (`postLedgerEntries`,
+// `runWalletLedgerReconciliation`, `runPostingReceiptInvariantCheck`,
+// etc.) which legitimately log operator alerts at runtime. The canonical
+// operator output for THIS script is locked at exactly the 10 PASS lines
+// + blank line + success banner — any extra stdout would break strict
+// matching. We restore the originals before the canonical reporter
+// runs, and dump the buffer only on FAIL so an operator can still see
+// the underlying production logs when something is broken.
+const consoleBuffer: { stream: "log" | "warn" | "error"; args: unknown[] }[] = [];
+const originalConsole = {
+  log: console.log.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+function silenceConsole(): void {
+  console.log = (...args: unknown[]) => {
+    consoleBuffer.push({ stream: "log", args });
+  };
+  console.warn = (...args: unknown[]) => {
+    consoleBuffer.push({ stream: "warn", args });
+  };
+  console.error = (...args: unknown[]) => {
+    consoleBuffer.push({ stream: "error", args });
+  };
+}
+function restoreConsole(): void {
+  console.log = originalConsole.log;
+  console.warn = originalConsole.warn;
+  console.error = originalConsole.error;
+}
+function dumpConsoleBuffer(): void {
+  for (const entry of consoleBuffer) {
+    if (entry.stream === "log") originalConsole.log(...entry.args);
+    else if (entry.stream === "warn") originalConsole.warn(...entry.args);
+    else originalConsole.error(...entry.args);
+  }
+}
+
 async function main(): Promise<void> {
-  console.log("=== Fee Deduction GATE B verification roll-up (Task #92) ===\n");
   let status: RunStatus = { exitCode: 0 };
+  silenceConsole();
   try {
     status = await runAllTests();
   } catch (err) {
     status = { exitCode: 1 };
     console.error("Gate B verification roll-up threw:", err);
   } finally {
+    // Restore stdout BEFORE cleanup so cleanup failures (which are
+    // operator-actionable) are visible.
+    restoreConsole();
     // GUARANTEED post-run cleanup. Runs even if a test threw, so the dev
     // DB is left in a clean state for the next run regardless of outcome.
     // Cleanup operates on PK arrays only — it cannot accidentally widen
@@ -1632,12 +1673,17 @@ async function main(): Promise<void> {
     try {
       await cleanupTrackedRows();
     } catch (cleanupErr) {
-      console.error("Post-run cleanup threw:", cleanupErr);
+      originalConsole.error("Post-run cleanup threw:", cleanupErr);
       // Do NOT downgrade a successful run on cleanup failure — the test
       // result itself is still valid — but DO ensure non-zero exit so an
       // operator notices the cleanup gap.
       if (status.exitCode === 0) status = { exitCode: 1 };
     }
+  }
+  // On FAIL: dump everything the production code logged so an operator
+  // can debug. On PASS: drop the buffer — canonical output stays clean.
+  if (status.exitCode !== 0) {
+    dumpConsoleBuffer();
   }
   process.exit(status.exitCode);
 }
@@ -1875,20 +1921,23 @@ async function runAllTests(): Promise<RunStatus> {
   // failures still abort the script with a FAIL line printed below the
   // canonical block, but they do NOT appear in the canonical block.
   // -----------------------------------------------------------------------
-  console.log("");
+  // Use `originalConsole.log` directly — `console.log` is currently
+  // silenced into the buffer by `silenceConsole()`. The canonical
+  // reporter MUST reach stdout regardless.
+  originalConsole.log("");
   let canonicalFailed = false;
   let canonicalMissing = 0;
   for (const name of CANONICAL_ORDER) {
     const r = results.get(name);
     if (!r) {
-      console.log(`MISSING ${name} — assertion was not recorded`);
+      originalConsole.log(`MISSING ${name} — assertion was not recorded`);
       canonicalMissing += 1;
       continue;
     }
     if (r.passed) {
-      console.log(`PASS ${name}`);
+      originalConsole.log(`PASS ${name}`);
     } else {
-      console.log(`FAIL ${name} — ${r.details}`);
+      originalConsole.log(`FAIL ${name} — ${r.details}`);
       canonicalFailed = true;
     }
   }
@@ -1899,12 +1948,12 @@ async function runAllTests(): Promise<RunStatus> {
   for (const name of INTERNAL_EXTRAS) {
     const r = results.get(name);
     if (!r) {
-      console.log(`MISSING (internal) ${name} — assertion was not recorded`);
+      originalConsole.log(`MISSING (internal) ${name} — assertion was not recorded`);
       extrasFailed = true;
       continue;
     }
     if (!r.passed) {
-      console.log(`FAIL (internal) ${name} — ${r.details}`);
+      originalConsole.log(`FAIL (internal) ${name} — ${r.details}`);
       extrasFailed = true;
     }
   }
@@ -1912,7 +1961,7 @@ async function runAllTests(): Promise<RunStatus> {
   if (canonicalFailed || canonicalMissing > 0 || extrasFailed) {
     const failedCount = Array.from(results.values()).filter((r) => !r.passed)
       .length;
-    console.error(
+    originalConsole.error(
       `\n${failedCount} fail(s), ${canonicalMissing} missing canonical assertion(s) in Gate B verification roll-up.`,
     );
     // Return non-zero status — main() will exit AFTER cleanup. Do NOT
@@ -1921,7 +1970,7 @@ async function runAllTests(): Promise<RunStatus> {
     return { exitCode: 1 };
   }
 
-  console.log("\nALL GATE B FEE DEDUCTION TESTS PASSED \u2705");
+  originalConsole.log("\nALL GATE B FEE DEDUCTION TESTS PASSED \u2705");
   return { exitCode: 0 };
 }
 
