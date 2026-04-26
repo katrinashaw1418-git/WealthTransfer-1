@@ -1,0 +1,308 @@
+
+
+Thought for 14s
+Below is the correct executable scope based on the latest cross-check.
+
+1. Phase 1 migration — role + adviserClients + feeConsents
+Add to shared/schema.ts.
+
+// users table — add only this column
+role: text("role").notNull().default("client"),
+export const adviserClients = pgTable("adviser_clients", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  clientUserId: integer("client_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  assignedAt: timestamp("assigned_at").defaultNow(),
+
+  isActive: boolean("is_active").notNull().default(true),
+}, (table) => ({
+  adviserClientUniq: uniqueIndex("adviser_clients_uniq")
+    .on(table.adviserUserId, table.clientUserId),
+}));
+export const feeConsents = pgTable("fee_consents", {
+  id: serial("id").primaryKey(),
+
+  adviserUserId: integer("adviser_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  clientUserId: integer("client_user_id")
+    .references(() => users.id)
+    .notNull(),
+
+  feeType: text("fee_type").notNull(),
+  // ongoing_service | advice | platform
+
+  amount: numeric("amount", { precision: 15, scale: 2 }).notNull(),
+  currency: text("currency").notNull().default("AUD"),
+
+  referenceDay: timestamp("reference_day").notNull(),
+  expiresAt: timestamp("expires_at").notNull(), // referenceDay + 150 days
+
+  status: text("status").notNull().default("active"),
+  // active | expired | terminated | withdrawn
+
+  consentSignedAt: timestamp("consent_signed_at"),
+  withdrawnAt: timestamp("withdrawn_at"),
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
+Add insert schemas/types:
+
+export const insertAdviserClientSchema = createInsertSchema(adviserClients);
+export const insertFeeConsentSchema = createInsertSchema(feeConsents);
+
+export type AdviserClient = typeof adviserClients.$inferSelect
+
+
+Pasted text(97).txt
+Document
+
+Your latest build + instructions are mostly correct, but there are a few critical gaps and one hidden risk you need to fix before moving forward.
+
+I’ll keep this tight and execution-focused.
+
+✅ 1. What is correct (confirmed)
+✔ Schema direction
+✔ users.role → correct
+✔ adviserClients → correct
+✔ feeConsents → correct (core revenue object)
+This aligns with your actual system maturity.
+
+✔ OTP / mobile logic direction
+From your uploaded file, the key conclusion is:
+
+You already have OTP infrastructure → reuse it instead of overbuilding
+
+✔ Correct and consistent with your codebase 
+
+
+✔ Google login implementation
+Your current implementation:
+
+<GoogleOAuthProvider clientId={...}>
+✔ Correct
+✔ Safe fallback when env not set
+✔ Matches best practice
+
+🔴 2. Critical issues you must fix
+❗ Issue 1 — password field still blocking OAuth + phone users
+Your schema:
+
+password: text("password").notNull()
+This WILL break:
+
+Google users
+Phone users
+Apple users
+✔ Fix (must do)
+password: text("password") // remove .notNull()
+OR (temporary workaround):
+
+password: "__oauth__" + providerId
+👉 Recommendation: make nullable properly
+
+❗ Issue 2 — googleId / appleId type mismatch risk
+From your file:
+
+DB may have column, but schema.ts may not
+
+This creates:
+
+Runtime works ❌
+TypeScript breaks ❌
+✔ Fix
+In shared/schema.ts:
+
+googleId: text("google_id").unique(),
+appleId: text("apple_id").unique(),
+❗ Issue 3 — OTP reuse must be consistent
+Right now you have:
+
+email OTP system
+phone OTP system
+But they must share:
+
+same expiry logic
+same validation endpoint
+same audit logging
+👉 Your file correctly suggests:
+
+Reuse /api/auth/verify-otp
+✔ That is the correct design 
+
+
+🟡 3. Mobile verification — reality check
+You asked:
+
+“can I build without external provider?”
+
+✔ Honest answer (important)
+❌ Real SMS → requires provider (law + carrier)
+✔ Email OTP → already sufficient for onboarding
+✔ Phone number collection → satisfies AUSTRAC CDD
+👉 Your file correctly states:
+
+phone is contact info, not identity proof 
+
+
+✔ This is legally correct for your current setup (Sumsub handles identity)
+
+🔴 4. One hidden risk (not mentioned in your doc)
+❗ Duplicate account risk
+Scenario:
+
+User signs up with:
+- Google (email A)
+- Phone (email A)
+- Email signup (email A)
+Without linking logic → you get:
+
+3 separate accounts ❌
+✔ Fix (must implement in ALL auth routes)
+let user = await storage.getUserByEmail(email);
+
+if (!user) {
+  // create
+} else {
+  // link provider (googleId / appleId / phone)
+}
+👉 This is critical for:
+
+AML/KYC consistency
+wallet ownership
+audit trails
+🟢 5. What your system now correctly supports
+After fixes:
+
+✔ Email + OTP signup
+✔ Google signup
+✔ Phone-assisted signup
+✔ Unified user identity
+✔ AUSTRAC-compliant onboarding path
+🧭 6. Clean final architecture (verified)
+User
+ → chooses method:
+    - Google
+    - Email
+    - Mobile
+
+All paths →
+ → backend normalises identity (email)
+ → single user record
+ → JWT issued
+ → redirect to /compliance (KYC)
+🟢 7. What to build next (correct order)
+Phase 1 (now)
+1. Fix schema (password nullable, googleId, appleId)
+2. Fix identity linking logic
+3. Stabilise OTP reuse
+Phase 2
+4. adviserClients
+5. feeConsents
+6. adviserTasks (limited triggers)
+Phase 3
+7. reporting (PDF + dashboard)
+🧠 Final verdict
+Your current direction is now:
+
+✔ grounded in your real codebase
+✔ aligned with fintech compliance reality
+✔ avoids overengineering
+But without the 3 fixes above, you will hit:
+
+❌ silent auth failures
+❌ duplicate users
+❌ broken OAuth flows
+▶️ If you want next step
+I can give you:
+
+👉 exact unified auth controller (Google + Email + Phone merged cleanly)
+👉 full user linking logic (production-safe)
+👉 onboarding state machine (Apply → KYC → Active)
+That’s the piece that turns this into a real fintech platform, not just working login.
+
+
+
+Pasted text(98).txt
+Document
+ i just want to add a layer to enable financial planners integrated in the platform with reference to netweatlh. and I am going to cooperate with a retail afsl wealth management company to do that
+
+Thought for 4s
+Yes — that is the right strategic layer.
+
+You do not need to build full Netwealth now. You need an adviser-access layer that lets a partnered retail AFSL wealth-management company and its planners operate inside your platform safely.
+
+Correct model
+AMAX = platform / technology / onboarding / portfolio visibility
+Retail AFSL partner = advice licensee / planner supervision / SOA responsibility
+Financial planners = servicing users with controlled client access
+Client = account holder / investor
+What to build first
+1. users.role
+2. adviserClients
+3. feeConsents
+4. adviserTasks
+5. reportRequests
+6. adviser dashboard
+7. client portfolio PDF/reporting
+Do not build yet
+Full SOA engine
+complex commission tier engine
+fact-find automation
+execution-authorisation engine
+programmatic advice workflow
+Those only come after your AFSL partner confirms the operating model.
+
+Adviser functions to add
+Adviser login
+Client list
+Client detail view
+Portfolio visibility
+KYC / onboarding status
+Fee consent status
+Task list
+Portfolio review task
+Report generation
+Document view/upload later
+Critical permission rules
+Adviser can only see linked clients
+Adviser cannot move money
+Adviser cannot edit balances
+Adviser cannot bypass KYC
+Adviser cannot execute advice
+AFSL/compliance/admin controls approval
+Best Replit instruction
+Build an adviser access layer for AMAX Wealth.
+
+Purpose:
+Allow financial planners from a partnered retail AFSL wealth management company to access linked clients, view onboarding/KYC status, view portfolio summaries, manage tasks, track fee consent status, and generate client reports.
+
+Do not build a full SOA engine yet.
+Do not build commission tiers yet.
+Do not allow advisers to move funds or execute transactions.
+
+Add:
+1. users.role
+2. adviserClients
+3. feeConsents
+4. adviserTasks
+5. reportRequests
+6. /adviser/dashboard
+7. /adviser/clients
+8. /adviser/clients/:id
+9. /adviser/tasks
+10. /adviser/reports
+
+All adviser access must be scoped through adviserClients.
+This gives you the Netwealth-style adviser layer without overbuilding before the AFSL partner structure is final.
+
+
+

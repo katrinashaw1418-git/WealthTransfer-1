@@ -14,6 +14,71 @@ This platform is a comprehensive cross-border wealth management solution designe
 - Landing page and login page "Apply for Access" links point to `/apply`
 - Files: `apply.tsx`, `application-status.tsx`, `signup.tsx`, `shared/schema.ts` (applications table), `server/routes.ts`, `server/storage.ts`
 
+## Recent Changes (April 2026) — Session 9 (Read-only Adviser Overlay for Retail-AFSL Partner)
+
+This session adds a read-only adviser-access layer so a partner retail AFSL's advisers can view **their linked clients** (KYC, portfolio, fee consents, recent advice records) and run their own internal workflows (tasks, report requests) without ever touching client-owned state.
+
+### Hard limits — what advisers cannot do (enforced server-side, not just UI)
+
+- **No money movement** — adviser JWT does not bypass any of the existing money-route guards (`requireAuth` + KYC + per-user scoping). `POST /api/wallets/*` continues to fail for an adviser the same way it would fail for any other user without standing.
+- **No balance edits, no KYC bypass, no advice execution** — there are no adviser-scoped routes that mutate `wallets`, `transactions`, `ledger_entries`, `kyc_status`, `advice_records`, `fee_consents`, or `exec_authorisations`. This is checked structurally: `server/services/adviser-access.ts` is the **only** module with adviser-scoped DB access, and the only tables it writes to are `adviser_tasks` and `report_requests` (the adviser's own working tables).
+- **No cross-client leakage** — every per-client read (`/api/adviser/clients/:id`, `/portfolio`, etc.) calls `assertAdviserClientLink` BEFORE returning client data. The list/dashboard aggregates don't call the helper but are scoped at the SQL level by `adviser_user_id`, with explicit comments documenting why the chokepoint pattern is structurally satisfied.
+
+### What was built
+
+1. **Schema** (`shared/schema.ts`):
+   - `adviser_tasks` — adviser-internal task list (id, adviserUserId, clientUserId, taskType, title, notes, status, priority, dueAt, completedAt, createdAt, updatedAt) + 2 indexes
+   - `report_requests` — queued statement requests (id, adviserUserId, clientUserId, reportType, format=pdf, status, requestedAt, generatedAt, downloadUrl, expiresAt, failureReason) + 2 indexes
+   - `downloadUrl` is intentionally null for now — backend PDF generation is deferred until partner confirms operating model. Status starts at `requested`; the schema is ready for an async generator job to flip it to `ready` and populate the URL.
+
+2. **Auth helper** (`server/auth.ts`):
+   - `requireRole(auth, ...allowed)` — small companion to `requireAuth`. Throws `Error & { status: 403 }` if `auth.role` not in the allow-list. Variadic so future routes can do `requireRole(auth, "adviser", "compliance")`.
+
+3. **Service layer** (`server/services/adviser-access.ts`, single file by design — every adviser DB touch lives here for security review):
+   - `assertAdviserClientLink(adviser, client)` — the chokepoint helper for per-client reads
+   - `listAdviserClients`, `getAdviserClientDetail`, `getAdviserClientPortfolio`, `getAdviserClientFeeConsents`, `getAdviserClientAdviceRecords`
+   - `listAdviserTasks`, `createAdviserTask`, `updateAdviserTask` (adviser may only update their OWN tasks; auto-stamps `completedAt` on transition to `done`)
+   - `listAdviserReportRequests`, `createReportRequest`
+   - `getAdviserDashboardSummary` — single-call aggregate (linked clients, open tasks, fee consents expiring ≤30d, pending reports)
+
+4. **Routes** (`server/adviser-routes.ts`, mounted from `routes.ts` first so its specific `/api/adviser/*` paths are matched ahead of any generic `/api/*` handler):
+   - Every route goes through an `adviserRoute()` wrapper that runs `requireAuth` + `requireRole(auth, "adviser")` + try/catch envelope. **It is structurally impossible** to add a new adviser route that skips role gating without bypassing the wrapper.
+   - All POST/PATCH writes emit an audit log entry (`adviser_task_created`, `adviser_task_updated`, `adviser_report_requested`).
+
+5. **Frontend**:
+   - `AuthUser.role` field added to `client/src/contexts/auth.tsx` (defaults to `"client"` for legacy `/api/auth/me` responses)
+   - `client/src/components/layout/sidebar.tsx` rewritten to be role-aware: separate `clientNav` and `adviserNav` constants (rather than a filtered shared list, so it's obvious in code review what each role sees). Hardcoded "Wise Investor / Premium Client" replaced with real user details.
+   - 5 new pages under `client/src/pages/adviser/`: `dashboard`, `clients`, `client-detail`, `tasks`, `reports`. All use TanStack Query v5 (default fetcher, queryKey arrays for hierarchical paths) + shadcn Cards/Tables/Forms/Dialogs.
+
+### Demo credentials seeded
+
+- `username='demoadviser', password='adviser888'` (id=12, role='adviser', kycStatus='verified')
+- Linked to `wiseinvestor` (id=1) via `adviser_clients` with `relationshipType='servicing'`
+
+### Smoke tests passing (10/10)
+
+| # | Test | Result |
+|---|---|---|
+| T1 | client token → `/api/adviser/clients` | 403 "requires role: adviser" |
+| T2 | adviser token → `/api/adviser/clients` | 200 with wiseinvestor in list |
+| T3 | adviser → `/api/adviser/clients/999` (unlinked) | 403 "not linked to this client" |
+| T3b | adviser → `/api/adviser/clients/1` (linked) | 200 with KYC, fee consents, advice |
+| T4 | adviser → `/api/wallets/deposit` | 400 (validation; no special access) |
+| T5 | `/api/adviser/dashboard` | returns linked/tasks/expiring/pending counts |
+| T6 | create + complete adviser task end-to-end | 200 + `completedAt` auto-stamped |
+| T7 | adviser → POST task with `clientUserId=999` | 403 (link enforced even on writes) |
+| T8 | client → POST adviser task | 403 (role check fires) |
+| T9 | adviser → POST report request | 200, `status='requested'` |
+| T10 | no token → `/api/adviser/clients` | 401 |
+
+### Architect review
+
+Pass with one P1 noted (chokepoint pattern not literal for enumeration queries) — addressed by adding explicit "CHOKEPOINT NOTE" comment blocks to `listAdviserClients` and `getAdviserDashboardSummary` documenting why those two functions must NOT call `assertAdviserClientLink` (the WHERE clause IS the link enforcement; the link is the result set, not a per-row lookup).
+
+### Out of scope (deferred until partner operating model confirmed)
+
+SOA generation engine, commission tier rules, fact-find automation flow tied to retail accounts, retail-execution flow, PDF generator for `report_requests` (status is wired through but generator job is not yet implemented).
+
 ## Recent Changes (April 2026) — Session 8 (Reconciliation + Platform Account Hardening)
 
 This session closes the two operational follow-ups left open at the end of Session 7. Combined with Track B's ledger and Phase 2.4's execution gate, the system now has the **minimum viable financial primitives**: ledger = truth, reconciliation = verification, execution gate = control.

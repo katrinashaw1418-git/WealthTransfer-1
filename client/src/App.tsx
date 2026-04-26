@@ -25,6 +25,11 @@ import ResetPassword from "@/pages/reset-password";
 import Onboarding from "@/pages/onboarding";
 import Legal from "@/pages/legal";
 import NotFound from "@/pages/not-found";
+import AdviserDashboard from "@/pages/adviser/dashboard";
+import AdviserClients from "@/pages/adviser/clients";
+import AdviserClientDetail from "@/pages/adviser/client-detail";
+import AdviserTasks from "@/pages/adviser/tasks";
+import AdviserReports from "@/pages/adviser/reports";
 import { Loader2 } from "lucide-react";
 
 function ProtectedApp() {
@@ -64,6 +69,13 @@ function ProtectedApp() {
         <Route path="/compliance" component={Compliance} />
         <Route path="/investments" component={Investments} />
         <Route path="/legal" component={Legal} />
+        {/* Session 9: adviser overlay routes. Backend enforces role gating; */}
+        {/* the sidebar is also role-aware so non-advisers won't see these. */}
+        <Route path="/adviser/dashboard" component={AdviserDashboard} />
+        <Route path="/adviser/clients" component={AdviserClients} />
+        <Route path="/adviser/clients/:id" component={AdviserClientDetail} />
+        <Route path="/adviser/tasks" component={AdviserTasks} />
+        <Route path="/adviser/reports" component={AdviserReports} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

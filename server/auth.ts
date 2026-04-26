@@ -99,6 +99,27 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 // ---------------------------------------------------------------------------
+// Role enforcement — throws 403 if the caller's role is not in `allowed`.
+// Use with: const auth = requireAuth(req); requireRole(auth, "adviser");
+//
+// Why a list rather than a single role: future routes may want
+// `requireRole(auth, "adviser", "compliance")` without two layers of guards.
+//
+// Why explicit (not "default-deny client"): the existing client-facing routes
+// outnumber adviser routes 50:1, and quietly demoting them to a stricter
+// default would break every existing endpoint. Explicit guards are louder
+// in code review.
+// ---------------------------------------------------------------------------
+export function requireRole(auth: AuthPayload, ...allowed: string[]): void {
+  if (!allowed.includes(auth.role)) {
+    throw Object.assign(
+      new Error(`Forbidden — this endpoint requires role: ${allowed.join(" or ")}`),
+      { status: 403 }
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // KYC enforcement — throws 403 if the user's KYC is not "verified".
 // Call after requireAuth on all money-movement routes.
 // Intentionally async so it reads the current DB state on every call.

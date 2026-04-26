@@ -9,6 +9,10 @@ interface AuthUser {
   kycStatus: string;
   userTier: string;
   emailVerified?: boolean;
+  // Session 9: surfaces the user's role so the UI can render the adviser
+  // overlay. Defaults to "client" for legacy /api/auth/me responses that
+  // omit the field.
+  role?: string;
 }
 
 export interface RegisterResult {

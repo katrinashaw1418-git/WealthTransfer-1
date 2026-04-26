@@ -1039,3 +1039,100 @@ export const insertReconciliationSchema = createInsertSchema(reconciliations).om
 });
 export type Reconciliation = typeof reconciliations.$inferSelect;
 export type InsertReconciliation = z.infer<typeof insertReconciliationSchema>;
+
+// =============================================================================
+// SESSION 9 — ADVISER ACCESS LAYER (read-only overlay for retail-AFSL partner)
+// =============================================================================
+// Purpose: let `role='adviser'` users (planners working under a partnered
+// retail-AFSL licensee) see their LINKED clients' state, manage internal
+// workflow tasks, and request reports.
+//
+// Hard limits (enforced at the route layer, NOT here — but documented here for
+// the next reader):
+//   - Advisers cannot move money (no debit/credit/transfer routes accept
+//     adviser tokens; existing money routes are scoped to the calling user)
+//   - Advisers cannot edit balances, override KYC, or execute advice
+//   - Adviser visibility is scoped strictly through the existing
+//     `adviser_clients` link table (uniq on adviser+client). No row, no read.
+//
+// What stays out of this session (deferred until the AFSL partner operating
+// model is confirmed): commission tier engine, fact-find automation, retail
+// SOA pipeline, retail-AFSL execution authorisation flow, programmatic advice
+// workflow. The Path B (wholesale) advice engine from Sessions 1-7 is left
+// completely untouched.
+// =============================================================================
+
+export const adviserTasks = pgTable("adviser_tasks", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  // The client this task is about. Adviser MUST be linked to the client at the
+  // time of insert (enforced in the route via assertAdviserClientLink).
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  // portfolio_review | fee_consent_renewal | kyc_followup | document_request |
+  // meeting_prep | other — kept as text rather than enum so we can extend
+  // without a migration; route validates with zod.
+  taskType: text("task_type").notNull(),
+  title: text("title").notNull(),
+  notes: text("notes"),
+  // open | in_progress | done | cancelled
+  status: text("status").notNull().default("open"),
+  // low | normal | high | urgent
+  priority: text("priority").notNull().default("normal"),
+  dueAt: timestamp("due_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  // "show me this adviser's open tasks" — the most common dashboard query
+  adviserStatusIdx: index("adviser_tasks_adviser_status_idx").on(table.adviserUserId, table.status),
+  // "show me all tasks for this client" — used on client-detail
+  clientIdx: index("adviser_tasks_client_idx").on(table.clientUserId),
+}));
+
+export const insertAdviserTaskSchema = createInsertSchema(adviserTasks).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  completedAt: true,
+});
+export type AdviserTask = typeof adviserTasks.$inferSelect;
+export type InsertAdviserTask = z.infer<typeof insertAdviserTaskSchema>;
+
+export const reportRequests = pgTable("report_requests", {
+  id: serial("id").primaryKey(),
+  adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
+  clientUserId: integer("client_user_id").references(() => users.id).notNull(),
+  // portfolio_summary | fee_summary | transaction_history | full_statement
+  reportType: text("report_type").notNull(),
+  // Currently only "pdf" is supported, but kept extensible for csv/xlsx.
+  format: text("format").notNull().default("pdf"),
+  // requested | generating | ready | failed | expired
+  // PDF generation itself is OUT OF SCOPE for this session — rows will sit at
+  // 'requested' until a future generator worker picks them up. The audit trail
+  // (who asked for what, when) is the immediate value.
+  status: text("status").notNull().default("requested"),
+  // Optional natural-language note ("for the Q2 review meeting on Friday")
+  notes: text("notes"),
+  // Set by the generator when ready; null while generating.
+  downloadUrl: text("download_url"),
+  failureReason: text("failure_reason"),
+  requestedAt: timestamp("requested_at").defaultNow(),
+  generatedAt: timestamp("generated_at"),
+  expiresAt: timestamp("expires_at"),
+}, (table) => ({
+  // "show me all my report requests" / "show me all reports for this client"
+  adviserCreatedIdx: index("report_requests_adviser_created_idx").on(table.adviserUserId, table.requestedAt),
+  clientCreatedIdx: index("report_requests_client_created_idx").on(table.clientUserId, table.requestedAt),
+}));
+
+export const insertReportRequestSchema = createInsertSchema(reportRequests).omit({
+  id: true,
+  requestedAt: true,
+  generatedAt: true,
+  downloadUrl: true,
+  failureReason: true,
+  expiresAt: true,
+  status: true,
+});
+export type ReportRequest = typeof reportRequests.$inferSelect;
+export type InsertReportRequest = z.infer<typeof insertReportRequestSchema>;

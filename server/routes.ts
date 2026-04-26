@@ -34,6 +34,7 @@ import {
   isLocalDev,
   type AuthPayload,
 } from "./auth";
+import { registerAdviserRoutes } from "./adviser-routes";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -560,6 +561,11 @@ async function backfillPortfolioHistory(userId: number, startDate: Date, endDate
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
+
+  // Session 9 — adviser overlay (read-only client access for partner advisers).
+  // Mounted FIRST so its specific /api/adviser/* paths are matched before
+  // any future generic /api/* fallback handlers.
+  registerAdviserRoutes(app);
 
   // Ensure crypto + GBP FX rates exist (seed missing rows, reset sequence first)
   {
