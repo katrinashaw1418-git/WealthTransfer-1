@@ -946,11 +946,26 @@ export async function createReportRequest(
 // linkedClientIds). There is no individual-client read that would benefit
 // from assertAdviserClientLink.
 // -----------------------------------------------------------------------------
+export interface ExpiringFeeConsentDetail {
+  feeConsentId: number;
+  clientUserId: number;
+  clientName: string;
+  expiryDate: string; // ISO timestamp
+}
+
 export interface AdviserDashboardSummary {
   linkedClients: number;
   openTasks: number;
   feeConsentsExpiringSoon: number; // ≤30 days from now
   pendingReports: number;
+  // Task #284 — currently in-force advice records (status issued or
+  // accepted) for visible linked clients. The schema's status vocabulary
+  // is draft|review_pending|issued|accepted|declined|superseded; "active"
+  // in the task spec maps to issued+accepted (i.e. not draft, not retired).
+  adviceRecordsActive: number;
+  // Task #284 — detail rows for the same 30-day window the count uses,
+  // so the UI can render a per-consent renew list without a second call.
+  expiringFeeConsentDetail: ExpiringFeeConsentDetail[];
 }
 
 export async function getAdviserDashboardSummary(
@@ -1017,11 +1032,62 @@ export async function getAdviserDashboardSummary(
     .from(reportRequests)
     .where(and(...reportConditions));
 
+  // Task #284 — count of currently in-force advice records for visible
+  // linked clients. issued = SOA delivered; accepted = client accepted.
+  let adviceRecordsActive = 0;
+  if (visibleClientIds.length > 0) {
+    const [{ count: adviceCount }] = await db
+      .select({ count: sql<number>`cast(count(*) as int)` })
+      .from(adviceRecords)
+      .where(
+        and(
+          inArray(adviceRecords.clientId, visibleClientIds),
+          inArray(adviceRecords.status, ["issued", "accepted"]),
+        ),
+      );
+    adviceRecordsActive = adviceCount;
+  }
+
+  // Task #284 — per-consent detail for the same 30-day window so the UI
+  // can render a renew list. Joined to users for the display label.
+  let expiringFeeConsentDetail: ExpiringFeeConsentDetail[] = [];
+  if (visibleClientIds.length > 0) {
+    const rows = await db
+      .select({
+        id: feeConsents.id,
+        clientId: feeConsents.clientId,
+        consentExpiryDate: feeConsents.consentExpiryDate,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+      })
+      .from(feeConsents)
+      .innerJoin(users, eq(users.id, feeConsents.clientId))
+      .where(
+        and(
+          inArray(feeConsents.clientId, visibleClientIds),
+          eq(feeConsents.renewalStatus, "active"),
+          lte(feeConsents.consentExpiryDate, in30Days),
+          gte(feeConsents.consentExpiryDate, now),
+        ),
+      )
+      .orderBy(feeConsents.consentExpiryDate);
+
+    expiringFeeConsentDetail = rows.map((r) => ({
+      feeConsentId: r.id,
+      clientUserId: r.clientId,
+      clientName: clientDisplayName(r, r.clientId),
+      expiryDate: (r.consentExpiryDate ?? new Date()).toISOString(),
+    }));
+  }
+
   return {
     linkedClients: visibleClientIds.length,
     openTasks,
     feeConsentsExpiringSoon,
     pendingReports,
+    adviceRecordsActive,
+    expiringFeeConsentDetail,
   };
 }
 

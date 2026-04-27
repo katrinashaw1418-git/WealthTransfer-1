@@ -7,6 +7,12 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import {
   Users,
   ClipboardList,
   AlertTriangle,
@@ -14,13 +20,25 @@ import {
   ClipboardCheck,
   TrendingUp,
   ArrowRight,
+  ShieldCheck,
+  HandCoins,
+  CheckCircle2,
 } from "lucide-react";
+
+interface ExpiringFeeConsentDetail {
+  feeConsentId: number;
+  clientUserId: number;
+  clientName: string;
+  expiryDate: string;
+}
 
 interface DashboardSummary {
   linkedClients: number;
   openTasks: number;
   feeConsentsExpiringSoon: number;
   pendingReports: number;
+  adviceRecordsActive: number;
+  expiringFeeConsentDetail: ExpiringFeeConsentDetail[];
 }
 
 interface AdviserClientRow {
@@ -42,6 +60,7 @@ interface AdviserTask {
   priority: string;
   dueAt: string | null;
   createdAt: string | null;
+  clientUserId: number;
 }
 
 interface InstructionRow {
@@ -110,18 +129,34 @@ function safeNum(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+// Currency-only number formatter; the page renders the explicit "AUD"
+// prefix separately so the unit is always unambiguous (Task #284).
+const audAmountFormatter = new Intl.NumberFormat("en-AU", {
+  style: "currency",
+  currency: "AUD",
+  maximumFractionDigits: 0,
+});
+
 function formatAud(value: number): string {
-  return new Intl.NumberFormat("en-AU", {
-    style: "currency",
-    currency: "AUD",
-    maximumFractionDigits: 0,
-  }).format(Number.isFinite(value) ? value : 0);
+  return audAmountFormatter.format(Number.isFinite(value) ? value : 0);
 }
 
 function formatDate(value: string | null): string {
   if (!value) return "—";
   try {
     return new Date(value).toLocaleDateString("en-AU", { month: "short", day: "numeric" });
+  } catch {
+    return "—";
+  }
+}
+
+function formatExpiryDate(value: string): string {
+  try {
+    return new Date(value).toLocaleDateString("en-AU", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
   } catch {
     return "—";
   }
@@ -147,6 +182,14 @@ export default function AdviserDashboard() {
     [instructions.data],
   );
 
+  // Lookup map so the Top Open Tasks list can resolve a client name
+  // from each task's clientUserId without re-querying the backend.
+  const clientById = useMemo(() => {
+    const map = new Map<number, AdviserClientRow>();
+    for (const c of clients.data ?? []) map.set(c.userId, c);
+    return map;
+  }, [clients.data]);
+
   const topClients = useMemo(
     () =>
       [...(clients.data ?? [])]
@@ -160,6 +203,8 @@ export default function AdviserDashboard() {
     [clients.data],
   );
 
+  const expiringConsents = summary.data?.expiringFeeConsentDetail ?? [];
+
   return (
     <div className="p-6 space-y-6" data-testid="page-adviser-dashboard">
       <div>
@@ -171,7 +216,7 @@ export default function AdviserDashboard() {
       </div>
 
       {/* Headline metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard
           label="Linked clients"
           value={summary.data?.linkedClients}
@@ -194,7 +239,7 @@ export default function AdviserDashboard() {
           label="Fee consents expiring ≤30d"
           value={summary.data?.feeConsentsExpiringSoon}
           icon={AlertTriangle}
-          href="/adviser/clients"
+          href="/adviser/fee-consents"
           accent="text-slate-500"
           isLoading={summary.isLoading}
           testId="card-fee-expiring"
@@ -207,6 +252,15 @@ export default function AdviserDashboard() {
           accent="text-violet-500"
           isLoading={summary.isLoading}
           testId="card-pending-reports"
+        />
+        <MetricCard
+          label="Advice records active"
+          value={summary.data?.adviceRecordsActive}
+          icon={ShieldCheck}
+          href="/adviser/clients"
+          accent="text-indigo-500"
+          isLoading={summary.isLoading}
+          testId="card-advice-active"
         />
       </div>
 
@@ -279,22 +333,41 @@ export default function AdviserDashboard() {
               ) : priorityTasks.length === 0 ? (
                 <p className="text-xs text-slate-500 pl-5">No open tasks. You're clear.</p>
               ) : (
-                <ul className="space-y-1.5 pl-5">
-                  {priorityTasks.map((t) => (
-                    <li
-                      key={t.id}
-                      className="text-sm text-slate-700 flex items-center justify-between gap-3"
-                      data-testid={`dash-task-${t.id}`}
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
-                        {priorityChip(t.priority)}
-                        <span className="truncate">{t.title}</span>
-                      </span>
-                      <span className="text-xs text-slate-400 whitespace-nowrap">
-                        Due {formatDate(t.dueAt)}
-                      </span>
-                    </li>
-                  ))}
+                <ul className="space-y-2 pl-5">
+                  {priorityTasks.map((t) => {
+                    const c = clientById.get(t.clientUserId);
+                    const clientLabel = c
+                      ? clientDisplayName(c, t.clientUserId)
+                      : `Client #${t.clientUserId}`;
+                    return (
+                      <li
+                        key={t.id}
+                        className="text-sm text-slate-700 flex items-center justify-between gap-3"
+                        data-testid={`dash-task-${t.id}`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            {priorityChip(t.priority)}
+                            <span className="truncate">{t.title}</span>
+                          </div>
+                          <div className="text-xs text-slate-500 mt-0.5 flex items-center gap-3">
+                            <span className="truncate">{clientLabel}</span>
+                            <Link href={`/adviser/clients/${t.clientUserId}`}>
+                              <a
+                                className="text-sky-600 hover:text-sky-700 whitespace-nowrap"
+                                data-testid={`dash-task-view-client-${t.id}`}
+                              >
+                                View client →
+                              </a>
+                            </Link>
+                          </div>
+                        </div>
+                        <span className="text-xs text-slate-400 whitespace-nowrap">
+                          Due {formatDate(t.dueAt)}
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -316,14 +389,23 @@ export default function AdviserDashboard() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
-              <p className="text-[11px] uppercase tracking-wide text-slate-500">Assets under advice</p>
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                Assets under advice
+              </p>
               {clients.isLoading ? (
                 <Skeleton className="h-7 w-32 mt-1" />
               ) : (
-                <p className="text-2xl font-bold text-slate-900 tabular-nums" data-testid="aum-total">
+                <p
+                  className="text-2xl font-bold text-slate-900 tabular-nums"
+                  data-testid="aum-total"
+                >
+                  <span className="text-sm font-medium text-slate-500 mr-1">AUD</span>
                   {formatAud(totalAum)}
                 </p>
               )}
+              <p className="text-[11px] text-slate-400 mt-1" data-testid="aum-caption">
+                Indicative · Based on latest portfolio snapshots
+              </p>
             </div>
             <div className="border-t border-slate-100 pt-3">
               <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-2">
@@ -335,22 +417,41 @@ export default function AdviserDashboard() {
                 <p className="text-xs text-slate-500">No linked clients yet.</p>
               ) : (
                 <ul className="space-y-2">
-                  {topClients.map((c) => (
-                    <li
-                      key={c.userId}
-                      className="flex items-center justify-between gap-2"
-                      data-testid={`dash-top-client-${c.userId}`}
-                    >
-                      <Link href={`/adviser/clients/${c.userId}`}>
-                        <a className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate">
-                          {clientDisplayName(c, c.userId)}
-                        </a>
-                      </Link>
-                      <span className="text-sm text-slate-700 tabular-nums">
-                        {formatAud(safeNum(c.portfolioValueAud))}
-                      </span>
-                    </li>
-                  ))}
+                  {topClients.map((c) => {
+                    const value = safeNum(c.portfolioValueAud);
+                    const share = totalAum > 0 ? value / totalAum : 0;
+                    const widthPct = Math.max(0, Math.min(100, share * 100));
+                    return (
+                      <li
+                        key={c.userId}
+                        className="space-y-1"
+                        data-testid={`dash-top-client-${c.userId}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <Link href={`/adviser/clients/${c.userId}`}>
+                            <a className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate">
+                              {clientDisplayName(c, c.userId)}
+                            </a>
+                          </Link>
+                          <span className="text-sm text-slate-700 tabular-nums">
+                            {formatAud(value)}
+                          </span>
+                        </div>
+                        {totalAum > 0 && (
+                          <div
+                            className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden"
+                            data-testid={`dash-top-client-bar-${c.userId}`}
+                            aria-label={`${(share * 100).toFixed(1)}% of book`}
+                          >
+                            <div
+                              className="h-full bg-emerald-500"
+                              style={{ width: `${widthPct}%` }}
+                            />
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
@@ -358,23 +459,89 @@ export default function AdviserDashboard() {
         </Card>
       </div>
 
-      {/* Scope reminder */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Scope of adviser access</CardTitle>
+      {/* Fee consent status */}
+      <Card data-testid="card-fee-consent-status">
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2">
+            <HandCoins className="h-4 w-4 text-amber-500" />
+            Fee consent status
+          </CardTitle>
+          <Link href="/adviser/fee-consents">
+            <Button variant="ghost" size="sm" data-testid="link-fee-consents">
+              All fee consents <ArrowRight className="h-3 w-3 ml-1" />
+            </Button>
+          </Link>
         </CardHeader>
-        <CardContent className="text-sm text-slate-600 space-y-2">
-          <p>
-            <strong>You can:</strong> view linked client KYC status, portfolio totals, fee consents,
-            and recent advice records; create internal tasks, request statement reports, and send
-            investment instructions for client consent.
-          </p>
-          <p>
-            <strong>You cannot:</strong> move money, edit balances, change KYC, or execute advice
-            actions on a client's behalf. Those operations remain with the client and the AMAX
-            Wealth platform.
-          </p>
+        <CardContent>
+          {summary.isLoading ? (
+            <Skeleton className="h-12 w-full" />
+          ) : expiringConsents.length === 0 ? (
+            <div
+              className="flex items-center gap-2 text-sm text-slate-600"
+              data-testid="fee-consents-all-active"
+            >
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              All fee consents active. No renewals due in the next 30 days.
+            </div>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {expiringConsents.map((c) => (
+                <li
+                  key={c.feeConsentId}
+                  className="py-2 flex items-center justify-between gap-3"
+                  data-testid={`fee-consent-expiring-${c.feeConsentId}`}
+                >
+                  <div className="min-w-0">
+                    <Link href={`/adviser/clients/${c.clientUserId}`}>
+                      <a className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate">
+                        {c.clientName}
+                      </a>
+                    </Link>
+                    <div className="text-xs text-slate-500">
+                      Expires {formatExpiryDate(c.expiryDate)}
+                    </div>
+                  </div>
+                  <Link href="/adviser/fee-consents">
+                    <a
+                      className="text-sm text-sky-600 hover:text-sky-700 whitespace-nowrap"
+                      data-testid={`fee-consent-renew-${c.feeConsentId}`}
+                    >
+                      Renew →
+                    </a>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </CardContent>
+      </Card>
+
+      {/* Scope reminder — collapsible (Task #284) */}
+      <Card>
+        <Accordion type="single" collapsible defaultValue={undefined}>
+          <AccordionItem value="scope" className="border-b-0">
+            <AccordionTrigger
+              className="px-6 py-4 hover:no-underline"
+              data-testid="scope-of-access-toggle"
+            >
+              <CardTitle className="text-base text-left">Scope of adviser access</CardTitle>
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="px-6 pb-4 text-sm text-slate-600 space-y-2">
+                <p>
+                  <strong>You can:</strong> view linked client KYC status, portfolio totals, fee
+                  consents, and recent advice records; create internal tasks, request statement
+                  reports, and send investment instructions for client consent.
+                </p>
+                <p>
+                  <strong>You cannot:</strong> move money, edit balances, change KYC, or execute
+                  advice actions on a client's behalf. Those operations remain with the client and
+                  the AMAX Wealth platform.
+                </p>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
       </Card>
     </div>
   );
