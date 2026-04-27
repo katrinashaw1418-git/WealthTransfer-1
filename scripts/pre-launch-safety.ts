@@ -888,11 +888,37 @@ async function cleanupTrackedRows(): Promise<void> {
       .where(inArray(accounts.userId, created.userIds));
     for (const r of accountRows) pushUnique(created.accountIds, r.id);
   }
+  // FK-walk: pick up any ledger entries posted AGAINST tracked accounts —
+  // even if the parent transaction id isn't in created.transactionIds. This
+  // closes the FK-violation hole where a lifecycle scenario aborts after
+  // posting an entry but before tracking the transactionId, leaving the
+  // entry to break the accounts DELETE at the bottom of this function.
+  // Collect their transactionIds too so the matching ledger_postings rows
+  // (PK = transactionId, FK -> ledger_entries via shared parent tx) get
+  // deleted before the entries themselves.
+  const extraTxForPostings: number[] = [];
+  if (created.accountIds.length > 0) {
+    const acctEntryRows = await db
+      .select({
+        id: ledgerEntries.id,
+        transactionId: ledgerEntries.transactionId,
+      })
+      .from(ledgerEntries)
+      .where(inArray(ledgerEntries.accountId, created.accountIds));
+    for (const r of acctEntryRows) {
+      pushUnique(created.ledgerEntryIds, r.id);
+      pushUnique(extraTxForPostings, r.transactionId);
+    }
+  }
 
-  if (created.transactionIds.length > 0) {
+  // Combined posting-delete set: tracked tx ∪ tx discovered by FK-walk above.
+  const postingTxIds: number[] = [];
+  for (const id of created.transactionIds) pushUnique(postingTxIds, id);
+  for (const id of extraTxForPostings) pushUnique(postingTxIds, id);
+  if (postingTxIds.length > 0) {
     await db
       .delete(ledgerPostings)
-      .where(inArray(ledgerPostings.transactionId, created.transactionIds));
+      .where(inArray(ledgerPostings.transactionId, postingTxIds));
   }
   if (created.ledgerEntryIds.length > 0) {
     await db

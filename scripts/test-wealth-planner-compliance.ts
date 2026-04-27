@@ -241,6 +241,20 @@ async function makeAdviceRecord(clientUserId: number): Promise<number> {
 // Wipe all rows we may have inserted in any prior run for the test users.
 async function cleanupForUserIds(userIds: number[]): Promise<void> {
   if (userIds.length === 0) return;
+  // Self-heal pass: a previous run that aborted between a status flip
+  // (tests #11 / #13) and its restore can leave the live advice record in
+  // 'review_pending'. Force any such rows back to 'issued' BEFORE the
+  // delete pass so the suite is recoverable even if the deletes below are
+  // narrowed in a future change.
+  await db
+    .update(adviceRecords)
+    .set({ status: "issued" })
+    .where(
+      and(
+        inArray(adviceRecords.clientId, userIds),
+        eq(adviceRecords.status, "review_pending"),
+      ),
+    );
   // Find advice records owned by any test client.
   const adviceRows = await db
     .select({ id: adviceRecords.id })
@@ -1299,91 +1313,107 @@ async function test11_reviewPendingLock(opts: {
     .set({ status: "review_pending" })
     .where(eq(adviceRecords.id, opts.adviceRecordId));
 
-  const token = signToken({
-    userId: opts.adviserUserId,
-    username: ADVISER_USERNAME,
-    email: "wpc-adviser@test.invalid",
-    role: "adviser",
-  });
+  // Hoist probe results outside the try so the assertions below can read
+  // them even if a probe throws and the finally re-raises later.
+  let r1!: ReturnType<typeof makeMockReqRes>;
+  let r2!: ReturnType<typeof makeMockReqRes>;
+  let r3!: ReturnType<typeof makeMockReqRes>;
+  let r4!: ReturnType<typeof makeMockReqRes>;
+  let afterObjectives: { id: number }[] = [];
+  let afterDocuments: { id: number }[] = [];
+  let afterVersions: { id: number }[] = [];
+  let lockedNote: { id: number }[] = [];
 
-  const expectedReason = "record_locked_under_review";
+  try {
+    const token = signToken({
+      userId: opts.adviserUserId,
+      username: ADVISER_USERNAME,
+      email: "wpc-adviser@test.invalid",
+      role: "adviser",
+    });
+
+    const lockedNoteBodyLocal =
+      "Compliance reviewer note while record is under review (test 11)";
+
+    // ---- BLOCKED: objective POST ----
+    const postObj = captured.get("POST /api/adviser/client-objectives")!;
+    r1 = makeMockReqRes({
+      token,
+      body: {
+        clientId: opts.clientUserId,
+        adviceRecordId: opts.adviceRecordId,
+        objectiveType: "income",
+        label: "should be locked under review (test 11)",
+      },
+    });
+    await postObj(r1.req, r1.res);
+
+    // ---- BLOCKED: document POST (with adviceRecordId) ----
+    const postDoc = captured.get("POST /api/adviser/client-documents")!;
+    r2 = makeMockReqRes({
+      token,
+      body: {
+        clientId: opts.clientUserId,
+        adviceRecordId: opts.adviceRecordId,
+        documentType: "fact_find",
+        fileName: "locked-under-review.pdf",
+        storageKey: "wpc-locked-under-review-key",
+      },
+    });
+    await postDoc(r2.req, r2.res);
+
+    // ---- BLOCKED: transition POST (issued) ----
+    const postTrans = captured.get(
+      "POST /api/adviser/advice-records/:id/transition",
+    )!;
+    r3 = makeMockReqRes({
+      token,
+      params: { id: String(opts.adviceRecordId) },
+      body: { newStatus: "issued" },
+    });
+    await postTrans(r3.req, r3.res);
+
+    // ---- ALLOWED: note POST stays open ----
+    const postNote = captured.get("POST /api/adviser/client-notes")!;
+    r4 = makeMockReqRes({
+      token,
+      body: {
+        clientUserId: opts.clientUserId,
+        adviceRecordId: opts.adviceRecordId,
+        body: lockedNoteBodyLocal,
+      },
+    });
+    await postNote(r4.req, r4.res);
+
+    // Re-snapshot to assert no objective/document/version leaked through.
+    afterObjectives = await db
+      .select({ id: clientObjectives.id })
+      .from(clientObjectives)
+      .where(eq(clientObjectives.adviceRecordId, opts.adviceRecordId));
+    afterDocuments = await db
+      .select({ id: clientDocuments.id })
+      .from(clientDocuments)
+      .where(eq(clientDocuments.adviceRecordId, opts.adviceRecordId));
+    afterVersions = await db
+      .select({ id: adviceRecordVersions.id })
+      .from(adviceRecordVersions)
+      .where(eq(adviceRecordVersions.adviceRecordId, opts.adviceRecordId));
+
+    lockedNote = await db
+      .select({ id: adviserNotes.id })
+      .from(adviserNotes)
+      .where(eq(adviserNotes.body, lockedNoteBodyLocal));
+  } finally {
+    // Restore original status — runs even if a probe above throws so the
+    // next test in the suite (and any rerun) sees a clean baseline.
+    await db
+      .update(adviceRecords)
+      .set({ status: orig?.status ?? "draft" })
+      .where(eq(adviceRecords.id, opts.adviceRecordId));
+  }
   const lockedNoteBody =
     "Compliance reviewer note while record is under review (test 11)";
-
-  // ---- BLOCKED: objective POST ----
-  const postObj = captured.get("POST /api/adviser/client-objectives")!;
-  const r1 = makeMockReqRes({
-    token,
-    body: {
-      clientId: opts.clientUserId,
-      adviceRecordId: opts.adviceRecordId,
-      objectiveType: "income",
-      label: "should be locked under review (test 11)",
-    },
-  });
-  await postObj(r1.req, r1.res);
-
-  // ---- BLOCKED: document POST (with adviceRecordId) ----
-  const postDoc = captured.get("POST /api/adviser/client-documents")!;
-  const r2 = makeMockReqRes({
-    token,
-    body: {
-      clientId: opts.clientUserId,
-      adviceRecordId: opts.adviceRecordId,
-      documentType: "fact_find",
-      fileName: "locked-under-review.pdf",
-      storageKey: "wpc-locked-under-review-key",
-    },
-  });
-  await postDoc(r2.req, r2.res);
-
-  // ---- BLOCKED: transition POST (issued) ----
-  const postTrans = captured.get(
-    "POST /api/adviser/advice-records/:id/transition",
-  )!;
-  const r3 = makeMockReqRes({
-    token,
-    params: { id: String(opts.adviceRecordId) },
-    body: { newStatus: "issued" },
-  });
-  await postTrans(r3.req, r3.res);
-
-  // ---- ALLOWED: note POST stays open ----
-  const postNote = captured.get("POST /api/adviser/client-notes")!;
-  const r4 = makeMockReqRes({
-    token,
-    body: {
-      clientUserId: opts.clientUserId,
-      adviceRecordId: opts.adviceRecordId,
-      body: lockedNoteBody,
-    },
-  });
-  await postNote(r4.req, r4.res);
-
-  // Re-snapshot to assert no objective/document/version leaked through.
-  const afterObjectives = await db
-    .select({ id: clientObjectives.id })
-    .from(clientObjectives)
-    .where(eq(clientObjectives.adviceRecordId, opts.adviceRecordId));
-  const afterDocuments = await db
-    .select({ id: clientDocuments.id })
-    .from(clientDocuments)
-    .where(eq(clientDocuments.adviceRecordId, opts.adviceRecordId));
-  const afterVersions = await db
-    .select({ id: adviceRecordVersions.id })
-    .from(adviceRecordVersions)
-    .where(eq(adviceRecordVersions.adviceRecordId, opts.adviceRecordId));
-
-  const lockedNote = await db
-    .select({ id: adviserNotes.id })
-    .from(adviserNotes)
-    .where(eq(adviserNotes.body, lockedNoteBody));
-
-  // Restore original status so reruns don't drift.
-  await db
-    .update(adviceRecords)
-    .set({ status: orig?.status ?? "draft" })
-    .where(eq(adviceRecords.id, opts.adviceRecordId));
+  const expectedReason = "record_locked_under_review";
 
   const objBlocked =
     r1.result.statusCode === 423 &&
@@ -1624,6 +1654,9 @@ async function test13_blockedWriteAuditRow(opts: {
   const baselineId = Number(maxBefore?.maxId ?? 0);
 
   // Flip the live row into review_pending so all three gated services trip.
+  // Wrap the probes in try/finally so the restore at the bottom of this
+  // test (which currently lives outside any guard) always runs even if a
+  // probe or audit-log read throws.
   await db
     .update(adviceRecords)
     .set({ status: "review_pending" })
@@ -1670,6 +1703,13 @@ async function test13_blockedWriteAuditRow(opts: {
     },
   ];
 
+  // From here on, every operation either flips the row or could throw —
+  // wrap in try/finally so the restore at the bottom always runs.
+  // Track threw via an explicit boolean so a pathological `throw undefined`
+  // still re-raises after the finally restore.
+  let __t13_didThrow = false;
+  let __t13_thrown: unknown = undefined;
+  try {
   // Mint a real adviser JWT so the route handlers' auth middleware passes
   // and we exercise the production handleError path that maps thrown
   // {status, reason} into a 423 JSON envelope.
@@ -1766,11 +1806,18 @@ async function test13_blockedWriteAuditRow(opts: {
     probes[4].reason = typeof err?.reason === "string" ? err.reason : undefined;
   }
 
-  // Restore original status so reruns and downstream assertions stay clean.
-  await db
-    .update(adviceRecords)
-    .set({ status: origRow?.status ?? "draft" })
-    .where(eq(adviceRecords.id, opts.adviceRecordId));
+  } catch (err) {
+    __t13_didThrow = true;
+    __t13_thrown = err;
+  } finally {
+    // Restore original status so reruns and downstream assertions stay
+    // clean — runs even if a probe above threw.
+    await db
+      .update(adviceRecords)
+      .set({ status: origRow?.status ?? "draft" })
+      .where(eq(adviceRecords.id, opts.adviceRecordId));
+  }
+  if (__t13_didThrow) throw __t13_thrown;
 
   // Pull every blocked-write audit row produced AFTER the snapshot id, for
   // THIS advice record. Filtering on entityId AND id-after-baseline keeps
@@ -2069,6 +2116,26 @@ async function main(): Promise<void> {
     clientUserId,
     adviceRecordId,
   });
+
+  // ---- Post-suite invariant: every advice record we created during this
+  // run must end at status='issued' (or any non-locked status). If a future
+  // edit drops a try/finally restore in test #11 / #13 the assertion below
+  // fires here instead of bleeding into the next pre-launch run.
+  const planneradviceRows = await db
+    .select({ id: adviceRecords.id, status: adviceRecords.status })
+    .from(adviceRecords)
+    .where(
+      inArray(adviceRecords.clientId, [clientUserId, otherClientUserId]),
+    );
+  const stuckUnderReview = planneradviceRows.filter(
+    (r) => r.status === "review_pending",
+  );
+  if (stuckUnderReview.length > 0) {
+    console.error(
+      `\nINVARIANT VIOLATION: ${stuckUnderReview.length} planner advice record(s) left in 'review_pending' after suite. ids=${stuckUnderReview.map((r) => r.id).join(",")}. A test flipped status without restoring it — wrap the flip in try/finally.`,
+    );
+    process.exit(1);
+  }
 
   console.log("");
   for (const name of CANONICAL_ORDER) {
