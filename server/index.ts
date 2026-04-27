@@ -339,158 +339,25 @@ app.use((req, res, next) => {
   // ---------------------------------------------------------------------------
   // Task #23 added `runDailyAccrualsAndRecord` — a thin wrapper that records
   // one row in `fee_accrual_runs` per invocation so admins can see the latest
-  // run without scanning logs. We keep using it here (one record per date),
-  // which means a backfill run produces one record per backfilled date —
-  // exactly the audit trail admins need.
-  const { runDailyAccrualsAndRecord, getLatestAccrualDate } = await import(
-    "./services/fee-engine"
+  // run without scanning logs. The actual cron-tick logic (backfill planning
+  // + per-date loop + kill-switch skip) lives in `runFeeAccrualsCronOnce` so
+  // it can be unit-tested in isolation (Task #168).
+  const { runFeeAccrualsCronOnce } = await import(
+    "./services/cron-fee-deductions"
   );
-
-  const FEE_ACCRUAL_BACKFILL_MAX_DAYS = 14;
-  const DAY_MS = 24 * 60 * 60 * 1000;
-
-  function startOfUtcDay(d: Date): Date {
-    return new Date(
-      Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
-    );
-  }
 
   async function runDailyFeeAccrualsCronInner() {
     // Task #155 — global write kill switch: skip the entire day's accrual
-    // sweep when ALL writes are paused, before any per-feature checks.
+    // sweep when ALL writes are paused, before the per-feature kill-switch
+    // check inside `runFeeAccrualsCronOnce`. Kept inline at the wrapper
+    // so the global skip records a distinct summary line in the dashboard.
     const ks = await assertWritesAllowed("fee-accruals");
     if (!ks.allowed) {
       return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
     }
-
-    // Task #146 — kill switch. When fee_deductions is disabled, scheduled
-    // accrual still represents fee work that operators have asked us to
-    // stop. Bail with a single info-level summary line so the cron leaves
-    // a clean trace in `background_job_runs` (instead of a blank pass that
-    // looks identical to "no rules to accrue").
-    const { isKillSwitchActive } = await import("./services/kill-switch");
-    if (await isKillSwitchActive("fee_deductions")) {
-      const note =
-        "skipped: kill switch fee_deductions is engaged — no accruals run";
-      log(`[fee-accruals] ${note}`);
-      return note;
-    }
-
-    const today = startOfUtcDay(new Date());
-
-    // Decide which UTC dates to run. Default: today only. If a previous
-    // accrual exists and there's a gap, fill in every missed UTC date up to
-    // today (capped). If the table is empty (first ever run) we don't try
-    // to invent history — we just do today.
-    let plannedDates: Date[] = [today];
-    try {
-      const latest = await getLatestAccrualDate();
-      if (latest) {
-        const latestDay = startOfUtcDay(latest);
-        // Both operands are UTC-midnight Dates so the divison is an exact
-        // integer; Math.floor makes the "calendar day count" intent obvious.
-        const gapDays = Math.floor(
-          (today.getTime() - latestDay.getTime()) / DAY_MS,
-        );
-        if (gapDays > 0) {
-          const computed: Date[] = [];
-          for (let i = 1; i <= gapDays; i++) {
-            computed.push(new Date(latestDay.getTime() + i * DAY_MS));
-          }
-          // Keep the most recent N days if the gap exceeds the cap so the
-          // catch-up still reaches `today`; older days fall off.
-          plannedDates =
-            computed.length > FEE_ACCRUAL_BACKFILL_MAX_DAYS
-              ? computed.slice(computed.length - FEE_ACCRUAL_BACKFILL_MAX_DAYS)
-              : computed;
-        }
-      }
-    } catch (e) {
-      console.error(
-        "[fee-accruals] failed to determine backfill range; running today only",
-        e,
-      );
-      plannedDates = [today];
-    }
-
-    let totalInserted = 0;
-    let totalSkipped = 0;
-    let totalDuplicates = 0;
-    const totalsByGate: Record<string, number> = {};
-    const datesRun: string[] = [];
-    const datesFailed: string[] = [];
-
-    for (const accrualDate of plannedDates) {
-      const iso = accrualDate.toISOString().slice(0, 10);
-      try {
-        const s = await runDailyAccrualsAndRecord({
-          accrualDate,
-          trigger: "cron",
-          triggeredByUserId: null,
-        });
-        totalInserted += s.inserted;
-        totalSkipped += s.skipped;
-        totalDuplicates += s.duplicates;
-        for (const [k, v] of Object.entries(s.byGateReason)) {
-          totalsByGate[k] = (totalsByGate[k] ?? 0) + v;
-        }
-        datesRun.push(iso);
-      } catch (e) {
-        // One failed date doesn't block the rest — the next scheduled tick
-        // will retry it (idempotency + per-date transaction make that safe).
-        // The recording wrapper already wrote a `fee_accrual_runs` row with
-        // errorMessage set before re-throwing, so the failure is visible in
-        // the admin UI too.
-        console.error(`[fee-accruals] cron error for ${iso}`, e);
-        datesFailed.push(iso);
-      }
-    }
-
-    const gateBreakdown =
-      Object.entries(totalsByGate)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(",") || "none";
-    const todayIso = today.toISOString().slice(0, 10);
-    const failedSuffix =
-      datesFailed.length > 0
-        ? `, ${datesFailed.length} failed (${datesFailed.join(",")})`
-        : "";
-
-    // "today only" is reserved for the case where the cron PLANNED a single
-    // tick (no backfill needed). If we planned multiple dates and only some
-    // succeeded, we still report it as a backfill run so operators can see
-    // the failed dates in the log line above.
-    const plannedTodayOnly =
-      plannedDates.length === 1 &&
-      plannedDates[0].toISOString().slice(0, 10) === todayIso;
-
-    let summaryLine: string;
-    if (plannedTodayOnly) {
-      summaryLine =
-        `for ${todayIso} (today only): ` +
-        `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
-        `${totalDuplicates} duplicate(s)${failedSuffix}`;
-      log(`[fee-accruals] completed ${summaryLine}`);
-    } else {
-      const firstPlanned = plannedDates[0].toISOString().slice(0, 10);
-      const lastPlanned = plannedDates[plannedDates.length - 1]
-        .toISOString()
-        .slice(0, 10);
-      // "backfilled N" counts past-day catch-ups (i.e. planned dates other
-      // than today), regardless of which actually succeeded — that matches
-      // operator intent ("we attempted to fill N missed days").
-      const backfilled = plannedDates.filter(
-        (d) => d.toISOString().slice(0, 10) !== todayIso,
-      ).length;
-      summaryLine =
-        `for ${firstPlanned}..${lastPlanned} (backfilled ${backfilled} day(s)): ` +
-        `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
-        `${totalDuplicates} duplicate(s)${failedSuffix}`;
-      if (datesRun.length > 0 || datesFailed.length > 0) {
-        log(`[fee-accruals] completed ${summaryLine}`);
-      }
-    }
-    return summaryLine;
+    // Task #168 — the per-feature kill-switch skip + backfill loop now lives
+    // in `runFeeAccrualsCronOnce` so it can be unit-tested in isolation.
+    return runFeeAccrualsCronOnce();
   }
 
   // Outer wrapper so a clean per-tick summary lands in `background_job_runs`.
@@ -645,8 +512,12 @@ app.use((req, res, next) => {
   // settle pass has had its tracking columns initialised before the sweep
   // visits it.
   // ---------------------------------------------------------------------------
-  const { runInsufficientFundsSweep } = await import(
-    "./services/insufficient-funds-sweep"
+  // Task #168 — the actual per-tick logic (kill-switch skip + sweep call +
+  // summary line) lives in `runInsufficientFundsSweepCronOnce` so it can be
+  // unit-tested in isolation. The wrapper here only owns scheduling and the
+  // background-job-run record.
+  const { runInsufficientFundsSweepCronOnce } = await import(
+    "./services/cron-fee-deductions"
   );
 
   async function runInsufficientFundsSweepCron() {
@@ -662,31 +533,10 @@ app.use((req, res, next) => {
         if (!ks.allowed) {
           return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
         }
-        // Task #146 — kill switch. Mirror the fee-accruals cron skip:
-        // emit an explicit, recognisable summary line so operators can
-        // tell "we skipped because the switch is engaged" apart from
-        // "we ran and there was nothing to do" in background_job_runs.
-        // The service itself also bails to be safe for any non-cron
-        // caller, but the cron summary is what shows in the dashboard.
-        const { isKillSwitchActive } = await import(
-          "./services/kill-switch"
-        );
-        if (await isKillSwitchActive("fee_deductions")) {
-          const note =
-            "skipped: kill switch fee_deductions is engaged — no settlements attempted";
-          log(`[insufficient-funds-sweep] ${note}`);
-          return note;
-        }
-        const r = await runInsufficientFundsSweep();
-        // The service returns a structured summary; surface the key counts so
-        // the dashboard's "summary" cell tells operators what happened.
-        const parts: string[] = [];
-        if (r && typeof r === "object") {
-          for (const [k, v] of Object.entries(r)) {
-            if (typeof v === "number") parts.push(`${k}=${v}`);
-          }
-        }
-        return parts.length > 0 ? parts.join(", ") : "completed";
+        // Task #168 — per-feature `fee_deductions` kill-switch skip + sweep
+        // call live in `runInsufficientFundsSweepCronOnce` so they can be
+        // unit-tested in isolation.
+        return runInsufficientFundsSweepCronOnce();
       });
     } catch (e) {
       console.error("[insufficient-funds-sweep] cron error", e);
