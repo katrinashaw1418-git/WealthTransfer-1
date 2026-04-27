@@ -256,6 +256,13 @@ const ALERT_TYPES: AlertTypeDef[] = [
       "Daily unattended run of scripts/go-no-go.ts. Info-level rows carry the latest GO report; alert-level rows mean a NO-GO verdict was paged to on-call. The full markdown report lives under details.report; the runner-side path under details.reportPath.",
     ackable: false,
   },
+  {
+    source: "rate-limit-abuse",
+    label: "Auth rate-limit abuse",
+    description:
+      "An IP or username has tripped one of the auth-surface rate limiters (login / forgot-password / reset-password) more than the configured threshold inside the configured window. Each trip is also recorded in audit_logs with action=rate_limit_exceeded for forensics. Threshold and window: RATE_LIMIT_ALERT_THRESHOLD (default 20) and RATE_LIMIT_ALERT_WINDOW_MINUTES (default 60).",
+    ackable: false,
+  },
 ];
 
 const ALERT_TYPE_BY_SOURCE = new Map<string, AlertTypeDef>(

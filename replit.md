@@ -1,5 +1,28 @@
 # Wealth Management Platform
 
+## Recent Changes (April 2026) — Task #163: Alert security on repeated rate-limiter trips
+
+The login / forgot-password / reset-password limiters now record every 429 to the existing `audit_logs` security table and, when an offender crosses the configured threshold inside the configured window, page an operator through the existing alert pipeline. A real credential-stuffing or token-fuzzing run was previously invisible — it tripped the limiter over and over and we kept no record.
+
+**New module** (`server/services/rate-limit-alerts.ts`):
+- `recordRateLimitTrip(req, { limiter, route })` writes one `audit_logs` row with action `rate_limit_exceeded`, entityType `rate_limiter`, entityId = the route, and metadata `{ limiter, route, ip, username }`. Username is read off `req.body.username` (login + forgot-password schemas), lower-cased, and capped at 256 chars; reset-password has no username so only the IP axis is used.
+- After insert, runs two count queries against `audit_logs` filtered by `(action, entityId, ip_address)` and `(action, entityId, metadata->>'username')` inside `now() - RATE_LIMIT_ALERT_WINDOW_MINUTES`. Either count crossing `RATE_LIMIT_ALERT_THRESHOLD` triggers a `notifyOperator({ source: "rate-limit-abuse", severity: "warning", … })` dispatch with `tripCountBucket = floor(count / threshold) * threshold` so the dispatcher's payload-hash dedupe collapses repeats inside a bucket but re-fires when the next multiple is crossed (20 → 40 → 60 …).
+- Defaults: threshold=20, window=60min. Both env vars use a graceful fall-back-to-default for invalid values (logged warning) so a typo cannot silently disable the watcher. Read at call time so .env edits are picked up without a restart.
+- Best-effort throughout: a failure inside the recorder, the aggregation, or the notify call is logged loudly but never blocks the 429 response — otherwise an alerting outage would silently disable the limiter's user-visible behaviour. The audit row is the canary; if even step 1 fails the function returns early with `alerted=false`.
+
+**Wiring** (`server/routes.ts`):
+- Each of the three auth-surface limiters (`loginLimiter`, `forgotPasswordLimiter`, `resetPasswordLimiter`) gets a `handler` callback built by a small factory `makeAuthLimiterHandler(limiter, route)`. The handler awaits `recordRateLimitTrip` and then sends `res.status(options.statusCode).json(options.message)` so the 429 body / status / standard-headers contract stays IDENTICAL to the pre-#163 default-handler behaviour. Adding the handler is purely additive observability.
+- Imports `Response` and `NextFunction` types from `express` to type the handler factory.
+
+**Admin UI** (`client/src/pages/admin/operator-alerts.tsx`):
+- New `rate-limit-abuse` row added to the `ALERT_TYPES` legend so operators viewing the alerts page see what the source means without re-reading code. Marked `ackable: false` — every wave of abuse is worth a fresh look, and the natural payload-hash dedupe + bucketed count already keeps the inbox quiet for steady-state attackers.
+
+**Notification target** is configured through the existing `OPERATOR_ALERT_WEBHOOK_URL` (Slack/email forwarder) — no rate-limit-specific knob, so the security team has one place to look across all sources.
+
+**Tests** (`server/services/rate-limit-alerts.test.ts`, 6 cases): audit-row contract (one row per trip with all fields including lower-cased username), no-alert-below-threshold, alert-on-crossing (one alert per offender axis: ip + username, both with the right bucket / threshold / window in the payload), IP-only path when no username is present, and env-var fallback for both invalid threshold and invalid window. The audit_logs rows are intentionally NOT scrubbed by `afterEach` — Task #149 made the table append-only via the `audit_logs_block_delete` trigger — so each test uses a unique-per-run route + IP to guarantee isolation across runs and across test files.
+
+**Files**: `server/services/rate-limit-alerts.ts` (new), `server/services/rate-limit-alerts.test.ts` (new), `server/routes.ts` (handler factory + 3 limiter `handler:` props + Response/NextFunction import), `client/src/pages/admin/operator-alerts.tsx` (legend row).
+
 ## Recent Changes (April 2026) — Task #173: Prometheus /metrics endpoint for trend dashboards
 
 The Task #157 `/health` and `/ready` endpoints answer "is the service up right now?". Task #173 adds the missing trend signal: a Prometheus-format `GET /metrics` endpoint mounted alongside them so an operator dashboard can chart request rates, latency percentiles, error counts per route, DB pool saturation, and background-job durations over time.

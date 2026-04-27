@@ -1,8 +1,8 @@
-import type { Express, Request } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { createHash, randomBytes } from "crypto";
 import { z } from "zod";
-import rateLimit from "express-rate-limit";
+import rateLimit, { type Options as RateLimitOptions } from "express-rate-limit";
 import { and, desc, eq, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 import { storage } from "./storage";
@@ -997,6 +997,51 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // already set in server/index.ts, that resolves to the real client IP
   // behind Replit's reverse proxy.
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // TASK #163 — Limiter trip recorder + repeat-offender operator alert
+  // ---------------------------------------------------------------------------
+  // Each of the three auth-surface limiters below wires a `handler` callback
+  // that (a) records a structured `audit_logs` row tagged
+  // `rate_limit_exceeded` and (b) dispatches an operator alert when the
+  // configured per-window threshold is crossed. The recorder is best-effort
+  // — failures inside it are logged loudly but never block the 429 response
+  // the user is about to receive (otherwise an outage in the alerting path
+  // would silently disable the limiter's user-visible behaviour).
+  //
+  // We send the response with `res.status(options.statusCode).json(options.message)`
+  // so the body / status / standard-headers contract stays IDENTICAL to the
+  // pre-Task-#163 default-handler behaviour. Adding the handler is purely
+  // additive observability.
+  // ---------------------------------------------------------------------------
+  const { recordRateLimitTrip } = await import("./services/rate-limit-alerts");
+
+  function makeAuthLimiterHandler(limiter: string, route: string) {
+    return async (
+      req: Request,
+      res: Response,
+      _next: NextFunction,
+      options: RateLimitOptions,
+    ) => {
+      try {
+        await recordRateLimitTrip(req, { limiter, route });
+      } catch (err) {
+        console.error(
+          `[rate-limit-handler] recorder threw for ${limiter} @ ${route}`,
+          (err as Error)?.message ?? err,
+        );
+      }
+      // express-rate-limit's `Options.message` is typed as `any` upstream
+      // (it can be a string, an object, or a value-determining middleware);
+      // we never configure the middleware form on these three limiters, so a
+      // narrow `string | object` is the right surface to send.
+      const message: string | object =
+        typeof options.message === "string" || typeof options.message === "object"
+          ? (options.message as string | object)
+          : { error: "Too many requests" };
+      res.status(options.statusCode).json(message);
+    };
+  }
+
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
@@ -1006,6 +1051,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       error:
         "Too many sign-in attempts from this address. Please try again in a few minutes.",
     },
+    handler: makeAuthLimiterHandler("loginLimiter", "/api/auth/login"),
   });
   const forgotPasswordLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -1016,6 +1062,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       error:
         "Too many password reset requests. Please wait a few minutes before trying again.",
     },
+    handler: makeAuthLimiterHandler(
+      "forgotPasswordLimiter",
+      "/api/auth/forgot-password",
+    ),
   });
   const resetPasswordLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -1026,6 +1076,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       error:
         "Too many password reset attempts. Please wait a few minutes before trying again.",
     },
+    handler: makeAuthLimiterHandler(
+      "resetPasswordLimiter",
+      "/api/auth/reset-password",
+    ),
   });
 
   // Login — returns JWT on valid credentials
