@@ -77,7 +77,7 @@
 
 import "./_bootstrap-test-env";
 import type { Express, Request } from "express";
-import { and, eq, inArray, like, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../server/db";
 import {
   users,
@@ -2159,7 +2159,14 @@ async function main(): Promise<void> {
     })
     .from(adviceRecords)
     .innerJoin(users, eq(adviceRecords.clientId, users.id))
-    .where(like(users.username, "__wpc_test_%"));
+    // Underscore is a single-char wildcard in SQL LIKE, so a naive
+    // `LIKE '__wpc_test_%'` would match e.g. 'aXwpc_testZ...'. Escape
+    // every literal underscore in the prefix with a backslash and
+    // declare the escape character explicitly so only true
+    // '__wpc_test_*' usernames match.
+    .where(
+      sql`${users.username} LIKE '\_\_wpc\_test\_%' ESCAPE '\\'`,
+    );
   const offending = planneradviceRows.filter((r) => r.status !== "issued");
   if (offending.length > 0) {
     console.error(
