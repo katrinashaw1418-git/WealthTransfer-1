@@ -101,6 +101,7 @@ import {
 } from "./services/error-log";
 import {
   getAllKillSwitchStates,
+  getKillSwitchBlockedStats,
   getKillSwitchHistory,
   isKillSwitchActive,
   isKillSwitchKey,
@@ -4735,6 +4736,40 @@ export function registerAdminRoutes(app: Express): void {
             : null,
         })),
         users: usersMap,
+        // Task #182 — initial blocked-attempt counts so the widget renders
+        // a real "0 in last 5m" instead of an "unknown" placeholder on the
+        // first paint. The widget polls the dedicated /blocked-attempts
+        // endpoint after that for cheap refreshes.
+        blockedAttempts: getKillSwitchBlockedStats().map((s) => ({
+          key: s.key,
+          last5m: s.last5m,
+          last15m: s.last15m,
+          last60m: s.last60m,
+          lastBlockedAt: s.lastBlockedAt
+            ? s.lastBlockedAt.toISOString()
+            : null,
+        })),
+      };
+    }),
+  );
+
+  // Task #182 — Per-switch blocked-attempt counters served from an
+  // in-memory ring buffer. Cheap enough to poll every few seconds from
+  // the admin Kill switches page so operators get a live "we're actually
+  // rejecting traffic right now" signal after engaging a switch.
+  app.get(
+    "/api/admin/kill-switches/blocked-attempts",
+    adminRoute(async () => {
+      return {
+        blockedAttempts: getKillSwitchBlockedStats().map((s) => ({
+          key: s.key,
+          last5m: s.last5m,
+          last15m: s.last15m,
+          last60m: s.last60m,
+          lastBlockedAt: s.lastBlockedAt
+            ? s.lastBlockedAt.toISOString()
+            : null,
+        })),
       };
     }),
   );

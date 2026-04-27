@@ -56,7 +56,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Power, Lock, History, AlertTriangle } from "lucide-react";
+import { Power, Lock, History, AlertTriangle, ShieldOff } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
@@ -80,9 +80,22 @@ interface KillSwitchRow {
   lastToggledAt: string | null;
 }
 
+interface BlockedAttemptStat {
+  key: SwitchKey;
+  last5m: number;
+  last15m: number;
+  last60m: number;
+  lastBlockedAt: string | null;
+}
+
 interface KillSwitchListResponse {
   switches: KillSwitchRow[];
   users: Record<string, { displayName: string }>;
+  blockedAttempts: BlockedAttemptStat[];
+}
+
+interface BlockedAttemptsResponse {
+  blockedAttempts: BlockedAttemptStat[];
 }
 
 interface KillSwitchHistoryEntry {
@@ -339,6 +352,128 @@ function HistorySheet({
 }
 
 // -----------------------------------------------------------------------------
+// Task #182 — Blocked attempts widget
+// -----------------------------------------------------------------------------
+// Shows operators a per-switch live count of HTTP 503 `operation_disabled`
+// responses for the last 5/15/60 minutes plus the most-recent timestamp.
+// Counts come from a tiny in-memory ring buffer on the server and reset on
+// boot, so the widget is a "right now" health check rather than an audit
+// (which is already covered by the audit log + operator alerts).
+// -----------------------------------------------------------------------------
+function BlockedAttemptsWidget({
+  switches,
+  initialStats,
+}: {
+  switches: KillSwitchRow[];
+  initialStats: BlockedAttemptStat[];
+}) {
+  const { data } = useQuery<BlockedAttemptsResponse>({
+    queryKey: ["/api/admin/kill-switches/blocked-attempts"],
+    initialData: { blockedAttempts: initialStats },
+    // Cheap endpoint (in-memory only) — poll often so operators see the
+    // counter tick up within a few seconds of engaging a switch.
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
+  });
+
+  const statsByKey = new Map<SwitchKey, BlockedAttemptStat>();
+  for (const s of data?.blockedAttempts ?? []) statsByKey.set(s.key, s);
+
+  return (
+    <Card data-testid="card-blocked-attempts">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ShieldOff className="h-4 w-4" />
+          Blocked attempts
+        </CardTitle>
+        <CardDescription>
+          HTTP 503 <code>operation_disabled</code> responses returned by the
+          guarded money-movement endpoints. Counts come from an in-memory
+          buffer (resets on server restart) so you can confirm traffic is
+          actually being rejected after engaging a switch.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          {switches.map((row) => {
+            const s = statsByKey.get(row.key) ?? {
+              key: row.key,
+              last5m: 0,
+              last15m: 0,
+              last60m: 0,
+              lastBlockedAt: null,
+            };
+            return (
+              <div
+                key={row.key}
+                className="border rounded-md p-3 space-y-2"
+                data-testid={`blocked-stats-${row.key}`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="font-medium text-sm">{row.label}</div>
+                  {row.enabled ? (
+                    <Badge
+                      variant="outline"
+                      className="bg-red-100 text-red-800 border-red-300 text-xs"
+                    >
+                      Engaged
+                    </Badge>
+                  ) : null}
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <div
+                      className="text-lg font-semibold tabular-nums"
+                      data-testid={`blocked-count-5m-${row.key}`}
+                    >
+                      {s.last5m}
+                    </div>
+                    <div className="text-[10px] uppercase text-muted-foreground">
+                      5 min
+                    </div>
+                  </div>
+                  <div>
+                    <div
+                      className="text-lg font-semibold tabular-nums"
+                      data-testid={`blocked-count-15m-${row.key}`}
+                    >
+                      {s.last15m}
+                    </div>
+                    <div className="text-[10px] uppercase text-muted-foreground">
+                      15 min
+                    </div>
+                  </div>
+                  <div>
+                    <div
+                      className="text-lg font-semibold tabular-nums"
+                      data-testid={`blocked-count-60m-${row.key}`}
+                    >
+                      {s.last60m}
+                    </div>
+                    <div className="text-[10px] uppercase text-muted-foreground">
+                      60 min
+                    </div>
+                  </div>
+                </div>
+                <div
+                  className="text-xs text-muted-foreground border-t pt-2"
+                  data-testid={`blocked-last-seen-${row.key}`}
+                >
+                  Last blocked:{" "}
+                  {s.lastBlockedAt
+                    ? formatDateTime(s.lastBlockedAt)
+                    : "never since boot"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// -----------------------------------------------------------------------------
 // Main page
 // -----------------------------------------------------------------------------
 export default function AdminKillSwitches() {
@@ -380,6 +515,13 @@ export default function AdminKillSwitches() {
               </span>
             </CardContent>
           </Card>
+        )}
+
+        {!isLoading && (
+          <BlockedAttemptsWidget
+            switches={data?.switches ?? []}
+            initialStats={data?.blockedAttempts ?? []}
+          />
         )}
 
         <Card>

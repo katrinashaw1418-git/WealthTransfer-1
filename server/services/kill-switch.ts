@@ -211,18 +211,130 @@ export async function assertKillSwitchOff(
 /**
  * Map a thrown error into the canonical 503 response envelope. Returns
  * true if the response was sent so callers can `if (handled) return`.
+ *
+ * Also records the blocked attempt in the in-memory ring buffer so the
+ * admin "Blocked attempts" widget (Task #182) can show operators that
+ * traffic is actually being rejected after engaging a switch — without
+ * having to grep server logs.
  */
 export function sendKillSwitchResponse(
   res: { status: (code: number) => any },
   err: unknown,
 ): boolean {
   if (err instanceof KillSwitchActiveError) {
+    recordKillSwitchBlocked(err.switchKey);
     res
       .status(503)
       .json({ error: "operation_disabled", switch: err.switchKey });
     return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Task #182 — Blocked-attempt ring buffer
+// ---------------------------------------------------------------------------
+// When a money-movement route returns the canonical 503 envelope we also
+// record a millisecond timestamp into a tiny per-switch ring buffer. The
+// admin Kill switches page reads aggregated counts (5/15/60 min windows)
+// from this buffer so operators can confirm "we're actually rejecting
+// traffic" after engaging a switch, without having to grep server logs.
+//
+// Design notes:
+//   * In-memory only — no DB write per blocked request. Resets on boot,
+//     which is acceptable: the widget is a "right now" health check, not
+//     a long-term audit. The audit log + operator alert already cover
+//     that on the toggle path.
+//   * Fixed-size circular buffer per switch. 1024 slots is enough to hold
+//     every blocked attempt over a 60-min window as long as sustained
+//     traffic stays below ~0.28 hits/sec (≈17/min) — well above what a
+//     kill-switched endpoint should ever see, since well-behaved clients
+//     back off after a single 503. Under sustained higher traffic the
+//     ring wraps and the oldest timestamps silently drop, so the
+//     counters become a lower bound for the 60-min window; the 5-min
+//     and 15-min counts (and the "last blocked" timestamp) stay
+//     accurate for any realistic burst size.
+//   * O(N) on read with N <= 1024 per switch is trivial; we don't need
+//     a more complex structure.
+
+const BLOCKED_RING_SIZE = 1024;
+const WINDOW_5M_MS = 5 * 60 * 1000;
+const WINDOW_15M_MS = 15 * 60 * 1000;
+const WINDOW_60M_MS = 60 * 60 * 1000;
+
+interface BlockedRing {
+  // Pre-allocated slot array; only the first `count` entries (in insertion
+  // order, modulo BLOCKED_RING_SIZE starting at `next`) hold real data.
+  timestamps: number[];
+  next: number;
+  count: number;
+}
+
+const blockedRings = new Map<KillSwitchKey, BlockedRing>();
+
+function makeEmptyRing(): BlockedRing {
+  return {
+    timestamps: new Array(BLOCKED_RING_SIZE),
+    next: 0,
+    count: 0,
+  };
+}
+
+for (const k of killSwitchKeyValues) {
+  blockedRings.set(k, makeEmptyRing());
+}
+
+export function recordKillSwitchBlocked(key: KillSwitchKey): void {
+  const ring = blockedRings.get(key);
+  if (!ring) return;
+  ring.timestamps[ring.next] = Date.now();
+  ring.next = (ring.next + 1) % BLOCKED_RING_SIZE;
+  if (ring.count < BLOCKED_RING_SIZE) ring.count += 1;
+}
+
+export interface KillSwitchBlockedStats {
+  key: KillSwitchKey;
+  last5m: number;
+  last15m: number;
+  last60m: number;
+  lastBlockedAt: Date | null;
+}
+
+export function getKillSwitchBlockedStats(): KillSwitchBlockedStats[] {
+  const now = Date.now();
+  const c5 = now - WINDOW_5M_MS;
+  const c15 = now - WINDOW_15M_MS;
+  const c60 = now - WINDOW_60M_MS;
+
+  return killSwitchKeyValues.map((key) => {
+    const ring = blockedRings.get(key) ?? makeEmptyRing();
+    let last5m = 0;
+    let last15m = 0;
+    let last60m = 0;
+    let lastBlockedAt: number | null = null;
+    for (let i = 0; i < ring.count; i++) {
+      const t = ring.timestamps[i];
+      if (typeof t !== "number") continue;
+      if (lastBlockedAt === null || t > lastBlockedAt) lastBlockedAt = t;
+      if (t >= c60) last60m += 1;
+      if (t >= c15) last15m += 1;
+      if (t >= c5) last5m += 1;
+    }
+    return {
+      key,
+      last5m,
+      last15m,
+      last60m,
+      lastBlockedAt: lastBlockedAt !== null ? new Date(lastBlockedAt) : null,
+    };
+  });
+}
+
+// Test hook — wipes all rings so a fresh suite run starts at zero counts.
+export function _resetKillSwitchBlockedRings(): void {
+  for (const k of killSwitchKeyValues) {
+    blockedRings.set(k, makeEmptyRing());
+  }
 }
 
 // ---------------------------------------------------------------------------
