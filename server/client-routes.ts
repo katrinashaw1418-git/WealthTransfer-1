@@ -572,12 +572,20 @@ export function registerClientRoutes(app: Express): void {
   //   the where clause is `clientUserId = auth.userId`, and we only ever
   //   project the deduction columns that are safe to expose to the client
   //   (we deliberately omit operator-only fields like accrualIds,
-  //   approvedByUserId, idempotencyKey, failureReason, rejectedReason).
+  //   approvedByUserId, idempotencyKey, rejectedReason).
+  //
+  // Task #204 — `failureReason` is selectively exposed for rows in
+  //   `insufficient_funds` status ONLY, so the client banner can render
+  //   "you need $X more to clear this fee". We strip it for every other
+  //   status so an operator's diagnostic note on a non-IF row (which uses
+  //   the same column for unrelated settlement crashes) cannot leak. The
+  //   schema bookkeeping fields `lastRecheckedAt`, `clientNotifiedAt`,
+  //   `clientNotificationCount` remain server-side only.
   // ===========================================================================
   app.get("/api/client/fee-deductions", async (req, res) => {
     try {
       const auth = requireAuth(req);
-      const rows = await db
+      const rawRows = await db
         .select({
           id: adviserFeeDeductions.id,
           adviserUserId: adviserFeeDeductions.adviserUserId,
@@ -596,11 +604,23 @@ export function registerClientRoutes(app: Express): void {
           reversedAt: adviserFeeDeductions.reversedAt,
           reversedReason: adviserFeeDeductions.reversedReason,
           reversalTransactionId: adviserFeeDeductions.reversalTransactionId,
+          // Task #204 — projected here, gated below for non-IF rows.
+          failureReason: adviserFeeDeductions.failureReason,
           createdAt: adviserFeeDeductions.createdAt,
         })
         .from(adviserFeeDeductions)
         .where(eq(adviserFeeDeductions.clientUserId, auth.userId))
         .orderBy(desc(adviserFeeDeductions.createdAt));
+
+      // Task #204 render contract — strip failureReason for any row whose
+      // CURRENT status isn't `insufficient_funds`. A previously-IF row that
+      // has since been settled must NOT keep leaking its old shortfall
+      // message to the client even though the column lingers in the table.
+      const rows = rawRows.map((r) => ({
+        ...r,
+        failureReason:
+          r.status === "insufficient_funds" ? r.failureReason : null,
+      }));
 
       const usersMap = await getUserNameMap(rows.map((r) => r.adviserUserId));
       res.json({ items: rows, users: usersMap });

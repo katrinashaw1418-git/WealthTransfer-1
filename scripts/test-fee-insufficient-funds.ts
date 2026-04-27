@@ -50,6 +50,11 @@ import {
   settleApprovedDeduction,
   InsufficientFundsError,
 } from "../server/services/fee-engine";
+// Task #204 — sweep + shortfall parser regression assertions.
+// We import the SAME entry point the cron and the new admin endpoint use,
+// so this script also acts as a regression gate for both call sites.
+import { runInsufficientFundsSweep } from "../server/services/insufficient-funds-sweep";
+import { parseShortfallFromFailureReason } from "../client/src/lib/insufficient-funds";
 
 const CLIENT_USERNAME = "__feegate_test_client__";
 const ADVISER_USERNAME = "__feegate_test_adviser__";
@@ -396,6 +401,175 @@ async function testSufficient(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Task #204 — sweep + parser regression tests.
+//
+// Exercises the full insufficient-funds workflow as a single deterministic
+// sequence:
+//
+//   1. Insert a fresh deduction and force it into 'insufficient_funds' via
+//      a direct settle attempt against an empty wallet.
+//   2. Verify the shared `parseShortfallFromFailureReason` parser extracts
+//      the same numeric shortfall the engine wrote into failureReason —
+//      the client banner relies on this regex matching the engine's
+//      message format exactly. If the engine ever changes the format, this
+//      test fails loudly.
+//   3. Run `runInsufficientFundsSweep()` against the empty wallet and
+//      assert it reports `checked >= 1, settled === 0,
+//      stillInsufficient >= 1`. This proves the same entry point used by
+//      the daily cron AND the new admin manual-trigger endpoint correctly
+//      identifies the held row without settling it.
+//   4. Top the wallet up above the required amount and re-run the sweep.
+//      Assert it reports `settled === 1, stillInsufficient === 0`.
+//   5. Assert the deduction row is now CLEAN: status='settled',
+//      failureReason cleared, lastRecheckedAt set (sweep timestamp),
+//      settledTransactionId populated. This catches any regression where
+//      the sweep settles a row but leaves stale IF bookkeeping behind.
+// ---------------------------------------------------------------------------
+async function testSweepWorkflow(opts: {
+  clientUserId: number;
+  adviserUserId: number;
+  approverUserId: number;
+}) {
+  // testSufficient above credited the client ledger account by 500.00 to
+  // settle its deduction. The fee engine reads the ledger sum (not the
+  // wallet cache) when checking sufficient funds, so we MUST wipe both
+  // ledger entries and the dependent transactions/deductions before
+  // inserting a new deduction — otherwise the row would settle on first
+  // attempt instead of falling into 'insufficient_funds'. cleanupForUser
+  // is the same FK-walk used at start-of-run / end-of-run, so it leaves
+  // the user row intact but resets balance to zero.
+  await cleanupForUser(opts.clientUserId);
+  await cleanupForUser(opts.adviserUserId);
+  await ensureFreshTestWallet(opts.clientUserId);
+  await ensureFreshTestWallet(opts.adviserUserId);
+
+  // Fresh deduction so the assertions below can target a single ID without
+  // colliding with anything else.
+  const deductionId = await insertPendingDeduction({
+    clientUserId: opts.clientUserId,
+    adviserUserId: opts.adviserUserId,
+    totalAccrued: "150.0000",
+    adviserShare: "100.0000",
+  });
+
+  // 1. Force the row into 'insufficient_funds' by invoking
+  //    settleApprovedDeduction against the now-empty ledger. The engine
+  //    writes the canonical failureReason string the parser depends on.
+  try {
+    await settleApprovedDeduction({
+      deductionId,
+      approverUserId: opts.approverUserId,
+    });
+  } catch (err) {
+    if (!(err instanceof InsufficientFundsError)) {
+      fail(
+        "sweep test fixture: forced into insufficient_funds",
+        `expected InsufficientFundsError, got ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+  }
+  pass("sweep test fixture: forced into insufficient_funds");
+
+  // 2. Parser-vs-engine regression. Read the actual failureReason the
+  //    engine wrote and feed it through the shared parser the banner uses.
+  const [held] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, deductionId));
+  if (!held || held.status !== "insufficient_funds" || !held.failureReason) {
+    fail(
+      "sweep test fixture: deduction is in IF state with failureReason",
+      `status=${held?.status}, failureReason=${held?.failureReason ?? "<null>"}`,
+    );
+    return;
+  }
+  const parsed = parseShortfallFromFailureReason(held.failureReason);
+  // totalAccrued = 150, available = 0 -> shortfall = "150.00" (the parser
+  // returns a fixed-2 string so the banner can render it directly without
+  // any further formatting).
+  if (
+    parsed &&
+    parsed.currency === TEST_CURRENCY &&
+    Number(parsed.shortfall) === 150
+  ) {
+    pass(
+      "shortfall parser extracts numeric gap from engine failureReason",
+      `parsed=${JSON.stringify(parsed)}`,
+    );
+  } else {
+    fail(
+      "shortfall parser extracts numeric gap from engine failureReason",
+      `failureReason=${held.failureReason}, parsed=${JSON.stringify(parsed)}`,
+    );
+  }
+
+  // 3. Sweep against the still-empty wallet — must check the row, must
+  //    NOT settle it, and must report it as still insufficient.
+  const sweepHeld = await runInsufficientFundsSweep();
+  if (
+    sweepHeld.checked >= 1 &&
+    sweepHeld.settled === 0 &&
+    sweepHeld.stillInsufficient >= 1
+  ) {
+    pass(
+      "sweep on empty wallet reports stillInsufficient and settles nothing",
+      `summary=${JSON.stringify(sweepHeld)}`,
+    );
+  } else {
+    fail(
+      "sweep on empty wallet reports stillInsufficient and settles nothing",
+      `summary=${JSON.stringify(sweepHeld)}`,
+    );
+  }
+
+  // 4. Top up + re-run sweep. The row must now flip to settled.
+  await topUpClient(opts.clientUserId, "500.00");
+  const sweepSettled = await runInsufficientFundsSweep();
+  if (
+    sweepSettled.checked >= 1 &&
+    sweepSettled.settled >= 1 &&
+    sweepSettled.errors === 0
+  ) {
+    pass(
+      "sweep after top-up reports settled >= 1 and zero errors",
+      `summary=${JSON.stringify(sweepSettled)}`,
+    );
+  } else {
+    fail(
+      "sweep after top-up reports settled >= 1 and zero errors",
+      `summary=${JSON.stringify(sweepSettled)}`,
+    );
+  }
+
+  // 5. Settled-row-clean — the freshly-settled row must not retain stale
+  //    IF bookkeeping. failureReason must be cleared (so the client banner
+  //    can never re-resurrect the row), settledTransactionId must point at
+  //    the settle transaction the sweep just posted, and lastRecheckedAt
+  //    must be populated (the sweep stamps it on every visit).
+  const [after] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, deductionId));
+  if (
+    after?.status === "settled" &&
+    after.failureReason === null &&
+    after.settledTransactionId !== null &&
+    after.lastRecheckedAt !== null
+  ) {
+    pass(
+      "sweep-settled row is clean (no stale IF bookkeeping)",
+      `status=${after.status}, settledTx=${after.settledTransactionId}, lastRecheckedAt=${after.lastRecheckedAt?.toISOString?.() ?? after.lastRecheckedAt}`,
+    );
+  } else {
+    fail(
+      "sweep-settled row is clean (no stale IF bookkeeping)",
+      `status=${after?.status}, failureReason=${after?.failureReason ?? "<null>"}, settledTx=${after?.settledTransactionId ?? "<null>"}, lastRecheckedAt=${after?.lastRecheckedAt ?? "<null>"}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
@@ -439,6 +613,15 @@ async function main() {
 
     await testSufficient({
       deductionId,
+      clientUserId,
+      adviserUserId,
+      approverUserId: adviserUserId,
+    });
+
+    // Task #204 — sweep + parser regression suite. Runs against a fresh
+    // deduction so the assertions don't collide with the row mutated by
+    // testInsufficient/testSufficient above.
+    await testSweepWorkflow({
       clientUserId,
       adviserUserId,
       approverUserId: adviserUserId,

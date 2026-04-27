@@ -1482,6 +1482,16 @@ export const walletLedgerDriftAcknowledgements = pgTable(
       precision: 18,
       scale: 8,
     }).notNull(),
+    // Task #203 — distinguishes a "we are aware, investigating" acknowledgement
+    // (kind='acknowledge') from a "we believe this is fixed and posted a
+    // corrective entry" resolution (kind='resolve'). Both suppress operator
+    // notifications identically; the value is rendered differently in the
+    // admin UI and is stored alongside the audit trail so a future review
+    // can tell which kind of action an admin took.
+    //
+    // Nullable so historical rows from before this column landed continue to
+    // work; the route layer treats `null` as 'acknowledge'.
+    kind: text("kind").default("acknowledge"),
     // Free-form note from the admin: ticket id, root-cause hypothesis, etc.
     note: text("note"),
     // Admin who recorded the acknowledgement.

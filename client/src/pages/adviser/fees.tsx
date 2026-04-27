@@ -21,6 +21,9 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Link } from "wouter";
 import { ShieldAlert, HandCoins, Undo2, ExternalLink } from "lucide-react";
+// Task #204 — single canonical source for the IF status string so the
+// adviser badge cannot drift from the server/admin/client predicates.
+import { INSUFFICIENT_FUNDS_STATUS } from "@/lib/insufficient-funds";
 
 interface FeeRuleRow {
   id: number;
@@ -72,6 +75,19 @@ function deductionStatusBadge(status: string) {
   if (status === "settled") return <Badge variant="default">settled</Badge>;
   if (status === "pending_approval") return <Badge variant="secondary">{status}</Badge>;
   if (status === "rejected") return <Badge variant="destructive">{status}</Badge>;
+  // Task #204 — distinct destructive badge for held rows so advisers see at
+  // a glance that the deduction is blocked on the client's wallet, not on
+  // approval. Uses the canonical status string from the shared helper.
+  if (status === INSUFFICIENT_FUNDS_STATUS) {
+    return (
+      <Badge
+        variant="destructive"
+        data-testid={`badge-deduction-status-${status}`}
+      >
+        held — insufficient funds
+      </Badge>
+    );
+  }
   return <Badge variant="outline">{status}</Badge>;
 }
 

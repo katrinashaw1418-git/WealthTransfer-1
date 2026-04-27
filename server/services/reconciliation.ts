@@ -258,18 +258,61 @@ export type WalletLedgerReconciliationSummary = {
 };
 
 // ---------------------------------------------------------------------------
+// Task #203 — drift acknowledgement TTL
+// ---------------------------------------------------------------------------
+// Acknowledgements are operational, not permanent. If an admin acks a drift
+// case but never circles back to clear it, we want to re-page eventually so
+// a forgotten investigation does not silently mask a real ledger problem
+// forever. The default window (14 days) is conservative — long enough to
+// cover a normal week + buffer, short enough that a stale ack always
+// resurfaces.
+//
+// Override via the DRIFT_ACK_TTL_DAYS env var (positive integer days).
+// Anything missing or invalid falls back to the default rather than
+// disabling expiry — failing open here would silently undermine the whole
+// point of the TTL.
+// ---------------------------------------------------------------------------
+const DEFAULT_DRIFT_ACK_TTL_DAYS = 14;
+
+export function getDriftAckTtlDays(): number {
+  const raw = process.env.DRIFT_ACK_TTL_DAYS;
+  if (!raw) return DEFAULT_DRIFT_ACK_TTL_DAYS;
+  const n = Number(raw);
+  // Require a POSITIVE INTEGER. Anything else (NaN, fractions like "0.5",
+  // zero, negatives) falls back to the default rather than silently rounding
+  // to zero days — which would expire every ack the instant it's recorded
+  // and effectively disable the suppression contract.
+  if (!Number.isInteger(n) || n <= 0) return DEFAULT_DRIFT_ACK_TTL_DAYS;
+  return n;
+}
+
+export function computeDriftAckExpiresAt(acknowledgedAt: Date | string): Date {
+  const base =
+    acknowledgedAt instanceof Date ? acknowledgedAt : new Date(acknowledgedAt);
+  return new Date(base.getTime() + getDriftAckTtlDays() * 86_400_000);
+}
+
+// ---------------------------------------------------------------------------
 // Task #35 — drift acknowledgement lookup
 // ---------------------------------------------------------------------------
-// Fetch the most recent ACTIVE acknowledgement (clearedAt IS NULL) for a
-// (userId, currency) pair. The partial unique index `wallet_ledger_drift_ack_active_uidx`
-// guarantees at most one such row exists, so the LIMIT 1 is defensive only.
-// Returns null when no active ack is on file — i.e. the dispatcher should
-// page operators normally.
+// Fetch the most recent ACTIVE acknowledgement (clearedAt IS NULL AND not
+// past TTL) for a (userId, currency) pair. The partial unique index
+// `wallet_ledger_drift_ack_active_uidx` guarantees at most one
+// `clearedAt IS NULL` row exists, so the LIMIT 1 is defensive only.
+// Returns null when no active+fresh ack is on file — i.e. the dispatcher
+// should page operators normally.
+//
+// Task #203 — also filter out acks whose `acknowledgedAt` is older than
+// `DRIFT_ACK_TTL_DAYS` so a forgotten investigation re-pages on the next
+// reconciliation pass instead of permanently muting the alert. The row is
+// NOT auto-cleared in the table — admins still see it in the UI as
+// "expired", which is more informative than the row vanishing.
 // ---------------------------------------------------------------------------
 async function getActiveDriftAcknowledgement(
   userId: number,
   currency: string,
 ): Promise<WalletLedgerDriftAcknowledgement | null> {
+  const ttlDays = getDriftAckTtlDays();
   const [row] = await db
     .select()
     .from(walletLedgerDriftAcknowledgements)
@@ -278,6 +321,7 @@ async function getActiveDriftAcknowledgement(
         eq(walletLedgerDriftAcknowledgements.userId, userId),
         eq(walletLedgerDriftAcknowledgements.currency, currency),
         isNull(walletLedgerDriftAcknowledgements.clearedAt),
+        sql`${walletLedgerDriftAcknowledgements.acknowledgedAt} > now() - (${ttlDays} || ' days')::interval`,
       ),
     )
     .orderBy(desc(walletLedgerDriftAcknowledgements.acknowledgedAt))
@@ -563,8 +607,13 @@ export async function acknowledgeWalletLedgerDrift(opts: {
   currency: string;
   note: string | null;
   actorUserId: number;
+  // Task #203 — defaults to 'acknowledge' so existing callers (notably the
+  // smoke test in scripts/test-task-35-suppression.ts) keep working without
+  // modification. 'resolve' is treated identically by the suppression
+  // dispatcher; only the persisted column value differs.
+  kind?: "acknowledge" | "resolve";
 }): Promise<WalletLedgerDriftAcknowledgement> {
-  const { userId, currency, note, actorUserId } = opts;
+  const { userId, currency, note, actorUserId, kind = "acknowledge" } = opts;
 
   // Live-compute the drift right now so we snapshot the truth, not a stale
   // reconciliation row.
@@ -582,13 +631,62 @@ export async function acknowledgeWalletLedgerDrift(opts: {
     );
   }
 
-  // Defence-in-depth: surface a friendly 409 before the partial unique index
-  // would also reject the insert.
-  const existing = await getActiveDriftAcknowledgement(userId, currency);
-  if (existing) {
-    throw new DriftAckConflictError(
-      `Active acknowledgement #${existing.id} already exists for user ${userId} (${currency}).`,
-    );
+  // Task #203 — fix re-ack for expired rows.
+  //
+  // `getActiveDriftAcknowledgement()` filters out rows older than the TTL
+  // window so the suppression dispatcher treats them as inactive. But the
+  // partial unique index `wallet_ledger_drift_ack_active_uidx` keys on
+  // `cleared_at IS NULL` — so a TTL-expired row that hasn't been explicitly
+  // cleared still occupies the "active" slot for that (user, currency) pair
+  // and a fresh INSERT would 409.
+  //
+  // To match the UI affordance (which exposes Ack/Resolve buttons on
+  // expired-ack rows), we look up the LIVE uncleared row directly here.
+  // If it exists and is past TTL, auto-clear it (preserving the audit trail
+  // of who recorded it and when, plus a system note explaining why) before
+  // inserting the new one. If it exists and is NOT past TTL, return 409 as
+  // before — concurrent operators racing to ack the same case is a real
+  // mistake that ought to be surfaced, not silently coalesced.
+  const [liveExisting] = await db
+    .select()
+    .from(walletLedgerDriftAcknowledgements)
+    .where(
+      and(
+        eq(walletLedgerDriftAcknowledgements.userId, userId),
+        eq(walletLedgerDriftAcknowledgements.currency, currency),
+        isNull(walletLedgerDriftAcknowledgements.clearedAt),
+      ),
+    )
+    .orderBy(desc(walletLedgerDriftAcknowledgements.acknowledgedAt))
+    .limit(1);
+
+  if (liveExisting) {
+    const ttlMs = getDriftAckTtlDays() * 86_400_000;
+    const ageMs = Date.now() - new Date(liveExisting.acknowledgedAt).getTime();
+    const isExpired = ageMs > ttlMs;
+
+    if (!isExpired) {
+      throw new DriftAckConflictError(
+        `Active acknowledgement #${liveExisting.id} already exists for user ${userId} (${currency}).`,
+      );
+    }
+
+    // Auto-clear the stale row so the partial unique index frees up. Use
+    // the same conditional UPDATE shape as clearWalletLedgerDriftAcknowledgement
+    // so a concurrent clear can't race us into double-clearing.
+    await db
+      .update(walletLedgerDriftAcknowledgements)
+      .set({
+        clearedAt: new Date(),
+        clearedByUserId: actorUserId,
+        clearReason: `Auto-cleared on re-${kind}: prior acknowledgement #${liveExisting.id} expired after ${getDriftAckTtlDays()} days.`,
+      })
+      .where(
+        and(
+          eq(walletLedgerDriftAcknowledgements.id, liveExisting.id),
+          isNull(walletLedgerDriftAcknowledgements.clearedAt),
+        ),
+      );
   }
 
   try {
@@ -600,6 +698,7 @@ export async function acknowledgeWalletLedgerDrift(opts: {
         acknowledgedDriftAmount: drift.toFixed(8),
         note,
         acknowledgedByUserId: actorUserId,
+        kind,
       })
       .returning();
     return inserted;

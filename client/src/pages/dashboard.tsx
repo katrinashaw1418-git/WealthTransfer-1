@@ -7,6 +7,7 @@ import FxExchangeTool from "@/components/dashboard/fx-exchange-tool";
 import AiAdvisoryPanel from "@/components/dashboard/ai-advisory-panel";
 import CurrencyBalances from "@/components/dashboard/currency-balances";
 import TransactionHistory from "@/components/dashboard/transaction-history";
+import { InsufficientFundsBanner } from "@/components/insufficient-funds-banner";
 
 interface ApplicationRecord {
   referenceId: string;
@@ -45,6 +46,11 @@ export default function Dashboard() {
 
   return (
     <div className="p-6 space-y-6">
+      {/* Task #204 — surface held adviser-fee deductions across the app.
+          Renders nothing when no IF rows exist; harmless on dashboards
+          for non-clients (the query 401s and stays silent). */}
+      <InsufficientFundsBanner compact />
+
       {application && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-4" data-testid="banner-application-pending">
           <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">

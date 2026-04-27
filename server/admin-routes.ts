@@ -68,6 +68,8 @@ import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engi
 import {
   acknowledgeWalletLedgerDrift,
   clearWalletLedgerDriftAcknowledgement,
+  computeDriftAckExpiresAt,
+  getDriftAckTtlDays,
   DriftAckConflictError,
   DriftAckNoMismatchError,
   DriftAckNotFoundError,
@@ -88,6 +90,7 @@ import {
 import {
   getAllKillSwitchStates,
   getKillSwitchHistory,
+  isKillSwitchActive,
   isKillSwitchKey,
   KillSwitchActiveError,
   killSwitchEnvVarName,
@@ -96,6 +99,8 @@ import {
   setKillSwitchState,
   type KillSwitchKey,
 } from "./services/kill-switch";
+// Task #204 — admin manual trigger for the insufficient-funds sweep.
+import { runInsufficientFundsSweep } from "./services/insufficient-funds-sweep";
 // Task #155 — global write kill switch (admin toggle + read-only state).
 import {
   getWriteKillSwitchState,
@@ -1672,6 +1677,7 @@ export function registerAdminRoutes(app: Express): void {
                  a.currency,
                  a.acknowledged_drift_amount AS "acknowledgedDriftAmount",
                  a.note,
+                 a.kind,
                  a.acknowledged_by_user_id   AS "acknowledgedByUserId",
                  a.acknowledged_at      AS "acknowledgedAt",
                  u.username             AS "acknowledgedByUsername"
@@ -1682,9 +1688,26 @@ export function registerAdminRoutes(app: Express): void {
         `);
         acks = (ackResult as any).rows ?? [];
       }
+      // Task #203 — compute the per-ack expiry on the way out so the client
+      // can render "expired" without needing to know the TTL config. We also
+      // include the boolean `isExpired` so the UI doesn't have to re-derive
+      // it (and so a future change in clock skew handling is centralised).
       const ackByPair = new Map<string, any>();
+      const ttlDays = getDriftAckTtlDays();
+      const nowMs = Date.now();
       for (const a of acks) {
-        ackByPair.set(`${Number(a.userId)}|${String(a.currency)}`, a);
+        const ackAtMs = new Date(a.acknowledgedAt).getTime();
+        const expiresAt = new Date(ackAtMs + ttlDays * 86_400_000);
+        const enrichedAck = {
+          ...a,
+          kind: a.kind ?? "acknowledge",
+          expiresAt,
+          isExpired: expiresAt.getTime() <= nowMs,
+        };
+        ackByPair.set(
+          `${Number(a.userId)}|${String(a.currency)}`,
+          enrichedAck,
+        );
       }
       const enriched = items.map((r: any) => ({
         ...r,
@@ -1692,7 +1715,7 @@ export function registerAdminRoutes(app: Express): void {
           ackByPair.get(`${Number(r.userId)}|${String(r.currency)}`) ?? null,
       }));
 
-      return { items: enriched, page, limit, total };
+      return { items: enriched, page, limit, total, ttlDays };
     }),
   );
 
@@ -1710,16 +1733,39 @@ export function registerAdminRoutes(app: Express): void {
   // sibling task ("Let admins resolve and annotate ledger drift from the
   // reconciliation page") layers a richer UI on top of the same data model.
   // -------------------------------------------------------------------------
-  const ackDriftSchema = z.object({
-    userId: z.number().int().positive(),
-    currency: z
-      .string()
-      .trim()
-      .min(2)
-      .max(10)
-      .transform((s) => s.toUpperCase()),
-    note: z.string().trim().max(2000).optional().nullable(),
-  });
+  // Task #203 — `kind` distinguishes "we're investigating" (acknowledge) from
+  // "we believe this is fixed" (resolve). Both suppress operator notifications
+  // identically — the difference is admin intent and is rendered differently
+  // in the UI. Resolve REQUIRES a free-text note ("what corrective entry was
+  // posted / why we believe this is closed"); acknowledge accepts an empty
+  // note. Validation is enforced server-side so the UI cannot bypass it.
+  const ackDriftSchema = z
+    .object({
+      userId: z.number().int().positive(),
+      currency: z
+        .string()
+        .trim()
+        .min(2)
+        .max(10)
+        .transform((s) => s.toUpperCase()),
+      note: z.string().trim().max(2000).optional().nullable(),
+      kind: z
+        .enum(["acknowledge", "resolve"])
+        .optional()
+        .default("acknowledge"),
+    })
+    .superRefine((val, ctx) => {
+      if (val.kind === "resolve") {
+        const noteText = (val.note ?? "").trim();
+        if (noteText.length === 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["note"],
+            message: "A note is required when resolving a drift case.",
+          });
+        }
+      }
+    });
 
   const clearAckDriftSchema = z.object({
     userId: z.number().int().positive(),
@@ -1741,7 +1787,7 @@ export function registerAdminRoutes(app: Express): void {
           status: 400,
         });
       }
-      const { userId, currency, note } = parsed.data;
+      const { userId, currency, note, kind } = parsed.data;
 
       try {
         const ack = await acknowledgeWalletLedgerDrift({
@@ -1749,23 +1795,36 @@ export function registerAdminRoutes(app: Express): void {
           currency,
           note: note ?? null,
           actorUserId: auth.userId,
+          kind,
         });
         await db.insert(auditLogs).values({
           userId: auth.userId,
-          action: "wallet_ledger_drift_acknowledged",
+          // Task #203 — distinct action verb so audit-log readers can tell
+          // "we marked this fixed" apart from "we are aware, investigating".
+          action:
+            kind === "resolve"
+              ? "wallet_ledger_drift_resolved"
+              : "wallet_ledger_drift_acknowledged",
           entityType: "wallet_ledger_drift_acknowledgement",
           entityId: String(ack.id),
           metadata: {
             targetUserId: userId,
             currency,
+            kind,
             acknowledgedDriftAmount: ack.acknowledgedDriftAmount,
             note: note ?? null,
+            ttlDays: getDriftAckTtlDays(),
             note_to_ops:
-              "Operator notifications for this drift case will be suppressed until the drift moves > MATCH_EPSILON or this acknowledgement is cleared.",
+              "Operator notifications for this drift case will be suppressed until the drift moves > MATCH_EPSILON, this acknowledgement is cleared, or the TTL window lapses.",
           } as any,
           ipAddress: req.ip ?? null,
         });
-        return { acknowledgement: ack };
+        return {
+          acknowledgement: {
+            ...ack,
+            expiresAt: computeDriftAckExpiresAt(ack.acknowledgedAt),
+          },
+        };
       } catch (err: any) {
         if (err instanceof DriftAckConflictError) {
           throw Object.assign(new Error(err.message), { status: 409 });
@@ -1828,12 +1887,38 @@ export function registerAdminRoutes(app: Express): void {
       const offset = (page - 1) * limit;
       const activeOnly = String(req.query.activeOnly ?? "").toLowerCase() === "true";
 
+      // Task #203 — optional per-pair filter so the reconciliation page can
+      // hydrate the "ack history for this drift case" collapsible without
+      // scanning the whole table. Both must be supplied together; passing
+      // only one is treated as no filter so a stray `?userId=` query
+      // doesn't accidentally leak unrelated currencies.
+      const userIdRaw =
+        typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+      const currencyRaw =
+        typeof req.query.currency === "string"
+          ? req.query.currency.trim().toUpperCase()
+          : "";
+      const userIdNum = Number(userIdRaw);
+      const validPairFilter =
+        userIdRaw &&
+        currencyRaw &&
+        Number.isInteger(userIdNum) &&
+        userIdNum > 0 &&
+        /^[A-Z]{3,10}$/.test(currencyRaw);
+      const pairFilter = validPairFilter
+        ? sql`AND a.user_id = ${userIdNum} AND a.currency = ${currencyRaw}`
+        : sql``;
+      const pairFilterCount = validPairFilter
+        ? sql`AND user_id = ${userIdNum} AND currency = ${currencyRaw}`
+        : sql``;
+
       const result = await db.execute(sql`
         SELECT a.id,
                a.user_id                  AS "userId",
                a.currency,
                a.acknowledged_drift_amount AS "acknowledgedDriftAmount",
                a.note,
+               a.kind,
                a.acknowledged_by_user_id  AS "acknowledgedByUserId",
                a.acknowledged_at          AS "acknowledgedAt",
                a.cleared_at               AS "clearedAt",
@@ -1848,6 +1933,7 @@ export function registerAdminRoutes(app: Express): void {
           LEFT JOIN users uc ON uc.id = a.cleared_by_user_id
          WHERE 1 = 1
            ${activeOnly ? sql`AND a.cleared_at IS NULL` : sql``}
+           ${pairFilter}
          ORDER BY a.acknowledged_at DESC, a.id DESC
          LIMIT ${limit}
         OFFSET ${offset}
@@ -1857,10 +1943,26 @@ export function registerAdminRoutes(app: Express): void {
           FROM wallet_ledger_drift_acknowledgements
          WHERE 1 = 1
            ${activeOnly ? sql`AND cleared_at IS NULL` : sql``}
+           ${pairFilterCount}
       `);
-      const items = (result as any).rows ?? [];
+      const itemsRaw = (result as any).rows ?? [];
+      // Task #203 — surface kind + per-row expiresAt + isExpired so the UI
+      // can render "expired" without re-deriving the TTL window.
+      const ttlDays = getDriftAckTtlDays();
+      const nowMs = Date.now();
+      const items = itemsRaw.map((a: any) => {
+        const ackAtMs = new Date(a.acknowledgedAt).getTime();
+        const expiresAt = new Date(ackAtMs + ttlDays * 86_400_000);
+        return {
+          ...a,
+          kind: a.kind ?? "acknowledge",
+          expiresAt,
+          isExpired:
+            a.clearedAt === null && expiresAt.getTime() <= nowMs,
+        };
+      });
       const total = Number(((totalResult as any).rows ?? [{ count: 0 }])[0]?.count ?? 0);
-      return { items, page, limit, total };
+      return { items, page, limit, total, ttlDays };
     }),
   );
 
@@ -3800,6 +3902,74 @@ export function registerAdminRoutes(app: Express): void {
         ipAddress: req.ip ?? null,
       });
       return reversed;
+    }),
+  );
+
+  // ===========================================================================
+  // TASK #204 — Admin manual trigger for the insufficient-funds sweep.
+  // ---------------------------------------------------------------------------
+  // POST /api/admin/insufficient-funds-sweep/run
+  //   Calls the EXACT same `runInsufficientFundsSweep()` entry point that the
+  //   daily cron uses (`server/services/cron-fee-deductions.ts`). We deliberately
+  //   do NOT duplicate any sweep logic here — the cron service is the single
+  //   sweep entry point, this endpoint just wraps it with admin auth + audit
+  //   + a JSON response so the admin fees page can show a summary card.
+  //
+  // Hard rules (mirror the cron):
+  //   - Honour the `fee_deductions` kill switch — if engaged, return early
+  //     with a structured response and DO NOT touch any rows. The sweep
+  //     itself also short-circuits, but we surface the reason here so the
+  //     admin UI can render "skipped — kill switch active" instead of an
+  //     all-zeros summary that looks like nothing happened.
+  //   - One sweep per call. No batching, no scheduling, no background fork.
+  //   - Always write an audit row with the summary so post-mortems can
+  //     reconstruct who triggered which retry and what it accomplished.
+  // ===========================================================================
+  app.post(
+    "/api/admin/insufficient-funds-sweep/run",
+    adminRoute(async (req, auth) => {
+      // Defence-in-depth: surface the kill switch with a clear payload so
+      // the admin UI doesn't show "0 settled" and look like a no-op. The
+      // sweep itself bails on the same check internally, so the row state
+      // is identical either way.
+      if (await isKillSwitchActive("fee_deductions")) {
+        await writeAuditLog({
+          userId: auth.userId,
+          action: "fee_deduction.manual_sweep_skipped",
+          entityType: "adviser_fee_deductions_sweep",
+          entityId: null,
+          before: null,
+          after: null,
+          extra: { reason: "fee_deductions kill switch is engaged" },
+          ipAddress: req.ip ?? null,
+        });
+        return {
+          ok: false,
+          skipped: true,
+          reason: "fee_deductions_kill_switch_active",
+          message:
+            "The fee_deductions kill switch is engaged — disable it before re-running the sweep.",
+        };
+      }
+
+      const summary = await runInsufficientFundsSweep();
+
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_deduction.manual_sweep_run",
+        entityType: "adviser_fee_deductions_sweep",
+        entityId: null,
+        before: null,
+        // Spread into a plain object so the type satisfies the
+        // Record<string, unknown> shape writeAuditLog expects. The
+        // InsufficientFundsSweepSummary interface has explicit fields, not
+        // an index signature, so we widen it for the audit row.
+        after: { ...summary },
+        extra: { trigger: "admin_manual" },
+        ipAddress: req.ip ?? null,
+      });
+
+      return { ok: true, skipped: false, summary };
     }),
   );
 

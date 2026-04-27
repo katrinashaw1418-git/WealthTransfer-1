@@ -33,6 +33,8 @@ import {
   DriftAckConflictError,
   DriftAckNoMismatchError,
   MATCH_EPSILON,
+  getDriftAckTtlDays,
+  computeDriftAckExpiresAt,
 } from "../server/services/reconciliation";
 
 const TEST_USERNAME = "__task35_test_user__";
@@ -366,6 +368,102 @@ async function main() {
     caught7 = e instanceof DriftAckConflictError;
   }
   assert(caught7, "second active ack rejected with DriftAckConflictError");
+
+  // -------------------------------------------------------------------------
+  // 8. Task #203 — TTL expiry: a stale ack stops suppressing.
+  // -------------------------------------------------------------------------
+  // Recreate a drifted state and a fresh ack, then back-date the ack into
+  // the past beyond DRIFT_ACK_TTL_DAYS via direct SQL. The next reconciliation
+  // run must page operators again because the dispatcher treats expired acks
+  // as inactive — even though the row is still `cleared_at IS NULL` in the
+  // table.
+  // -------------------------------------------------------------------------
+  await clearWalletLedgerDriftAcknowledgement({
+    userId,
+    currency: TEST_CURRENCY,
+    actorUserId: userId,
+    reason: "reset for ttl test",
+  });
+  await setWalletAndLedger(userId, "1050.00000000", "1000.00000000");
+  const freshAck = await acknowledgeWalletLedgerDrift({
+    userId,
+    currency: TEST_CURRENCY,
+    note: "ttl test",
+    actorUserId: userId,
+  });
+  const ttlDays = getDriftAckTtlDays();
+  console.log(`DRIFT_ACK_TTL_DAYS = ${ttlDays}`);
+  assert(ttlDays > 0, "TTL helper returns a positive default");
+  // Sanity: computeDriftAckExpiresAt agrees with the TTL.
+  const expectedExpiry = computeDriftAckExpiresAt(freshAck.acknowledgedAt);
+  const expectedDeltaDays =
+    (expectedExpiry.getTime() - freshAck.acknowledgedAt.getTime()) /
+    86_400_000;
+  assert(
+    Math.abs(expectedDeltaDays - ttlDays) < 1e-6,
+    `computeDriftAckExpiresAt adds exactly TTL days (got ${expectedDeltaDays})`,
+  );
+
+  // Back-date the ack so it is firmly past the TTL window.
+  const backdated = new Date(Date.now() - (ttlDays + 1) * 86_400_000);
+  await db
+    .update(walletLedgerDriftAcknowledgements)
+    .set({ acknowledgedAt: backdated })
+    .where(eq(walletLedgerDriftAcknowledgements.id, freshAck.id));
+
+  const summary8 = await runWalletLedgerReconciliation();
+  console.log("[run8 summary]", summary8);
+  assert(
+    summary8.operatorNotifications >= 1,
+    "run8 re-paged because the active ack is past TTL (auto-expired)",
+  );
+
+  // -------------------------------------------------------------------------
+  // 9. Task #203 — re-acknowledging an expired-but-uncleared row succeeds.
+  // -------------------------------------------------------------------------
+  // The ack from step 8 is uncleared but past TTL. A naïve implementation of
+  // acknowledgeWalletLedgerDrift() would 409 here because the partial unique
+  // index `wallet_ledger_drift_ack_active_uidx` keys on `cleared_at IS NULL`
+  // — even though the suppression dispatcher correctly treats expired rows
+  // as inactive. The service must auto-clear the stale row and insert a
+  // fresh one so the UI's Ack/Resolve buttons (which appear on
+  // expired-ack rows) actually work.
+  // -------------------------------------------------------------------------
+  const reAck = await acknowledgeWalletLedgerDrift({
+    userId,
+    currency: TEST_CURRENCY,
+    note: "post-expiry re-investigation",
+    actorUserId: userId,
+    kind: "resolve", // exercise the kind path too
+  });
+  assert(
+    reAck.id !== freshAck.id,
+    "re-ack inserted a NEW row (not reusing the expired id)",
+  );
+  assert(
+    reAck.kind === "resolve",
+    `re-ack persisted the requested kind (got ${reAck.kind})`,
+  );
+  // Verify the previous row was auto-cleared with a system reason.
+  const [oldAfter] = await db
+    .select()
+    .from(walletLedgerDriftAcknowledgements)
+    .where(eq(walletLedgerDriftAcknowledgements.id, freshAck.id));
+  assert(
+    oldAfter.clearedAt !== null,
+    "previous expired ack was auto-cleared on re-ack",
+  );
+  assert(
+    !!oldAfter.clearReason && oldAfter.clearReason.includes("Auto-cleared"),
+    `auto-clear reason recorded (got: ${oldAfter.clearReason})`,
+  );
+  // Suppression resumes from the new snapshot.
+  const summary9 = await runWalletLedgerReconciliation();
+  console.log("[run9 summary]", summary9);
+  assert(
+    summary9.operatorNotificationsSuppressed >= 1,
+    "run9 suppressed (fresh re-ack now active)",
+  );
 
   // Cleanup ack so the test user is left clean.
   await clearWalletLedgerDriftAcknowledgement({

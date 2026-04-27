@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +69,15 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+// Task #204 — single canonical source for the IF status string + predicate.
+// Using these in admin/fees.tsx keeps the admin surface aligned with the
+// client + adviser surfaces; previously the page used raw "insufficient_funds"
+// string literals which are easy to drift if the engine ever renames the
+// status.
+import {
+  INSUFFICIENT_FUNDS_STATUS,
+  isInsufficientFundsRow,
+} from "@/lib/insufficient-funds";
 
 const TOKEN_KEY = "amax_jwt";
 
@@ -364,7 +373,7 @@ function deductionStatusVariant(status: string): "default" | "secondary" | "outl
   // Task #34: client couldn't cover the debit. Render as destructive so it
   // pops in the table the same way a rejection does — admins need to see
   // these to top the client up before retrying.
-  if (status === "insufficient_funds") return "destructive";
+  if (status === INSUFFICIENT_FUNDS_STATUS) return "destructive";
   return "outline";
 }
 
@@ -475,6 +484,171 @@ function UserCell({
       <div className="text-sm font-medium">{name}</div>
       <div className="text-xs text-muted-foreground">{u.email}</div>
     </div>
+  );
+}
+
+// =============================================================================
+// TASK #204 — Manual insufficient-funds sweep card
+// -----------------------------------------------------------------------------
+// Lives above the deductions table. Posts to the new admin-only endpoint
+// that wraps `runInsufficientFundsSweep()` and renders the returned summary
+// counts in a compact card. Refreshes the deductions query so freshly-settled
+// rows disappear from the IF filter view immediately.
+// =============================================================================
+interface SweepSummary {
+  checked: number;
+  settled: number;
+  stillInsufficient: number;
+  errors: number;
+  notificationsSent: number;
+  notificationsSkippedDueToDebounce: number;
+  notificationsFailed: number;
+}
+interface SweepRunResponse {
+  ok: boolean;
+  skipped: boolean;
+  reason?: string;
+  message?: string;
+  summary?: SweepSummary;
+}
+
+function InsufficientFundsSweepCard() {
+  const { toast } = useToast();
+  const [lastResult, setLastResult] = useState<SweepRunResponse | null>(null);
+
+  const runMutation = useMutation({
+    mutationFn: async (): Promise<SweepRunResponse> => {
+      const res = await apiRequest(
+        "POST",
+        "/api/admin/insufficient-funds-sweep/run",
+        {},
+      );
+      return (await res.json()) as SweepRunResponse;
+    },
+    onSuccess: (data) => {
+      setLastResult(data);
+      // Pull fresh deduction rows so the table reflects any newly-settled
+      // entries the sweep moved out of the IF state.
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/admin/fee-reconciliation"],
+      });
+      if (data.skipped) {
+        toast({
+          title: "Sweep skipped",
+          description: data.message ?? "Sweep was not run.",
+          variant: "destructive",
+        });
+      } else if (data.summary) {
+        toast({
+          title: "Sweep complete",
+          description: `Checked ${data.summary.checked}, settled ${data.summary.settled}, still held ${data.summary.stillInsufficient}.`,
+        });
+      }
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Sweep failed",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  return (
+    <Card data-testid="card-if-sweep">
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <CardTitle className="text-base">
+              Insufficient-funds re-check
+            </CardTitle>
+            <CardDescription>
+              Manually re-runs the daily sweep that re-attempts settlement
+              for every held deduction. Honours the fee-deductions kill
+              switch.
+            </CardDescription>
+          </div>
+          <Button
+            onClick={() => runMutation.mutate()}
+            disabled={runMutation.isPending}
+            data-testid="button-run-if-sweep"
+          >
+            <Play className="h-4 w-4 mr-1" />
+            {runMutation.isPending
+              ? "Running…"
+              : "Re-check insufficient deductions now"}
+          </Button>
+        </div>
+      </CardHeader>
+      {lastResult && (
+        <CardContent>
+          {lastResult.skipped ? (
+            <Alert
+              variant="destructive"
+              data-testid="alert-if-sweep-skipped"
+            >
+              <AlertTriangle className="h-4 w-4" />
+              <AlertTitle>Sweep skipped</AlertTitle>
+              <AlertDescription>
+                {lastResult.message ?? "Sweep was not run."}
+              </AlertDescription>
+            </Alert>
+          ) : lastResult.summary ? (
+            <div
+              className="grid grid-cols-2 sm:grid-cols-4 gap-3"
+              data-testid="card-if-sweep-summary"
+            >
+              <div className="rounded border p-3">
+                <div className="text-xs text-muted-foreground">Checked</div>
+                <div
+                  className="text-2xl font-semibold"
+                  data-testid="text-sweep-checked"
+                >
+                  {lastResult.summary.checked}
+                </div>
+              </div>
+              <div className="rounded border p-3">
+                <div className="text-xs text-muted-foreground">Settled</div>
+                <div
+                  className="text-2xl font-semibold text-green-700 dark:text-green-400"
+                  data-testid="text-sweep-settled"
+                >
+                  {lastResult.summary.settled}
+                </div>
+              </div>
+              <div className="rounded border p-3">
+                <div className="text-xs text-muted-foreground">
+                  Still insufficient
+                </div>
+                <div
+                  className="text-2xl font-semibold text-amber-700 dark:text-amber-400"
+                  data-testid="text-sweep-still-insufficient"
+                >
+                  {lastResult.summary.stillInsufficient}
+                </div>
+              </div>
+              <div className="rounded border p-3">
+                <div className="text-xs text-muted-foreground">
+                  Errors / not eligible
+                </div>
+                <div
+                  className="text-2xl font-semibold text-red-700 dark:text-red-400"
+                  data-testid="text-sweep-errors"
+                >
+                  {lastResult.summary.errors}
+                </div>
+              </div>
+              <div className="col-span-2 sm:col-span-4 text-xs text-muted-foreground pt-1">
+                Client notifications: sent {lastResult.summary.notificationsSent},
+                debounced {lastResult.summary.notificationsSkippedDueToDebounce},
+                failed {lastResult.summary.notificationsFailed}.
+              </div>
+            </div>
+          ) : null}
+        </CardContent>
+      )}
+    </Card>
   );
 }
 
@@ -792,8 +966,8 @@ export default function AdminFeesPage() {
   }, [highlightDeductionId, tab, deductionsQ.isLoading, deductionsQ.dataUpdatedAt]);
 
   function openDeductionFromException(d: FeeDeductionRow) {
-    if (d.status === "insufficient_funds") {
-      setDeductionsStatus("insufficient_funds");
+    if (isInsufficientFundsRow(d)) {
+      setDeductionsStatus(INSUFFICIENT_FUNDS_STATUS);
     } else if (d.status === "pending_approval") {
       setDeductionsStatus("pending_approval");
     } else if (d.status === "settled") {
@@ -1046,15 +1220,18 @@ export default function AdminFeesPage() {
   function downloadExceptionsCsv() {
     const d = exceptionsQ.data;
     if (!d) return;
+    // Task #204 — `failureReason` is IF-only metadata that lingers on the
+    // row after settle. Only surface it to non-IF kinds via the synthetic
+    // fallback so a stuck/role_corruption row from a previously-IF
+    // deduction can't leak the old IF text into the CSV.
     const reasonFor = (x: FeeExceptionRow): string =>
-      x.deduction.failureReason ??
-      (x.kind === "held"
-        ? "Insufficient client balance"
+      x.kind === "held"
+        ? (x.deduction.failureReason ?? "Insufficient client balance")
         : x.kind === "stuck"
           ? "Pending approval > 7 days"
           : x.kind === "role_corruption"
             ? "Settled or reversed against a non-adviser user"
-            : "");
+            : "Last attempt failed";
     const rows: (string | number)[][] = [
       ["Period from", d.period.from],
       ["Period to", d.period.to],
@@ -1078,6 +1255,10 @@ export default function AdminFeesPage() {
       ...d.items.map((x) => {
         const c = d.users[x.deduction.clientUserId];
         const a = d.users[x.deduction.adviserUserId];
+        // Task #204 — gate IF bookkeeping fields by kind === "held" so
+        // stuck/role_corruption/failed rows don't carry over stale IF
+        // re-check / notification data from a previous IF episode.
+        const heldOnly = x.kind === "held";
         return [
           x.kind,
           x.deduction.id,
@@ -1092,9 +1273,9 @@ export default function AdminFeesPage() {
           x.deduction.totalAccrued,
           x.deduction.currency,
           x.ageDays,
-          x.deduction.lastRecheckedAt ?? "",
-          x.deduction.clientNotifiedAt ?? "",
-          x.deduction.clientNotificationCount,
+          heldOnly ? (x.deduction.lastRecheckedAt ?? "") : "",
+          heldOnly ? (x.deduction.clientNotifiedAt ?? "") : "",
+          heldOnly ? x.deduction.clientNotificationCount : "",
           reasonFor(x),
         ];
       }),
@@ -1496,6 +1677,11 @@ export default function AdminFeesPage() {
             </CardContent>
           </Card>
 
+          {/* Task #204 — manual trigger for the insufficient-funds sweep.
+              Re-runs the SAME sweep the daily cron uses (no logic
+              duplication). Honours the fee_deductions kill switch. */}
+          <InsufficientFundsSweepCard />
+
           <Card>
             <CardHeader>
               <div className="flex items-start justify-between gap-2">
@@ -1542,7 +1728,7 @@ export default function AdminFeesPage() {
                     <SelectContent>
                       <SelectItem value="all">All statuses</SelectItem>
                       <SelectItem value="pending_approval">Pending approval</SelectItem>
-                      <SelectItem value="insufficient_funds">
+                      <SelectItem value={INSUFFICIENT_FUNDS_STATUS}>
                         Held — insufficient funds
                       </SelectItem>
                       <SelectItem value="settled">Settled</SelectItem>
@@ -1660,11 +1846,11 @@ export default function AdminFeesPage() {
                                 className="text-red-600"
                                 title={d.failureReason}
                               >
-                                {d.status === "insufficient_funds"
+                                {isInsufficientFundsRow(d)
                                   ? "Insufficient client balance"
                                   : "Last attempt failed"}
                               </span>
-                              {d.status === "insufficient_funds" && (
+                              {isInsufficientFundsRow(d) && (
                                 <div
                                   className="text-muted-foreground mt-1 leading-snug"
                                   data-testid={`text-recheck-${d.id}`}
@@ -1715,7 +1901,7 @@ export default function AdminFeesPage() {
                         <TableCell>
                           {(d.status === "pending_approval" ||
                             d.status === "approved" ||
-                            d.status === "insufficient_funds") && (
+                            isInsufficientFundsRow(d)) && (
                             <Button
                               size="sm"
                               variant="default"
@@ -1723,7 +1909,7 @@ export default function AdminFeesPage() {
                               data-testid={`button-approve-${d.id}`}
                             >
                               <CheckCircle2 className="h-4 w-4 mr-1" />
-                              {d.status === "insufficient_funds"
+                              {isInsufficientFundsRow(d)
                                 ? "Retry (after top-up)"
                                 : d.failureReason
                                   ? "Retry"
@@ -2372,11 +2558,21 @@ export default function AdminFeesPage() {
                                 {x.deduction.currency}
                               </TableCell>
                               <TableCell>{x.ageDays}d</TableCell>
+                              {/* Task #204 — IF bookkeeping (lastRecheckedAt /
+                                  clientNotifiedAt / clientNotificationCount /
+                                  failureReason) is intentionally retained on
+                                  the row after settle for cron debounce. It
+                                  must NOT leak onto non-IF exception kinds
+                                  (stuck / failed / role_corruption) — those
+                                  rows can hold stale IF text from a previous
+                                  IF episode. Gate every IF-only column on
+                                  kind === "held". */}
                               <TableCell
                                 className="text-xs whitespace-nowrap"
                                 data-testid={`text-exception-recheck-${x.deduction.id}`}
                               >
-                                {x.deduction.lastRecheckedAt ? (
+                                {x.kind === "held" &&
+                                x.deduction.lastRecheckedAt ? (
                                   <span title={x.deduction.lastRecheckedAt}>
                                     {formatRelative(x.deduction.lastRecheckedAt)}
                                   </span>
@@ -2388,7 +2584,8 @@ export default function AdminFeesPage() {
                                 className="text-xs whitespace-nowrap"
                                 data-testid={`text-exception-notified-${x.deduction.id}`}
                               >
-                                {x.deduction.clientNotifiedAt ? (
+                                {x.kind === "held" &&
+                                x.deduction.clientNotifiedAt ? (
                                   <span title={x.deduction.clientNotifiedAt}>
                                     {formatRelative(x.deduction.clientNotifiedAt)}
                                     {x.deduction.clientNotificationCount > 1 && (
@@ -2404,24 +2601,24 @@ export default function AdminFeesPage() {
                               <TableCell
                                 className="text-xs max-w-[240px] truncate"
                                 title={
-                                  x.deduction.failureReason ??
-                                  (x.kind === "held"
-                                    ? "Insufficient client balance"
+                                  x.kind === "held"
+                                    ? (x.deduction.failureReason ??
+                                      "Insufficient client balance")
                                     : x.kind === "stuck"
                                       ? "Pending approval > 7 days"
                                       : x.kind === "role_corruption"
                                         ? "Settled or reversed against a non-adviser user"
-                                        : "")
+                                        : "Last attempt failed"
                                 }
                               >
-                                {x.deduction.failureReason ??
-                                  (x.kind === "held"
-                                    ? "Insufficient client balance"
-                                    : x.kind === "stuck"
-                                      ? "Pending > 7d"
-                                      : x.kind === "role_corruption"
-                                        ? "Non-adviser user"
-                                        : "")}
+                                {x.kind === "held"
+                                  ? (x.deduction.failureReason ??
+                                    "Insufficient client balance")
+                                  : x.kind === "stuck"
+                                    ? "Pending > 7d"
+                                    : x.kind === "role_corruption"
+                                      ? "Non-adviser user"
+                                      : "Last attempt failed"}
                               </TableCell>
                               <TableCell>
                                 <Button

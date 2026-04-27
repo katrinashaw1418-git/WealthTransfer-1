@@ -20,6 +20,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ShieldAlert, Receipt, ExternalLink, Undo2 } from "lucide-react";
+import { InsufficientFundsBanner } from "@/components/insufficient-funds-banner";
+import { isInsufficientFundsRow } from "@/lib/insufficient-funds";
 
 interface UserRef {
   id: number;
@@ -144,6 +146,11 @@ export default function ClientFeesPage() {
         <Receipt className="h-6 w-6 text-primary" />
         <h1 className="text-2xl font-semibold">Your fees</h1>
       </div>
+
+      {/* Task #204 — full-detail banner above the page content for any
+          deduction currently held due to insufficient funds. Renders nothing
+          when no IF rows exist. */}
+      <InsufficientFundsBanner />
 
       <Alert variant="default" data-testid="alert-gate-a">
         <ShieldAlert className="h-4 w-4" />
