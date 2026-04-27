@@ -1,0 +1,257 @@
+**Current state — run strict check first before accepting anything.**
+
+---
+
+**Accept next — 6 new tasks (after strict check passes)**
+1. Lock in the post-merge gate count automatically
+2. Cover the newest safety tests with the ledger-leak gate too
+3. Stop paging the on-call channel nine times for every deploy
+4. Run the launch readiness gate every night so we catch problems before deploy day
+5. Catch leaked platform-side rows in more test scripts on a fresh CI database
+6. Cover the client and adviser endpoints in the kill-switch HTTP guard check too
+
+Wait for all six to finish.
+
+---
+
+**Cluster 2 — CI gates and deploy blocking (last cluster needing a strict check)**
+1. Block deploys when the pre-launch safety check skips a gate
+2. Have each safety sub-script report its own skipped checks
+3. Strip held-only metadata from the admin exceptions API
+
+Run strict check after this cluster. This is the last manual strict run.
+
+---
+
+**Cluster 3 — operational visibility**
+1. Show operators which kill switch tripped a money-movement attempt
+2. Show whether write operations are paused on the health page
+3. Add a metrics endpoint so dashboards can chart traffic and latency
+4. Email or page operators when /health stays unhealthy
+5. Cover /health and the metrics endpoint with automated tests
+6. Show the persistent error log in the admin UI
+7. Tune the dedupe window per alert source so noisy jobs coalesce
+8. Show operators a one-glance summary of alert delivery health
+
+---
+
+**Cluster 4 — alert resilience**
+1. Let admins reroute operator alerts to a backup channel
+2. Alert security when someone repeatedly hits the new rate limits
+3. Stop spamming the same prune-stalled alert every day until fixed
+4. Warn admins when a long outage drops days from the auto-backfill
+
+---
+
+**Cluster 5 — infrastructure hardening**
+1. Configure DB_BACKUP_DIR and offsite retention in production
+2. Cover the backup service with automated tests
+3. Test the rollback runbook end-to-end against a real scratch database
+4. Show pause notice on the deposits and withdrawals client screens
+5. Make currency conversion, internal transfer, investments leave a clean audit trail
+
+---
+
+**Cluster 6 — security hardening**
+1. Block disguised file uploads by detecting their real type
+2. Apply the same upload size and type limits to every other upload route
+3. Block uploads of risky file types on the document upload route
+
+---
+
+**Cluster 7 — admin UX and audit log**
+1. Show admin and user names alongside IDs in the audit log
+2. Make sure diff colours stay correct as the audit format evolves
+3. Let admins copy the diff or share a deep link to a single audit entry
+4. Alert compliance reviewers when an adviser tries to edit a plan under review
+5. Show blocked write attempts on the admin audit log page
+6. Clean up the 506 demo-data drift alerts in the operator alert feed
+7. Show admins a clear demo data hidden banner on the Reconciliation page
+
+---
+
+**Cluster 8 — planner and client UX**
+1. Let advisers upload client documents from the app
+2. Let advisers actually upload document files instead of pasting storage keys
+3. Move stored client documents off the app server's local disk
+4. Let clients sign the advice acknowledgement directly in the portal
+5. Show advisers the full edit history of a note in one click
+6. Personalise the AI advisory benchmark from each client's risk profile
+7. One-click deposit from the insufficient-funds banner
+
+---
+
+**Cluster 9 — fee and ledger polish**
+1. Stream very large fee reports straight to a CSV download
+2. Email finance the monthly fee CSV pack on a schedule
+3. Show fee deduction and reversal amounts with the correct sign
+4. Show held-deductions filter and sort on the adviser fees page
+5. Let admins filter the rules and deductions tables by status
+6. Add prev/next page controls to the admin fee tables
+7. Split withdrawal fees into their own ledger entries
+8. Add an HTTP-level test for the 422 when ledger is unbalanced
+9. Open the right transaction when a client clicks a fee link
+10. Show a friendly message when an accounting error blocks a transfer
+11. Show the manual sweep history on the admin fees page
+12. Show operators the prune job's recent run history
+13. Email or in-app alert when funds are insufficient
+
+---
+
+**Cluster 10 — test coverage and misc**
+1. Test the withdrawal path's atomic wallet cache refresh
+2. Get the operator alert tests passing on a fresh dev database
+3. Test that the dashboard alerts tile actually refreshes every minute
+4. Add tests for the new operator alert payload search
+5. Test the suppression behavior automatically on every CI run
+6. Stop sending unused pending-deduction data on the client fees page
+7. Warn admins if the alerts tile stops refreshing
+8. Show admins when the dashboard data last refreshed
+
+---
+
+**Cluster 11 — invite and misc UX**
+1. See and revoke pending registration invitations
+2. Show a clear countdown until each invite link expires
+3. Highlight matching text in operator alert search results
+4. Let admins copy any alert field with one click
+5. Notify clients in-app when one of their fees is refunded
+
+---
+
+**Scope gate — one-line answer required before accepting**
+Build the adviser payout batch system — if reporting only accept, if touches payment rails requires own gate and verification script
+
+---
+
+**Cancel on the board — already shipped by 203 and 204**
+- Show acknowledged drift cases on the admin reconciliation page
+- Auto-clear stale drift acknowledgements after a configurable window
+- Let admins resolve and annotate ledger drift from the reconciliation page
+- Alert admins automatically when wallet balances drift from the ledger
+- Show clients an in-app banner when their adviser fee couldn't be deducted
+- Stop showing settled deductions as insufficient funds history forever
+- Let admins trigger an insufficient-funds re-check on demand
+
+---
+
+**Skip permanently — undefined stubs**
+- Build to launch readiness checklist
+- Verify cross check implement if correct
+- Pre-launch safety check and kill switch test
+
+---
+
+**Complete done list as of now — 158 tasks**
+
+```
+#1   Audit Session 14 invite flow
+#2   Build the admin page for issuing invitation links
+#3   Send invitation links by email instead of copy-pasting
+#4   Tighten duplicate-email check at invite-create time
+#11  Session 23A — Fee Engine Gate A scaffold
+#12  Wire fee deductions to actual money movement (Gate B)
+#13  Run daily fee accruals automatically
+#14  Show client and adviser names instead of raw IDs on the fee pages
+#15  Session 27 — Payout export verification + finance sign-off
+#16  Session 28 — External payment recording
+#17  Make the ledger the source of truth and surface any drift
+#22  Ledger posting safeguards and balance transparency
+#23  Show admins when the daily fee accrual job last ran
+#24  Automatically backfill missed days of fee accruals
+#25  Add a daily reconciliation alert when wallet balances drift
+#26  Add an automated test that catches double-posting bugs
+#27  Remove the unused duplicate client fees page
+#28  Let admins search fee tables by client or adviser name
+#33  Let admins reverse a settled fee deduction
+#34  Block adviser fee charges when the client can't afford them
+#35  Stop re-paging operators about drift they've already acknowledged
+#36  Keep an auditable record of every operator alert that was sent
+#37  Block accidental double-posts even under rare race conditions
+#38  Set up a real test runner so money-movement tests are easy to add
+#41  Test that the ledger refuses mixed-currency journals
+#42  Test that the wallet cache stays in sync with the ledger
+#43  Show the operator alert history in the admin dashboard
+#44  Stop the operator alert log from growing forever
+#45  Test that the ledger refuses unbalanced journals
+#46  Run the new posting-receipt backfill on production before the next deploy
+#50  Lock in that wallet cache refresh works inside a real settlement transaction
+#51  Stop the test suite from racing on shared dev database resources
+#54  Show users a clear error when their account ledger doesn't add up
+#56  Let admins drill into an alert's full details and payload
+#57  Show operator alert counts and unresolved trend on admin dashboard
+#59  Show how many old operator alerts get cleaned up each day
+#60  Alert operators if the daily alert-cleanup job stops running
+#61  Show clients and advisers when their fees have been refunded
+#62  Test that fee reversals fully unwind the ledger
+#63  Catch missing posting-receipts automatically on every deploy
+#64  Auto-detect insufficient-funds deductions and notify the client
+#65  Filter and sort held fee deductions in the admin table
+#66  Let admins copy an alert's payload to their clipboard
+#67  Let admins search and filter alerts by what's inside the payload
+#68  Auto-refresh the dashboard alert tile so new alerts appear without reloading
+#69  Let admins filter operator alerts by a custom date range
+#75  Show admins when the alerts tile was last refreshed
+#76  Keep the dashboard's recent activity feed live too
+#79  Show how often each background job ran and whether it's overdue
+#92  Gate B verification roll-up script
+#93  Fee reconciliation and payout reporting
+#94  Wealth planner compliance gaps
+#95  Standardise audit logs to record before/after snapshots
+#96  Block writes to advice records while a compliance review is in progress
+#98  Build the wealth-planner UI for objectives, documents, and notes
+#99  Wire client-document storage to real object storage
+#100 Add CSV export buttons to fee reporting tabs
+#101 Show alerting threshold on the wallet-vs-ledger drift card
+#105 Planner verification roll-up script
+#107 Show advisers a clear lock indicator when a plan is under compliance review
+#108 Record an audit log entry every time a write is blocked by the review lock
+#109 Show before/after diffs in the admin audit-log viewer
+#132 Remove synthetic portfolio data
+#133 Pre-launch safety validation
+#135 Run the no-synthetic-data tripwire automatically on every CI run
+#140 Planner test fixture isolation and cleanup
+#141 Wallet vs Ledger drift audit user 1
+#142 Add strict mode to the pre-launch safety script
+#143 Stop demo seed wallet data from triggering drift alerts
+#144 Add /health endpoint, persistent error logs, and key business metrics
+#145 Wire missing operator alerts
+#146 Add global kill switches for transactions, deposits, withdrawals, and fees
+#147 Automated DB backups, restore drills, and rollback runbook
+#148 Enforce file-upload limits, audit admin route coverage, tighten login rate limit
+#149 Make audit_logs truly immutable at the database level
+#150 Final go/no-go pre-launch verification and report
+#155 Add a global write kill switch admins can flip in seconds
+#156 Make operator alerts reliably reach a channel and stop duplicating
+#157 Add /health and /ready endpoints for uptime monitoring
+#158 Stop test scripts from leaving fake balances on the platform's internal account
+#159 Fix the test fixture that triggers a phantom missing-receipt alert
+#160 Fix the deposit endpoint so two simultaneous requests don't return a 500
+#168 Test that the kill switches actually stop money movement end-to-end
+#180 Run the launch readiness check automatically before every deploy
+#181 Stop the wallet vs ledger drift the readiness check is now flagging
+#183 Cover the remaining money-movement entry points with kill-switch tests
+#184 Auto-rerun strict pre-launch safety check after 168 and 150 merge
+#185 Stop withdrawals and other money routes from returning 500 on simultaneous retries
+#186 Stop the txsafety test from leaving stale wallet cache on user 29
+#187 Stop the older fee-gate test script from leaking platform ledger entries
+#188 Stop the wallet-drift suppression test from corrupting the test database
+#189 Catch new money-movement HTTP endpoints without a kill-switch guard
+#190 Prove every caller of the ledger primitive is itself kill-switched
+#192 Stop a stuck pre-existing test from blocking pre-launch safety
+#193 Add a CI gate that flags any test script leaking platform ledger entries
+#194 Extend the kill-switch HTTP guard check to admin endpoints too
+#195 Catch raw ledger_entries and wallets writes that skip the kill-switched primitives
+#197 Run the new ledger-leak gate automatically on every PR
+#198 Catch test scripts that leave behind orphan transactions on the platform user
+#200 Stop the safety alarm system from going silent on repeat issues
+#201 Fix the root cause: stop test routes from writing to wallets directly
+#202 Verify the launch alarm at every stage so issues can't slip through
+#203 Ship the full drift admin workflow in one PR
+#204 Ship the full insufficient-funds workflow in one PR
+#209 Prove the new launch-alarm gate actually catches contamination
+#210 Retire the now-redundant end-of-Stage-2 scrub in pre-launch safety
+#213 Prove the new end-of-Stage-2 contract gate fails loudly
+#214 Stop the post-merge safety check from going RED on every clean run
+#219 Stop the insufficient-funds test from leaving stray accounts on the platform user
+```
