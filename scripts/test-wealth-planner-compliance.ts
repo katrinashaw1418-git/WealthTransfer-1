@@ -1183,43 +1183,67 @@ async function test10_transitionAndImmutability(opts: {
     role: "adviser",
   });
 
-  // Probe with a payload that ALSO tries to mutate adviceType and
-  // riskProfileId. The route's zod schema (transitionSchema in
-  // adviser-routes.ts) only whitelists newStatus/soaIssued/soaIssuedAt;
-  // these extra fields must be silently ignored by zod's strict parse,
-  // so the live row's adviceType + riskProfileId remain at their pre-call
-  // values. This is the recommendation/risk-profile allow-list enforcement.
-  const r1 = makeMockReqRes({
-    token,
-    params: { id: String(opts.adviceRecordId) },
-    body: {
-      newStatus: "issued",
-      soaIssued: true,
-      soaIssuedAt: new Date().toISOString(),
-      // Hostile fields below — must NOT be applied:
-      adviceType: "general",
-      riskProfileId: 99999,
-    },
-  });
-  await handler(r1.req, r1.res);
+  // Probes mutate adviceRecords.status (draft -> issued -> superseded) via
+  // the transition route. Wrap in try/finally so the row is normalized to
+  // status='issued' afterwards regardless of throw — the post-suite
+  // invariant enforces that every planner advice record ends at 'issued'.
+  let r1!: ReturnType<typeof makeMockReqRes>;
+  let r2!: ReturnType<typeof makeMockReqRes>;
+  let afterRow: { adviceType: string | null; riskProfileId: number | null; status: string | null } | undefined;
+  let __t10_didThrow = false;
+  let __t10_thrown: unknown = undefined;
+  try {
+    // Probe with a payload that ALSO tries to mutate adviceType and
+    // riskProfileId. The route's zod schema (transitionSchema in
+    // adviser-routes.ts) only whitelists newStatus/soaIssued/soaIssuedAt;
+    // these extra fields must be silently ignored by zod's strict parse,
+    // so the live row's adviceType + riskProfileId remain at their pre-call
+    // values. This is the recommendation/risk-profile allow-list enforcement.
+    r1 = makeMockReqRes({
+      token,
+      params: { id: String(opts.adviceRecordId) },
+      body: {
+        newStatus: "issued",
+        soaIssued: true,
+        soaIssuedAt: new Date().toISOString(),
+        // Hostile fields below — must NOT be applied:
+        adviceType: "general",
+        riskProfileId: 99999,
+      },
+    });
+    await handler(r1.req, r1.res);
 
-  const r2 = makeMockReqRes({
-    token,
-    params: { id: String(opts.adviceRecordId) },
-    body: { newStatus: "superseded", adviceType: "scaled" },
-  });
-  await handler(r2.req, r2.res);
+    r2 = makeMockReqRes({
+      token,
+      params: { id: String(opts.adviceRecordId) },
+      body: { newStatus: "superseded", adviceType: "scaled" },
+    });
+    await handler(r2.req, r2.res);
 
-  // Re-read the advice row to assert immutability of fields outside the
-  // transition's typed update shape.
-  const [afterRow] = await db
-    .select({
-      adviceType: adviceRecords.adviceType,
-      riskProfileId: adviceRecords.riskProfileId,
-      status: adviceRecords.status,
-    })
-    .from(adviceRecords)
-    .where(eq(adviceRecords.id, opts.adviceRecordId));
+    // Re-read the advice row to assert immutability of fields outside the
+    // transition's typed update shape.
+    [afterRow] = await db
+      .select({
+        adviceType: adviceRecords.adviceType,
+        riskProfileId: adviceRecords.riskProfileId,
+        status: adviceRecords.status,
+      })
+      .from(adviceRecords)
+      .where(eq(adviceRecords.id, opts.adviceRecordId));
+  } catch (err) {
+    __t10_didThrow = true;
+    __t10_thrown = err;
+  } finally {
+    // Normalize parent row to the canonical fixture terminal status so
+    // the post-suite invariant (status === 'issued' for every planner
+    // advice record) holds. Versions written by the transitions are left
+    // intact — they are deleted by cleanupForUserIds() on the next run.
+    await db
+      .update(adviceRecords)
+      .set({ status: "issued" })
+      .where(eq(adviceRecords.id, opts.adviceRecordId));
+  }
+  if (__t10_didThrow) throw __t10_thrown;
 
   const adviceTypeImmutable = afterRow?.adviceType === beforeRow?.adviceType;
   const riskProfileImmutable = afterRow?.riskProfileId === beforeRow?.riskProfileId;
@@ -1404,11 +1428,14 @@ async function test11_reviewPendingLock(opts: {
       .from(adviserNotes)
       .where(eq(adviserNotes.body, lockedNoteBodyLocal));
   } finally {
-    // Restore original status — runs even if a probe above throws so the
-    // next test in the suite (and any rerun) sees a clean baseline.
+    // Normalize parent row to the canonical fixture terminal status
+    // ('issued') so the post-suite invariant holds. Runs even if a probe
+    // above throws so the next test in the suite (and any rerun) sees a
+    // clean baseline. We deliberately don't replay `orig?.status` because
+    // an earlier test (#10) may have left it at a non-canonical value.
     await db
       .update(adviceRecords)
-      .set({ status: orig?.status ?? "draft" })
+      .set({ status: "issued" })
       .where(eq(adviceRecords.id, opts.adviceRecordId));
   }
   const lockedNoteBody =
@@ -1810,11 +1837,12 @@ async function test13_blockedWriteAuditRow(opts: {
     __t13_didThrow = true;
     __t13_thrown = err;
   } finally {
-    // Restore original status so reruns and downstream assertions stay
-    // clean — runs even if a probe above threw.
+    // Normalize parent row to the canonical fixture terminal status
+    // ('issued') so reruns, downstream assertions, and the post-suite
+    // invariant all hold — runs even if a probe above threw.
     await db
       .update(adviceRecords)
-      .set({ status: origRow?.status ?? "draft" })
+      .set({ status: "issued" })
       .where(eq(adviceRecords.id, opts.adviceRecordId));
   }
   if (__t13_didThrow) throw __t13_thrown;
@@ -2117,22 +2145,25 @@ async function main(): Promise<void> {
     adviceRecordId,
   });
 
-  // ---- Post-suite invariant: every advice record we created during this
-  // run must end at status='issued' (or any non-locked status). If a future
-  // edit drops a try/finally restore in test #11 / #13 the assertion below
-  // fires here instead of bleeding into the next pre-launch run.
+  // ---- Post-suite invariant: every planner fixture advice record (i.e.
+  // every adviceRecords row owned by a __planner_* client) MUST end at
+  // exactly status='issued'. This is the canonical terminal state — tests
+  // #10 (transition), #11 (review_pending lock) and #13 (blocked-write
+  // audit) all flip status during their probes and normalize back to
+  // 'issued' in their finally blocks. Any other status here means a future
+  // edit dropped the restore — fail hard with the offending IDs and statuses.
   const planneradviceRows = await db
     .select({ id: adviceRecords.id, status: adviceRecords.status })
     .from(adviceRecords)
     .where(
       inArray(adviceRecords.clientId, [clientUserId, otherClientUserId]),
     );
-  const stuckUnderReview = planneradviceRows.filter(
-    (r) => r.status === "review_pending",
-  );
-  if (stuckUnderReview.length > 0) {
+  const offending = planneradviceRows.filter((r) => r.status !== "issued");
+  if (offending.length > 0) {
     console.error(
-      `\nINVARIANT VIOLATION: ${stuckUnderReview.length} planner advice record(s) left in 'review_pending' after suite. ids=${stuckUnderReview.map((r) => r.id).join(",")}. A test flipped status without restoring it — wrap the flip in try/finally.`,
+      `\nINVARIANT VIOLATION: ${offending.length} planner advice record(s) ended at a non-canonical status (expected exactly 'issued'). Offending: ${offending
+        .map((r) => `id=${r.id} status='${r.status}'`)
+        .join("; ")}. A test mutated status without restoring it to 'issued' — wrap the flip in try/finally and set status='issued' in the finally.`,
     );
     process.exit(1);
   }

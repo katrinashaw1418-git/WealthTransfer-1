@@ -1,0 +1,166 @@
+Choose this:
+
+```txt
+Plan multiple tasks — one per major section (kill switch, monitoring, alerting, rollback, security, compliance, pre-launch test)
+```
+
+---
+
+# 🎯 Why this is the correct choice
+
+## ❌ Not ONE audit task
+
+```txt
+That gives you a report, not a system
+→ you already KNOW the gaps
+→ you need implementation, not analysis
+```
+
+---
+
+## ❌ Not only “highest-impact”
+
+```txt
+Dangerous shortcut
+
+You might:
+✔ have kill switch
+❌ but no monitoring
+❌ no alerts
+❌ no rollback
+
+→ still fail in production
+```
+
+---
+
+## ❌ Not only kill switch
+
+```txt
+Kill switch alone = blind shutdown
+
+Without:
+- monitoring → you don’t know when to trigger it
+- alerts → you find out too late
+- rollback → you can’t recover
+```
+
+---
+
+# ✅ Correct approach = structured build
+
+Break into **7 clean tasks**
+
+---
+
+# 🟢 TASK GROUP (create these)
+
+## 1. Monitoring
+
+```txt
+- health endpoint
+- error tracking
+- key business metrics
+```
+
+---
+
+## 2. Alerting
+
+```txt
+- wallet vs ledger drift alerts
+- failed transaction alerts
+- audit log failure alerts
+```
+
+---
+
+## 3. Kill Switch (CRITICAL)
+
+```txt
+- disable transactions
+- disable deposits/withdrawals
+- global config flags
+```
+
+---
+
+## 4. Rollback
+
+```txt
+- deploy rollback
+- DB restore process
+```
+
+---
+
+## 5. Security baseline
+
+```txt
+- protect admin routes
+- rate limiting
+- upload restrictions
+```
+
+---
+
+## 6. Compliance validation
+
+```txt
+- audit immutability
+- review lock enforcement
+- no fake data
+```
+
+---
+
+## 7. Pre-launch validation
+
+```txt
+- enforce safety script
+- manual checklist verification
+```
+
+---
+
+# 🧠 How to execute
+
+```txt
+1. Plan all 7 tasks
+2. Prioritise:
+   → Kill switch
+   → Alerting
+   → Monitoring
+3. Run in parallel where safe
+```
+
+---
+
+# 🔥 Strategic insight
+
+You are now in:
+
+```txt
+Infrastructure safety layer
+```
+
+NOT:
+
+```txt
+Product feature layer
+```
+
+---
+
+# 🧾 Final answer
+
+```txt
+Plan multiple tasks (full checklist)
+→ build each safety component properly
+→ do not shortcut this stage
+```
+
+---
+
+If you want:
+I can generate the **exact 7 task specs (copy-paste into your task system)** with acceptance criteria so the agent executes them perfectly.
