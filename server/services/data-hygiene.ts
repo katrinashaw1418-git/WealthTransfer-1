@@ -57,10 +57,21 @@ export async function clearPlaceholderClientNames(): Promise<DataHygieneSummary>
 
   for (const [firstName, lastName] of PLACEHOLDER_NAME_PAIRS) {
     try {
+      // Scope: only `role='client'` rows. Advisers, admins, ops users
+      // are out of scope — they should never have these placeholder
+      // names anyway, but the explicit guard avoids any chance of
+      // false-positive collision with a real adviser whose name
+      // happens to match a placeholder pair.
+      const matchPredicate = and(
+        eq(users.firstName, firstName),
+        eq(users.lastName, lastName),
+        eq(users.role, "client"),
+      );
+
       const matches = await db
         .select({ id: users.id })
         .from(users)
-        .where(and(eq(users.firstName, firstName), eq(users.lastName, lastName)));
+        .where(matchPredicate);
 
       summary.placeholderNamesScanned += matches.length;
       if (matches.length === 0) continue;
@@ -68,7 +79,7 @@ export async function clearPlaceholderClientNames(): Promise<DataHygieneSummary>
       const result = await db
         .update(users)
         .set({ firstName: "", lastName: "" })
-        .where(and(eq(users.firstName, firstName), eq(users.lastName, lastName)))
+        .where(matchPredicate)
         .returning({ id: users.id });
 
       summary.placeholderNamesCleared += result.length;
