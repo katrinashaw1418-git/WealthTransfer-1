@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------------------
-// Pre-launch safety roll-up (Task #133)
+// Pre-launch safety roll-up (Task #133, Task #142)
 //
 // Single-command go/no-go validator. Run with:
 //   npx tsx scripts/pre-launch-safety.ts
+//   npx tsx scripts/pre-launch-safety.ts --strict   # see "Outcomes" below
 //
 // What this proves:
 //   1. Each of the four existing safety/regression scripts still passes:
@@ -20,9 +21,31 @@
 //          leaves wallet + ledger at exactly the pre-state, with both audit
 //          rows still visible.
 //   3. The three reconciliation services (wallet-vs-ledger, ledger-vs-custodian,
-//      posting-receipt invariant) run in-process and emit ZERO new
+//      posting-receipt invariant) each run in-process and emit ZERO new
 //      `operator_alerts` rows of severity `critical` or `alert` over the
-//      pre-snapshot baseline.
+//      pre-snapshot baseline. Each is a separate gate.
+//
+// Outcomes (Task #142):
+//   Every gate reports one of three outcomes:
+//     - PASS — the gate ran and was satisfied.
+//     - FAIL — the gate ran and was NOT satisfied. Always blocks launch.
+//     - SKIP — the gate could not meaningfully run (precondition missing,
+//             sub-script failed to spawn, no data to reconcile, etc.).
+//             A SKIP is "we did not actually verify this", which is *not*
+//             the same as a real PASS — even though without --strict the
+//             exit code does not fail on SKIP alone.
+//
+//   By default, only FAILs change the exit code. With --strict, any SKIP
+//   also fails the exit code, so a launch gate can require BOTH zero FAILs
+//   AND zero SKIPs. Intended go-live invocation:
+//
+//     npx tsx scripts/pre-launch-safety.ts --strict   # must exit 0 to deploy
+//
+//   The final summary line says one of:
+//     - "PRE-LAUNCH SAFETY: ALL GATES PASSED" (zero FAIL, zero SKIP)
+//     - "PRE-LAUNCH SAFETY: PASS — N skipped (run with --strict to block)"
+//     - "PRE-LAUNCH SAFETY: FAIL — gate(s) failed"
+//     - "PRE-LAUNCH SAFETY: FAIL — N skipped in --strict mode"
 //
 // What this DOES NOT prove (see docs/PRE_LAUNCH_CHECKLIST.md):
 //   - Real custodian / bank SDK connectivity (the ledger-vs-custodian
@@ -33,7 +56,8 @@
 //   - JWT secret / API key rotation.
 //
 // Exit code:
-//   - 0 only if every assertion passes and every existing script returns 0.
+//   - 0 only if every assertion passes and every existing script returns 0
+//     (and, in --strict mode, no gate skipped).
 //   - 1 on any failure. A red light here MUST block deploy.
 // ---------------------------------------------------------------------------
 
@@ -72,9 +96,13 @@ import {
 import { runPostingReceiptInvariantCheck } from "../server/services/posting-receipt-invariant";
 
 // ---------------------------------------------------------------------------
-// Result reporter (canonical PASS/FAIL block, mirrors the other scripts).
+// Result reporter (canonical PASS/FAIL/SKIP block, mirrors the other scripts).
+// Task #142 — SKIP is a first-class outcome, with a human-readable reason.
+// SKIP means "we did not actually verify this", so a launch gate using
+// --strict treats it as a failure of the exit code.
 // ---------------------------------------------------------------------------
-type Result = { passed: boolean; details: string };
+type Outcome = "pass" | "fail" | "skip";
+type Result = { outcome: Outcome; details: string };
 const results = new Map<string, Result>();
 const CANONICAL_ORDER: string[] = [
   "existing: test-transaction-safety",
@@ -84,13 +112,18 @@ const CANONICAL_ORDER: string[] = [
   "lifecycle: happy-path wallet matches ledger",
   "lifecycle: idempotency under concurrency",
   "lifecycle: reversal symmetry",
-  "operator-alert clean-room (no new critical/alert)",
+  "reconciliation: wallet-ledger clean-room",
+  "reconciliation: ledger-vs-custodian clean-room",
+  "reconciliation: posting-receipt invariant clean-room",
 ];
 function pass(name: string, details: string): void {
-  results.set(name, { passed: true, details });
+  results.set(name, { outcome: "pass", details });
 }
 function fail(name: string, details: string): void {
-  results.set(name, { passed: false, details });
+  results.set(name, { outcome: "fail", details });
+}
+function skip(name: string, reason: string): void {
+  results.set(name, { outcome: "skip", details: reason });
 }
 
 // ---------------------------------------------------------------------------
@@ -117,26 +150,36 @@ const EXISTING_SCRIPTS: Array<{ label: string; file: string }> = [
   },
 ];
 
-function runExistingScript(scriptPath: string): {
-  passed: boolean;
-  details: string;
-} {
+type ExistingScriptOutcome =
+  | { outcome: "pass"; details: string }
+  | { outcome: "fail"; details: string }
+  | { outcome: "skip"; details: string };
+
+function runExistingScript(scriptPath: string): ExistingScriptOutcome {
   const r = spawnSync("npx", ["tsx", scriptPath], {
     stdio: "inherit",
     env: process.env,
     encoding: "utf8",
   });
+  // Task #142 — a spawn error or signal-kill means the sub-script never
+  // actually ran to completion, so we have NOT verified the gate. That's
+  // a SKIP (with a clear reason), not a real PASS or a real FAIL — the
+  // exit-code distinction matters in --strict mode.
   if (r.error) {
-    return { passed: false, details: `spawn error: ${r.error.message}` };
+    return {
+      outcome: "skip",
+      details: `script did not run (spawn error: ${r.error.message})`,
+    };
   }
   if (r.signal) {
-    return { passed: false, details: `killed by signal ${r.signal}` };
+    return {
+      outcome: "skip",
+      details: `script did not complete (killed by signal ${r.signal})`,
+    };
   }
   const code = r.status ?? -1;
-  return {
-    passed: code === 0,
-    details: code === 0 ? "exit=0" : `exit=${code}`,
-  };
+  if (code === 0) return { outcome: "pass", details: "exit=0" };
+  return { outcome: "fail", details: `exit=${code}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +410,14 @@ function getHandler(key: string): CapturedHandler {
   return h;
 }
 
+// Task #142 — preflight a route's availability so the lifecycle scenarios
+// can SKIP cleanly (with a reason) instead of FAILing when the precondition
+// they need wasn't even registered. Returns the missing keys, or [] if all
+// expected handlers are present.
+function missingHandlerKeys(...keys: string[]): string[] {
+  return keys.filter((k) => !captured.has(k));
+}
+
 // ---------------------------------------------------------------------------
 // Synthetic balanced ledger pair — used by the happy-path scenario to
 // simulate the AUD and BTC legs of a crypto trade. Each leg is a single
@@ -508,6 +559,14 @@ async function captureNewIdemIds(userId: number): Promise<void> {
 // ---------------------------------------------------------------------------
 async function lifecycle1_happyPath(): Promise<void> {
   const NAME = "lifecycle: happy-path wallet matches ledger";
+  // Task #142 — preflight: if the deposit/withdraw routes weren't even
+  // registered, we cannot meaningfully run this scenario. SKIP with a
+  // clear reason rather than fall through to FAIL.
+  const missing = missingHandlerKeys("POST /api/deposit", "POST /api/withdraw");
+  if (missing.length > 0) {
+    skip(NAME, `route handler(s) not captured: ${missing.join(", ")}`);
+    return;
+  }
   try {
     const userId = await ensureUser({
       username: HAPPY_USERNAME,
@@ -642,6 +701,12 @@ async function lifecycle1_happyPath(): Promise<void> {
 // ---------------------------------------------------------------------------
 async function lifecycle2_idempotencyConcurrency(): Promise<void> {
   const NAME = "lifecycle: idempotency under concurrency";
+  // Task #142 — preflight: needs the deposit handler.
+  const missing = missingHandlerKeys("POST /api/deposit");
+  if (missing.length > 0) {
+    skip(NAME, `route handler(s) not captured: ${missing.join(", ")}`);
+    return;
+  }
   try {
     const userId = await ensureUser({
       username: IDEM_USERNAME,
@@ -808,56 +873,128 @@ async function lifecycle3_reversalSymmetry(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Operator-alert clean room.
-// Snapshot MAX(operator_alerts.id) before, run the three reconciliation
-// services in-process, then assert no rows of severity 'critical' or
-// 'alert' were produced over the snapshot baseline.
+// Operator-alert clean rooms (Task #142 — split per service).
+// Each reconciliation service is its own gate: snapshot MAX(operator_alerts.id)
+// before, run the service in-process, then assert no rows of severity
+// 'critical' or 'alert' were produced over the snapshot baseline. A service
+// that finds no data to reconcile (no users with wallets/ledger entries, or
+// no postings to compare) reports SKIP — there's nothing for the gate to
+// have actually verified.
 // ---------------------------------------------------------------------------
-async function operatorAlertCleanRoom(): Promise<void> {
-  const NAME = "operator-alert clean-room (no new critical/alert)";
+async function snapshotMaxAlertId(): Promise<number> {
+  const [maxRow] = await db
+    .select({ maxId: sql<number>`COALESCE(MAX(id), 0)::int` })
+    .from(operatorAlerts);
+  return Number(maxRow?.maxId ?? 0);
+}
+
+async function newCriticalOrAlertRows(baselineMaxId: number, source?: string) {
+  const conditions = [
+    gt(operatorAlerts.id, baselineMaxId),
+    inArray(operatorAlerts.severity, ["critical", "alert"]),
+  ];
+  if (source) conditions.push(eq(operatorAlerts.source, source));
+  return db
+    .select({
+      id: operatorAlerts.id,
+      source: operatorAlerts.source,
+      severity: operatorAlerts.severity,
+      title: operatorAlerts.title,
+    })
+    .from(operatorAlerts)
+    .where(and(...conditions))
+    .orderBy(desc(operatorAlerts.id));
+}
+
+function summarizeAlertRows(
+  rows: Array<{ id: number; source: string; severity: string; title: string }>,
+): string {
+  return rows
+    .slice(0, 5)
+    .map((r) => `#${r.id}[${r.severity}/${r.source}] ${r.title}`)
+    .join("; ");
+}
+
+async function reconWalletLedgerCleanRoom(): Promise<void> {
+  const NAME = "reconciliation: wallet-ledger clean-room";
   try {
-    const [maxRow] = await db
-      .select({ maxId: sql<number>`COALESCE(MAX(id), 0)::int` })
-      .from(operatorAlerts);
-    const baselineMaxId = Number(maxRow?.maxId ?? 0);
-
-    // Run the three reconciliation services back-to-back. Each one does
-    // its own internal try/catch around notifyOperator, so a notification
-    // failure here cannot crash the rollup — but a thrown error from the
-    // recon body itself is fatal and counts as a fail.
-    await runWalletLedgerReconciliation();
-    await runLedgerReconciliation();
-    await runPostingReceiptInvariantCheck();
-
-    const newRows = await db
-      .select({
-        id: operatorAlerts.id,
-        source: operatorAlerts.source,
-        severity: operatorAlerts.severity,
-        title: operatorAlerts.title,
-      })
-      .from(operatorAlerts)
-      .where(
-        and(
-          gt(operatorAlerts.id, baselineMaxId),
-          inArray(operatorAlerts.severity, ["critical", "alert"]),
-        ),
-      )
-      .orderBy(desc(operatorAlerts.id));
-
+    const baselineMaxId = await snapshotMaxAlertId();
+    const summary = await runWalletLedgerReconciliation();
+    if (summary.pairsChecked === 0) {
+      skip(
+        NAME,
+        "no (user, currency) pairs to reconcile (no wallet rows and no ledger entries)",
+      );
+      return;
+    }
+    const newRows = await newCriticalOrAlertRows(baselineMaxId);
     if (newRows.length === 0) {
       pass(
         NAME,
-        `baseline max_id=${baselineMaxId}, 0 new critical/alert rows from in-process recon`,
+        `pairs=${summary.pairsChecked}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows`,
       );
     } else {
-      const sample = newRows
-        .slice(0, 5)
-        .map((r) => `#${r.id}[${r.severity}/${r.source}] ${r.title}`)
-        .join("; ");
       fail(
         NAME,
-        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${sample}`,
+        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}`,
+      );
+    }
+  } catch (err: any) {
+    fail(NAME, `threw: ${err?.message ?? err}`);
+  }
+}
+
+async function reconLedgerVsCustodianCleanRoom(): Promise<void> {
+  const NAME = "reconciliation: ledger-vs-custodian clean-room";
+  try {
+    const baselineMaxId = await snapshotMaxAlertId();
+    const summary = await runLedgerReconciliation();
+    if (summary.pairsChecked === 0) {
+      skip(
+        NAME,
+        "no (user, currency) pairs to reconcile (no ledger entries exist)",
+      );
+      return;
+    }
+    const newRows = await newCriticalOrAlertRows(baselineMaxId);
+    if (newRows.length === 0) {
+      pass(
+        NAME,
+        `pairs=${summary.pairsChecked}, externalUnavailable=${summary.externalUnavailable}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows`,
+      );
+    } else {
+      fail(
+        NAME,
+        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}`,
+      );
+    }
+  } catch (err: any) {
+    fail(NAME, `threw: ${err?.message ?? err}`);
+  }
+}
+
+async function reconPostingReceiptCleanRoom(): Promise<void> {
+  const NAME = "reconciliation: posting-receipt invariant clean-room";
+  try {
+    const baselineMaxId = await snapshotMaxAlertId();
+    const result = await runPostingReceiptInvariantCheck();
+    if (result.txWithEntries === 0 && result.receipts === 0) {
+      skip(
+        NAME,
+        "no ledger entries and no postings to compare (invariant has nothing to check)",
+      );
+      return;
+    }
+    const newRows = await newCriticalOrAlertRows(baselineMaxId);
+    if (newRows.length === 0) {
+      pass(
+        NAME,
+        `txWithEntries=${result.txWithEntries}, receipts=${result.receipts}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows`,
+      );
+    } else {
+      fail(
+        NAME,
+        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}`,
       );
     }
   } catch (err: any) {
@@ -951,6 +1088,10 @@ async function cleanupTrackedRows(): Promise<void> {
 // Main
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
+  // Task #142 — parse --strict. In strict mode, any SKIP fails the exit
+  // code (alongside any FAIL); without it, only FAILs change the exit code.
+  const argv = process.argv.slice(2);
+  const strict = argv.includes("--strict");
   let exitCode = 0;
   try {
     // -------------------------------------------------------------------
@@ -973,7 +1114,8 @@ async function main(): Promise<void> {
     for (const s of EXISTING_SCRIPTS) {
       console.log(`\n--- pre-launch: running ${s.file} ---`);
       const r = runExistingScript(s.file);
-      if (r.passed) pass(s.label, r.details);
+      if (r.outcome === "pass") pass(s.label, r.details);
+      else if (r.outcome === "skip") skip(s.label, r.details);
       else fail(s.label, r.details);
     }
 
@@ -994,37 +1136,75 @@ async function main(): Promise<void> {
     await lifecycle3_reversalSymmetry();
 
     // -------------------------------------------------------------------
-    // Stage 3: operator-alert clean room. Runs LAST so any drift the
-    // lifecycle scenarios inadvertently introduced shows up here as a new
-    // critical/alert row instead of being masked.
+    // Stage 3: operator-alert clean rooms (Task #142 — one gate per
+    // reconciliation service). Runs LAST so any drift the lifecycle
+    // scenarios inadvertently introduced shows up here as a new
+    // critical/alert row instead of being masked. Each service is its
+    // own gate so SKIP / FAIL / PASS is reported independently.
     // -------------------------------------------------------------------
-    console.log("\n--- pre-launch: operator-alert clean room ---");
-    await operatorAlertCleanRoom();
+    console.log("\n--- pre-launch: reconciliation: wallet-ledger clean room ---");
+    await reconWalletLedgerCleanRoom();
+
+    console.log("\n--- pre-launch: reconciliation: ledger-vs-custodian clean room ---");
+    await reconLedgerVsCustodianCleanRoom();
+
+    console.log("\n--- pre-launch: reconciliation: posting-receipt invariant clean room ---");
+    await reconPostingReceiptCleanRoom();
 
     // -------------------------------------------------------------------
-    // Canonical reporter.
+    // Canonical reporter (Task #142 — PASS / FAIL / SKIP).
     // -------------------------------------------------------------------
     console.log("");
-    let anyFailed = false;
+    let passCount = 0;
+    let failCount = 0;
+    let skipCount = 0;
+    const skippedNames: string[] = [];
     for (const name of CANONICAL_ORDER) {
       const r = results.get(name);
       if (!r) {
         console.log(`MISSING ${name}`);
-        anyFailed = true;
+        failCount += 1;
         continue;
       }
-      if (r.passed) console.log(`PASS ${name} — ${r.details}`);
-      else {
+      if (r.outcome === "pass") {
+        console.log(`PASS ${name} — ${r.details}`);
+        passCount += 1;
+      } else if (r.outcome === "skip") {
+        console.log(`SKIP ${name} — ${r.details}`);
+        skipCount += 1;
+        skippedNames.push(name);
+      } else {
         console.log(`FAIL ${name} — ${r.details}`);
-        anyFailed = true;
+        failCount += 1;
       }
     }
 
-    if (anyFailed) {
+    console.log(
+      `\nSummary: ${passCount} passed, ${failCount} failed, ${skipCount} skipped` +
+        (strict ? " (--strict mode: SKIP fails)" : ""),
+    );
+    if (skipCount > 0) {
+      console.log("Skipped gates:");
+      for (const n of skippedNames) {
+        const r = results.get(n);
+        console.log(`  - ${n}: ${r?.details ?? ""}`);
+      }
+    }
+
+    if (failCount > 0) {
       console.error(
-        "\nPRE-LAUNCH SAFETY: FAIL — one or more gates failed. Do not deploy.",
+        "\nPRE-LAUNCH SAFETY: FAIL — gate(s) failed. Do not deploy.",
       );
       exitCode = 1;
+    } else if (strict && skipCount > 0) {
+      console.error(
+        `\nPRE-LAUNCH SAFETY: FAIL — ${skipCount} skipped in --strict mode. Do not deploy.`,
+      );
+      exitCode = 1;
+    } else if (skipCount > 0) {
+      console.log(
+        `\nPRE-LAUNCH SAFETY: PASS — ${skipCount} skipped (run with --strict to block on skipped gates)`,
+      );
     } else {
       console.log("\nPRE-LAUNCH SAFETY: ALL GATES PASSED ✅");
     }
