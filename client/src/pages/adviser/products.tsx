@@ -13,6 +13,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Building2, AlertCircle, FileSignature, Filter as FilterIcon, X } from "lucide-react";
+import {
+  RISK_PROFILE_KEYS,
+  RISK_PROFILE_LABELS,
+  riskProfileBadgeVariant,
+  riskProfileLabel,
+  riskProfileRank,
+  toKnownRiskProfile,
+} from "@shared/risk-profiles";
 
 interface AdviserProduct {
   id: number;
@@ -61,40 +69,6 @@ const CATEGORY_PRIORITY: Record<string, number> = {
 
 function categoryRank(category: string): number {
   return CATEGORY_PRIORITY[category] ?? 50;
-}
-
-// Sentence-case the risk profile label for display. Source data is now stored
-// already-normalised ("Low" / "Moderate" / "Medium" / "High" / "Very High"),
-// but we still defensively re-format any legacy snake_case or lowercase value
-// that might leak through, instead of using the previous CSS `capitalize` hack
-// which produces "Very_high".
-function formatRiskLabel(profile: string | null | undefined): string {
-  if (!profile) return "—";
-  const trimmed = profile.trim();
-  if (!trimmed) return "—";
-  return trimmed
-    .replace(/_/g, " ")
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function riskBadgeVariant(profile: string | null): "default" | "secondary" | "outline" | "destructive" {
-  if (!profile) return "outline";
-  const p = profile.toLowerCase();
-  if (p.includes("very high")) return "destructive";
-  if (p.includes("low") || p.includes("conservative")) return "secondary";
-  if (p.includes("high") || p.includes("aggressive")) return "default";
-  return "outline";
-}
-
-// Risk levels listed strongest-to-weakest priority for sorting, then sentence
-// cased for display.
-const RISK_ORDER = ["Low", "Moderate", "Medium", "High", "Very High"];
-
-function riskRank(profile: string | null | undefined): number {
-  const label = formatRiskLabel(profile);
-  const idx = RISK_ORDER.indexOf(label);
-  return idx === -1 ? 99 : idx;
 }
 
 // First numeric value in the targetNetIrr label, used for sorting.
@@ -186,16 +160,10 @@ export default function AdviserProducts() {
     return Array.from(set).sort((a, b) => categoryRank(a) - categoryRank(b));
   }, [allProducts]);
 
-  const availableRisks = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of allProducts) set.add(formatRiskLabel(p.riskProfile));
-    return RISK_ORDER.filter((r) => set.has(r));
-  }, [allProducts]);
-
   const filtered = useMemo(() => {
     const list = allProducts.filter((p) => {
       if (filters.category !== "all" && p.category !== filters.category) return false;
-      if (filters.risk !== "all" && formatRiskLabel(p.riskProfile) !== filters.risk) return false;
+      if (filters.risk !== "all" && toKnownRiskProfile(p.riskProfile) !== filters.risk) return false;
       if (!minBandMatch(p.minimumInvestment, filters.minBand)) return false;
       if (!liquidityBandMatch(p.liquidity, filters.liquidity)) return false;
       return true;
@@ -225,7 +193,7 @@ export default function AdviserProducts() {
         sorted.sort((a, b) => {
           const rankDiff = categoryRank(a.category) - categoryRank(b.category);
           if (rankDiff !== 0) return rankDiff;
-          const riskDiff = riskRank(a.riskProfile) - riskRank(b.riskProfile);
+          const riskDiff = riskProfileRank(a.riskProfile) - riskProfileRank(b.riskProfile);
           if (riskDiff !== 0) return riskDiff;
           return a.name.localeCompare(b.name);
         });
@@ -287,11 +255,11 @@ export default function AdviserProducts() {
           </div>
           {p.riskProfile && (
             <Badge
-              variant={riskBadgeVariant(p.riskProfile)}
+              variant={riskProfileBadgeVariant(p.riskProfile)}
               className="text-xs whitespace-nowrap"
               data-testid={`badge-risk-${p.id}`}
             >
-              {formatRiskLabel(p.riskProfile)}
+              {riskProfileLabel(p.riskProfile)}
             </Badge>
           )}
         </div>
@@ -441,9 +409,9 @@ export default function AdviserProducts() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All risk levels</SelectItem>
-                  {availableRisks.map((r) => (
-                    <SelectItem key={r} value={r}>
-                      {r}
+                  {RISK_PROFILE_KEYS.map((key) => (
+                    <SelectItem key={key} value={key}>
+                      {RISK_PROFILE_LABELS[key]}
                     </SelectItem>
                   ))}
                 </SelectContent>

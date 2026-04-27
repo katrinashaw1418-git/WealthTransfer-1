@@ -43,6 +43,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Plus, Package } from "lucide-react";
+import {
+  RISK_PROFILE_KEYS,
+  RISK_PROFILE_LABELS,
+  riskProfileLabel,
+  type KnownRiskProfile,
+} from "@shared/risk-profiles";
 
 interface InvestmentProduct {
   id: number;
@@ -78,7 +84,9 @@ const createProductSchema = z.object({
   distributions: z.string().min(1).max(200),
   liquidity: z.string().min(1).max(200),
   minimumInvestment: z.string().regex(/^\d+(\.\d{1,2})?$/, "Whole number or decimal e.g. 50000.00"),
-  riskProfile: z.enum(["conservative", "moderate", "high"]),
+  // Sourced from the shared risk-profile list so adding a band only requires
+  // editing `shared/risk-profiles.ts`. Cast satisfies z.enum's tuple shape.
+  riskProfile: z.enum(RISK_PROFILE_KEYS as [KnownRiskProfile, ...KnownRiskProfile[]]),
   returnType: z.enum(["income", "capital_gains", "blended"]),
   returnMethod: z.enum(["fixed_annual_compound", "fixed_annual_simple"]),
   // Decimal fraction in [0, 1]. Required because portfolio valuation is
@@ -214,9 +222,7 @@ export default function AdminProducts() {
                       <div className="text-xs text-slate-500">{p.subCategory}</div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline" className="capitalize">
-                        {p.riskProfile}
-                      </Badge>
+                      <Badge variant="outline">{riskProfileLabel(p.riskProfile)}</Badge>
                     </TableCell>
                     <TableCell className="text-sm">{p.targetNetIrr}</TableCell>
                     <TableCell className="text-sm">{fmtMoney(p.minimumInvestment)}</TableCell>
@@ -408,9 +414,11 @@ export default function AdminProducts() {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value="conservative">Conservative</SelectItem>
-                          <SelectItem value="moderate">Moderate</SelectItem>
-                          <SelectItem value="high">High</SelectItem>
+                          {Object.entries(RISK_PROFILE_LABELS).map(([value, label]) => (
+                            <SelectItem key={value} value={value}>
+                              {label}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                       <FormMessage />
