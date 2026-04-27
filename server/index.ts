@@ -2,8 +2,8 @@ import express, { type Request, Response, NextFunction } from "express";
 import { randomUUID } from "crypto";
 import rateLimit from "express-rate-limit";
 import { registerRoutes } from "./routes";
+import { registerHealthRoutes } from "./health";
 import { setupVite, serveStatic, log } from "./vite";
-import { buildHealthReport } from "./services/health";
 import { recordServerError } from "./services/error-log";
 
 const app = express();
@@ -12,32 +12,27 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
 // ---------------------------------------------------------------------------
-// TASK #144 — /health endpoint
+// Task #157 — uptime endpoints (/health, /ready)
 // ---------------------------------------------------------------------------
-// Mounted BEFORE the /api rate limiter (and outside the /api namespace) so
-// external uptime monitors can poll without ever hitting the limiter, even
-// if a future refactor changes the limiter's `skip` rules. The handler is
-// fire-and-forget cheap (parallel DB ping + 3 indexed SELECTs) so we are
-// not creating a new attack surface by exposing it unauthenticated — the
-// payload deliberately leaks no business data, only "is this server able
-// to serve traffic?" signals.
+// Mounted BEFORE the rate limiter, the request logger, and the heavy
+// `registerRoutes` setup so external monitors can probe `/health` and
+// `/ready` from the moment the process is up — even while the rest of
+// the app is still finishing its boot-time DB migrations. They live
+// outside `/api`, so the per-IP rate limiter and the `/api`-only request
+// logger below also leave them alone (no auth, no audit log noise).
+//
+// REBASE NOTE (Task #157 over Task #144): Task #144 had earlier added its
+// own `app.get("/health", ...)` here that called `buildHealthReport()`
+// from `services/health.ts`. Task #157 supersedes that route with a
+// `/health` whose payload shape is the one the spec asks for
+// (status / uptimeSeconds / version / db.{ok,latencyMs}) AND adds the
+// new `/ready` endpoint. The admin-dashboard "lastSuccessfulHealthProbeAt"
+// signal Task #144 wired into `recordSuccessfulHealthProbe()` is preserved
+// because `registerHealthRoutes` calls it on every successful /health hit.
+// `services/health.ts` is left in place for any future caller of
+// `buildHealthReport()`.
 // ---------------------------------------------------------------------------
-app.get("/health", async (_req, res) => {
-  try {
-    const report = await buildHealthReport();
-    res.status(report.status === "ok" ? 200 : 503).json(report);
-  } catch (err) {
-    // We expect buildHealthReport itself to never throw, but if it ever
-    // does, default to 503 with a structured body so monitors can parse it
-    // (rather than the express default HTML 500 page).
-    res.status(503).json({
-      status: "degraded",
-      generatedAt: new Date().toISOString(),
-      checks: [],
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-});
+registerHealthRoutes(app);
 
 // ---------------------------------------------------------------------------
 // TASK #144 — per-request id
