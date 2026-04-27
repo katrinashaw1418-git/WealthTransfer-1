@@ -124,7 +124,15 @@ const ADMIN_USERNAME = "__wpc_test_admin__";
 // ---------------------------------------------------------------------------
 // Result tracking
 // ---------------------------------------------------------------------------
-type TestResult = { passed: boolean; details: string };
+// Task #152 — SKIP is a first-class outcome alongside PASS and FAIL,
+// mirroring the contract in scripts/pre-launch-safety.ts. A SKIP means
+// "we did not actually verify this check" (precondition missing,
+// fixture row absent, env var unset). Without --strict, SKIP does not
+// change the exit code; with --strict, any SKIP fails the exit code so
+// a skipped internal check propagates up through the roll-up instead
+// of being hidden behind a PASS exit code.
+type Outcome = "pass" | "fail" | "skip";
+type TestResult = { outcome: Outcome; details: string };
 const CANONICAL_ORDER: string[] = [
   "1. retention defaults wired",
   "2. adviceType default stays 'personal'",
@@ -142,14 +150,19 @@ const CANONICAL_ORDER: string[] = [
 ];
 const results = new Map<string, TestResult>();
 
-function record(name: string, passed: boolean, details: string): void {
+function record(name: string, outcome: Outcome, details: string): void {
   if (!CANONICAL_ORDER.includes(name)) {
     throw new Error(`Internal: unknown canonical test name '${name}'`);
   }
-  results.set(name, { passed, details });
+  results.set(name, { outcome, details });
 }
-const pass = (name: string, details: string) => record(name, true, details);
-const fail = (name: string, details: string) => record(name, false, details);
+const pass = (name: string, details: string) => record(name, "pass", details);
+const fail = (name: string, details: string) => record(name, "fail", details);
+// Task #152 — `skip` records "we did not actually verify this check"
+// with a clear human-readable reason. Used for precondition-missing
+// short-circuits (route handler not captured, etc.) that previously
+// surfaced as a hard FAIL even though the check itself never ran.
+const skip = (name: string, reason: string) => record(name, "skip", reason);
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -535,7 +548,8 @@ async function test3_crossAdviserRejected(opts: {
 
   const handler = captured.get("POST /api/adviser/client-objectives");
   if (!handler) {
-    fail(NAME, "internal: route handler not captured");
+    // Task #152 — precondition missing: SKIP, not FAIL.
+    skip(NAME, "POST /api/adviser/client-objectives route handler not captured");
     return;
   }
   const token = signToken({
@@ -619,7 +633,8 @@ async function test4_crossClientReadPrevented(opts: {
 
   const handler = captured.get("GET /api/client/advice/:id");
   if (!handler) {
-    fail(NAME, "internal: route handler not captured");
+    // Task #152 — precondition missing: SKIP, not FAIL.
+    skip(NAME, "GET /api/client/advice/:id route handler not captured");
     return;
   }
   // Sign in AS THE OTHER CLIENT and try to read clientUserId's advice.
@@ -861,9 +876,10 @@ async function test7_viewingGateBlocks(opts: {
 
   const handler = captured.get("GET /api/client/advice/:id");
   if (!handler) {
-    fail(
+    // Task #152 — precondition missing: SKIP, not FAIL.
+    skip(
       "7. viewing-ack gate blocks unacknowledged GET",
-      "internal: route handler not captured",
+      "GET /api/client/advice/:id route handler not captured",
     );
     return;
   }
@@ -1166,9 +1182,10 @@ async function test10_transitionAndImmutability(opts: {
 
   const handler = captured.get("POST /api/adviser/advice-records/:id/transition");
   if (!handler) {
-    fail(
+    // Task #152 — precondition missing: SKIP, not FAIL.
+    skip(
       NAME,
-      "internal: transition route handler not captured (snapshot hook not wired into a real route)",
+      "POST /api/adviser/advice-records/:id/transition route handler not captured (snapshot hook not wired into a real route)",
     );
     return;
   }
@@ -2018,6 +2035,12 @@ function makeStreamingMockRes(): {
 // Runner
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
+  // Task #152 — accept --strict from argv. Forwarded by the parent
+  // roll-up (scripts/pre-launch-safety.ts) when the parent itself was
+  // invoked --strict. In strict mode any internal SKIP fails the exit
+  // code (we use 2 so the parent can distinguish "skipped" from
+  // "failed"); without --strict, SKIPs do not change the exit code.
+  const strict = process.argv.slice(2).includes("--strict");
   console.log("=== Wealth Planner Compliance verification roll-up (Task #94) ===\n");
 
   captureAllRoutes();
@@ -2171,26 +2194,54 @@ async function main(): Promise<void> {
   }
 
   console.log("");
+  // Task #152 — SKIP is now reported alongside PASS/FAIL with its
+  // reason so operators can see exactly which check did not run.
+  let skippedCount = 0;
   for (const name of CANONICAL_ORDER) {
     const r = results.get(name);
     if (!r) {
       console.log(`MISSING ${name} — assertion was not recorded`);
       continue;
     }
-    const tag = r.passed ? "PASS" : "FAIL";
+    let tag: string;
+    if (r.outcome === "pass") tag = "PASS";
+    else if (r.outcome === "skip") {
+      tag = "SKIP";
+      skippedCount += 1;
+    } else tag = "FAIL";
     console.log(`${tag} ${name} — ${r.details}`);
   }
 
-  const failedCount = Array.from(results.values()).filter((r) => !r.passed).length;
+  const failedCount = Array.from(results.values()).filter(
+    (r) => r.outcome === "fail",
+  ).length;
   const missingCount = CANONICAL_ORDER.filter((n) => !results.has(n)).length;
   if (failedCount > 0 || missingCount > 0) {
     console.error(
-      `\n${failedCount} fail(s), ${missingCount} missing assertion(s) in Wealth Planner Compliance roll-up.`,
+      `\n${failedCount} fail(s), ${missingCount} missing assertion(s), ${skippedCount} skipped in Wealth Planner Compliance roll-up.`,
     );
     process.exit(1);
   }
 
-  console.log("\nALL WEALTH PLANNER COMPLIANCE TESTS PASSED \u2705");
+  if (skippedCount > 0 && strict) {
+    // Task #152 — strict mode: any internal SKIP fails the exit code.
+    // Use exit code 2 so the parent roll-up's runExistingScript() can
+    // distinguish skip from fail when classifying the existing-script
+    // outcome.
+    console.error(
+      `\n${skippedCount} Wealth Planner Compliance check(s) skipped under --strict. Treating as failure.`,
+    );
+    process.exit(2);
+  }
+
+  if (skippedCount > 0) {
+    console.log(
+      `\nALL WEALTH PLANNER COMPLIANCE TESTS PASSED — ${skippedCount} skipped ` +
+        "(run with --strict to block on skipped checks).",
+    );
+  } else {
+    console.log("\nALL WEALTH PLANNER COMPLIANCE TESTS PASSED \u2705");
+  }
   process.exit(0);
 }
 

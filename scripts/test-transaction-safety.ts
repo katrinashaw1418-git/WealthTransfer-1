@@ -77,15 +77,27 @@ const TEST_ADVISER_USERNAME = "__txsafety_adviser_user__";
 const TEST_ADVISER_EMAIL = "txsafety-adviser@test.invalid";
 const TEST_CURRENCY = "AUD";
 
-type TestResult = { name: string; passed: boolean; details?: string };
+// Task #152 — SKIP is a first-class outcome alongside PASS and FAIL,
+// mirroring the contract in scripts/pre-launch-safety.ts. A SKIP means
+// "we did not actually verify this check" (precondition missing,
+// fixture row absent, env var unset, sub-script dependency didn't
+// land). Without --strict, SKIP does not change the exit code; with
+// --strict, any SKIP fails the exit code so the parent roll-up sees a
+// real propagated outcome instead of a hidden PASS.
+type Outcome = "pass" | "fail" | "skip";
+type TestResult = { name: string; outcome: Outcome; details?: string };
 const results: TestResult[] = [];
 
 function pass(name: string, details?: string) {
-  results.push({ name, passed: true, details });
+  results.push({ name, outcome: "pass", details });
 }
 
 function fail(name: string, details?: string) {
-  results.push({ name, passed: false, details });
+  results.push({ name, outcome: "fail", details });
+}
+
+function skip(name: string, reason: string) {
+  results.push({ name, outcome: "skip", details: reason });
 }
 
 function hashPayload(body: unknown): string {
@@ -1210,7 +1222,16 @@ async function countLedgerEntriesByTxId(txId: number): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log("=== Transaction Safety Test ===\n");
+  // Task #152 — accept --strict from argv. In strict mode, any check
+  // that resolves to SKIP fails the exit code (mirroring the contract
+  // in scripts/pre-launch-safety.ts). The parent roll-up forwards
+  // --strict to this child when it itself was invoked strict, so a
+  // skipped internal check propagates up as a non-zero child exit
+  // instead of being hidden behind a PASS.
+  const strict = process.argv.slice(2).includes("--strict");
+  console.log(
+    `=== Transaction Safety Test ===${strict ? " (--strict)" : ""}\n`,
+  );
 
   const userId = await ensureTestUser();
   const adviserUserId = await ensureAdviserTestUser();
@@ -1265,18 +1286,40 @@ async function main() {
 
     console.log("");
     for (const r of results) {
-      const tag = r.passed ? "PASS" : "FAIL";
+      const tag =
+        r.outcome === "pass"
+          ? "PASS"
+          : r.outcome === "skip"
+            ? "SKIP"
+            : "FAIL";
       const tail = r.details ? ` — ${r.details}` : "";
       console.log(`${tag} ${r.name}${tail}`);
     }
 
-    const failed = results.filter((r) => !r.passed);
+    const failed = results.filter((r) => r.outcome === "fail");
+    const skipped = results.filter((r) => r.outcome === "skip");
     if (failed.length > 0) {
       console.error(
         `\n${failed.length} transaction safety test(s) failed. ` +
           "Do not proceed to fee-engine money movement.",
       );
       exitCode = 1;
+    } else if (skipped.length > 0 && strict) {
+      // Task #152 — strict mode: any internal SKIP fails the exit code
+      // so the parent roll-up's `existing: ...` gate flips off PASS,
+      // mirroring scripts/pre-launch-safety.ts. Use exit code 2 so the
+      // parent can distinguish "skipped" from "failed" when classifying
+      // the existing-script outcome.
+      console.error(
+        `\n${skipped.length} transaction safety check(s) skipped under --strict. ` +
+          "Treating as failure.",
+      );
+      exitCode = 2;
+    } else if (skipped.length > 0) {
+      console.log(
+        `\nALL TRANSACTION SAFETY TESTS PASSED — ${skipped.length} skipped ` +
+          "(run with --strict to block on skipped checks).",
+      );
     } else {
       console.log("\nALL TRANSACTION SAFETY TESTS PASSED \u2705");
     }

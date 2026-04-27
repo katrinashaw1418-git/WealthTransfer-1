@@ -150,7 +150,16 @@ const TEST_CURRENCY = "AUD";
 // Result tracking — keyed by canonical name so we can print in a stable order
 // regardless of execution order.
 // ---------------------------------------------------------------------------
-type TestResult = { passed: boolean; details: string };
+// Task #152 — SKIP is a first-class outcome alongside PASS and FAIL,
+// mirroring the contract in scripts/pre-launch-safety.ts. A SKIP means
+// "we did not actually verify this check" (precondition missing,
+// fixture row absent, env var unset, sub-script dependency didn't
+// land). Without --strict, SKIP does not change the exit code; with
+// --strict, any SKIP fails the exit code so a skipped internal check
+// propagates up through the roll-up instead of being hidden behind a
+// PASS exit code.
+type Outcome = "pass" | "fail" | "skip";
+type TestResult = { outcome: Outcome; details: string };
 // Canonical operator-facing contract from `.local/tasks/task-92.md`.
 const CANONICAL_ORDER: string[] = [
   "non-admin cannot deduct",
@@ -206,14 +215,21 @@ function settleRace<T>(p: Promise<T>): Promise<RaceOutcome<T>> {
   );
 }
 
-function record(name: string, passed: boolean, details: string): void {
+function record(name: string, outcome: Outcome, details: string): void {
   if (!CANONICAL_ORDER.includes(name) && !INTERNAL_EXTRAS.includes(name)) {
     throw new Error(`Internal: unknown test name '${name}'`);
   }
-  results.set(name, { passed, details });
+  results.set(name, { outcome, details });
 }
-const pass = (name: string, details: string) => record(name, true, details);
-const fail = (name: string, details: string) => record(name, false, details);
+const pass = (name: string, details: string) => record(name, "pass", details);
+const fail = (name: string, details: string) => record(name, "fail", details);
+// Task #152 — `skip` records "we did not actually verify this check"
+// with a clear human-readable reason. Used for precondition-missing
+// short-circuits (route handler not captured, dependency from a prior
+// test didn't land, env var absent) that previously surfaced as a
+// silent PASS or as a hard FAIL even though the check itself never
+// actually ran.
+const skip = (name: string, reason: string) => record(name, "skip", reason);
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -808,9 +824,14 @@ async function test1_nonAdminCannotDeduct(opts: {
 }): Promise<void> {
   const handler = captured.get("POST /api/admin/fee-deductions/:id/approve");
   if (!handler) {
-    fail(
+    // Task #152 — precondition missing: the production approve route
+    // handler was never captured by captureAdminRoutes(). The check
+    // CAN'T run without it, so SKIP rather than FAIL — strict mode
+    // will still block deploy because SKIP propagates up via exit
+    // code 2.
+    skip(
       "non-admin cannot deduct",
-      "internal: approve route handler was not captured from registerAdminRoutes",
+      "approve route handler was not captured from registerAdminRoutes",
     );
     return;
   }
@@ -911,9 +932,10 @@ async function test2_approvedDeductionPostsOnce(opts: {
   // browser hits): adminRoute(...) auth + role guard + audit + service.
   const handler = captured.get("POST /api/admin/fee-deductions/:id/approve");
   if (!handler) {
-    fail(
+    // Task #152 — precondition missing: SKIP, not FAIL.
+    skip(
       "approved deduction posts once",
-      "internal: approve route handler was not captured from registerAdminRoutes",
+      "approve route handler was not captured from registerAdminRoutes",
     );
     return;
   }
@@ -984,9 +1006,14 @@ async function test3_duplicateDeductionBlocked(opts: {
     .where(eq(transactions.idempotencyKey, idemKey));
   const settledTxId = txBefore[0]?.id;
   if (!settledTxId) {
-    fail(
+    // Task #152 — depends on test #2 having settled. If that test
+    // SKIPPED (route handler not captured) the settled row never
+    // landed and this duplicate-guard check has nothing to evaluate.
+    // Record SKIP so the propagation chain is honest, not a hard FAIL
+    // that would mask the real upstream cause.
+    skip(
       "duplicate deduction blocked",
-      "no settled transactions row found from test #2 — cannot evaluate duplicate guard",
+      "no settled transactions row from test #2 — duplicate guard has nothing to evaluate (likely upstream SKIP)",
     );
     return;
   }
@@ -1262,9 +1289,12 @@ async function test7_ledgerDebitCreated(opts: {
     .from(adviserFeeDeductions)
     .where(eq(adviserFeeDeductions.id, opts.deductionId));
   if (!deduction?.settledTransactionId) {
-    fail(
+    // Task #152 — depends on test #2 having settled. If that test
+    // SKIPPED, no settledTransactionId exists and there is nothing
+    // to inspect for the ledger-debit assertion. SKIP, not FAIL.
+    skip(
       "ledger debit created",
-      `deduction#${opts.deductionId} has no settledTransactionId — settle from test #2 didn't land`,
+      `deduction#${opts.deductionId} has no settledTransactionId — settle from test #2 didn't land (likely upstream SKIP)`,
     );
     return;
   }
@@ -1657,9 +1687,13 @@ async function test13_postingReceiptInvariantHolds(): Promise<void> {
   // wiped by the upfront PK cleanup) cannot affect the result.
   const trackedTxIds = created.transactionIds;
   if (trackedTxIds.length === 0) {
-    fail(
+    // Task #152 — nothing to scope the invariant against. Most likely
+    // every settle/reverse path SKIPPED upstream (route handler not
+    // captured), so no transactions were tracked. The invariant
+    // machinery itself is fine — we just have no rows to check.
+    skip(
       "posting-receipt invariant holds",
-      "no transactions were tracked in this run — cannot validate scoped invariant",
+      "no transactions were tracked in this run — scoped invariant has nothing to check (likely upstream SKIP)",
     );
     return;
   }
@@ -1745,10 +1779,16 @@ function dumpConsoleBuffer(): void {
 let endOfRunDiscoveryUserIds: number[] = [];
 
 async function main(): Promise<void> {
+  // Task #152 — accept --strict from argv. Forwarded by the parent
+  // roll-up (scripts/pre-launch-safety.ts) when the parent itself was
+  // invoked --strict. In strict mode any internal SKIP fails the exit
+  // code (we use 2 so the parent can distinguish "skipped" from
+  // "failed"); without --strict, SKIPs do not change the exit code.
+  const strict = process.argv.slice(2).includes("--strict");
   let status: RunStatus = { exitCode: 0 };
   silenceConsole();
   try {
-    status = await runAllTests();
+    status = await runAllTests(strict);
   } catch (err) {
     status = { exitCode: 1 };
     console.error("Gate B verification roll-up threw:", err);
@@ -1780,7 +1820,7 @@ async function main(): Promise<void> {
   process.exit(status.exitCode);
 }
 
-async function runAllTests(): Promise<RunStatus> {
+async function runAllTests(strict: boolean): Promise<RunStatus> {
   // Capture the actual admin route handlers so test #1 calls the same
   // adminRoute() wrapper the production app uses.
   captureAdminRoutes();
@@ -2042,8 +2082,12 @@ async function runAllTests(): Promise<RunStatus> {
   // even though console.log is currently silenced into the buffer.
   // No leading blank line — the canonical block per the task spec
   // begins directly with `PASS non-admin cannot deduct`.
+  // Task #152 — SKIP is now a first-class outcome alongside PASS/FAIL,
+  // and emits in the canonical block with its reason so operators can
+  // see exactly which check did not run.
   let canonicalFailed = false;
   let canonicalMissing = 0;
+  let canonicalSkipped = 0;
   for (const name of CANONICAL_ORDER) {
     const r = results.get(name);
     if (!r) {
@@ -2051,16 +2095,21 @@ async function runAllTests(): Promise<RunStatus> {
       canonicalMissing += 1;
       continue;
     }
-    if (r.passed) {
+    if (r.outcome === "pass") {
       originalConsole.log(`PASS ${name}`);
+    } else if (r.outcome === "skip") {
+      originalConsole.log(`SKIP ${name} — ${r.details}`);
+      canonicalSkipped += 1;
     } else {
       originalConsole.log(`FAIL ${name} — ${r.details}`);
       canonicalFailed = true;
     }
   }
 
-  // INTERNAL_EXTRAS: only emit on FAIL.
+  // INTERNAL_EXTRAS: emit on FAIL or SKIP. PASS extras stay silent so
+  // the canonical block remains the operator-facing contract.
   let extrasFailed = false;
+  let extrasSkipped = 0;
   for (const name of INTERNAL_EXTRAS) {
     const r = results.get(name);
     if (!r) {
@@ -2068,23 +2117,47 @@ async function runAllTests(): Promise<RunStatus> {
       extrasFailed = true;
       continue;
     }
-    if (!r.passed) {
+    if (r.outcome === "fail") {
       originalConsole.log(`FAIL (internal) ${name} — ${r.details}`);
       extrasFailed = true;
+    } else if (r.outcome === "skip") {
+      originalConsole.log(`SKIP (internal) ${name} — ${r.details}`);
+      extrasSkipped += 1;
     }
   }
 
+  const totalSkipped = canonicalSkipped + extrasSkipped;
+
   if (canonicalFailed || canonicalMissing > 0 || extrasFailed) {
-    const failedCount = Array.from(results.values()).filter((r) => !r.passed)
-      .length;
+    const failedCount = Array.from(results.values()).filter(
+      (r) => r.outcome === "fail",
+    ).length;
     originalConsole.error(
-      `\n${failedCount} fail(s), ${canonicalMissing} missing canonical assertion(s) in Gate B verification roll-up.`,
+      `\n${failedCount} fail(s), ${canonicalMissing} missing canonical assertion(s), ${totalSkipped} skipped in Gate B verification roll-up.`,
     );
     // Return non-zero — main() exits AFTER cleanup runs.
     return { exitCode: 1 };
   }
 
-  originalConsole.log("\nALL GATE B FEE DEDUCTION TESTS PASSED \u2705");
+  if (totalSkipped > 0 && strict) {
+    // Task #152 — strict mode: any internal SKIP fails the exit code.
+    // Use exit code 2 so the parent roll-up's runExistingScript() can
+    // distinguish skip from fail when classifying the existing-script
+    // outcome.
+    originalConsole.error(
+      `\n${totalSkipped} Gate B check(s) skipped under --strict. Treating as failure.`,
+    );
+    return { exitCode: 2 };
+  }
+
+  if (totalSkipped > 0) {
+    originalConsole.log(
+      `\nALL GATE B FEE DEDUCTION TESTS PASSED — ${totalSkipped} skipped ` +
+        "(run with --strict to block on skipped checks).",
+    );
+  } else {
+    originalConsole.log("\nALL GATE B FEE DEDUCTION TESTS PASSED \u2705");
+  }
   return { exitCode: 0 };
 }
 

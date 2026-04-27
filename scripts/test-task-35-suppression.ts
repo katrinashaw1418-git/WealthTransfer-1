@@ -40,12 +40,33 @@ import {
 const TEST_USERNAME = "__task35_test_user__";
 const TEST_CURRENCY = "AUD";
 
+// Task #152 — accept --strict from argv. Forwarded by the parent
+// roll-up (scripts/pre-launch-safety.ts) when the parent itself was
+// invoked --strict. In strict mode any internal SKIP fails the exit
+// code (we use 2 so the parent can distinguish "skipped" from
+// "failed"); without --strict, SKIPs do not change the exit code.
+const STRICT = process.argv.slice(2).includes("--strict");
+// Task #152 — internal-skip counter. Currently this script's checks
+// all have preconditions we set up ourselves (no precondition-missing
+// short-circuits exist), but `skipCheck()` is wired through the same
+// reporter contract as the other Task #152 scripts so a future check
+// added here can self-report SKIP without further plumbing.
+let skipCount = 0;
+
 function assert(cond: any, msg: string) {
   if (!cond) {
     console.error(`✗ FAIL: ${msg}`);
     process.exit(1);
   }
   console.log(`✓ ${msg}`);
+}
+
+// Task #152 — `skipCheck` records "we did not actually verify this
+// check" with a clear human-readable reason. Print to stdout so it is
+// visible in the same stream as ✓ assertions.
+function skipCheck(reason: string) {
+  console.log(`⊘ SKIP: ${reason}`);
+  skipCount += 1;
 }
 
 async function setupUser(): Promise<number> {
@@ -511,7 +532,25 @@ async function main() {
     .delete(wallets)
     .where(eq(wallets.userId, userId));
 
-  console.log("\n✓✓✓ ALL TASK #35 ASSERTIONS PASSED");
+  // Task #152 — strict mode: any internal SKIP fails the exit code.
+  // Use exit code 2 so the parent roll-up's runExistingScript() can
+  // distinguish skip from fail when classifying the existing-script
+  // outcome.
+  if (skipCount > 0 && STRICT) {
+    console.error(
+      `\n${skipCount} Task #35 suppression check(s) skipped under --strict. Treating as failure.`,
+    );
+    process.exit(2);
+  }
+
+  if (skipCount > 0) {
+    console.log(
+      `\n✓✓✓ ALL TASK #35 ASSERTIONS PASSED — ${skipCount} skipped ` +
+        "(run with --strict to block on skipped checks).",
+    );
+  } else {
+    console.log("\n✓✓✓ ALL TASK #35 ASSERTIONS PASSED");
+  }
   process.exit(0);
 }
 

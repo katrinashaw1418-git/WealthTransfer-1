@@ -256,8 +256,18 @@ type ExistingScriptOutcome =
   | { outcome: "fail"; details: string }
   | { outcome: "skip"; details: string };
 
-function runExistingScript(scriptPath: string): ExistingScriptOutcome {
-  const r = spawnSync("npx", ["tsx", scriptPath], {
+function runExistingScript(
+  scriptPath: string,
+  strict: boolean,
+): ExistingScriptOutcome {
+  // Task #152 — forward --strict to the sub-script so it applies the
+  // same skip-fails-exit semantics internally that the parent applies
+  // here. Sub-scripts that don't recognize --strict (e.g. third-party
+  // helpers) ignore the unknown flag harmlessly; sub-scripts that DO
+  // recognize it (the four updated by Task #152) will exit 2 instead of
+  // 0 if any of their internal checks self-reported SKIP.
+  const args = strict ? ["tsx", scriptPath, "--strict"] : ["tsx", scriptPath];
+  const r = spawnSync("npx", args, {
     stdio: "inherit",
     env: process.env,
     encoding: "utf8",
@@ -280,6 +290,19 @@ function runExistingScript(scriptPath: string): ExistingScriptOutcome {
   }
   const code = r.status ?? -1;
   if (code === 0) return { outcome: "pass", details: "exit=0" };
+  // Task #152 — exit code 2 is the agreed contract for "the script ran
+  // to completion but at least one of its internal checks self-reported
+  // SKIP, and --strict was on so the script chose to fail its exit
+  // code". Surface it here as a SKIP outcome so the parent's own
+  // strict-mode policy at the top-level reporter applies uniformly
+  // (rather than double-counting it as a fail-from-the-child AND a
+  // skip-at-the-parent).
+  if (code === 2) {
+    return {
+      outcome: "skip",
+      details: "exit=2 (sub-script reported skipped internal check(s))",
+    };
+  }
   return { outcome: "fail", details: `exit=${code}` };
 }
 
@@ -2361,7 +2384,7 @@ async function main(): Promise<void> {
         );
       }
 
-      const r = runExistingScript(s.file);
+      const r = runExistingScript(s.file, strict);
       if (r.outcome === "pass") pass(s.label, r.details);
       else if (r.outcome === "skip") skip(s.label, r.details);
       else fail(s.label, r.details);
