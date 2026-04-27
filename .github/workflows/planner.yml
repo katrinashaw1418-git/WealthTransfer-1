@@ -23,6 +23,24 @@
 #                           runtime — so it runs as its own fast,
 #                           parallel job.
 #
+#   - ledger-leak-gate    — scripts/ci-ledger-leak-gate.ts (Task #193).
+#                           Self-policing gate that snapshots the
+#                           platform user's per-currency ledger SUM and
+#                           ROW COUNT (and the same for every __-prefixed
+#                           deterministic test user) before and after
+#                           each scripts/test-*.ts run, and fails with a
+#                           clear per-currency diff if anything was
+#                           leaked. Catches the regression pattern fixed
+#                           by tasks #158 and #187 — test scripts that
+#                           forget to wrap the test body in try/finally
+#                           with a per-user cleanup. Iterates ALL seven
+#                           scripts/test-*.ts files (so test-planner and
+#                           test-no-synthetic-portfolio-data are also
+#                           covered with a leak snapshot, in addition to
+#                           their dedicated jobs above which provide
+#                           direct per-script failure attribution).
+#                           Needs Postgres via PLANNER_DATABASE_URL.
+#
 # Gating: runs on every push and pull request. A non-zero exit from any
 # job blocks the build.
 name: Verification gate
@@ -65,3 +83,28 @@ jobs:
       - run: npm ci
       - name: No-synthetic-data tripwire (Task #132)
         run: npx tsx scripts/test-no-synthetic-portfolio-data.ts
+
+  ledger-leak-gate:
+    runs-on: ubuntu-latest
+    env:
+      # CI-only safety-belt defaults; mirror the planner job above.
+      NODE_ENV: test
+      JWT_SECRET: ci-leak-gate-test-secret
+      # Same DB as the planner job — the gate's resolvePlatformUserId()
+      # mints / reuses a deterministic '__prelaunch_platform' user, and
+      # every sub-script's fixtures are scoped to a __-prefixed user
+      # whose state the gate snapshots and asserts is unchanged.
+      DATABASE_URL: ${{ secrets.PLANNER_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Ledger-leak gate (Task #193)
+        # No --scripts flag = iterate every scripts/test-*.ts file.
+        # Exits non-zero if any sub-script either fails on its own
+        # merits OR leaks ledger entries on the platform user / on
+        # any __-prefixed deterministic test user.
+        run: npx tsx scripts/ci-ledger-leak-gate.ts

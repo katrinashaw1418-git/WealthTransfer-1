@@ -109,9 +109,18 @@ type Result = { outcome: Outcome; details: string };
 const results = new Map<string, Result>();
 const CANONICAL_ORDER: string[] = [
   "existing: test-transaction-safety",
+  // Task #193 — per-script ledger-leak gates. Each existing-script run is
+  // wrapped in a snapshot of the platform user's per-currency ledger SUM
+  // + COUNT before and after. A non-zero delta means the script regressed
+  // back to the leak pattern fixed by tasks #158 and #187 (e.g. forgot to
+  // wrap the test body in try/finally + cleanup at end-of-script).
+  "ledger-leak: test-transaction-safety",
   "existing: test-fee-deduction-gate-b",
+  "ledger-leak: test-fee-deduction-gate-b",
   "existing: test-wealth-planner-compliance",
+  "ledger-leak: test-wealth-planner-compliance",
   "existing: test-task-35-suppression",
+  "ledger-leak: test-task-35-suppression",
   "lifecycle: happy-path wallet matches ledger",
   "lifecycle: idempotency under concurrency",
   // Task #185 — same idempotency-under-concurrency invariant for the
@@ -125,6 +134,13 @@ const CANONICAL_ORDER: string[] = [
   "reconciliation: wallet-ledger clean-room",
   "reconciliation: ledger-vs-custodian clean-room",
   "reconciliation: posting-receipt invariant clean-room",
+  // Task #193 — same self-policing leak gate, but for the test scripts
+  // pre-launch does NOT run in Stage 1 (test-fee-insufficient-funds,
+  // test-no-synthetic-portfolio-data, test-planner). Runs as a single
+  // subprocess via scripts/ci-ledger-leak-gate.ts so the same harness
+  // covers EVERY scripts/test-*.ts in pre-launch — without re-running
+  // the four heavy Stage 1 scripts a second time.
+  "ledger-leak: ci-gate (other test-*.ts)",
 ];
 function pass(name: string, details: string): void {
   results.set(name, { outcome: "pass", details });
@@ -141,23 +157,47 @@ function skip(name: string, reason: string): void {
 // runs in process isolation with its own module-init side effects, exactly
 // as a developer would invoke it.
 // ---------------------------------------------------------------------------
-const EXISTING_SCRIPTS: Array<{ label: string; file: string }> = [
+// Task #193 — `leakLabel` is the per-script leak-gate name (CANONICAL_ORDER
+// has both an "existing: ..." gate for the script's own exit code and a
+// matching "ledger-leak: ..." gate for the platform-user before/after delta).
+const EXISTING_SCRIPTS: Array<{
+  label: string;
+  leakLabel: string;
+  file: string;
+}> = [
   {
     label: "existing: test-transaction-safety",
+    leakLabel: "ledger-leak: test-transaction-safety",
     file: "scripts/test-transaction-safety.ts",
   },
   {
     label: "existing: test-fee-deduction-gate-b",
+    leakLabel: "ledger-leak: test-fee-deduction-gate-b",
     file: "scripts/test-fee-deduction-gate-b.ts",
   },
   {
     label: "existing: test-wealth-planner-compliance",
+    leakLabel: "ledger-leak: test-wealth-planner-compliance",
     file: "scripts/test-wealth-planner-compliance.ts",
   },
   {
     label: "existing: test-task-35-suppression",
+    leakLabel: "ledger-leak: test-task-35-suppression",
     file: "scripts/test-task-35-suppression.ts",
   },
+];
+
+// Test scripts NOT run by Stage 1 above. We cover them via a single
+// subprocess invocation of scripts/ci-ledger-leak-gate.ts — the same
+// harness used in PR / CI — so pre-launch's leak coverage is the union
+// of the per-script wraps above PLUS this CI gate, with no script run
+// twice. Listed by basename so the leak gate's --scripts flag stays
+// explicit (we don't want it to silently grow if someone adds a new
+// scripts/test-*.ts without thinking about leak isolation).
+const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
+  "scripts/test-fee-insufficient-funds.ts",
+  "scripts/test-no-synthetic-portfolio-data.ts",
+  "scripts/test-planner.ts",
 ];
 
 type ExistingScriptOutcome =
@@ -190,6 +230,71 @@ function runExistingScript(scriptPath: string): ExistingScriptOutcome {
   const code = r.status ?? -1;
   if (code === 0) return { outcome: "pass", details: "exit=0" };
   return { outcome: "fail", details: `exit=${code}` };
+}
+
+// ---------------------------------------------------------------------------
+// Task #193 — per-script ledger-leak snapshot for the platform user.
+//
+// Every Stage-1 sub-script is wrapped: snapshot the platform user's
+// per-currency (SUM, COUNT) BEFORE the spawn and AFTER. A non-zero
+// delta means the sub-script left ledger entries behind on the
+// platform user (the same leak pattern fixed by Tasks #158 and #187).
+//
+// Same SUM(CASE WHEN credit/-debit) shape as getUserCurrencyBalance()
+// in server/services/ledger.ts so a leak this gate catches is the
+// same shape the wallet-vs-ledger reconciliation flags as a critical
+// drift in the recon clean-room gate.
+// ---------------------------------------------------------------------------
+type CurrencyStat = { net: string; count: number };
+type PlatformSnapshot = Map<string, CurrencyStat>;
+
+async function snapshotPlatformLedger(
+  platformUserId: number,
+): Promise<PlatformSnapshot> {
+  const rows = await db
+    .select({
+      currency: ledgerEntries.currency,
+      net: sql<string>`COALESCE(SUM(CASE WHEN ${ledgerEntries.direction} = 'credit' THEN ${ledgerEntries.amount} ELSE -${ledgerEntries.amount} END), 0)`,
+      count: sql<number>`COUNT(*)::int`,
+    })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.userId, platformUserId))
+    .groupBy(ledgerEntries.currency);
+  const out: PlatformSnapshot = new Map();
+  for (const r of rows) {
+    out.set(r.currency, { net: String(r.net), count: Number(r.count) });
+  }
+  return out;
+}
+
+// Strict leak definition per task spec: fail on ANY per-currency drift in
+// either net OR row count. Mirrors scripts/ci-ledger-leak-gate.ts. A clean
+// script that wraps its body in try/finally with end-of-script per-user
+// cleanup leaves both unchanged.
+function diffPlatformLedger(
+  before: PlatformSnapshot,
+  after: PlatformSnapshot,
+): string[] {
+  const drift: string[] = [];
+  const currencies = new Set<string>([...before.keys(), ...after.keys()]);
+  for (const cur of Array.from(currencies).sort()) {
+    const b = before.get(cur) ?? { net: "0", count: 0 };
+    const a = after.get(cur) ?? { net: "0", count: 0 };
+    const bNet = new Decimal(b.net);
+    const aNet = new Decimal(a.net);
+    const netEq = aNet.eq(bNet);
+    const dCount = a.count - b.count;
+    const countEq = dCount === 0;
+    if (netEq && countEq) continue;
+    const dNet = aNet.minus(bNet);
+    drift.push(
+      `${cur}: net ${bNet.toString()} -> ${aNet.toString()} ` +
+        `(delta ${dNet.gte(0) ? "+" : ""}${dNet.toString()}), ` +
+        `count ${b.count} -> ${a.count} ` +
+        `(delta ${dCount >= 0 ? "+" : ""}${dCount})`,
+    );
+  }
+  return drift;
 }
 
 // ---------------------------------------------------------------------------
@@ -1688,13 +1793,88 @@ async function main(): Promise<void> {
 
     // -------------------------------------------------------------------
     // Stage 1: run the four existing safety scripts in sequence.
+    //
+    // Task #193 — every Stage-1 script is also wrapped in a per-script
+    // ledger-leak gate that snapshots the platform user's per-currency
+    // (SUM, COUNT) before and after the spawn. A non-zero delta means
+    // the script regressed back to the same leak pattern fixed by tasks
+    // #158 and #187 (forgot to wrap the test body in try/finally and
+    // call the per-user cleanup at end-of-script). The leak gate is
+    // reported as a SEPARATE outcome from the script's own pass/fail
+    // so an operator can tell "the script asserted everything correctly
+    // BUT it leaked rows" apart from "the script's assertions failed".
+    //
+    // PLATFORM_USER_ID is already pinned by the resolver above, so
+    // every sub-script's platform-side suspense / fee legs land on the
+    // same user we're snapshotting.
     // -------------------------------------------------------------------
+    const platformUserIdForLeak = parseInt(
+      process.env.PLATFORM_USER_ID ?? "0",
+      10,
+    );
     for (const s of EXISTING_SCRIPTS) {
       console.log(`\n--- pre-launch: running ${s.file} ---`);
+      let leakBefore: PlatformSnapshot | null = null;
+      try {
+        if (platformUserIdForLeak > 0) {
+          leakBefore = await snapshotPlatformLedger(platformUserIdForLeak);
+        }
+      } catch (err: any) {
+        // Snapshot failure shouldn't block the script run; we'll SKIP
+        // the leak gate with a reason if we can't capture the baseline.
+        console.error(
+          `pre-launch: leak-gate snapshot (before) failed for ${s.file}:`,
+          err?.message ?? err,
+        );
+      }
+
       const r = runExistingScript(s.file);
       if (r.outcome === "pass") pass(s.label, r.details);
       else if (r.outcome === "skip") skip(s.label, r.details);
       else fail(s.label, r.details);
+
+      // Per-script leak gate report.
+      if (platformUserIdForLeak <= 0) {
+        skip(
+          s.leakLabel,
+          `PLATFORM_USER_ID not resolvable; cannot snapshot platform ledger`,
+        );
+      } else if (!leakBefore) {
+        skip(
+          s.leakLabel,
+          `pre-snapshot of platform ledger failed; see error above`,
+        );
+      } else if (r.outcome === "skip") {
+        // If the sub-script never actually ran, there's nothing to
+        // gate against — same SKIP semantics as the existing-script
+        // outcome above (Task #142).
+        skip(s.leakLabel, `sub-script did not complete (${r.details})`);
+      } else {
+        try {
+          const leakAfter = await snapshotPlatformLedger(platformUserIdForLeak);
+          const drift = diffPlatformLedger(leakBefore, leakAfter);
+          if (drift.length === 0) {
+            pass(
+              s.leakLabel,
+              `platform user (id=${platformUserIdForLeak}) ledger unchanged`,
+            );
+          } else {
+            fail(
+              s.leakLabel,
+              `script leaked on platform user (id=${platformUserIdForLeak}): ` +
+                drift.join("; ") +
+                ` — wrap the test body in try/finally and call the per-user ` +
+                `cleanup at end-of-script (see Task #187 reference fix in ` +
+                `scripts/test-fee-insufficient-funds.ts)`,
+            );
+          }
+        } catch (err: any) {
+          skip(
+            s.leakLabel,
+            `post-snapshot of platform ledger failed: ${err?.message ?? err}`,
+          );
+        }
+      }
     }
 
     // -------------------------------------------------------------------
@@ -1757,6 +1937,51 @@ async function main(): Promise<void> {
 
     console.log("\n--- pre-launch: reconciliation: posting-receipt invariant clean room ---");
     await reconPostingReceiptCleanRoom();
+
+    // -------------------------------------------------------------------
+    // Stage 4 (Task #193): leak gate for the test scripts NOT covered by
+    // Stage 1's per-script wraps. Single subprocess invocation of the
+    // standalone CI gate (scripts/ci-ledger-leak-gate.ts) so we use
+    // exactly the same harness PR / CI uses, with no double-runs of the
+    // four heavy Stage-1 scripts.
+    // -------------------------------------------------------------------
+    console.log(
+      "\n--- pre-launch: ledger-leak: ci-gate (other test-*.ts) ---",
+    );
+    {
+      const NAME = "ledger-leak: ci-gate (other test-*.ts)";
+      const r = spawnSync(
+        "npx",
+        [
+          "tsx",
+          "scripts/ci-ledger-leak-gate.ts",
+          "--scripts",
+          CI_LEAK_GATE_OTHER_SCRIPTS.join(","),
+        ],
+        { stdio: "inherit", env: process.env, encoding: "utf8" },
+      );
+      if (r.error) {
+        skip(
+          NAME,
+          `ci-ledger-leak-gate did not run (spawn error: ${r.error.message})`,
+        );
+      } else if (r.signal) {
+        skip(
+          NAME,
+          `ci-ledger-leak-gate did not complete (killed by signal ${r.signal})`,
+        );
+      } else if ((r.status ?? -1) === 0) {
+        pass(
+          NAME,
+          `ci-ledger-leak-gate covered ${CI_LEAK_GATE_OTHER_SCRIPTS.length} script(s) with zero drift`,
+        );
+      } else {
+        fail(
+          NAME,
+          `ci-ledger-leak-gate exit=${r.status} — see its output above for the leaking script and per-currency diff`,
+        );
+      }
+    }
 
     // -------------------------------------------------------------------
     // Canonical reporter (Task #142 — PASS / FAIL / SKIP).
