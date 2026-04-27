@@ -3,3 +3,12 @@
 # launch ticket, not code, so they should not be checked into version
 # control.
 go-no-go-*.md
+# Task #231 — per-deploy strict-gate verdict files written by
+# `scripts/pre-launch-safety.ts --json-verdict <path>` via
+# `scripts/predeploy-build.sh` Stage 1. Each invocation produces a fresh
+# timestamped file; the trend signal lives in `docs/PRE_LAUNCH_CHECKLIST.md`
+# (the recorder appends a one-line entry per file) and in
+# `operator_alerts` rows of source `predeploy-strict-gate`. The raw JSON
+# files themselves are runtime artefacts of the deploy build environment,
+# not code, so they should not be checked into version control.
+strict-gate-*.json
