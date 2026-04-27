@@ -119,6 +119,47 @@ earlier early-warning check that catches obvious SKIP regressions
 data) before they reach Publish time, complementing — not replacing —
 the production-DB gate above.
 
+### SKIP trend tracking (Task #231)
+
+The deploy log is ephemeral: once the next deploy runs, the only way to
+spot a slow-moving SKIP regression — for example "gate X started
+SKIPping a week ago and is now masking a real failure" — used to be
+scrolling through individual deploy logs. Stage 1 now persists each
+strict-gate run's per-gate verdict so the trend is visible at a glance.
+
+Where to look:
+
+1. **`docs/PRE_LAUNCH_CHECKLIST.md` → Deploy strict-gate verdicts
+   section** (below). One line per Stage 1 invocation: timestamp,
+   verdict, pass/fail/skip counts, short SHA, and the names of the
+   first few FAIL / SKIP gates inline. Best for local /
+   developer-driven invocations of `predeploy-build.sh` where the
+   checkout IS a git working tree and the line lands in the next
+   commit.
+2. **`docs/golive/strict-gate-<timestamp>.json`**. Structured
+   per-deploy verdict file (gitignored). Contains every gate's outcome
+   + reason, exit code, started/finished timestamps, git SHA, and a
+   `crashed` flag for runs that died before reaching the canonical
+   reporter. Written by `scripts/pre-launch-safety.ts --json-verdict
+   <path>` and named in the trend line above.
+3. **`operator_alerts` rows of source `predeploy-strict-gate`**. One
+   info-severity row per Stage 1 invocation, queryable from the admin
+   alerts UI and via SQL — the recommended view for production deploys
+   where the deploy build environment is not a git working tree:
+
+   ```sql
+   SELECT created_at, title, details
+   FROM operator_alerts
+   WHERE source = 'predeploy-strict-gate'
+   ORDER BY created_at DESC
+   LIMIT 30;
+   ```
+
+The persistence path is best-effort: a checklist write failure or a
+DB outage logs a warning but never blocks the deploy. The deploy's
+pass / fail is owned by the gates themselves, not by whether the
+trend artefacts wrote successfully.
+
 ## Post-merge rechecks
 
 Each line below records one auto-run of `scripts/post-merge-safety-recheck.ts`

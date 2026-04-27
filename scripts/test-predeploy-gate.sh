@@ -106,7 +106,59 @@ case "\$script" in
     else
       echo "[strict-stub] PASS — all gates green"
     fi
+    # Task #231 — pre-launch-safety.ts now writes a structured verdict JSON
+    # when invoked with --json-verdict <path>. The wrapper computes this
+    # path and passes it through; the recorder stub below reads it. Mirror
+    # that contract in the stub so the wrapper's recorder invocation has a
+    # plausible file to read (or, on the fail-fast path, we still want the
+    # recorder to be invoked even if the file is empty/missing).
+    verdict_path=""
+    for ((i = 1; i <= \$#; i++)); do
+      if [ "\${!i}" = "--json-verdict" ]; then
+        next=\$((i + 1))
+        verdict_path="\${!next:-}"
+        break
+      fi
+    done
+    if [ -n "\$verdict_path" ]; then
+      mkdir -p "\$(dirname "\$verdict_path")"
+      # Note on heredoc interpolation: the OUTER heredoc that writes this
+      # stub script (above) is unquoted (\`<< EOF\`), so \`$stage1_status\`
+      # is interpolated at stub-WRITE time and the inner heredoc below
+      # only ever sees a literal number. The inner heredoc is unquoted
+      # too purely for clarity — by the time the stub runs the value is
+      # already a literal, so quoting / not quoting the inner heredoc
+      # makes no functional difference. If a future contributor adds a
+      # field that needs to interpolate against the stub's runtime
+      # variables (not the outer test's), switch to escaping (\\\$foo)
+      # in the OUTER heredoc instead.
+      cat > "\$verdict_path" << VERDICT
+{
+  "schemaVersion": 1,
+  "startedAt": "1970-01-01T00:00:00.000Z",
+  "finishedAt": "1970-01-01T00:00:01.000Z",
+  "strict": true,
+  "exitCode": $stage1_status,
+  "crashed": false,
+  "gitSha": "stub",
+  "summary": { "pass": 0, "fail": 0, "skip": 0, "missing": 0 },
+  "gates": [],
+  "failedGateNames": [],
+  "skippedGateNames": [],
+  "missingGateNames": []
+}
+VERDICT
+    fi
     exit $stage1_status
+    ;;
+  scripts/record-strict-gate-verdict.ts)
+    # Task #231 — recorder stub. The real script appends a line to
+    # docs/PRE_LAUNCH_CHECKLIST.md and inserts an operator_alerts row;
+    # both are out-of-scope for this pure-bash smoke test (no DB, no real
+    # checklist). We only need the wrapper to invoke it and to keep
+    # exiting non-zero recorder status from blocking the deploy.
+    echo "[recorder-stub] simulated record-strict-gate-verdict.ts \${@:2}"
+    exit 0
     ;;
   scripts/go-no-go.ts)
     if [ "$produce_report" = "yes" ]; then

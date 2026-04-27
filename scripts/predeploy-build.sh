@@ -64,11 +64,39 @@ set -o pipefail
 REPORT_DIR="docs/golive"
 ARTEFACT_NAME="go-no-go-report.md"
 
+# Task #231 — per-invocation strict-gate verdict file. Stage 1 below writes
+# its per-gate PASS/FAIL/SKIP outcome here as JSON via `--json-verdict`, so
+# `scripts/record-strict-gate-verdict.ts` can append a deploy-trend line to
+# `docs/PRE_LAUNCH_CHECKLIST.md` AND insert an `operator_alerts` info row.
+# Both surfaces let an operator spot SKIP trends across deploys without
+# having to scroll through individual ephemeral deploy logs. Filename is
+# timestamped + matches the `docs/golive/strict-gate-*.json` glob.
+PREDEPLOY_TIMESTAMP="$(date -u +%Y-%m-%dT%H-%M-%S-%3NZ)"
+STRICT_GATE_VERDICT_PATH="$REPORT_DIR/strict-gate-${PREDEPLOY_TIMESTAMP}.json"
+mkdir -p "$REPORT_DIR"
+
 echo "[predeploy] ============================================================"
 echo "[predeploy] Launch readiness gates (Stages 1 + 2)"
 echo "[predeploy] Started:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "[predeploy] NODE_ENV: ${NODE_ENV:-(unset)}"
+echo "[predeploy] Verdict:  ${STRICT_GATE_VERDICT_PATH}"
 echo "[predeploy] ============================================================"
+
+# Task #231 — best-effort recorder. Reads the strict-gate verdict JSON and
+# appends a deploy-trend line to `docs/PRE_LAUNCH_CHECKLIST.md` plus an
+# `operator_alerts` info row. Wrapped in `set +e` so a recorder failure
+# (read-only filesystem, schema drift, missing DATABASE_URL) NEVER blocks
+# the deploy — the deploy's pass/fail is owned by the gates themselves.
+record_strict_gate_verdict() {
+  set +e
+  npx tsx scripts/record-strict-gate-verdict.ts "$STRICT_GATE_VERDICT_PATH"
+  local rec_status=$?
+  set -e
+  if [ "$rec_status" -ne 0 ]; then
+    echo "[predeploy] [verdict-recorder] WARNING: recorder exited $rec_status —" \
+         "trend line may not have been persisted. This is non-fatal."
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # STAGE 1 — pre-launch safety (strict). Task #151.
@@ -87,9 +115,20 @@ echo "[predeploy] [strict-gate] (SKIP is treated as a real failure — Task #151
 echo "[predeploy] [strict-gate] ----------------------------------------------"
 
 set +e
-npx tsx scripts/pre-launch-safety.ts --strict
+# Task #231 — `--json-verdict` writes a structured per-gate outcome JSON to
+# the path computed at the top of this script. The recorder below reads it
+# and persists a one-line trend entry to the pre-launch checklist + an
+# `operator_alerts` info row, so SKIP regressions are spottable across
+# deploys without scrolling through individual deploy logs.
+npx tsx scripts/pre-launch-safety.ts --strict \
+  --json-verdict "$STRICT_GATE_VERDICT_PATH"
 STRICT_STATUS=$?
 set -e
+
+# Task #231 — record the verdict BEFORE we exit (on FAIL) or proceed to
+# Stage 2 (on PASS). Persistence happens regardless of outcome — capturing
+# every FAIL / SKIP is the whole point of the trend artefact.
+record_strict_gate_verdict
 
 if [ "$STRICT_STATUS" -ne 0 ]; then
   echo ""
@@ -102,10 +141,15 @@ if [ "$STRICT_STATUS" -ne 0 ]; then
   echo "[predeploy] The per-gate PASS/FAIL/SKIP lines are above — search the"
   echo "[predeploy] deploy log for 'FAIL' and 'SKIP' to find the gate name."
   echo "[predeploy]"
+  echo "[predeploy] Structured verdict (per-gate JSON, Task #231):"
+  echo "[predeploy]   $STRICT_GATE_VERDICT_PATH"
+  echo "[predeploy]"
   echo "[predeploy] To reproduce locally against the same DB:"
   echo "[predeploy]   npx tsx scripts/pre-launch-safety.ts --strict"
   echo "[predeploy]"
-  echo "[predeploy] See docs/PRE_LAUNCH_CHECKLIST.md for what each gate proves."
+  echo "[predeploy] See docs/PRE_LAUNCH_CHECKLIST.md for what each gate proves"
+  echo "[predeploy] and the 'Deploy strict-gate verdicts' section for SKIP"
+  echo "[predeploy] trends across recent deploys."
   echo "[predeploy] Deploy is BLOCKED. Fix the failing/skipped gate(s) and"
   echo "[predeploy] re-publish."
   exit "$STRICT_STATUS"

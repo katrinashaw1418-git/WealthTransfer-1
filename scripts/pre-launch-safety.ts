@@ -62,7 +62,8 @@
 // ---------------------------------------------------------------------------
 
 import "./_bootstrap-test-env";
-import { spawnSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
+import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Express, Request } from "express";
@@ -118,6 +119,28 @@ import {
 import { CANONICAL_ORDER } from "./lib/pre-launch-canonical-order";
 
 // ---------------------------------------------------------------------------
+// Wall-clock anchor for the run. Captured at module-init time so the JSON
+// verdict file (Task #231) reports the same start instant the operator sees
+// in the deploy log header, not the much-later moment `main()` first runs.
+// ---------------------------------------------------------------------------
+const STARTED_AT = new Date();
+
+// ---------------------------------------------------------------------------
+// Best-effort short SHA of the working tree. Mirrors the same lookup used by
+// `scripts/post-merge-safety-recheck.ts` so the JSON verdict file (Task
+// #231) carries the same provenance field as the post-merge artefact. Falls
+// back to the literal string "unknown" when git is unavailable (production
+// deploy environments are not always git working trees).
+// ---------------------------------------------------------------------------
+function getGitSha(): string {
+  try {
+    return execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
+  } catch {
+    return "unknown";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Result reporter (canonical PASS/FAIL/SKIP block, mirrors the other scripts).
 // Task #142 — SKIP is a first-class outcome, with a human-readable reason.
 // SKIP means "we did not actually verify this", so a launch gate using
@@ -138,6 +161,121 @@ function fail(name: string, details: string): void {
 }
 function skip(name: string, reason: string): void {
   results.set(name, { outcome: "skip", details: reason });
+}
+
+// ---------------------------------------------------------------------------
+// Task #231 — structured verdict writer.
+//
+// Persist this run's per-gate PASS/FAIL/SKIP outcome to a JSON file so an
+// operator can spot SKIP trends across deploys (e.g. "gate X started SKIPping
+// a week ago and is now hiding a real failure"). The deploy log is ephemeral
+// — once the next deploy runs, the only way to spot a slow-moving SKIP is to
+// scroll through individual deploy logs. A canonical JSON shape, written
+// alongside the existing `docs/golive/go-no-go-*.md` artefacts, is the
+// per-deploy snapshot the recorder script (`scripts/record-strict-gate-
+// verdict.ts`) reads to append a checklist trend line and an
+// `operator_alerts` info row.
+//
+// Best-effort by design:
+//   * Activated only when `--json-verdict <path>` is on the command line.
+//     Without the flag this is a no-op and the script's existing exit-code
+//     contract is unchanged.
+//   * Failure to write the file logs a warning but does NOT change the exit
+//     code. A persistence problem must not block a deploy that the gates
+//     themselves passed.
+//   * Called from the `finally` block of `main()` so a partial verdict is
+//     still written when the run crashes mid-way (with `crashed: true` in
+//     the JSON) — the missing-gates pattern is itself a useful signal.
+// ---------------------------------------------------------------------------
+export interface StrictGateVerdictGate {
+  name: string;
+  outcome: "pass" | "fail" | "skip" | "missing";
+  details: string;
+}
+export interface StrictGateVerdict {
+  schemaVersion: 1;
+  startedAt: string;
+  finishedAt: string;
+  strict: boolean;
+  exitCode: number;
+  crashed: boolean;
+  gitSha: string;
+  summary: { pass: number; fail: number; skip: number; missing: number };
+  gates: StrictGateVerdictGate[];
+  failedGateNames: string[];
+  skippedGateNames: string[];
+  missingGateNames: string[];
+}
+
+function buildStrictGateVerdict(opts: {
+  strict: boolean;
+  exitCode: number;
+  crashed: boolean;
+}): StrictGateVerdict {
+  const gates: StrictGateVerdictGate[] = [];
+  const failedGateNames: string[] = [];
+  const skippedGateNames: string[] = [];
+  const missingGateNames: string[] = [];
+  let pass = 0;
+  let fail = 0;
+  let skipCount = 0;
+  let missing = 0;
+  for (const name of CANONICAL_ORDER) {
+    const r = results.get(name);
+    if (!r) {
+      gates.push({ name, outcome: "missing", details: "(no result recorded)" });
+      missingGateNames.push(name);
+      missing += 1;
+      continue;
+    }
+    gates.push({ name, outcome: r.outcome, details: r.details });
+    if (r.outcome === "pass") pass += 1;
+    else if (r.outcome === "fail") {
+      fail += 1;
+      failedGateNames.push(name);
+    } else {
+      skipCount += 1;
+      skippedGateNames.push(name);
+    }
+  }
+  return {
+    schemaVersion: 1,
+    startedAt: STARTED_AT.toISOString(),
+    finishedAt: new Date().toISOString(),
+    strict: opts.strict,
+    exitCode: opts.exitCode,
+    crashed: opts.crashed,
+    gitSha: getGitSha(),
+    summary: { pass, fail, skip: skipCount, missing },
+    gates,
+    failedGateNames,
+    skippedGateNames,
+    missingGateNames,
+  };
+}
+
+function writeStrictGateVerdict(
+  outputPath: string,
+  verdict: StrictGateVerdict,
+): void {
+  // Best-effort persistence. We log a single warning on failure and let the
+  // caller continue — the script's exit code is owned by the gates, not by
+  // whether we succeeded in writing the trend file.
+  try {
+    const dir = path.dirname(outputPath);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(outputPath, JSON.stringify(verdict, null, 2) + "\n", "utf8");
+    console.log(
+      `[pre-launch] strict-gate verdict written: ${outputPath}` +
+        ` (pass=${verdict.summary.pass} fail=${verdict.summary.fail}` +
+        ` skip=${verdict.summary.skip} missing=${verdict.summary.missing})`,
+    );
+  } catch (err: any) {
+    console.error(
+      `[pre-launch] failed to write strict-gate verdict to ${outputPath}: ` +
+        (err?.message ?? String(err)),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2210,7 +2348,27 @@ async function main(): Promise<void> {
   // code (alongside any FAIL); without it, only FAILs change the exit code.
   const argv = process.argv.slice(2);
   const strict = argv.includes("--strict");
+  // Task #231 — optional `--json-verdict <path>`. When set, the script writes
+  // a structured per-gate verdict JSON file at the given path on exit (even
+  // on crash / partial run). Used by `scripts/predeploy-build.sh` Stage 1
+  // to feed the recorder script that appends a deploy-trend line to the
+  // pre-launch checklist and an `operator_alerts` info row.
+  let jsonVerdictPath: string | null = null;
+  {
+    const idx = argv.indexOf("--json-verdict");
+    if (idx >= 0) {
+      const v = argv[idx + 1];
+      if (!v || v.startsWith("--")) {
+        console.error(
+          "pre-launch: --json-verdict requires a file path argument",
+        );
+        process.exit(2);
+      }
+      jsonVerdictPath = v;
+    }
+  }
   let exitCode = 0;
+  let crashed = false;
   try {
     // -------------------------------------------------------------------
     // PLATFORM_USER_ID is needed by getOrCreateSuspenseAccount inside the
@@ -2692,12 +2850,23 @@ async function main(): Promise<void> {
   } catch (err: any) {
     console.error("pre-launch safety roll-up crashed:", err);
     exitCode = 1;
+    crashed = true;
   } finally {
     try {
       await cleanupTrackedRows();
     } catch (err: any) {
       console.error("pre-launch cleanup failed:", err?.message ?? err);
       exitCode = exitCode || 1;
+    }
+    // Task #231 — write the per-gate verdict JSON. Done last (after the
+    // canonical reporter has populated `results` and after cleanup) so the
+    // file reflects the script's final state. Runs whether the gates passed,
+    // failed, or the script crashed mid-run; on a crash the file's
+    // `crashed: true` flag plus `summary.missing > 0` lets a reader
+    // distinguish an incomplete run from a real FAIL/SKIP.
+    if (jsonVerdictPath) {
+      const verdict = buildStrictGateVerdict({ strict, exitCode, crashed });
+      writeStrictGateVerdict(jsonVerdictPath, verdict);
     }
   }
 
