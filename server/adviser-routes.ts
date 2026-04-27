@@ -13,7 +13,6 @@
 
 import fs from "node:fs";
 import type { Express, Request, Response } from "express";
-import multer from "multer";
 import { z } from "zod";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "./db";
@@ -84,6 +83,10 @@ import { adviceRecords } from "@shared/schema";
 // audit() helper below; only fee-consent + advice-record paths have been
 // migrated.
 import { writeAuditLog } from "./services/audit";
+// Task #148 — shared multer factory that enforces a maximum file size and a
+// strict mime allow-list, returning 400 BEFORE any bytes are handed off to
+// uploadClientDocument(). Replaces the route-local multer config.
+import { buildUploadMiddleware } from "./services/upload-security";
 
 // Both `clientUserId` (the established adviser-route convention used by
 // fee-rules / fee-deductions / etc.) AND `clientId` (the spec wording for the
@@ -1133,10 +1136,18 @@ export function registerAdviserRoutes(app: Express): void {
   );
 
   // Task #99 — real upload route. Streams a multipart/form-data file via
-  // multer (in-memory, capped at 25 MiB) and routes it through
-  // uploadClientDocument(), which computes the storageKey itself instead of
-  // trusting the caller. The legacy POST above is kept for back-compat with
-  // the existing test fixtures that supply a synthetic storageKey.
+  // multer (in-memory, capped at MAX_UPLOAD_BYTES, default 25 MiB) and
+  // routes it through uploadClientDocument(), which computes the storageKey
+  // itself instead of trusting the caller. The legacy POST above is kept for
+  // back-compat with the existing test fixtures that supply a synthetic
+  // storageKey.
+  //
+  // Task #148 — size + mime allow-list enforcement is delegated to the
+  // shared `buildUploadMiddleware` factory so the rejection contract (400
+  // with structured `code` + nothing written to object storage) is identical
+  // for every upload route and is unit-tested in one place. The audit-log
+  // entry below now records the detected mime alongside the byte size so a
+  // regulator can see exactly what was uploaded.
   const uploadMetadataSchema = z.object({
     clientId: z.coerce.number().int().positive(),
     adviceRecordId: z.coerce.number().int().positive().optional().nullable(),
@@ -1145,13 +1156,10 @@ export function registerAdviserRoutes(app: Express): void {
     mimeType: z.string().max(200).optional().nullable(),
     description: z.string().max(2000).optional().nullable(),
   });
-  const uploadMulter = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 25 * 1024 * 1024, files: 1 },
-  });
+  const clientDocumentUpload = buildUploadMiddleware();
   app.post(
     "/api/adviser/client-documents/upload",
-    uploadMulter.single("file"),
+    clientDocumentUpload.handler,
     adviserRoute(async (req, auth) => {
       // multer drops the parsed file on req.file and the form fields on
       // req.body. The verification script bypasses multer and supplies
@@ -1168,7 +1176,12 @@ export function registerAdviserRoutes(app: Express): void {
         throw Object.assign(new Error("Invalid upload metadata"), { status: 400 });
       }
       const fileName = parsed.data.fileName ?? file.originalname ?? "upload.bin";
-      const mimeType = parsed.data.mimeType ?? file.mimetype ?? null;
+      // The mime persisted on the document row is the one we actually saw on
+      // the wire (file.mimetype) — the caller can override only if absent.
+      // The audit row below records BOTH so an auditor can see what the
+      // browser claimed AND what the row was stored with.
+      const detectedMimeType = file.mimetype ?? null;
+      const mimeType = detectedMimeType ?? parsed.data.mimeType ?? null;
 
       const row = await uploadClientDocument(
         auth.userId,
@@ -1191,7 +1204,12 @@ export function registerAdviserRoutes(app: Express): void {
           clientId: row.clientId,
           documentType: row.documentType,
           uploaded: true,
+          // Task #148 — record file size + detected mime alongside the
+          // upload audit entry so a regulator can see exactly what landed
+          // in object storage without joining back to client_documents.
           sizeBytes: row.fileSizeBytes,
+          mimeType: row.mimeType,
+          detectedMimeType,
         },
         req.ip ?? null,
       );

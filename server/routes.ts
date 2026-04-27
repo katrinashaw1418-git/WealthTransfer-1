@@ -816,8 +816,69 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Auth routes — login, current user, logout
   // ---------------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------------
+  // Task #148 — stricter per-IP rate limits on auth-mutating endpoints
+  // ---------------------------------------------------------------------------
+  // Layered ON TOP of the global 200/min /api limiter in server/index.ts.
+  //
+  // Rationale:
+  //   * The global limiter exists to soak up burst abuse across the whole
+  //     dashboard; 200 req/min per IP is generous enough to cover a real
+  //     user with auto-refresh queries open.
+  //   * That cap is FAR too generous for credential-guessing or
+  //     reset-token enumeration. A single IP could attempt ~12,000 password
+  //     guesses per hour and never hit the global limit.
+  //   * These three endpoints (login, forgot-password, reset-password) are
+  //     the only public surfaces that mutate authentication state, so they
+  //     get their own dedicated, much tighter limiters.
+  //
+  // Sizing notes:
+  //   * Login: 10 attempts per 15 min. Generous enough for a user mistyping
+  //     their password a few times across a session, tight enough that an
+  //     online brute-force is impractical (~40/hour vs ~10⁹ password space).
+  //   * Forgot-password: 5 per 15 min. SMTP-cost protection AND a brake on
+  //     someone trying to spray reset-token requests for many usernames.
+  //   * Reset-password: 10 per 15 min. The token itself has 256-bit entropy
+  //     so the limiter is mainly a bot-deterrent — ten chances per IP per
+  //     window is more than any real user will ever need.
+  //
+  // The keyGenerator defaults to req.ip; with `app.set('trust proxy', 1)`
+  // already set in server/index.ts, that resolves to the real client IP
+  // behind Replit's reverse proxy.
+  // ---------------------------------------------------------------------------
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      error:
+        "Too many sign-in attempts from this address. Please try again in a few minutes.",
+    },
+  });
+  const forgotPasswordLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      error:
+        "Too many password reset requests. Please wait a few minutes before trying again.",
+    },
+  });
+  const resetPasswordLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      error:
+        "Too many password reset attempts. Please wait a few minutes before trying again.",
+    },
+  });
+
   // Login — returns JWT on valid credentials
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", loginLimiter, async (req, res) => {
     try {
       const { username, password } = req.body;
       if (!username || !password) {
@@ -3791,7 +3852,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Password Reset — forgot-password generates a token; reset-password validates
   // it, hashes the new password, and marks the token used. Single-use, 1h TTL.
   // ---------------------------------------------------------------------------
-  app.post("/api/auth/forgot-password", async (req, res) => {
+  app.post("/api/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
     try {
       const { username } = z.object({ username: z.string().min(1) }).parse(req.body);
       const [user] = await db.select().from(users).where(eq(users.username, username));
@@ -3825,7 +3886,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/auth/reset-password", async (req, res) => {
+  app.post("/api/auth/reset-password", resetPasswordLimiter, async (req, res) => {
     try {
       const { token, newPassword } = z.object({
         token: z.string().min(1),
