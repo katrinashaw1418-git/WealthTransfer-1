@@ -156,23 +156,39 @@ describe("notifyOperator persistence (Task #36)", () => {
     expect(result.channelsAttempted).toEqual(["log", "webhook"]);
     // Log channel still succeeded.
     expect(result.channels).toContain("log");
-    // Webhook outcome must NOT be success.
-    const webhookOutcome = result.outcomes.find((o) => o.channel === "webhook");
-    expect(webhookOutcome).toBeDefined();
-    expect(["timeout", "error", "http_error"]).toContain(webhookOutcome!.status);
-    expect(webhookOutcome!.status).not.toBe("success");
+    // Task #156 — the dispatcher retries once on timeout/error/5xx, so the
+    // unreachable webhook produces TWO outcome entries (attempt 1 + attempt 2)
+    // alongside the single log entry. Both attempts must be captured and
+    // both must be non-success.
+    const webhookOutcomes = result.outcomes.filter((o) => o.channel === "webhook");
+    expect(webhookOutcomes).toHaveLength(2);
+    for (const o of webhookOutcomes) {
+      expect(["timeout", "error", "http_error"]).toContain(o.status);
+      expect(o.status).not.toBe("success");
+    }
+    expect(webhookOutcomes.map((o) => o.attempt)).toEqual([1, 2]);
+    // The LAST webhook outcome is the final (retry) failure that determines
+    // the rolled-up delivery status.
+    const finalWebhook = webhookOutcomes[webhookOutcomes.length - 1];
+    expect(finalWebhook.attempt).toBe(2);
+    expect(finalWebhook.status).not.toBe("success");
 
     insertedIds.push(result.alertId!);
     const row = await loadById(result.alertId!);
     expect(row).not.toBeNull();
     expect(row!.channelsAttempted).toEqual(["log", "webhook"]);
     const stored = row!.channelOutcomes as unknown as OperatorAlertChannelOutcome[];
-    expect(stored).toHaveLength(2);
-    expect(stored.map((o) => o.channel).sort()).toEqual(["log", "webhook"]);
-    const persistedWebhook = stored.find((o) => o.channel === "webhook")!;
-    expect(persistedWebhook.status).not.toBe("success");
-    // Error message string is captured.
-    expect(typeof persistedWebhook.error === "string" || persistedWebhook.error === undefined).toBe(true);
+    // 1 log entry + 2 webhook attempts = 3 persisted outcomes.
+    expect(stored).toHaveLength(3);
+    expect(stored.filter((o) => o.channel === "log")).toHaveLength(1);
+    const persistedWebhooks = stored.filter((o) => o.channel === "webhook");
+    expect(persistedWebhooks).toHaveLength(2);
+    expect(persistedWebhooks.map((o) => o.attempt)).toEqual([1, 2]);
+    for (const o of persistedWebhooks) {
+      expect(o.status).not.toBe("success");
+      // Error message string is captured (or undefined for http_error rows).
+      expect(typeof o.error === "string" || o.error === undefined).toBe(true);
+    }
   }, 20_000);
 
   // ===========================================================================
