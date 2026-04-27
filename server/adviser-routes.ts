@@ -567,7 +567,23 @@ export function registerAdviserRoutes(app: Express): void {
   app.get(
     "/api/adviser/reports",
     adviserRoute(async (_req, auth) => {
-      return listAdviserReportRequests(auth.userId);
+      // Task #315 — augment each row with the prior-version chain so the UI
+      // can render a "v2 (prior: v1, v0)" chip without a second round-trip.
+      const rows = await listAdviserReportRequests(auth.userId);
+      const { listPriorVersions } = await import("./services/reports");
+      const enriched = await Promise.all(
+        rows.map(async (r) => ({
+          ...r,
+          versions: await listPriorVersions(r.id),
+        })),
+      );
+      // Status counts strip — single source of truth so adviser + admin
+      // pages never disagree about what's pending.
+      const counts = enriched.reduce<Record<string, number>>((acc, r) => {
+        acc[r.status] = (acc[r.status] ?? 0) + 1;
+        return acc;
+      }, {});
+      return { rows: enriched, counts };
     }),
   );
 
@@ -661,9 +677,32 @@ export function registerAdviserRoutes(app: Express): void {
           });
         }
 
+        // Task #315 — 7-day download-link expiry check (tighter than the 30d
+        // data-retention `expiresAt`). A forwarded URL past the cutoff returns
+        // 410 with a structured body so the UI can prompt the adviser to
+        // re-generate rather than show a generic error toast.
+        if (
+          row.downloadLinkExpiresAt &&
+          new Date(row.downloadLinkExpiresAt).getTime() < Date.now()
+        ) {
+          await db
+            .update(reportRequests)
+            .set({ status: "expired_link" })
+            .where(eq(reportRequests.id, id));
+          return res.status(410).json({
+            error:
+              "This download link has expired (7-day limit). Please regenerate the report.",
+            code: "link_expired",
+            reportId: id,
+          });
+        }
         if (row.expiresAt && new Date(row.expiresAt).getTime() < Date.now()) {
           await db.update(reportRequests).set({ status: "expired" }).where(eq(reportRequests.id, id));
-          return res.status(410).json({ error: "Report has expired" });
+          return res.status(410).json({
+            error: "Report has expired",
+            code: "report_expired",
+            reportId: id,
+          });
         }
 
         const filePath = path.join(REPORTS_DIR, `${id}.pdf`);
@@ -691,6 +730,76 @@ export function registerAdviserRoutes(app: Express): void {
         handleError(res, error, "Report download failed");
       }
     },
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #315 — Regenerate. Inserts a new row pointing back at the supplied
+  // original via supersedesReportId, then runs the PDF generator inline so
+  // the response carries the new row in its terminal state.
+  //
+  // Bypasses the duplicate guard (regeneration IS deliberately a duplicate);
+  // the chain itself is the audit record so a recovering operator can see
+  // every prior attempt without trawling the audit log.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/adviser/reports/:id/regenerate",
+    adviserRoute(async (req, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid report id"), { status: 400 });
+      }
+      const { regenerateReport } = await import("./services/reports");
+      const next = await regenerateReport(auth.userId, id);
+      await audit(
+        auth.userId,
+        "adviser_report_regenerated",
+        "report_request",
+        String(next.id),
+        {
+          supersedesReportId: id,
+          versionNumber: next.versionNumber,
+          clientUserId: next.clientUserId,
+          reportType: next.reportType,
+        },
+        (req as Request).ip || null,
+      );
+      const result = await generateReportPdf(next.id);
+      if (result.status === "ready") {
+        await audit(
+          auth.userId,
+          "adviser_report_generated",
+          "report_request",
+          String(next.id),
+          {
+            clientUserId: next.clientUserId,
+            reportType: next.reportType,
+            downloadUrl: result.downloadUrl,
+            versionNumber: next.versionNumber,
+          },
+          (req as Request).ip || null,
+        );
+      } else {
+        await audit(
+          auth.userId,
+          "adviser_report_failed",
+          "report_request",
+          String(next.id),
+          {
+            clientUserId: next.clientUserId,
+            reportType: next.reportType,
+            failureReason: result.failureReason,
+            versionNumber: next.versionNumber,
+          },
+          (req as Request).ip || null,
+        );
+      }
+      const [final] = await db
+        .select()
+        .from(reportRequests)
+        .where(eq(reportRequests.id, next.id))
+        .limit(1);
+      return final;
+    }),
   );
 
   // ===========================================================================

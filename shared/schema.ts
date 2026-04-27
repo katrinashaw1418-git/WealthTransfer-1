@@ -1681,23 +1681,41 @@ export const reportRequests = pgTable("report_requests", {
   reportType: text("report_type").notNull(),
   // Currently only "pdf" is supported, but kept extensible for csv/xlsx.
   format: text("format").notNull().default("pdf"),
-  // requested | generating | ready | failed | expired
-  // PDF generation itself is OUT OF SCOPE for this session — rows will sit at
-  // 'requested' until a future generator worker picks them up. The audit trail
-  // (who asked for what, when) is the immediate value.
+  // requested | generating | ready | failed | expired | expired_link
+  // Task #315 — `expired_link` flags rows whose 7-day downloadLinkExpiresAt
+  // has elapsed. The pre-existing `expired` value remains for the older
+  // 30-day data-validity expiry. Both are terminal as far as downloads go;
+  // expired_link is recoverable via a Regenerate that emits v2.
   status: text("status").notNull().default("requested"),
   // Optional natural-language note ("for the Q2 review meeting on Friday")
   notes: text("notes"),
   // Set by the generator when ready; null while generating.
   downloadUrl: text("download_url"),
+  // Failure reason — also re-used by the sweeper (Task #315) which writes
+  // 'sweeper_timeout' on rows it forces from requested/generating to failed.
   failureReason: text("failure_reason"),
   requestedAt: timestamp("requested_at").defaultNow(),
   generatedAt: timestamp("generated_at"),
   expiresAt: timestamp("expires_at"),
+  // Task #315 — versioning chain. supersedesReportId points at the report
+  // this version replaces; versionNumber starts at 1 for originals and
+  // increments on each Regenerate. Self-reference declared via integer
+  // column + raw FK (drizzle's chained `.references()` would create a
+  // circular type reference).
+  supersedesReportId: integer("supersedes_report_id"),
+  versionNumber: integer("version_number").notNull().default(1),
+  // Task #315 — 7-day download-link expiry. Set to (generatedAt + 7d) on
+  // generation success. The download endpoint returns 410 + structured
+  // body once this passes, and the row is flipped to status='expired_link'.
+  downloadLinkExpiresAt: timestamp("download_link_expires_at"),
 }, (table) => ({
   // "show me all my report requests" / "show me all reports for this client"
   adviserCreatedIdx: index("report_requests_adviser_created_idx").on(table.adviserUserId, table.requestedAt),
   clientCreatedIdx: index("report_requests_client_created_idx").on(table.clientUserId, table.requestedAt),
+  // Task #315 — duplicate-guard probe + version-chain lookup ("what
+  // versions does this original have?"). Both are point reads, so a
+  // single index on supersedesReportId is sufficient.
+  supersedesIdx: index("report_requests_supersedes_idx").on(table.supersedesReportId),
 }));
 
 export const insertReportRequestSchema = createInsertSchema(reportRequests).omit({
@@ -1708,6 +1726,9 @@ export const insertReportRequestSchema = createInsertSchema(reportRequests).omit
   failureReason: true,
   expiresAt: true,
   status: true,
+  supersedesReportId: true,
+  versionNumber: true,
+  downloadLinkExpiresAt: true,
 });
 export type ReportRequest = typeof reportRequests.$inferSelect;
 export type InsertReportRequest = z.infer<typeof insertReportRequestSchema>;

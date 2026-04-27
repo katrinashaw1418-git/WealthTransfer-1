@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -40,7 +40,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, FileText, Download, AlertCircle } from "lucide-react";
+import { Plus, FileText, Download, AlertCircle, RotateCcw, Layers } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Tooltip,
@@ -48,6 +48,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+interface PriorVersion {
+  id: number;
+  versionNumber: number;
+  generatedAt: string | null;
+  status: string;
+}
 
 interface ReportRequest {
   id: number;
@@ -60,19 +67,41 @@ interface ReportRequest {
   downloadUrl: string | null;
   failureReason: string | null;
   notes: string | null;
+  versionNumber?: number | null;
+  supersedesReportId?: number | null;
+  downloadLinkExpiresAt?: string | null;
+  versions?: PriorVersion[];
+}
+
+interface ReportsListResponse {
+  rows: ReportRequest[];
+  counts: Record<string, number>;
 }
 
 const TOKEN_KEY = "amax_jwt";
 
-async function downloadReport(reportId: number, clientLabel: string, toast: ReturnType<typeof useToast>["toast"]) {
+async function downloadReport(reportId: number, toast: ReturnType<typeof useToast>["toast"]) {
   try {
     const token = (() => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } })();
     const res = await fetch(`/api/adviser/reports/${reportId}/download`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`${res.status}: ${txt || res.statusText}`);
+      // Task #315 — link-expired (410 with code='link_expired') gets a
+      // dedicated toast that points the adviser at the Regenerate action.
+      let body: any = null;
+      try { body = await res.json(); } catch { /* not json */ }
+      if (res.status === 410 && body?.code === "link_expired") {
+        toast({
+          title: "Download link expired",
+          description: "This download link is older than 7 days. Use the Regenerate button to get a fresh PDF.",
+          variant: "destructive",
+        });
+        // Refresh the list so the row's status flips to 'expired_link' in the UI.
+        queryClient.invalidateQueries({ queryKey: ["/api/adviser/reports"] });
+        return;
+      }
+      throw new Error(body?.error ?? `${res.status}: ${res.statusText}`);
     }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -125,21 +154,33 @@ function statusBadge(status: string) {
   const variant: "default" | "secondary" | "destructive" | "outline" =
     status === "ready"
       ? "default"
-      : status === "failed" || status === "expired"
+      : status === "failed" || status === "expired" || status === "expired_link"
         ? "destructive"
         : "secondary";
   return (
-    <Badge variant={variant} className="capitalize">
-      {status}
+    <Badge variant={variant} className="capitalize" data-testid={`badge-status-${status}`}>
+      {status.replace(/_/g, " ")}
     </Badge>
   );
 }
 
+// Status counts strip — order is fixed so the visual layout is stable
+// regardless of which buckets happen to be empty in the response.
+const COUNT_BUCKETS: Array<{ key: string; label: string; chipClass: string }> = [
+  { key: "requested", label: "Pending", chipClass: "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100" },
+  { key: "generating", label: "Generating", chipClass: "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100" },
+  { key: "ready", label: "Ready", chipClass: "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100" },
+  { key: "failed", label: "Failed", chipClass: "bg-red-50 text-red-700 border-red-200 hover:bg-red-100" },
+  { key: "expired_link", label: "Link expired", chipClass: "bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200" },
+  { key: "expired", label: "Expired", chipClass: "bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200" },
+];
+
 export default function AdviserReports() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
 
-  const reports = useQuery<ReportRequest[]>({ queryKey: ["/api/adviser/reports"] });
+  const reports = useQuery<ReportsListResponse>({ queryKey: ["/api/adviser/reports"] });
   // /api/adviser/clients now returns { asOfDate, clients } (Task #287). Adapt
   // to the rows-only shape this page uses everywhere downstream.
   const clientsResponse = useQuery<{ asOfDate: string; clients: ClientLite[] }>({
@@ -184,10 +225,57 @@ export default function AdviserReports() {
       setOpen(false);
       form.reset();
     },
-    onError: (err: Error) => {
-      toast({ title: "Request failed", description: err.message, variant: "destructive" });
+    onError: (err: any) => {
+      // Task #315 — duplicate guard (409, code=duplicate_report_request)
+      // gets a softer toast. apiRequest rejects with the error envelope
+      // attached as `.body`.
+      const body = err?.body ?? null;
+      if (body?.code === "duplicate_report_request") {
+        toast({
+          title: "Recent duplicate",
+          description: `A report of this type was already requested in the last 30 minutes (id #${body.existingReportId}, status ${body.existingStatus}). Open it from the list below.`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Request failed",
+          description: err instanceof Error ? err.message : "Unknown error",
+          variant: "destructive",
+        });
+      }
     },
   });
+
+  // Task #315 — Regenerate. Inserts a new versioned row and runs the
+  // generator inline; on success we invalidate the list so the new row
+  // appears at the top with the expected version chip.
+  const regenerate = useMutation({
+    mutationFn: async (reportId: number) => {
+      const res = await apiRequest("POST", `/api/adviser/reports/${reportId}/regenerate`, {});
+      return res.json();
+    },
+    onSuccess: (data: ReportRequest) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/adviser/reports"] });
+      toast({
+        title: data?.status === "ready" ? "Regenerated" : "Regeneration submitted",
+        description:
+          data?.status === "ready"
+            ? `Version ${data.versionNumber ?? "?"} is ready to download.`
+            : data?.failureReason ?? "Submitted; check status above.",
+        variant: data?.status === "failed" ? "destructive" : "default",
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Regenerate failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const counts = reports.data?.counts ?? {};
+  const allRows = reports.data?.rows ?? [];
+  const filtered = useMemo(
+    () => (statusFilter ? allRows.filter((r) => r.status === statusFilter) : allRows),
+    [allRows, statusFilter],
+  );
 
   return (
     <div className="p-6 space-y-6" data-testid="page-adviser-reports">
@@ -196,7 +284,7 @@ export default function AdviserReports() {
           <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
           <p className="text-sm text-gray-500 mt-1">
             Request statement-style reports for any of your linked clients. Generation is handled
-            by the platform; you'll see a download link once ready.
+            by the platform; you'll see a download link once ready. Download links expire after 7 days.
           </p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
@@ -295,11 +383,49 @@ export default function AdviserReports() {
         </Dialog>
       </div>
 
+      {/* Status counts strip with click-to-filter */}
+      <div className="flex flex-wrap items-center gap-2" data-testid="strip-status-counts">
+        <button
+          type="button"
+          onClick={() => setStatusFilter(null)}
+          className={`text-xs font-medium px-3 py-1.5 rounded-full border transition ${
+            statusFilter === null
+              ? "bg-slate-900 text-white border-slate-900"
+              : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+          }`}
+          data-testid="chip-count-all"
+        >
+          All ({allRows.length})
+        </button>
+        {COUNT_BUCKETS.map((b) => {
+          const n = counts[b.key] ?? 0;
+          const active = statusFilter === b.key;
+          return (
+            <button
+              key={b.key}
+              type="button"
+              onClick={() => setStatusFilter(active ? null : b.key)}
+              className={`text-xs font-medium px-3 py-1.5 rounded-full border transition ${
+                active ? "ring-2 ring-offset-1 ring-slate-400 " : ""
+              }${b.chipClass}`}
+              data-testid={`chip-count-${b.key}`}
+            >
+              {b.label}: {n}
+            </button>
+          );
+        })}
+      </div>
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <FileText className="h-4 w-4 text-violet-500" />
             Your report requests
+            {statusFilter && (
+              <span className="text-xs font-normal text-slate-500">
+                · filtered by <span className="font-mono">{statusFilter}</span>
+              </span>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -308,9 +434,9 @@ export default function AdviserReports() {
               <Skeleton className="h-10 w-full" />
               <Skeleton className="h-10 w-full" />
             </div>
-          ) : !reports.data || reports.data.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <p className="text-sm text-gray-500" data-testid="text-no-reports">
-              No report requests yet.
+              {statusFilter ? `No reports with status "${statusFilter}".` : "No report requests yet."}
             </p>
           ) : (
             <Table>
@@ -318,54 +444,120 @@ export default function AdviserReports() {
                 <TableRow>
                   <TableHead>Client</TableHead>
                   <TableHead>Type</TableHead>
+                  <TableHead>Version</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Requested</TableHead>
-                  <TableHead>Download</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {reports.data.map((r) => (
-                  <TableRow key={r.id} data-testid={`row-report-${r.id}`}>
-                    <TableCell className="text-sm">#{r.clientUserId}</TableCell>
-                    <TableCell className="capitalize text-sm">
-                      {r.reportType.replace(/_/g, " ")}
-                    </TableCell>
-                    <TableCell>{statusBadge(r.status)}</TableCell>
-                    <TableCell className="text-sm">{formatDateTime(r.requestedAt)}</TableCell>
-                    <TableCell>
-                      {r.status === "ready" && r.downloadUrl ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => downloadReport(r.id, `#${r.clientUserId}`, toast)}
-                          data-testid={`button-download-report-${r.id}`}
-                        >
-                          <Download className="h-3.5 w-3.5 mr-1.5" />
-                          Download
-                        </Button>
-                      ) : r.status === "failed" ? (
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span
-                                className="inline-flex items-center text-xs text-red-600 cursor-help"
-                                data-testid={`text-failed-report-${r.id}`}
-                              >
-                                <AlertCircle className="h-3.5 w-3.5 mr-1" />
-                                Failed
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <p className="max-w-xs text-xs">{r.failureReason ?? "Unknown error"}</p>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {filtered.map((r) => {
+                  const isFailed = r.status === "failed";
+                  const isExpiredLink = r.status === "expired_link";
+                  const showRetry = isFailed || isExpiredLink || r.status === "expired";
+                  const versionNum = r.versionNumber ?? 1;
+                  const priorCount = r.versions?.length ?? 0;
+                  return (
+                    <TableRow
+                      key={r.id}
+                      data-testid={`row-report-${r.id}`}
+                      className={
+                        isFailed
+                          ? "border-l-4 border-l-red-500 bg-red-50/40"
+                          : isExpiredLink
+                            ? "border-l-4 border-l-slate-400 bg-slate-50/40"
+                            : ""
+                      }
+                    >
+                      <TableCell className="text-sm">#{r.clientUserId}</TableCell>
+                      <TableCell className="capitalize text-sm">
+                        {r.reportType.replace(/_/g, " ")}
+                      </TableCell>
+                      <TableCell>
+                        {priorCount > 0 ? (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span
+                                  className="inline-flex items-center text-xs gap-1 text-violet-700 bg-violet-50 border border-violet-200 px-2 py-0.5 rounded cursor-help"
+                                  data-testid={`chip-version-${r.id}`}
+                                >
+                                  <Layers className="h-3 w-3" />v{versionNum}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p className="text-xs">
+                                  {priorCount} prior version{priorCount === 1 ? "" : "s"}: {" "}
+                                  {r.versions!
+                                    .map((v) => `#${v.id} v${v.versionNumber}`)
+                                    .join(", ")}
+                                </p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        ) : (
+                          <span className="text-xs text-slate-500" data-testid={`chip-version-${r.id}`}>v{versionNum}</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          {statusBadge(r.status)}
+                          {isFailed && r.failureReason && (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span
+                                    className="inline-flex items-center text-[10px] uppercase tracking-wide bg-red-100 text-red-700 border border-red-200 px-1.5 py-0.5 rounded cursor-help"
+                                    data-testid={`chip-reason-${r.id}`}
+                                  >
+                                    <AlertCircle className="h-3 w-3 mr-1" />
+                                    {r.failureReason === "sweeper_timeout"
+                                      ? "timeout"
+                                      : r.failureReason.slice(0, 24)}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p className="max-w-xs text-xs">{r.failureReason}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm">{formatDateTime(r.requestedAt)}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          {r.status === "ready" && r.downloadUrl ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => downloadReport(r.id, toast)}
+                              data-testid={`button-download-report-${r.id}`}
+                            >
+                              <Download className="h-3.5 w-3.5 mr-1.5" />
+                              Download
+                            </Button>
+                          ) : null}
+                          {showRetry && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => regenerate.mutate(r.id)}
+                              disabled={regenerate.isPending}
+                              data-testid={`button-retry-report-${r.id}`}
+                            >
+                              <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                              Regenerate
+                            </Button>
+                          )}
+                          {!showRetry && r.status !== "ready" && (
+                            <span className="text-xs text-gray-400">—</span>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           )}

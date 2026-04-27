@@ -1436,6 +1436,37 @@ export async function createReportRequest(
   input: Omit<InsertReportRequest, "adviserUserId">,
 ): Promise<ReportRequest> {
   await assertAdviserClientLink(adviserUserId, input.clientUserId);
+
+  // Task #315 — duplicate guard. A second click within the guard window
+  // (default 30m) for the same (clientUserId, reportType) returns the
+  // existing row id via a 409 the UI can deep-link to. Bypassed when the
+  // caller passes `_skipDuplicateGuard` (used by the regenerate path,
+  // which IS deliberately a duplicate).
+  // The dynamic import keeps the adviser-access module decoupled from
+  // services/reports.ts so a future test that mocks reports.ts doesn't
+  // also have to mock the dup-guard plumbing here.
+  const { findDuplicateRecentReport } = await import("./reports");
+  const existing = await findDuplicateRecentReport({
+    adviserUserId,
+    clientUserId: input.clientUserId,
+    reportType: input.reportType,
+  });
+  if (existing) {
+    throw Object.assign(
+      new Error(
+        `A report of this type for this client was already requested in the last 30 minutes (id ${existing.id}, status ${existing.status}).`,
+      ),
+      {
+        status: 409,
+        body: {
+          code: "duplicate_report_request",
+          existingReportId: existing.id,
+          existingStatus: existing.status,
+        },
+      },
+    );
+  }
+
   const [row] = await db
     .insert(reportRequests)
     .values({ ...input, adviserUserId })

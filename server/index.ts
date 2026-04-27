@@ -870,6 +870,41 @@ app.use((req, res, next) => {
     }, 600 * 1000);
   }
 
+  // -------------------------------------------------------------------------
+  // Task #315 — Report job sweeper. One-minute cadence; flips report rows
+  // stuck in 'requested'/'generating' for >10 minutes to 'failed' so the
+  // adviser/admin Reports surfaces can offer a Retry button. Disable in
+  // dev shells with REPORT_SWEEPER_DISABLED=1.
+  // -------------------------------------------------------------------------
+  if (
+    process.env.REPORT_SWEEPER_DISABLED &&
+    /^(1|true|yes|on)$/i.test(process.env.REPORT_SWEEPER_DISABLED)
+  ) {
+    console.log(
+      "[report-sweeper] REPORT_SWEEPER_DISABLED is set; the per-minute report job sweeper is NOT registered.",
+    );
+  } else {
+    const { runReportJobSweeper } = await import("./services/reports");
+    const runReportSweeperCron = async () => {
+      try {
+        await withBackgroundJobRunRecord("report-sweeper", async () => {
+          const r = await runReportJobSweeper();
+          // Compact one-line summary for the Background Jobs dashboard.
+          return r.flipped > 0
+            ? `Flipped ${r.flipped} stuck report row(s) to failed: [${r.flippedIds.join(", ")}]`
+            : `No stuck report rows (scanned ${r.scanned}).`;
+        });
+      } catch (e) {
+        console.error("[report-sweeper] cron error", e);
+      }
+    };
+    // First run after 30s so newly booted shells have a moment to settle.
+    setTimeout(() => {
+      void runReportSweeperCron();
+      setInterval(runReportSweeperCron, 60 * 1000);
+    }, 30 * 1000);
+  }
+
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.

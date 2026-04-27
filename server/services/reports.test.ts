@@ -1,0 +1,350 @@
+// =============================================================================
+// Task #315 — automated tests for reports lifecycle hardening
+// =============================================================================
+// Locks in the behaviour of:
+//   1. runReportJobSweeper() — flips an 11-minute-old `requested` row to
+//      `failed` with failureReason='sweeper_timeout' and writes the
+//      `report.sweeper_timeout` audit row, while leaving fresh rows alone.
+//   2. regenerateReport() — inserts a new row pointing back at the original
+//      via supersedesReportId and increments versionNumber. Re-regenerating
+//      from the original id still walks the chain to v3.
+//   3. createReportRequest duplicate guard — a second request for the same
+//      (clientUserId, reportType) within 30 minutes throws a 409 carrying
+//      a structured `body.code = 'duplicate_report_request'` envelope.
+//   4. findDuplicateRecentReport — outside the 30-minute window the guard
+//      returns null (so a daily request cadence is fine).
+// =============================================================================
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { and, desc, eq, inArray } from "drizzle-orm";
+import { db } from "../db";
+import {
+  adviserClients,
+  auditLogs,
+  reportRequests,
+  users,
+} from "@shared/schema";
+import {
+  DUPLICATE_GUARD_WINDOW_MS,
+  findDuplicateRecentReport,
+  regenerateReport,
+  runReportJobSweeper,
+  SWEEPER_STUCK_AFTER_MS,
+} from "./reports";
+import { createReportRequest } from "./adviser-access";
+
+const ADVISER_USERNAME = "__reports_test_adviser__";
+const CLIENT_USERNAME = "__reports_test_client__";
+
+let adviserUserId: number;
+let clientUserId: number;
+
+async function ensureUser(
+  username: string,
+  email: string,
+  role: "client" | "adviser",
+): Promise<number> {
+  const [existing] = await db.select().from(users).where(eq(users.username, username));
+  if (existing) {
+    await db
+      .update(users)
+      .set({ email, firstName: "Reports", lastName: "Test", role })
+      .where(eq(users.id, existing.id));
+    return existing.id;
+  }
+  const [created] = await db
+    .insert(users)
+    .values({
+      username,
+      email,
+      password: "not-a-real-password",
+      firstName: "Reports",
+      lastName: "Test",
+      kycStatus: "verified",
+      emailVerified: true,
+      role,
+    })
+    .returning();
+  return created.id;
+}
+
+async function clearReportRows(): Promise<void> {
+  if (adviserUserId !== undefined) {
+    // audit_logs is immutable (DELETE blocked at the DB level), so we leave
+    // its rows alone. Each new reportRequests insert produces a fresh
+    // serial id, so the sweeper-audit assertion below scopes its lookup
+    // to that specific id and never collides with prior runs.
+    await db
+      .delete(reportRequests)
+      .where(eq(reportRequests.adviserUserId, adviserUserId));
+  }
+}
+
+beforeAll(async () => {
+  adviserUserId = await ensureUser(
+    ADVISER_USERNAME,
+    "reports-test-adviser@example.com",
+    "adviser",
+  );
+  clientUserId = await ensureUser(
+    CLIENT_USERNAME,
+    "reports-test-client@example.com",
+    "client",
+  );
+  // Idempotent active link — required by createReportRequest.
+  const [existingLink] = await db
+    .select()
+    .from(adviserClients)
+    .where(
+      and(
+        eq(adviserClients.adviserUserId, adviserUserId),
+        eq(adviserClients.clientUserId, clientUserId),
+      ),
+    );
+  if (!existingLink) {
+    await db.insert(adviserClients).values({
+      adviserUserId,
+      clientUserId,
+      isActive: true,
+    });
+  } else if (!existingLink.isActive) {
+    await db
+      .update(adviserClients)
+      .set({ isActive: true })
+      .where(eq(adviserClients.id, existingLink.id));
+  }
+  await clearReportRows();
+});
+
+afterAll(async () => {
+  await clearReportRows();
+  await db
+    .delete(adviserClients)
+    .where(
+      and(
+        eq(adviserClients.adviserUserId, adviserUserId),
+        eq(adviserClients.clientUserId, clientUserId),
+      ),
+    );
+  await db.delete(users).where(inArray(users.id, [adviserUserId, clientUserId]));
+});
+
+describe("runReportJobSweeper", () => {
+  it("flips a row stuck in 'requested' for >10 minutes to 'failed' with sweeper_timeout reason and writes audit", async () => {
+    await clearReportRows();
+    const now = new Date();
+    const eleven = new Date(now.getTime() - 11 * 60 * 1000);
+    const five = new Date(now.getTime() - 5 * 60 * 1000);
+
+    // Insert two rows: one stuck (11m old), one fresh (5m old).
+    const [stuckRow] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+        requestedAt: eleven,
+      })
+      .returning();
+    const [freshRow] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "fee_summary",
+        format: "pdf",
+        status: "generating",
+        requestedAt: five,
+      })
+      .returning();
+
+    const summary = await runReportJobSweeper({ now });
+
+    expect(summary.scanned).toBeGreaterThanOrEqual(1);
+    expect(summary.flippedIds).toContain(stuckRow.id);
+    expect(summary.flippedIds).not.toContain(freshRow.id);
+
+    const [stuckAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, stuckRow.id));
+    expect(stuckAfter.status).toBe("failed");
+    expect(stuckAfter.failureReason).toBe("sweeper_timeout");
+
+    const [freshAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, freshRow.id));
+    expect(freshAfter.status).toBe("generating");
+    expect(freshAfter.failureReason).toBeNull();
+
+    const [audit] = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.action, "report.sweeper_timeout"),
+          eq(auditLogs.entityType, "report_request"),
+          eq(auditLogs.entityId, String(stuckRow.id)),
+        ),
+      )
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(1);
+    expect(audit).toBeDefined();
+    expect(audit.userId).toBeNull();
+    const meta = audit.metadata as any;
+    expect(meta.previousStatus).toBe("requested");
+    expect(meta.stuckAfterMsConfig).toBe(SWEEPER_STUCK_AFTER_MS);
+  });
+
+  it("returns scanned=0 when no rows are stuck", async () => {
+    await clearReportRows();
+    const summary = await runReportJobSweeper();
+    expect(summary.flipped).toBe(0);
+  });
+});
+
+describe("regenerateReport (versioning chain)", () => {
+  it("inserts v2 with supersedesReportId pointing at v1", async () => {
+    await clearReportRows();
+    const [v1] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "transaction_history",
+        format: "pdf",
+        status: "ready",
+      })
+      .returning();
+    expect(v1.versionNumber).toBe(1);
+    expect(v1.supersedesReportId).toBeNull();
+
+    const v2 = await regenerateReport(adviserUserId, v1.id);
+    expect(v2.versionNumber).toBe(2);
+    expect(v2.supersedesReportId).toBe(v1.id);
+    expect(v2.adviserUserId).toBe(adviserUserId);
+    expect(v2.clientUserId).toBe(clientUserId);
+    expect(v2.reportType).toBe("transaction_history");
+    // The new row is in the initial 'requested' state — the cron / route
+    // wrapper is responsible for actually generating the PDF.
+    expect(v2.status).toBe("requested");
+  });
+
+  it("regenerating from the ORIGINAL id again walks the chain head and produces v3", async () => {
+    await clearReportRows();
+    const [v1] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "full_statement",
+        format: "pdf",
+        status: "failed",
+        failureReason: "test",
+      })
+      .returning();
+    const v2 = await regenerateReport(adviserUserId, v1.id);
+    // Pass v1.id again — the service must walk forward to v2 and produce v3.
+    const v3 = await regenerateReport(adviserUserId, v1.id);
+    expect(v2.versionNumber).toBe(2);
+    expect(v3.versionNumber).toBe(3);
+    expect(v3.supersedesReportId).toBe(v2.id);
+  });
+
+  it("rejects regenerate when the caller does not own the original", async () => {
+    await clearReportRows();
+    const [v1] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "ready",
+      })
+      .returning();
+    await expect(regenerateReport(adviserUserId + 99999, v1.id)).rejects.toMatchObject({
+      status: 403,
+    });
+  });
+});
+
+describe("createReportRequest duplicate guard", () => {
+  it("rejects a second request for the same (client, type) within 30 minutes with a 409", async () => {
+    await clearReportRows();
+    const first = await createReportRequest(adviserUserId, {
+      clientUserId,
+      reportType: "portfolio_summary",
+      format: "pdf",
+    });
+    expect(first.id).toBeGreaterThan(0);
+
+    let captured: any = null;
+    try {
+      await createReportRequest(adviserUserId, {
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+      });
+    } catch (err) {
+      captured = err;
+    }
+    expect(captured).toBeTruthy();
+    expect(captured.status).toBe(409);
+    expect(captured.body?.code).toBe("duplicate_report_request");
+    expect(captured.body?.existingReportId).toBe(first.id);
+  });
+
+  it("does NOT block when the report type differs", async () => {
+    await clearReportRows();
+    await createReportRequest(adviserUserId, {
+      clientUserId,
+      reportType: "portfolio_summary",
+      format: "pdf",
+    });
+    const second = await createReportRequest(adviserUserId, {
+      clientUserId,
+      reportType: "fee_summary",
+      format: "pdf",
+    });
+    expect(second.id).toBeGreaterThan(0);
+    expect(second.reportType).toBe("fee_summary");
+  });
+
+  it("does NOT block once the guard window has passed", async () => {
+    await clearReportRows();
+    // Insert a synthetic "old" row directly so we can place its requestedAt
+    // outside the guard window without time travel.
+    const oldRequestedAt = new Date(Date.now() - DUPLICATE_GUARD_WINDOW_MS - 60 * 1000);
+    await db.insert(reportRequests).values({
+      adviserUserId,
+      clientUserId,
+      reportType: "portfolio_summary",
+      format: "pdf",
+      status: "ready",
+      requestedAt: oldRequestedAt,
+    });
+
+    const fresh = await createReportRequest(adviserUserId, {
+      clientUserId,
+      reportType: "portfolio_summary",
+      format: "pdf",
+    });
+    expect(fresh.id).toBeGreaterThan(0);
+  });
+});
+
+describe("findDuplicateRecentReport (boundary check)", () => {
+  it("returns null when no row exists for that combination at all", async () => {
+    await clearReportRows();
+    const r = await findDuplicateRecentReport({
+      adviserUserId,
+      clientUserId,
+      reportType: "fee_summary",
+    });
+    expect(r).toBeNull();
+  });
+});

@@ -3333,7 +3333,7 @@ export function registerAdminRoutes(app: Express): void {
       if (reportType) conditions.push(eq(reportRequests.reportType, reportType));
       const where = conditions.length ? and(...conditions) : undefined;
 
-      const [rows, totalRow] = await Promise.all([
+      const [rows, totalRow, statusCountRows] = await Promise.all([
         db
           .select({
             id: reportRequests.id,
@@ -3348,6 +3348,11 @@ export function registerAdminRoutes(app: Express): void {
             requestedAt: reportRequests.requestedAt,
             generatedAt: reportRequests.generatedAt,
             expiresAt: reportRequests.expiresAt,
+            // Task #315 — version chain metadata so the admin row can show
+            // a "v2 ← v1" chip without a per-row round-trip.
+            versionNumber: reportRequests.versionNumber,
+            supersedesReportId: reportRequests.supersedesReportId,
+            downloadLinkExpiresAt: reportRequests.downloadLinkExpiresAt,
             adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${reportRequests.adviserUserId})`,
             clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${reportRequests.clientUserId})`,
             clientEmail: sql<string>`(SELECT email FROM ${users} u WHERE u.id = ${reportRequests.clientUserId})`,
@@ -3361,14 +3366,101 @@ export function registerAdminRoutes(app: Express): void {
           .select({ count: sql<number>`count(*)::int` })
           .from(reportRequests)
           .where(where as any),
+        // Task #315 — counts strip is global (NOT page-scoped) so the
+        // admin can see the true backlog regardless of current filter.
+        // Computed in a single GROUP BY rather than N round-trips.
+        db
+          .select({
+            status: reportRequests.status,
+            count: sql<number>`count(*)::int`,
+          })
+          .from(reportRequests)
+          .groupBy(reportRequests.status),
       ]);
+
+      const counts: Record<string, number> = {};
+      for (const r of statusCountRows) counts[r.status] = Number(r.count);
 
       return {
         items: rows,
         page,
         limit,
         total: Number(totalRow[0]?.count ?? 0),
+        counts,
       };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #315 — POST /api/admin/reports/:id/retry
+  // Inserts a fresh job (versionNumber + 1, supersedesReportId = id), then
+  // generates the PDF inline. Does NOT mutate the failed row — the chain
+  // itself is the audit trail.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/admin/reports/:id/retry",
+    adminRoute(async (req, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid report id"), { status: 400 });
+      }
+      const [orig] = await db
+        .select()
+        .from(reportRequests)
+        .where(eq(reportRequests.id, id))
+        .limit(1);
+      if (!orig) {
+        throw Object.assign(new Error("Report not found"), { status: 404 });
+      }
+      // Admin retry impersonates the original adviser (admin is acting on
+      // their behalf so the new row's adviserUserId stays unchanged and
+      // ownership semantics on download still hold).
+      const { regenerateReport, generateReportPdf } = await import("./services/reports");
+      const next = await regenerateReport(orig.adviserUserId, id);
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "admin_report_retry",
+        entityType: "report_request",
+        entityId: String(next.id),
+        after: {
+          supersedesReportId: id,
+          versionNumber: next.versionNumber,
+          originalAdviserUserId: orig.adviserUserId,
+          clientUserId: next.clientUserId,
+          reportType: next.reportType,
+        },
+        ipAddress: req.ip || null,
+      });
+      await generateReportPdf(next.id);
+      const [final] = await db
+        .select()
+        .from(reportRequests)
+        .where(eq(reportRequests.id, next.id))
+        .limit(1);
+      return final;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #315 — POST /api/admin/reports/sweeper/run-once
+  // Manual trigger of the report sweeper — useful when an operator wants
+  // to clear stuck rows immediately rather than wait for the next minute
+  // tick. Returns the same summary structure the cron records.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/admin/reports/sweeper/run-once",
+    adminRoute(async (req, auth) => {
+      const { runReportJobSweeper } = await import("./services/reports");
+      const summary = await runReportJobSweeper();
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "admin_report_sweeper_run_once",
+        entityType: "background_job",
+        entityId: "report-sweeper",
+        after: { scanned: summary.scanned, flipped: summary.flipped, flippedIds: summary.flippedIds },
+        ipAddress: req.ip || null,
+      });
+      return summary;
     }),
   );
 
