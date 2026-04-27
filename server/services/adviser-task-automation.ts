@@ -62,6 +62,23 @@ const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
+// Display label for a client used in adviser task titles / notes.
+// Fallback chain: full name -> email -> Client #<id>.
+// Mirrors the resolution used in adviser-access.ts so the adviser portal is
+// consistent across notifications, lists, and tasks. Exported so a vitest
+// case can pin the contract without spinning up a full DB fixture.
+// ---------------------------------------------------------------------------
+export function clientLabelForTask(input: {
+  firstName?: string | null;
+  lastName?: string | null;
+  email?: string | null;
+  clientUserId: number;
+}): string {
+  const fullName = `${input.firstName ?? ""} ${input.lastName ?? ""}`.trim();
+  return fullName || input.email || `Client #${input.clientUserId}`;
+}
+
+// ---------------------------------------------------------------------------
 // Has this adviser already got an OPEN or IN_PROGRESS task of `taskType` for
 // this client? If so, the cron should not create another.
 // ---------------------------------------------------------------------------
@@ -168,6 +185,10 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
       kycStatus: users.kycStatus,
       firstName: users.firstName,
       lastName: users.lastName,
+      // Pulled so the task label can fall back to email when name fields
+      // are empty — without this, automated tasks render as "Client #26"
+      // instead of an actionable label.
+      email: users.email,
     })
     .from(adviserClients)
     .innerJoin(users, eq(users.id, adviserClients.clientUserId))
@@ -204,7 +225,10 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
   // 3. Per-link processing. Errors on one link must never abort the rest.
   for (const link of links) {
     try {
-      const clientLabel = `${link.firstName ?? ""} ${link.lastName ?? ""}`.trim() || `Client #${link.clientUserId}`;
+      // See clientLabelForTask. Only affects newly-created tasks;
+      // historical task titles keep their existing wording (no backfill —
+      // see task #283 scope).
+      const clientLabel = clientLabelForTask(link);
 
       // Trigger A — KYC follow-up
       if (link.kycStatus !== "verified") {
