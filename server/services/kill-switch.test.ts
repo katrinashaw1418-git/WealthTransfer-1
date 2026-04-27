@@ -1111,6 +1111,518 @@ describe("entry-point coverage walk (Task #183)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 6b. Ledger-primitive caller coverage walk (Task #190)
+// ---------------------------------------------------------------------------
+// The Section-6 walk above guarantees that any NEW exported function in
+// `server/services/` whose name matches a money-movement verb is either
+// guarded or explicitly registered. That alone is not enough for the ledger
+// primitive itself: `postLedgerEntries` in `server/services/ledger.ts` is
+// classified as an `allowlisted_primitive` because every caller is supposed
+// to hold its own kill-switch guard upstream — but the registry only asserts
+// that claim by hand. A future caller that forgets to add the guard
+// (e.g. a new HTTP route, a new fee-engine path, or a sweep helper) would
+// slip past the Section-6 walk because the walk only inspects names of
+// exported services, not the call graph.
+//
+// This walk closes the gap by enumerating every CALLSITE of the ledger
+// primitives across `server/routes.ts` and `server/services/*.ts`, finding
+// the enclosing named function for each, and asserting that enclosing
+// function either:
+//   (a) calls `assertKillSwitchOff(...)` directly in its own body, AND is
+//       listed in either `KILL_SWITCH_ENTRY_POINT_REGISTRY` (for service
+//       exports) or `LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY` (for the
+//       route-handler local consts in routes.ts that aren't service
+//       exports); OR
+//   (b) is itself called only by registered guarded functions (one level
+//       of indirection — the chain must terminate in a guarded function
+//       within at most one hop).
+//
+// PRIMITIVES IN SCOPE
+//   * postLedgerEntries           — the only writer of ledger_entries
+//   * refreshWalletCacheBalance   — the only writer of wallets.balance/availableBalance
+//   * getOrCreateClientAccount    — creates/locates client accounts (an
+//                                   account row is a precondition for posting
+//                                   to it; gating account creation on the
+//                                   kill switch keeps half-state out of the
+//                                   accounts table when the operator engages
+//                                   the switch mid-transaction)
+//   * getOrCreateSuspenseAccount  — same rationale, platform suspense leg
+//   * getOrCreateFeeAccount       — same rationale, platform fee revenue leg
+//
+// FILES IN SCOPE
+//   * server/routes.ts            — HTTP money-movement routes
+//   * server/services/*.ts        — service-layer code, EXCLUDING:
+//       - ledger.ts itself        — the primitives' own declarations (and
+//                                   the lines `await postLedgerEntries(...)`
+//                                   in their JSDoc would otherwise produce
+//                                   spurious matches; AST-based scanning
+//                                   ignores comments anyway)
+//       - *.test.ts               — tests intentionally exercise the
+//                                   primitives directly with the switch off
+//
+//   `scripts/*.ts` are deliberately OUT OF SCOPE: those are operator-only
+//   maintenance utilities (pre-launch safety probes, cleanup helpers,
+//   reconciliation backfills) that run with elevated trust outside the
+//   request path. Kill-switch guarding scripts would prevent the operator
+//   from cleaning up AFTER engaging the switch — the opposite of what the
+//   switch is for.
+//
+// FAILURE MODES THIS TEST CATCHES
+//   * A new HTTP route that calls postLedgerEntries() / refreshWalletCacheBalance()
+//     without an `await assertKillSwitchOff(...)` at the top → fail with a
+//     message naming the file, the enclosing function, and the missing guard.
+//   * A new service-layer function that calls a primitive but is missing
+//     from both registries → fail with a message telling the author to
+//     either add the guard + register it as `guarded`, or document the
+//     upstream guard chain via the indirection allowance.
+//   * A registry entry classified `guarded` whose body silently lost its
+//     `assertKillSwitchOff(...)` call → already caught by the Section-6
+//     check; this section additionally surfaces it through the call-graph
+//     view (the primitive call now has no upstream guard).
+//
+// HOW TO EXTEND
+//   When you add a new caller of a ledger primitive:
+//     1. Put `await assertKillSwitchOff(<specific>, "transactions")` at the
+//        top of the enclosing function, BEFORE any `db.transaction(...)` or
+//        primitive call.
+//     2. If the enclosing function is an `export function` in
+//        `server/services/`, add it to KILL_SWITCH_ENTRY_POINT_REGISTRY
+//        as `{ classification: "guarded", reason: "<one-line summary>" }`.
+//        If it's a local `const handleX = async (req, res) => ...` in
+//        `server/routes.ts`, add it to LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY
+//        below with the same shape.
+//     3. Wire an HTTP / throw assertion in Sections 1–3 above so engagement
+//        actually surfaces as 503 / KillSwitchActiveError.
+// ---------------------------------------------------------------------------
+
+// Local-handler counterparts to KILL_SWITCH_ENTRY_POINT_REGISTRY: the
+// route-handler `const handleX` arrows in `server/routes.ts` are not
+// exported (they're locals inside `registerRoutes(app)`), so the
+// service-export-only Section-6 walk does not see them. We list them
+// explicitly here. Each entry is the (file, name) of a NAMED function or
+// const-arrow whose body contains a primitive call AND a direct
+// `assertKillSwitchOff(...)` call.
+const LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY: Record<
+  string,
+  { classification: "guarded"; reason: string }
+> = {
+  "routes.ts:handleDeposit": {
+    classification: "guarded",
+    reason:
+      "POST /api/deposit and /api/wallets/deposit. Calls assertKillSwitchOff('deposits', 'transactions') at the top of the handler, before db.transaction(...) or any ledger primitive call.",
+  },
+  "routes.ts:handleWithdraw": {
+    classification: "guarded",
+    reason:
+      "POST /api/withdraw and /api/wallets/withdraw. Calls assertKillSwitchOff('withdrawals', 'transactions') at the top of the handler, before db.transaction(...) or any ledger primitive call.",
+  },
+};
+
+const LEDGER_PRIMITIVES = [
+  "postLedgerEntries",
+  "refreshWalletCacheBalance",
+  "getOrCreateClientAccount",
+  "getOrCreateSuspenseAccount",
+  "getOrCreateFeeAccount",
+] as const;
+type LedgerPrimitive = (typeof LEDGER_PRIMITIVES)[number];
+const LEDGER_PRIMITIVE_SET: ReadonlySet<string> = new Set(LEDGER_PRIMITIVES);
+
+const SERVER_DIR = path.resolve(SERVICES_DIR, "..");
+const REPO_ROOT = path.resolve(SERVER_DIR, "..");
+const LEDGER_PRIMITIVE_SOURCE = path.resolve(SERVICES_DIR, "ledger.ts");
+const KILL_SWITCH_GUARD_SOURCE = path.resolve(SERVICES_DIR, "kill-switch.ts");
+
+type FuncInfo = {
+  id: string; // "<file>:<name>"
+  file: string; // basename, e.g. "routes.ts"
+  name: string;
+  hasGuard: boolean; // body contains a (symbol-resolved) assertKillSwitchOff(...) call
+  primitiveCalls: LedgerPrimitive[]; // keyed by the resolved primitive name (alias-safe)
+  calleeOwnerIds: Set<string>; // SYMBOL-resolved ids of in-graph callees this owner invokes
+  exported: boolean; // true if this is an `export function` / `export const` at module top level
+};
+
+// Files we walk for the call-graph analysis. Kept narrow on purpose so the
+// test stays cheap and so adding a brand-new file under server/ doesn't
+// accidentally widen the surface without a deliberate update. The list is
+// also used as the canonical "in-scope file set" assertion below — every
+// owner the walk produces MUST resolve to one of these files (anything
+// else means a script or unrelated module slipped in).
+async function listLedgerPrimitiveCallerFiles(): Promise<string[]> {
+  const files: string[] = [path.join(SERVER_DIR, "routes.ts")];
+  const dirents = await fs.readdir(SERVICES_DIR, { withFileTypes: true });
+  for (const d of dirents) {
+    if (!d.isFile()) continue;
+    if (!d.name.endsWith(".ts")) continue;
+    if (d.name.endsWith(".test.ts")) continue;
+    if (d.name === "ledger.ts") continue;
+    files.push(path.join(SERVICES_DIR, d.name));
+  }
+  return files.map((f) => path.resolve(f));
+}
+
+// Build a TS Program over the in-scope files (plus their transitive imports
+// via standard module resolution). The TypeChecker lets us:
+//   * resolve a callsite identifier to the ACTUAL imported declaration,
+//     so `import { postLedgerEntries as foo } from "../services/ledger";`
+//     plus `await foo(...)` is recognised as a primitive call by symbol
+//     identity, not by spelling.
+//   * link `<file>:<name>` owners by ts.Symbol identity, so two functions
+//     in different files that happen to share a name are NOT conflated
+//     when we check one-hop indirection.
+async function buildFunctionGraph(): Promise<{
+  graph: Map<string, FuncInfo>;
+  inScopeFiles: ReadonlySet<string>;
+}> {
+  const ts = await import("typescript");
+  const inScopeFiles = await listLedgerPrimitiveCallerFiles();
+  const inScopeFileSet = new Set(inScopeFiles);
+
+  // Use the project tsconfig so module resolution + path aliases match
+  // production. We force noEmit and skipLibCheck for speed.
+  const tsconfigPath = path.resolve(REPO_ROOT, "tsconfig.json");
+  const cf = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+  if (cf.error) {
+    throw new Error(
+      `Failed to read tsconfig at ${tsconfigPath}: ${ts.flattenDiagnosticMessageText(cf.error.messageText, "\n")}`,
+    );
+  }
+  const parsed = ts.parseJsonConfigFileContent(
+    cf.config,
+    ts.sys,
+    path.dirname(tsconfigPath),
+  );
+  const program = ts.createProgram({
+    rootNames: inScopeFiles,
+    options: { ...parsed.options, noEmit: true, skipLibCheck: true },
+  });
+  const checker = program.getTypeChecker();
+
+  const graph = new Map<string, FuncInfo>();
+  // Map from ts.Symbol → owner id for the four in-scope owner functions.
+  // We use this to resolve "owner X calls owner Y" edges by symbol identity.
+  const symbolToOwnerId = new Map<ts.Symbol, string>();
+
+  function relFile(absPath: string): string {
+    return path.relative(SERVER_DIR, absPath); // "routes.ts" or "services/fee-engine.ts"
+  }
+
+  function ensureOwner(
+    file: string,
+    name: string,
+    exported: boolean,
+    symbol: ts.Symbol | undefined,
+  ): FuncInfo {
+    // We key by (basename, name) to keep the public id format stable with
+    // the registries, but we ALSO record the symbol so cross-file collisions
+    // (e.g. two `processQueue` functions in two files) cannot conflate.
+    const id = `${path.basename(file)}:${name}`;
+    let info = graph.get(id);
+    if (!info) {
+      info = {
+        id,
+        file: path.basename(file),
+        name,
+        hasGuard: false,
+        primitiveCalls: [],
+        calleeOwnerIds: new Set(),
+        exported,
+      };
+      graph.set(id, info);
+    } else if (exported) {
+      info.exported = true;
+    }
+    if (symbol && !symbolToOwnerId.has(symbol)) {
+      symbolToOwnerId.set(symbol, id);
+    }
+    return info;
+  }
+
+  // Pass 1 — discover every named function/var-arrow in every in-scope file
+  // and register their symbols. We need this BEFORE we resolve calls so that
+  // any "owner A calls owner B" edge can be linked by symbol on first sight.
+  const ownerEnvelopesByFile = new Map<
+    string,
+    Array<{ start: number; end: number; info: FuncInfo }>
+  >();
+  for (const filePath of inScopeFiles) {
+    const sf = program.getSourceFile(filePath);
+    if (!sf) {
+      throw new Error(`TS Program missing in-scope source file ${filePath}`);
+    }
+    const file = relFile(filePath);
+    const envelopes: Array<{ start: number; end: number; info: FuncInfo }> = [];
+
+    function recordOwner(
+      nameNode: ts.Identifier,
+      exported: boolean,
+      bodyHost: ts.Node,
+    ): FuncInfo {
+      const symbol = checker.getSymbolAtLocation(nameNode);
+      const info = ensureOwner(file, nameNode.text, exported, symbol);
+      envelopes.push({ start: bodyHost.getStart(), end: bodyHost.getEnd(), info });
+      return info;
+    }
+
+    function walk(node: ts.Node) {
+      if (ts.isFunctionDeclaration(node) && node.name) {
+        const exported =
+          node.modifiers?.some(
+            (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+          ) ?? false;
+        recordOwner(node.name, exported, node);
+      } else if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer &&
+        (ts.isArrowFunction(node.initializer) ||
+          ts.isFunctionExpression(node.initializer))
+      ) {
+        let exported = false;
+        let parent: ts.Node | undefined = node.parent;
+        while (parent && !ts.isVariableStatement(parent)) parent = parent.parent;
+        if (parent && ts.isVariableStatement(parent)) {
+          exported =
+            parent.modifiers?.some(
+              (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+            ) ?? false;
+        }
+        recordOwner(node.name, exported, node);
+      }
+      node.forEachChild(walk);
+    }
+    walk(sf);
+    ownerEnvelopesByFile.set(filePath, envelopes);
+  }
+
+  // Pass 2 — visit every CallExpression in every in-scope file, resolve the
+  // callee symbol (following alias imports), and attribute the call to the
+  // OUTERMOST named owner whose lexical span contains the call.
+  for (const filePath of inScopeFiles) {
+    const sf = program.getSourceFile(filePath)!;
+    const envelopes = ownerEnvelopesByFile.get(filePath) ?? [];
+
+    function ownerAtPosition(pos: number): FuncInfo | null {
+      // INNERMOST containing envelope wins — the immediate enclosing
+      // named function/const-arrow. We want `handleDeposit` (the local
+      // const-arrow) to own its primitive calls, not its outer wrapper
+      // `registerRoutes`. Likewise for any nested helper an author
+      // introduces inside an existing entry point: the test then asserts
+      // on the helper's name and forces the author to either guard it
+      // directly or register the indirection.
+      let best: { start: number; end: number; info: FuncInfo } | null = null;
+      for (const env of envelopes) {
+        if (env.start <= pos && pos <= env.end) {
+          if (!best || env.start > best.start) best = env;
+        }
+      }
+      return best?.info ?? null;
+    }
+
+    function visit(node: ts.Node) {
+      if (ts.isCallExpression(node)) {
+        // Locate the identifier we'll resolve. Bare-call: `foo(...)` — the
+        // expression is an Identifier. Property-access: `obj.bar(...)` — we
+        // look at the .name. (`obj.bar` could still resolve to one of our
+        // primitives via re-export, but in practice none of our primitives
+        // are accessed via property syntax.)
+        let calleeIdent: ts.Identifier | null = null;
+        if (ts.isIdentifier(node.expression)) {
+          calleeIdent = node.expression;
+        } else if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.name)
+        ) {
+          calleeIdent = node.expression.name;
+        }
+        if (calleeIdent) {
+          const ownerInfo = ownerAtPosition(node.getStart());
+          if (ownerInfo) {
+            let symbol = checker.getSymbolAtLocation(calleeIdent);
+            // Follow alias imports so `import { postLedgerEntries as p }`
+            // resolves to the primitive's actual declaration.
+            if (symbol && symbol.flags & ts.SymbolFlags.Alias) {
+              try {
+                symbol = checker.getAliasedSymbol(symbol);
+              } catch {
+                /* unresolvable alias — leave symbol as-is */
+              }
+            }
+            const decls = symbol?.declarations ?? [];
+            for (const decl of decls) {
+              const declFile = path.resolve(decl.getSourceFile().fileName);
+              const declName = symbol?.name;
+              if (
+                declFile === LEDGER_PRIMITIVE_SOURCE &&
+                declName &&
+                LEDGER_PRIMITIVE_SET.has(declName)
+              ) {
+                ownerInfo.primitiveCalls.push(declName as LedgerPrimitive);
+              }
+              if (
+                declFile === KILL_SWITCH_GUARD_SOURCE &&
+                declName === "assertKillSwitchOff"
+              ) {
+                ownerInfo.hasGuard = true;
+              }
+            }
+            // Symbol-keyed edge to another in-scope owner (if any). This
+            // is what makes the one-hop indirection check identity-based
+            // instead of name-based: `processQueue` in services/A.ts and
+            // `processQueue` in services/B.ts have distinct symbols and
+            // therefore distinct owner ids on the edge.
+            if (symbol) {
+              const calleeOwnerId = symbolToOwnerId.get(symbol);
+              if (calleeOwnerId && calleeOwnerId !== ownerInfo.id) {
+                ownerInfo.calleeOwnerIds.add(calleeOwnerId);
+              }
+            }
+          }
+        }
+      }
+      node.forEachChild(visit);
+    }
+    visit(sf);
+  }
+
+  return { graph, inScopeFiles: inScopeFileSet };
+}
+
+function isRegisteredAsGuarded(id: string): boolean {
+  const httpEntry = LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY[id];
+  if (httpEntry?.classification === "guarded") return true;
+  const serviceEntry = KILL_SWITCH_ENTRY_POINT_REGISTRY[id];
+  if (serviceEntry?.classification === "guarded") return true;
+  return false;
+}
+
+describe("ledger-primitive caller coverage walk (Task #190)", () => {
+  it("every caller of postLedgerEntries / refreshWalletCacheBalance / getOrCreate*Account is itself kill-switched", async () => {
+    const { graph, inScopeFiles } = await buildFunctionGraph();
+
+    // Anchor: discovery must produce the headline owners we already know
+    // about. If the AST walk silently returns nothing (wrong directory,
+    // ts-import failure, etc.) every per-callsite assertion below would
+    // pass vacuously — so we hard-fail up front when the headline owners
+    // aren't present.
+    const KNOWN_OWNERS = [
+      "routes.ts:handleDeposit",
+      "routes.ts:handleWithdraw",
+      "fee-engine.ts:settleApprovedDeduction",
+      "fee-engine.ts:reverseSettledDeduction",
+    ];
+    for (const id of KNOWN_OWNERS) {
+      expect(graph.has(id), `function graph missing known owner ${id}`).toBe(
+        true,
+      );
+    }
+
+    // Collect every (owner, primitive) pair, then validate each owner.
+    const callerOwners = Array.from(graph.values()).filter(
+      (info) => info.primitiveCalls.length > 0,
+    );
+
+    // A second anchor: the owners we expect to see calling primitives
+    // include AT LEAST the four headline functions above. Subset (not
+    // strict equality) so a legitimately-added new caller doesn't trip
+    // this anchor — the per-owner validation loop below is what gates
+    // new callers on having a guard. AND every detected owner's source
+    // file MUST be one of the basenames produced by
+    // listLedgerPrimitiveCallerFiles() — that's what stops a
+    // script-style file from silently widening the in-scope set.
+    const callerOwnerIds = callerOwners.map((o) => o.id).sort();
+    for (const id of KNOWN_OWNERS) {
+      expect(
+        callerOwnerIds,
+        `expected the function graph to include caller ${id}`,
+      ).toContain(id);
+    }
+    const allowedBasenames = new Set(
+      Array.from(inScopeFiles).map((f) => path.basename(f)),
+    );
+    for (const owner of callerOwners) {
+      expect(
+        allowedBasenames.has(owner.file),
+        `unexpected file ${owner.file} sneaked into the caller scan; allowed: ${Array.from(allowedBasenames).join(", ")}`,
+      ).toBe(true);
+    }
+
+    const issues: string[] = [];
+
+    for (const owner of callerOwners) {
+      // Path 1 — owner directly calls assertKillSwitchOff AND is registered.
+      if (owner.hasGuard && isRegisteredAsGuarded(owner.id)) continue;
+
+      // Path 2 — one level of indirection. The owner is itself called by
+      // one or more in-scope owners; if EVERY such caller is registered
+      // as guarded AND has the guard call in its own body, accept the
+      // chain. Edges are symbol-resolved (see calleeOwnerIds), so two
+      // unrelated functions with the same name in different files are
+      // never conflated. This intentionally caps the search at one hop.
+      const directCallers = Array.from(graph.values()).filter((other) =>
+        other.calleeOwnerIds.has(owner.id) && other.id !== owner.id,
+      );
+      const indirectionOk =
+        directCallers.length > 0 &&
+        directCallers.every(
+          (caller) => caller.hasGuard && isRegisteredAsGuarded(caller.id),
+        );
+      if (indirectionOk) continue;
+
+      // Build a precise diagnostic explaining which knob the author needs
+      // to turn. We keep the message long on purpose — this test will
+      // typically fail the FIRST time someone adds a new money-movement
+      // path, and the failure has to be self-explanatory in CI.
+      const calls = Array.from(new Set(owner.primitiveCalls)).join(", ");
+      if (!owner.hasGuard) {
+        issues.push(
+          `${owner.id} calls ledger primitive(s) [${calls}] but does NOT call assertKillSwitchOff() in its own body, ` +
+            `and no caller of ${owner.name} (one hop) terminates in a guarded, registered function. ` +
+            `Add \`await assertKillSwitchOff(<specific>, "transactions")\` at the top of ${owner.name} ` +
+            `(BEFORE any db.transaction(...) or primitive call), then register it as ` +
+            `{ classification: "guarded", reason: "..." } in ` +
+            `${owner.file === "routes.ts" ? "LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY" : "KILL_SWITCH_ENTRY_POINT_REGISTRY"}.`,
+        );
+        continue;
+      }
+      // Owner has the guard but is missing from the registry.
+      issues.push(
+        `${owner.id} calls ledger primitive(s) [${calls}] and DOES guard with assertKillSwitchOff(), ` +
+          `but is missing from ${owner.file === "routes.ts" ? "LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY" : "KILL_SWITCH_ENTRY_POINT_REGISTRY"}. ` +
+          `Add it as { classification: "guarded", reason: "<one-line summary>" } so the in-scope set stays auditable.`,
+      );
+    }
+
+    if (issues.length > 0) {
+      throw new Error(
+        `Ledger-primitive caller coverage check failed:\n  - ${issues.join("\n  - ")}`,
+      );
+    }
+  });
+
+  it("HTTP-route registry covers handleDeposit and handleWithdraw (anchor)", () => {
+    // Mirrors the Section-6 anchor for KILL_SWITCH_ENTRY_POINT_REGISTRY:
+    // keeps the headline routes explicit so a registry edit + handler
+    // rename in the same change can't go silent.
+    expect(LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY).toHaveProperty(
+      "routes.ts:handleDeposit",
+    );
+    expect(LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY).toHaveProperty(
+      "routes.ts:handleWithdraw",
+    );
+    expect(
+      LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY["routes.ts:handleDeposit"]
+        .classification,
+    ).toBe("guarded");
+    expect(
+      LEDGER_PRIMITIVE_HTTP_ROUTE_REGISTRY["routes.ts:handleWithdraw"]
+        .classification,
+    ).toBe("guarded");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7. HTTP entry-point coverage walk (Task #189)
 // ---------------------------------------------------------------------------
 // Section 6 above catches a new MONEY-MOVEMENT FUNCTION landing in
