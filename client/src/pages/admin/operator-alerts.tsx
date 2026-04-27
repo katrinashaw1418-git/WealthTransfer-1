@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,8 @@ import {
   Trash2,
   ShieldCheck,
   BookOpen,
+  Send,
+  Repeat,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
@@ -62,6 +64,21 @@ interface OperatorAlertRow {
   channelsAttempted: string[] | null;
   channelOutcomes: ChannelOutcome[] | null;
   createdAt: string | null;
+  // Task #156 — top-level rollup + occurrence counter + last-seen timestamp.
+  // Older rows that predate Task #156 may not have these fields populated;
+  // the renderer treats undefined/null defensively.
+  deliveryStatus?: string | null;
+  occurrences?: number | null;
+  lastSeenAt?: string | null;
+}
+
+interface TestAlertResponse {
+  alertId: number | null;
+  deliveryStatus: string;
+  channelsAttempted: string[];
+  outcomes: ChannelOutcome[];
+  occurrences: number;
+  webhookConfigured: boolean;
 }
 
 interface OperatorAlertsPage {
@@ -241,6 +258,20 @@ const OUTCOME_BADGE: Record<string, string> = {
   error: "bg-red-100 text-red-800 border-red-300",
 };
 
+// Task #156 — top-level dispatch rollup. Distinct palette from per-channel
+// outcomes so the two columns don't visually merge.
+const DELIVERY_BADGE: Record<string, string> = {
+  delivered: "bg-emerald-50 text-emerald-800 border-emerald-300",
+  failed: "bg-red-50 text-red-800 border-red-300",
+  suppressed_duplicate: "bg-violet-50 text-violet-800 border-violet-300",
+};
+
+const DELIVERY_LABEL: Record<string, string> = {
+  delivered: "delivered",
+  failed: "failed",
+  suppressed_duplicate: "duplicate",
+};
+
 function fmt(d: string | null): string {
   if (!d) return "—";
   try {
@@ -337,6 +368,7 @@ async function copyToClipboard(text: string): Promise<boolean> {
 
 export default function AdminOperatorAlerts() {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   // Read filters from the querystring once, on first render — the dashboard
   // tile links here with `?severity=critical` (etc.) so admins land on a
   // pre-filtered view. We deliberately don't subscribe to live querystring
@@ -546,6 +578,72 @@ export default function AdminOperatorAlerts() {
     : "";
   const selectedOutcomes = selectedAlert?.channelOutcomes ?? [];
   const selectedAttempted = selectedAlert?.channelsAttempted ?? [];
+
+  // Task #156 — "Send test alert" mutation. Fires a synthetic alert through
+  // the dispatcher so the operator can confirm the webhook pipe is reachable
+  // without manufacturing a real failure. The toast reports the rollup
+  // status (delivered / failed / suppressed-as-duplicate) so the operator
+  // gets immediate feedback even before the table refreshes.
+  const testAlertMutation = useMutation<TestAlertResponse, Error, void>({
+    mutationFn: async () => {
+      const res = await fetch("/api/admin/operator-alerts/test", {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      const status = result.deliveryStatus;
+      const channelList = result.channelsAttempted.join(", ") || "none";
+      if (status === "delivered") {
+        toast({
+          title: "Test alert delivered",
+          description:
+            `Reached channels: ${channelList}.` +
+            (result.webhookConfigured
+              ? ""
+              : " (Webhook not configured — alert was logged only.)"),
+          duration: 4000,
+        });
+      } else if (status === "suppressed_duplicate") {
+        toast({
+          title: "Test alert coalesced",
+          description: `An identical test alert is already inside the dedupe window. Counter incremented (occurrences=${result.occurrences}).`,
+          duration: 4000,
+        });
+      } else {
+        const errSummary =
+          result.outcomes
+            .filter((o) => o.status !== "success")
+            .map(
+              (o) =>
+                `${o.channel}=${o.status}${o.httpStatus ? ` (HTTP ${o.httpStatus})` : ""}`,
+            )
+            .join("; ") || "see audit row";
+        toast({
+          title: "Test alert delivery failed",
+          description: `Outcome: ${errSummary}. Check OPERATOR_ALERT_WEBHOOK_URL.`,
+          variant: "destructive",
+          duration: 6000,
+        });
+      }
+      // Surface the freshly-inserted row in the table without forcing a
+      // hard reload.
+      void queryClient.invalidateQueries({ queryKey: ["/api/admin/operator-alerts"] });
+    },
+    onError: (err) => {
+      toast({
+        title: "Test alert request failed",
+        description: err.message,
+        variant: "destructive",
+        duration: 6000,
+      });
+    },
+  });
 
   async function handleCopy(text: string, label: string) {
     const ok = await copyToClipboard(text);
@@ -922,6 +1020,17 @@ export default function AdminOperatorAlerts() {
           </CardTitle>
           <div className="flex items-center gap-2 text-sm text-slate-600">
             <Button
+              variant="default"
+              size="sm"
+              onClick={() => testAlertMutation.mutate()}
+              disabled={testAlertMutation.isPending}
+              data-testid="button-send-test-alert"
+              className="gap-1"
+            >
+              <Send className="h-4 w-4" />
+              {testAlertMutation.isPending ? "Sending…" : "Send test alert"}
+            </Button>
+            <Button
               variant="outline"
               size="sm"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -957,6 +1066,7 @@ export default function AdminOperatorAlerts() {
                   <TableHead>Severity</TableHead>
                   <TableHead>Source</TableHead>
                   <TableHead>Title</TableHead>
+                  <TableHead>Delivery</TableHead>
                   <TableHead>Channels</TableHead>
                 </TableRow>
               </TableHeader>
@@ -973,6 +1083,23 @@ export default function AdminOperatorAlerts() {
                       outcomeByChannel.set(o.channel, o);
                     }
                   }
+                  // Task #156 — derive a delivery rollup even for legacy rows
+                  // that predate the new column, by inspecting the persisted
+                  // per-channel outcomes. This way the "Delivery" column is
+                  // never blank.
+                  const derivedDelivery = (() => {
+                    if (row.deliveryStatus) return row.deliveryStatus;
+                    if (outcomes.length === 0) return "delivered";
+                    const allOk = outcomes.every((o) => o.status === "success");
+                    return allOk ? "delivered" : "failed";
+                  })();
+                  const deliveryClass =
+                    DELIVERY_BADGE[derivedDelivery] ??
+                    "bg-slate-50 text-slate-700 border-slate-300";
+                  const deliveryLabel =
+                    DELIVERY_LABEL[derivedDelivery] ?? derivedDelivery;
+                  const occurrences = Math.max(1, row.occurrences ?? 1);
+                  const lastSeen = row.lastSeenAt ?? row.createdAt;
                   return (
                     <TableRow
                       key={row.id}
@@ -981,7 +1108,15 @@ export default function AdminOperatorAlerts() {
                       onClick={() => setSelectedAlert(row)}
                     >
                       <TableCell className="text-xs text-slate-600 whitespace-nowrap align-top">
-                        {fmt(row.createdAt)}
+                        <div data-testid={`text-when-${row.id}`}>{fmt(lastSeen)}</div>
+                        {occurrences > 1 && lastSeen !== row.createdAt && (
+                          <div
+                            className="text-[11px] text-slate-400 mt-0.5"
+                            title={`First seen ${fmt(row.createdAt)}`}
+                          >
+                            first {fmt(row.createdAt)}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="align-top">
                         <Badge
@@ -997,6 +1132,27 @@ export default function AdminOperatorAlerts() {
                       </TableCell>
                       <TableCell className="text-sm text-slate-900 align-top max-w-md">
                         {row.title}
+                      </TableCell>
+                      <TableCell className="align-top">
+                        <div className="flex flex-col gap-1">
+                          <Badge
+                            variant="outline"
+                            className={`text-[11px] font-mono ${deliveryClass}`}
+                            data-testid={`badge-delivery-${row.id}`}
+                          >
+                            {deliveryLabel}
+                          </Badge>
+                          {occurrences > 1 && (
+                            <Badge
+                              variant="outline"
+                              className="text-[11px] font-mono bg-slate-100 text-slate-700 border-slate-300 gap-1"
+                              data-testid={`badge-occurrences-${row.id}`}
+                              title="Number of times this alert has fired (coalesced inside the dedupe window)"
+                            >
+                              <Repeat className="h-3 w-3" />×{occurrences}
+                            </Badge>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="align-top">
                         {attempted.length === 0 ? (
@@ -1084,8 +1240,44 @@ export default function AdminOperatorAlerts() {
                   className="text-left text-xs"
                   data-testid="text-detail-when"
                 >
-                  Alert #{selectedAlert.id} · {fmt(selectedAlert.createdAt)}
+                  Alert #{selectedAlert.id} · first {fmt(selectedAlert.createdAt)}
+                  {selectedAlert.lastSeenAt &&
+                    selectedAlert.lastSeenAt !== selectedAlert.createdAt && (
+                      <> · last {fmt(selectedAlert.lastSeenAt)}</>
+                    )}
                 </SheetDescription>
+                <div className="flex items-center gap-2 pt-1">
+                  {(() => {
+                    const ds =
+                      selectedAlert.deliveryStatus ??
+                      ((selectedAlert.channelOutcomes ?? []).every(
+                        (o) => o.status === "success",
+                      )
+                        ? "delivered"
+                        : "failed");
+                    const cls =
+                      DELIVERY_BADGE[ds] ??
+                      "bg-slate-50 text-slate-700 border-slate-300";
+                    return (
+                      <Badge
+                        variant="outline"
+                        className={`text-[11px] font-mono ${cls}`}
+                        data-testid="badge-detail-delivery"
+                      >
+                        {DELIVERY_LABEL[ds] ?? ds}
+                      </Badge>
+                    );
+                  })()}
+                  {(selectedAlert.occurrences ?? 1) > 1 && (
+                    <Badge
+                      variant="outline"
+                      className="text-[11px] font-mono bg-slate-100 text-slate-700 border-slate-300 gap-1"
+                      data-testid="badge-detail-occurrences"
+                    >
+                      <Repeat className="h-3 w-3" />×{selectedAlert.occurrences}
+                    </Badge>
+                  )}
+                </div>
               </SheetHeader>
 
               <ScrollArea className="flex-1">

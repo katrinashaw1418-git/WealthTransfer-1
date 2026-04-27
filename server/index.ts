@@ -140,6 +140,18 @@ app.use((req, res, next) => {
   const server = await registerRoutes(app);
 
   // ---------------------------------------------------------------------------
+  // TASK #156 — Operator-alerts boot log
+  // ---------------------------------------------------------------------------
+  // Print whether the webhook is wired up the moment the server comes up,
+  // so a misconfigured deployment is caught BEFORE the first real alert
+  // fires (otherwise the operator would only learn the webhook was missing
+  // at the exact moment it was needed). The helper hides the URL itself
+  // and only logs the host + dedupe window + timeout.
+  // ---------------------------------------------------------------------------
+  const { logOperatorAlertsStartup } = await import("./services/operator-alerts");
+  logOperatorAlertsStartup();
+
+  // ---------------------------------------------------------------------------
   // SESSION 25 (Task #17) — Daily wallet ↔ ledger reconciliation
   // ---------------------------------------------------------------------------
   // LEDGER IS THE SOURCE OF TRUTH — wallet cache is derived only.

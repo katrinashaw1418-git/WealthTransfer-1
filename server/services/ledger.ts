@@ -397,6 +397,64 @@ export async function notifyLedgerUnbalanced(opts: {
 }
 
 /**
+ * Task #156 — fire a critical operator alert for any unexpected money-movement
+ * failure (deposit/withdraw 5xx that ISN'T a balanced-journal trip). Same
+ * fire-and-forget contract as `notifyLedgerUnbalanced`: every failure to
+ * dispatch is swallowed so the original 500 still reaches the client.
+ *
+ * The dedupe key keys off (callSite, currency, error.message) — repeated
+ * 500s of the same shape during an outage collapse onto one row inside
+ * the dedupe window instead of paging on every retry.
+ */
+export async function notifyMoneyMovementFailure(opts: {
+  callSite: "deposit" | "withdrawal";
+  error: unknown;
+  context?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    const errMessage =
+      opts.error instanceof Error
+        ? opts.error.message
+        : typeof opts.error === "string"
+          ? opts.error
+          : (() => {
+              try {
+                return JSON.stringify(opts.error);
+              } catch {
+                return String(opts.error);
+              }
+            })();
+    const errName =
+      opts.error instanceof Error ? opts.error.name : "UnknownError";
+    const currency =
+      typeof opts.context?.currency === "string" ? opts.context.currency : "unknown";
+    await notifyOperator({
+      source: `money-movement.${opts.callSite}`,
+      severity: "critical",
+      title: `${opts.callSite} failed unexpectedly (HTTP 500)`,
+      details: {
+        callSite: opts.callSite,
+        errorName: errName,
+        errorMessage: errMessage,
+        ...(opts.context ?? {}),
+      },
+      kind: "money-movement-failure",
+      subjectType: opts.callSite,
+      // Bucket by (callSite, currency, error message) so a flapping rail
+      // collapses onto one row inside the dedupe window. The `notifyOperator`
+      // dispatcher hashes payloadHash anyway, so passing a lightweight key
+      // here is enough.
+      subjectId: `${opts.callSite}:${currency}:${errName}:${errMessage.slice(0, 200)}`,
+    });
+  } catch (alertErr) {
+    console.error(
+      `[money-movement] failed to dispatch operator alert for ${opts.callSite}`,
+      alertErr,
+    );
+  }
+}
+
+/**
  * Express-aware mapping helper. If `error` is a `LedgerUnbalancedError`,
  * fires the operator alert (best-effort) and writes a stable 422 JSON
  * response, then returns true so the caller's catch block can early-return.

@@ -49,6 +49,7 @@ import {
   refreshWalletCacheBalance,
   getUserLedgerSumsByCurrency,
   mapLedgerUnbalancedToHttpResponse,
+  notifyMoneyMovementFailure,
 } from "./services/ledger";
 import { MATCH_EPSILON } from "./services/reconciliation";
 import { emitAuditWriteFailureAlert } from "./services/audit";
@@ -3268,6 +3269,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("[deposit] failed", error);
+      // Task #156 — money-movement 5xx failures must page an operator. The
+      // ledger-unbalanced branch above already does this for the specific
+      // 422 case; this catches every OTHER unexpected failure (DB outage,
+      // serialization conflict, missing wallet, etc.) so a stuck deposit
+      // path doesn't quietly burn for hours before being noticed.
+      void notifyMoneyMovementFailure({
+        callSite: "deposit",
+        error,
+        context: {
+          route: req.path,
+          ipAddress: req.ip ?? null,
+          currency: typeof req.body?.currency === "string" ? req.body.currency : null,
+        },
+      });
       res.status(500).json({ error: "Failed to process deposit" });
     }
   };
@@ -3401,6 +3416,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("[withdraw] failed", error);
+      // Task #156 — see deposit handler above for the rationale.
+      void notifyMoneyMovementFailure({
+        callSite: "withdrawal",
+        error,
+        context: {
+          route: req.path,
+          ipAddress: req.ip ?? null,
+          currency: typeof req.body?.currency === "string" ? req.body.currency : null,
+        },
+      });
       res.status(500).json({ error: "Failed to process withdrawal" });
     }
   };

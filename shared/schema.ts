@@ -2036,6 +2036,30 @@ export const operatorAlerts = pgTable(
     // Stored as an array (not keyed object) so future re-dispatches of the
     // same channel can be appended without overwriting prior attempts.
     channelOutcomes: jsonb("channel_outcomes").notNull().default(sql`'[]'::jsonb`),
+    // Task #156 — coalescing key. SHA-256 hex of
+    //   `${kind}|${subjectType}|${subjectId}|${payloadHash}`
+    // computed in `notifyOperator`. Two alerts with the same key fired inside
+    // the dedupe window collapse onto the EARLIER row by incrementing
+    // `occurrences` and bumping `lastSeenAt` instead of inserting a fresh
+    // row + posting another webhook. Nullable so legacy rows (pre-156) are
+    // unaffected.
+    dedupeKey: text("dedupe_key"),
+    // Number of times this alert has fired (always >= 1). Incremented on
+    // suppressed-as-duplicate hits within the dedupe window.
+    occurrences: integer("occurrences").notNull().default(1),
+    // Wall-clock timestamp of the most recent firing. Equal to `createdAt`
+    // until the row is hit by a coalesced duplicate, after which it bumps
+    // forward. The admin UI sorts by `lastSeenAt DESC` so a recurring
+    // problem keeps floating to the top of the list.
+    lastSeenAt: timestamp("last_seen_at").notNull().defaultNow(),
+    // Top-level outcome of THIS dispatch attempt. One of:
+    //   delivered            — at least one non-log channel succeeded, OR
+    //                          the log channel succeeded and no webhook is
+    //                          configured.
+    //   failed               — every attempted channel failed (incl. retry).
+    //   suppressed_duplicate — a prior row inside the dedupe window absorbed
+    //                          this alert; webhook was NOT re-posted.
+    deliveryStatus: text("delivery_status").notNull().default("delivered"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => ({
@@ -2050,6 +2074,13 @@ export const operatorAlerts = pgTable(
     severityCreatedIdx: index("operator_alerts_severity_created_idx").on(
       table.severity,
       table.createdAt,
+    ),
+    // Task #156 — dedupe lookup is "newest row inside the window with this
+    // key", so we index (dedupeKey, lastSeenAt DESC). The partial WHERE
+    // skips legacy / null-keyed rows so the index stays small.
+    dedupeKeyLastSeenIdx: index("operator_alerts_dedupe_last_seen_idx").on(
+      table.dedupeKey,
+      table.lastSeenAt,
     ),
   }),
 );

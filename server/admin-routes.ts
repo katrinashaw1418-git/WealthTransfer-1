@@ -2081,10 +2081,16 @@ export function registerAdminRoutes(app: Express): void {
             channelsAttempted: operatorAlerts.channelsAttempted,
             channelOutcomes: operatorAlerts.channelOutcomes,
             createdAt: operatorAlerts.createdAt,
+            // Task #156 — surface delivery rollup, occurrence counter and
+            // last-seen so the admin viewer can show "delivered/failed/
+            // suppressed-as-duplicate" + an occurrence badge per row.
+            deliveryStatus: operatorAlerts.deliveryStatus,
+            occurrences: operatorAlerts.occurrences,
+            lastSeenAt: operatorAlerts.lastSeenAt,
           })
           .from(operatorAlerts)
           .where(where)
-          .orderBy(desc(operatorAlerts.createdAt), desc(operatorAlerts.id))
+          .orderBy(desc(operatorAlerts.lastSeenAt), desc(operatorAlerts.id))
           .limit(limit)
           .offset(offset),
         db
@@ -2176,6 +2182,74 @@ export function registerAdminRoutes(app: Express): void {
         .limit(30);
 
       return { items: rows };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // TASK #156 — "Send test alert" admin trigger
+  // -------------------------------------------------------------------------
+  // Lets an operator confirm the OPERATOR_ALERT_WEBHOOK_URL pipe is reachable
+  // without having to wait for a real failure (or to manufacture wallet
+  // drift). Fires a single, clearly-marked synthetic alert through the
+  // dispatcher and returns the structured result so the UI can show
+  // "delivered to <channel>" or surface the per-channel error inline.
+  //
+  // The synthetic alert has:
+  //   * source   = "admin-test"  (so the audit trail is filterable)
+  //   * severity = "info"
+  //   * subjectId = `admin:<userId>:<msTimestamp>`  (per-call dedupe key —
+  //                  back-to-back clicks must NOT collapse onto a prior
+  //                  test alert; the operator wants visible feedback)
+  //
+  // Admin role is enforced by `adminRoute`; the action is captured in the
+  // standard audit log so we have a record of which admin tested when.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/admin/operator-alerts/test",
+    adminRoute(async (req, auth) => {
+      const { notifyOperator } = await import("./services/operator-alerts");
+      const triggeredAt = new Date();
+      const result = await notifyOperator({
+        source: "admin-test",
+        severity: "info",
+        title: "Operator alert pipeline test",
+        details: {
+          triggeredByUserId: auth.userId,
+          triggeredByUsername: auth.username,
+          triggeredAt: triggeredAt.toISOString(),
+          message:
+            "This is a synthetic alert fired from the admin UI to verify the operator-alerts pipeline. No action required.",
+        },
+        kind: "admin-test",
+        subjectType: "admin",
+        // Per-call subject id so two consecutive clicks each produce a
+        // visible result rather than the second one being suppressed.
+        subjectId: `admin:${auth.userId}:${triggeredAt.getTime()}`,
+      });
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "admin_operator_alert_test",
+        entityType: "operator_alert",
+        entityId: result.alertId !== null ? String(result.alertId) : null,
+        before: null,
+        after: {
+          deliveryStatus: result.deliveryStatus,
+          channelsAttempted: result.channelsAttempted,
+          alertId: result.alertId,
+        },
+        extra: {
+          webhookConfigured: Boolean(process.env.OPERATOR_ALERT_WEBHOOK_URL),
+        },
+        ipAddress: req.ip ?? null,
+      });
+      return {
+        alertId: result.alertId,
+        deliveryStatus: result.deliveryStatus,
+        channelsAttempted: result.channelsAttempted,
+        outcomes: result.outcomes,
+        occurrences: result.occurrences,
+        webhookConfigured: Boolean(process.env.OPERATOR_ALERT_WEBHOOK_URL),
+      };
     }),
   );
 
