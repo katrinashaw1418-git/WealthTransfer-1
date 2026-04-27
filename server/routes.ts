@@ -38,6 +38,7 @@ import {
   isLocalDev,
   type AuthPayload,
 } from "./auth";
+import { recordAuditWriteFailure } from "./services/error-log";
 import { registerAdviserRoutes } from "./adviser-routes";
 import { registerAdminRoutes } from "./admin-routes";
 import { registerClientRoutes } from "./client-routes";
@@ -179,8 +180,13 @@ async function writeAuditLog(
       metadata: metadata as any,
       ipAddress,
     });
-  } catch {
-    // Audit log failures must never crash money routes
+  } catch (err) {
+    // Audit log failures must never crash money routes — but we DO record
+    // the failure into the persistent error log + the in-process metrics
+    // counter (Task #144). Without that, audit-log write failures would
+    // disappear into the void and the admin metrics tile would show
+    // misleadingly clean numbers.
+    recordAuditWriteFailure(err, { userId, action });
   }
 }
 

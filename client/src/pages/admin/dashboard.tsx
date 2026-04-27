@@ -3,7 +3,15 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ClipboardList, Users, Link2, ScrollText, Siren } from "lucide-react";
+import {
+  ClipboardList,
+  Users,
+  Link2,
+  ScrollText,
+  Siren,
+  Activity,
+  Info,
+} from "lucide-react";
 import { Link } from "wouter";
 
 interface DashboardData {
@@ -35,6 +43,30 @@ interface OperatorAlertsSummary {
   last24h: Record<Severity, number>;
   last7d: Record<Severity, number>;
   generatedAt: string;
+}
+
+interface AdminMetrics {
+  windowMs: number;
+  generatedAt: string;
+  failedTransactions: {
+    last24h: number;
+    mostRecentId: number | null;
+    mostRecentAt: string | null;
+  };
+  feeDeductionFailures: {
+    last24h: number;
+    inProcessLast24h: number;
+  };
+  auditWriteFailures: {
+    last24hInProcess: number;
+  };
+  http5xx: {
+    last24hInProcess: number;
+  };
+  lastSuccessfulHealthProbe: {
+    at: string | null;
+    ageMs: number | null;
+  };
 }
 
 const SEVERITIES: Severity[] = ["critical", "alert", "warning", "info"];
@@ -69,6 +101,15 @@ export default function AdminDashboard() {
     dataUpdatedAt: alertsUpdatedAt,
   } = useQuery<OperatorAlertsSummary>({
     queryKey: ["/api/admin/operator-alerts/summary"],
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    staleTime: 30_000,
+  });
+  const {
+    data: metrics,
+    isLoading: metricsLoading,
+  } = useQuery<AdminMetrics>({
+    queryKey: ["/api/admin/metrics"],
     refetchInterval: 60_000,
     refetchOnWindowFocus: true,
     staleTime: 30_000,
@@ -208,6 +249,98 @@ export default function AdminDashboard() {
         </CardContent>
       </Card>
 
+      {/* Key business metrics — Task #144 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Activity className="h-4 w-4 text-violet-600" />
+            Key business metrics
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {metricsLoading ? (
+            <Skeleton className="h-24 w-full" />
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <MetricTile
+                  testId="tile-metric-failed-transactions"
+                  label="Failed transactions"
+                  value={metrics?.failedTransactions.last24h ?? 0}
+                  windowLabel="last 24h"
+                  warn={(metrics?.failedTransactions.last24h ?? 0) > 0}
+                />
+                <MetricTile
+                  testId="tile-metric-audit-failures"
+                  label="Audit-log write failures"
+                  value={metrics?.auditWriteFailures.last24hInProcess ?? 0}
+                  windowLabel="last 24h (this process)"
+                  warn={(metrics?.auditWriteFailures.last24hInProcess ?? 0) > 0}
+                />
+                <MetricTile
+                  testId="tile-metric-fee-deduction-failures"
+                  label="Fee deduction failures"
+                  value={metrics?.feeDeductionFailures.last24h ?? 0}
+                  windowLabel="last 24h"
+                  warn={(metrics?.feeDeductionFailures.last24h ?? 0) > 0}
+                />
+                <HealthProbeTile
+                  ageMs={metrics?.lastSuccessfulHealthProbe.ageMs ?? null}
+                  at={metrics?.lastSuccessfulHealthProbe.at ?? null}
+                />
+              </div>
+
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-2">
+                <div className="flex items-center gap-2 font-medium text-slate-700">
+                  <Info className="h-3.5 w-3.5 text-slate-500" />
+                  What these numbers mean
+                </div>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>
+                    <span className="font-medium">Failed transactions</span> —
+                    rows in <code>transactions</code> with status{" "}
+                    <code>failed</code> created in the last 24h. Investigate
+                    via the wallet activity / ledger pages.
+                  </li>
+                  <li>
+                    <span className="font-medium">Audit-log write failures</span>{" "}
+                    — times the persistent audit-log insert itself threw or
+                    was swallowed in the last 24h. In-process counter (resets
+                    on deploy); a non-zero value here means at least one
+                    finance event may not have been recorded — check{" "}
+                    <code>logs/errors.log</code>.
+                  </li>
+                  <li>
+                    <span className="font-medium">Fee deduction failures</span>{" "}
+                    — fee deductions in the last 24h that landed in{" "}
+                    <code>insufficient_funds</code> or recorded a{" "}
+                    <code>failureReason</code>. Review under the fee
+                    deductions admin page.
+                  </li>
+                  <li>
+                    <span className="font-medium">Last successful /health probe</span>{" "}
+                    — the most recent time the <code>/health</code> endpoint
+                    returned 200. Monitor it from your uptime tool; if this
+                    field stays empty, no monitor is wired up.
+                  </li>
+                </ul>
+                <div className="pt-1">
+                  <span className="font-medium text-slate-700">
+                    /health returns 503 when:
+                  </span>{" "}
+                  the database <code>SELECT 1</code> probe fails OR any of
+                  the daily background jobs (fee accruals, wallet/ledger
+                  reconciliation, operator alert prune) has not recorded a
+                  successful run within the last 36 hours. The 503 body
+                  always includes the per-check status so the failing signal
+                  is identifiable without a separate log dive.
+                </div>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Recent audit */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
@@ -326,6 +459,84 @@ function AlertsRefreshStatus({
     >
       auto-updating · {label}
     </p>
+  );
+}
+
+function MetricTile({
+  label,
+  value,
+  windowLabel,
+  warn,
+  testId,
+}: {
+  label: string;
+  value: number;
+  windowLabel: string;
+  warn?: boolean;
+  testId?: string;
+}) {
+  return (
+    <div
+      data-testid={testId}
+      className={`border rounded-md p-3 ${
+        warn
+          ? "bg-amber-50 border-amber-200 text-amber-900"
+          : "bg-slate-50 border-slate-200 text-slate-700"
+      }`}
+    >
+      <div className="text-xs uppercase tracking-wide font-medium">{label}</div>
+      <div className="mt-1 text-2xl font-semibold">{value}</div>
+      <div className="text-xs opacity-70 mt-0.5">{windowLabel}</div>
+    </div>
+  );
+}
+
+function HealthProbeTile({
+  ageMs,
+  at,
+}: {
+  ageMs: number | null;
+  at: string | null;
+}) {
+  // The "no probe yet" state is genuinely informative — it usually means
+  // the operator forgot to point their uptime monitor at /health, which is
+  // exactly the kind of silent miss this tile exists to surface.
+  const neverProbed = at === null;
+  const stale = !neverProbed && (ageMs ?? 0) > 5 * 60 * 1000; // > 5 min
+  const tone = neverProbed
+    ? "bg-slate-50 border-slate-200 text-slate-600"
+    : stale
+    ? "bg-amber-50 border-amber-200 text-amber-900"
+    : "bg-emerald-50 border-emerald-200 text-emerald-900";
+
+  let display: string;
+  if (neverProbed) {
+    display = "never";
+  } else if (ageMs === null) {
+    display = "—";
+  } else if (ageMs < 60_000) {
+    display = `${Math.max(1, Math.round(ageMs / 1000))}s ago`;
+  } else if (ageMs < 60 * 60_000) {
+    display = `${Math.round(ageMs / 60_000)}m ago`;
+  } else {
+    display = `${Math.round(ageMs / 3_600_000)}h ago`;
+  }
+
+  return (
+    <div
+      data-testid="tile-metric-health-probe"
+      className={`border rounded-md p-3 ${tone}`}
+    >
+      <div className="text-xs uppercase tracking-wide font-medium">
+        Last /health 200
+      </div>
+      <div className="mt-1 text-2xl font-semibold" data-testid="text-health-probe-age">
+        {display}
+      </div>
+      <div className="text-xs opacity-70 mt-0.5">
+        {neverProbed ? "no monitor wired up?" : fmt(at)}
+      </div>
+    </div>
   );
 }
 

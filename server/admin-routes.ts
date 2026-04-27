@@ -61,6 +61,8 @@ import {
   operatorAlertPruneRuns,
   // Task #79 — generic background-job run history
   backgroundJobRuns,
+  // Task #144 — admin metrics tile reads transaction failures
+  transactions,
 } from "@shared/schema";
 import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
 import {
@@ -79,6 +81,10 @@ import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 // advice + fee-engine surfaces. Other admin paths still use auditTx; only the
 // fee-deduction settle/reverse routes below have been migrated.
 import { writeAuditLog } from "./services/audit";
+import {
+  getInProcessCounters,
+  getLastSuccessfulHealthProbeAt,
+} from "./services/error-log";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
 import { storage } from "./storage";
@@ -336,6 +342,107 @@ export function registerAdminRoutes(app: Express): void {
           active: Number(linksCount[0]?.active ?? 0),
         },
         recentAudit,
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/metrics — Task #144 key business metrics tile
+  // -------------------------------------------------------------------------
+  // Three of the four numbers come straight from the durable tables (the
+  // source of truth survives restarts and is per-cluster); the fourth
+  // (audit-log write failures) is necessarily process-local because by
+  // definition a successful audit-failure DB write is impossible. The
+  // response includes the units + window explicitly so the frontend doesn't
+  // have to guess: `windowMs` makes "in last 24h" rendering trivial and
+  // future-proofs against ever changing the window without a coordinated
+  // FE/BE deploy.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/metrics",
+    adminRoute(async () => {
+      const windowMs = 24 * 60 * 60 * 1000;
+      const cutoff = new Date(Date.now() - windowMs);
+
+      // Three independent COUNT(*) queries, run in parallel. Each one hits
+      // an existing index (`createdAt`/`status`) so the total cost is
+      // bounded even on a busy day.
+      const [failedTxRows, feeFailureRows, lastTxFailureRows] = await Promise.all([
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(transactions)
+          .where(
+            and(
+              eq(transactions.status, "failed"),
+              gte(transactions.createdAt, cutoff),
+            ),
+          ),
+        // A fee deduction is "failed" in the user-visible sense if it has
+        // landed in `insufficient_funds` (the explicit business failure mode)
+        // OR has a `failureReason` set in the recorded window (a posting
+        // attempt blew up and rolled back). We OR them so a deduction that
+        // recovered to settled but failed earlier IS still counted on the
+        // tile — operators care about "things that needed attention", not
+        // just "things still broken right now".
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(adviserFeeDeductions)
+          .where(
+            and(
+              gte(adviserFeeDeductions.createdAt, cutoff),
+              or(
+                eq(adviserFeeDeductions.status, "insufficient_funds"),
+                sql`${adviserFeeDeductions.failureReason} IS NOT NULL`,
+              )!,
+            ),
+          ),
+        // Surface the most recent failed transaction's id so an admin can
+        // jump straight to it. Cheapest possible probe — index seek + LIMIT 1.
+        db
+          .select({ id: transactions.id, createdAt: transactions.createdAt })
+          .from(transactions)
+          .where(eq(transactions.status, "failed"))
+          .orderBy(desc(transactions.createdAt))
+          .limit(1),
+      ]);
+
+      const counters = getInProcessCounters();
+      const lastProbeMs = getLastSuccessfulHealthProbeAt();
+
+      return {
+        windowMs,
+        generatedAt: new Date().toISOString(),
+        failedTransactions: {
+          last24h: Number(failedTxRows[0]?.count ?? 0),
+          mostRecentId: lastTxFailureRows[0]?.id ?? null,
+          mostRecentAt: lastTxFailureRows[0]?.createdAt
+            ? new Date(lastTxFailureRows[0].createdAt as Date).toISOString()
+            : null,
+        },
+        feeDeductionFailures: {
+          last24h: Number(feeFailureRows[0]?.count ?? 0),
+          // Process-local mirror — useful when the DB column is set on a
+          // tx-rollback path (failureReason cleared after retry success) and
+          // the durable count is artificially low.
+          inProcessLast24h: counters.feeDeductionFailuresLast24h,
+        },
+        // Audit-log write failures are intentionally process-local only —
+        // see comment block at the top of `server/services/error-log.ts`.
+        // We also expose the in-process 5xx tally so the operator can see
+        // whether the persistent error log is being fed at all.
+        auditWriteFailures: {
+          last24hInProcess: counters.auditWriteFailuresLast24h,
+        },
+        http5xx: {
+          last24hInProcess: counters.http5xxLast24h,
+        },
+        lastSuccessfulHealthProbe: {
+          // ISO timestamp of the last /health 200, or null if no monitor
+          // has hit /health since this process started. The FE renders this
+          // as "X minutes ago" and shows a warning when null.
+          at: lastProbeMs ? new Date(lastProbeMs).toISOString() : null,
+          ageMs: lastProbeMs ? Date.now() - lastProbeMs : null,
+        },
       };
     }),
   );

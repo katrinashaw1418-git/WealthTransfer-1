@@ -37,6 +37,7 @@
 
 import { db } from "../db";
 import { auditLogs } from "../../shared/schema";
+import { recordAuditWriteFailure } from "./error-log";
 
 // Inferred from the insert().returning() shape so the return type stays in
 // lock-step with the table definition without a hand-maintained alias.
@@ -113,17 +114,29 @@ export async function writeAuditLog(
     ...(opts.extra ?? {}),
   };
 
-  const [row] = await handle
-    .insert(auditLogs)
-    .values({
+  try {
+    const [row] = await handle
+      .insert(auditLogs)
+      .values({
+        userId: opts.userId,
+        action: opts.action,
+        entityType: opts.entityType,
+        entityId: opts.entityId,
+        metadata,
+        ipAddress: opts.ipAddress ?? null,
+      })
+      .returning();
+
+    return row;
+  } catch (err) {
+    // Task #144 — even though we re-throw (this writer is fail-closed by
+    // design so the surrounding tx rolls back), we tally the failure so the
+    // admin metrics tile can show "audit-log write failures in last 24h"
+    // without scraping the rotating error log.
+    recordAuditWriteFailure(err, {
       userId: opts.userId,
       action: opts.action,
-      entityType: opts.entityType,
-      entityId: opts.entityId,
-      metadata,
-      ipAddress: opts.ipAddress ?? null,
-    })
-    .returning();
-
-  return row;
+    });
+    throw err;
+  }
 }

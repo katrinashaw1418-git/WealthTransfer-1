@@ -1,12 +1,114 @@
 import express, { type Request, Response, NextFunction } from "express";
+import { randomUUID } from "crypto";
 import rateLimit from "express-rate-limit";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { buildHealthReport } from "./services/health";
+import { recordServerError } from "./services/error-log";
 
 const app = express();
 app.set("trust proxy", 1); // Trust first proxy hop (Replit's reverse proxy sets X-Forwarded-For)
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+// ---------------------------------------------------------------------------
+// TASK #144 — /health endpoint
+// ---------------------------------------------------------------------------
+// Mounted BEFORE the /api rate limiter (and outside the /api namespace) so
+// external uptime monitors can poll without ever hitting the limiter, even
+// if a future refactor changes the limiter's `skip` rules. The handler is
+// fire-and-forget cheap (parallel DB ping + 3 indexed SELECTs) so we are
+// not creating a new attack surface by exposing it unauthenticated — the
+// payload deliberately leaks no business data, only "is this server able
+// to serve traffic?" signals.
+// ---------------------------------------------------------------------------
+app.get("/health", async (_req, res) => {
+  try {
+    const report = await buildHealthReport();
+    res.status(report.status === "ok" ? 200 : 503).json(report);
+  } catch (err) {
+    // We expect buildHealthReport itself to never throw, but if it ever
+    // does, default to 503 with a structured body so monitors can parse it
+    // (rather than the express default HTML 500 page).
+    res.status(503).json({
+      status: "degraded",
+      generatedAt: new Date().toISOString(),
+      checks: [],
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// TASK #144 — per-request id
+// ---------------------------------------------------------------------------
+// Tagged onto every request so the persistent error log line and any
+// downstream service log can be correlated. Uses an inbound `x-request-id`
+// header when present (handy for tracing through a proxy), otherwise mints
+// a fresh UUID. We attach to res.locals so the global error handler can
+// read it without re-parsing headers.
+// ---------------------------------------------------------------------------
+app.use((req, res, next) => {
+  const inbound = req.header("x-request-id");
+  const id =
+    inbound && inbound.length > 0 && inbound.length <= 128 ? inbound : randomUUID();
+  (res.locals as Record<string, unknown>).requestId = id;
+  res.setHeader("x-request-id", id);
+  next();
+});
+
+// ---------------------------------------------------------------------------
+// TASK #144 — universal 5xx response sniffer
+// ---------------------------------------------------------------------------
+// The global Express error middleware (registered far below) only fires when
+// a route calls `next(err)`. Many existing handlers (in routes.ts,
+// admin-routes.ts, adviser-routes.ts, client-routes.ts, etc.) instead use
+// `res.status(500).json(...)` directly — those responses would otherwise
+// never be persisted to the rotating error log file.
+//
+// To close that gap we hook `res.on('finish', …)` here, BEFORE any route
+// runs, so every response (regardless of how it was produced) is inspected
+// once after Express finishes flushing it. If the status code is in the 5xx
+// range AND the global error middleware did not already record this same
+// response (it sets `_serverErrorRecorded` on `res.locals` to prevent double
+// counting), we record a synthetic entry. The synthetic entry has no JS
+// error/stack — it's the best we can do for a manually-returned 5xx — but
+// it still captures method, route, status, user id, and request id so the
+// rotating log file is genuinely complete.
+//
+// We attach the listener exactly once per response and use a tiny try/catch
+// so a logging hiccup can never break a real client response.
+// ---------------------------------------------------------------------------
+app.use((req, res, next) => {
+  res.on("finish", () => {
+    try {
+      if (res.statusCode < 500) return;
+      const locals = res.locals as Record<string, unknown>;
+      // The global error middleware sets this flag when it has already
+      // recorded the failure with a real Error/stack — skip the synthetic
+      // record so we don't double-count in the http5xx counter.
+      if (locals._serverErrorRecorded) return;
+      const userId =
+        (req as unknown as { user?: { userId?: number } }).user?.userId ?? null;
+      recordServerError({
+        tag: "http_5xx",
+        requestId: typeof locals.requestId === "string" ? locals.requestId : null,
+        method: req.method,
+        path: req.originalUrl,
+        status: res.statusCode,
+        userId,
+        // Synthetic marker — distinguishes "manual res.status(500).json(...)"
+        // from "thrown error caught by global handler" in the persisted log.
+        error: new Error(
+          `manual_5xx_response (no error object available — route returned ${res.statusCode} without throwing)`,
+        ),
+      });
+    } catch (hookErr) {
+      console.error("[error-log] response-finish hook failed", hookErr);
+    }
+  });
+  next();
+});
 
 // General rate limit — covers all /api/* routes against burst abuse.
 // 200 req/min per IP is generous enough for a dashboard with auto-refresh queries.
@@ -578,14 +680,40 @@ app.use((req, res, next) => {
     setInterval(runPostingReceiptInvariantCron, 24 * 60 * 60 * 1000);
   }, 30 * 1000);
 
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.
     const message = status < 500 ? (err.message || "Request failed") : "Internal Server Error";
 
     // Log 5xx errors internally before responding (never after — that causes
-    // "Cannot set headers after they are sent" crashes).
-    if (status >= 500) console.error("[server error]", err);
+    // "Cannot set headers after they are sent" crashes). Task #144: every
+    // 5xx is also written to the rotating `logs/errors.log` file so a
+    // post-mortem after a restart still has the request id, route, user id,
+    // and stack — the in-memory dev console alone is not enough for a
+    // production wealth platform.
+    if (status >= 500) {
+      const locals = res.locals as Record<string, unknown>;
+      const requestId = locals.requestId as string | undefined;
+      // `req.user` is set by the JWT middleware in routes.ts; we read it
+      // defensively so a 5xx from an unauthenticated route still records
+      // cleanly. Using the loose `any` cast avoids importing the auth type
+      // here just to read an optional field.
+      const userId =
+        (req as unknown as { user?: { userId?: number } }).user?.userId ?? null;
+      recordServerError({
+        tag: "http_5xx",
+        requestId: requestId ?? null,
+        method: req.method,
+        path: req.originalUrl,
+        status,
+        userId,
+        error: err,
+      });
+      // Tell the response-finish sniffer (registered above) that this 5xx
+      // has already been persisted with a real error/stack — without this
+      // the sniffer would record a second synthetic entry on `finish`.
+      locals._serverErrorRecorded = true;
+    }
 
     res.status(status).json({ message });
     // Do NOT re-throw here: the response is already sent. Re-throwing causes
