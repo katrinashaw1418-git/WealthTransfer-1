@@ -2252,6 +2252,13 @@ describe("raw ledger_entries / wallets writer coverage walk (Task #195)", () => 
 //     (instead of delegating to a guarded service) would also slip
 //     past the original Task #189 walk, which only inspected
 //     `server/routes.ts`. This walk now covers admin-routes.ts too.
+//   * Task #221: a client- or adviser-self-service money-movement
+//     endpoint added to `server/client-routes.ts` or
+//     `server/adviser-routes.ts` (the routes the end-user / their
+//     adviser hit directly) would also slip past the Task #189/#194
+//     walk, which only inspected the platform routes (routes.ts) and
+//     the admin surface (admin-routes.ts). This walk now covers both
+//     of those role-scoped route files too.
 //
 // Like Section 6, the check is a static walk of the source files. We
 // don't try to spin up the new endpoint at runtime — the kill-switch
@@ -2341,6 +2348,16 @@ describe("raw ledger_entries / wallets writer coverage walk (Task #195)", () => 
 const HTTP_ROUTE_FILES = [
   path.resolve(SERVICES_DIR, "..", "routes.ts"),
   path.resolve(SERVICES_DIR, "..", "admin-routes.ts"),
+  // Task #221 — extend the walk to client-routes.ts and adviser-routes.ts so
+  // a new money-movement-named endpoint added to either file (e.g. a future
+  // adviser self-service "transfer" or client "settle") can't silently slip
+  // past the guard the same way the original Task #189 gap did for
+  // admin-routes.ts. The discovery walk supports BOTH route shapes used here:
+  // client-routes.ts uses the inline arrow shape (Task #189 parser), and
+  // adviser-routes.ts uses the multi-line `app.<method>(\n "PATH", ...);`
+  // shape (Task #194 parser).
+  path.resolve(SERVICES_DIR, "..", "client-routes.ts"),
+  path.resolve(SERVICES_DIR, "..", "adviser-routes.ts"),
 ];
 
 type HttpRouteClassification =
@@ -2414,6 +2431,18 @@ const KILL_SWITCH_HTTP_ROUTE_REGISTRY: Record<
     classification: "guarded_downstream",
     reason:
       "Manual trigger for the insufficient-funds sweep (same code path as the daily cron). Delegates to insufficient-funds-sweep.ts:runInsufficientFundsSweep, which probes isKillSwitchActive('fee_deductions') up front and returns an empty summary when the switch is engaged. The route also probes the switch directly so the response carries an accurate pre-run snapshot.",
+  },
+  // ---- adviser-routes.ts (Task #221) ----
+  // The adviser fee-consent-request "withdraw" path matches the money-movement
+  // verb pattern by name only — it flips an unsigned consent request from
+  // 'pending' to 'withdrawn_by_adviser' and writes an audit row. No wallets
+  // are touched, no ledger entries are written, and no downstream service is
+  // invoked that would move money. This is purely a state-machine transition
+  // on the request artefact itself.
+  "PATCH /api/adviser/fee-consent-requests/:id/withdraw": {
+    classification: "allowlisted_not_money_movement",
+    reason:
+      "Adviser withdraws their own UNSIGNED fee consent REQUEST (state flip pending → withdrawn_by_adviser + audit row). Money never moves: signing a request is what creates the executed feeConsents row, and even that is gated by the separate fee-engine path (Section 6). No wallet/ledger writes happen on this route.",
   },
 };
 
@@ -2608,8 +2637,8 @@ async function discoverHttpRoutes(): Promise<DiscoveredHttpRoute[]> {
   return all;
 }
 
-describe("HTTP entry-point coverage walk (Tasks #189 & #194)", () => {
-  it("every money-movement-named HTTP route in server/routes.ts and server/admin-routes.ts is either guarded or registered with a reason", async () => {
+describe("HTTP entry-point coverage walk (Tasks #189, #194 & #221)", () => {
+  it("every money-movement-named HTTP route in server/routes.ts, server/admin-routes.ts, server/client-routes.ts, and server/adviser-routes.ts is either guarded or registered with a reason", async () => {
     const discovered = await discoverHttpRoutes();
 
     // Sanity: if discovery returned nothing, the file walk silently broke
@@ -2674,7 +2703,7 @@ describe("HTTP entry-point coverage walk (Tasks #189 & #194)", () => {
     for (const id of Object.keys(KILL_SWITCH_HTTP_ROUTE_REGISTRY)) {
       if (!seenIds.has(id)) {
         issues.push(
-          `KILL_SWITCH_HTTP_ROUTE_REGISTRY entry "${id}" no longer matches any \`app.<method>("PATH", ...)\` registration in any walked file (server/routes.ts, server/admin-routes.ts). Remove the stale registry entry so the doc-of-record stays accurate.`,
+          `KILL_SWITCH_HTTP_ROUTE_REGISTRY entry "${id}" no longer matches any \`app.<method>("PATH", ...)\` registration in any walked file (server/routes.ts, server/admin-routes.ts, server/client-routes.ts, server/adviser-routes.ts). Remove the stale registry entry so the doc-of-record stays accurate.`,
         );
       }
     }
@@ -2763,6 +2792,51 @@ describe("HTTP entry-point coverage walk (Tasks #189 & #194)", () => {
     const ids = new Set(discovered.map((r) => r.id));
     expect(ids.has("POST /api/admin/fee-deductions/:id/approve")).toBe(true);
     expect(ids.has("POST /api/admin/fee-deductions/:id/reverse")).toBe(true);
+  });
+
+  it("discovers app.<method>(...) registrations in client-routes.ts AND adviser-routes.ts (Task #221 anchor)", async () => {
+    // Companion anchor for the Task #221 expansion. If the HTTP_ROUTE_FILES
+    // list silently regresses to the Task #189/#194 set, this anchor fails
+    // loudly rather than letting a future money-movement endpoint added to
+    // either of these role-scoped route files slip past the guard check.
+    const discovered = await discoverHttpRoutes();
+    const filesSeen = new Set(discovered.map((r) => r.file));
+    expect(filesSeen.has("client-routes.ts")).toBe(true);
+    expect(filesSeen.has("adviser-routes.ts")).toBe(true);
+
+    // Spot-check that BOTH route shapes used in those files are actually
+    // parsed by the discovery walk:
+    //   * client-routes.ts uses the inline arrow shape (Task #189 parser)
+    //     — confirmed via the consent endpoint.
+    //   * adviser-routes.ts uses the multi-line shape (Task #194 parser)
+    //     — confirmed via the fee-consent-request withdraw endpoint, which
+    //     is also the single verb-matching route in either file and is
+    //     therefore the registry entry whose presence we're asserting
+    //     against the discovery walk.
+    const ids = new Set(discovered.map((r) => r.id));
+    expect(ids.has("POST /api/client/instructions/:id/consent")).toBe(true);
+    expect(ids.has("POST /api/client/fee-consent-requests/:id/sign")).toBe(true);
+    expect(
+      ids.has("PATCH /api/adviser/fee-consent-requests/:id/withdraw"),
+    ).toBe(true);
+  });
+
+  it("registry covers the verb-matching adviser-routes.ts entry (Task #221 anchor)", () => {
+    // Hard "the registry must list the verb-matching adviser route" anchor.
+    // The /api/adviser/fee-consent-requests/:id/withdraw path matches the
+    // money-movement verb regex by name only ("withdraw") — it is registered
+    // as `allowlisted_not_money_movement` because the route just flips an
+    // unsigned consent request's status. A simultaneous deletion of the
+    // registry entry AND the route would silently shrink the audited surface;
+    // this anchor keeps the explicit allowlist visible.
+    expect(KILL_SWITCH_HTTP_ROUTE_REGISTRY).toHaveProperty(
+      "PATCH /api/adviser/fee-consent-requests/:id/withdraw",
+    );
+    expect(
+      KILL_SWITCH_HTTP_ROUTE_REGISTRY[
+        "PATCH /api/adviser/fee-consent-requests/:id/withdraw"
+      ].classification,
+    ).toBe("allowlisted_not_money_movement");
   });
 });
 
