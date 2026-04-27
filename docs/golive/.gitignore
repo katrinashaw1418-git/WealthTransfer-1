@@ -1,0 +1,5 @@
+# Runtime reports produced by scripts/go-no-go.ts. Each launch attempt
+# generates a fresh timestamped file; they are evidence artifacts for the
+# launch ticket, not code, so they should not be checked into version
+# control.
+go-no-go-*.md
