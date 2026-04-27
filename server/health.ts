@@ -18,9 +18,13 @@
 //                  request count + latency histogram, DB pool saturation,
 //                  and background-job duration + success/error counts.
 //                  Mounted by `registerMetricsRoute` (server/metrics.ts).
+//                  Task #242: gated by `METRICS_TOKEN` (Bearer) and/or
+//                  `METRICS_ALLOW_FROM` (CIDR allow-list) when set; falls
+//                  back to open access (with a startup warning) otherwise.
 //
-// All three endpoints:
-//   * Do NOT require auth (uptime monitors don't carry credentials).
+// /health and /ready do NOT require auth (uptime monitors don't carry
+// credentials). /metrics requires auth ONLY if `METRICS_TOKEN` and/or
+// `METRICS_ALLOW_FROM` is set — see server/metrics.ts. All three:
 //   * Are mounted outside `/api`, so the per-IP rate limiter and the
 //     `/api`-only request logger in `server/index.ts` never touch them.
 //   * Are GETs only, so they wouldn't be blocked by a future write

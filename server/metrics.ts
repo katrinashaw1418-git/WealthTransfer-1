@@ -33,6 +33,7 @@
 // =============================================================================
 
 import type { Express, NextFunction, Request, Response } from "express";
+import { isIPv4, isIPv6 } from "node:net";
 import { sql } from "drizzle-orm";
 import type { Pool } from "@neondatabase/serverless";
 import { db, pool as defaultPool } from "./db";
@@ -440,20 +441,282 @@ export async function renderMetrics(
 }
 
 // ---------------------------------------------------------------------------
+// Task #242 — /metrics access control.
+// The endpoint exposes the full route table plus live DB-pool saturation —
+// fine for an internal scrape target, but a recon goldmine on a public
+// deployment. We support two layered controls, configurable via env so the
+// existing scraper setup keeps working:
+//
+//   * `METRICS_TOKEN`        — shared secret, presented as `Authorization:
+//                              Bearer <token>`. Compared in length-safe time.
+//   * `METRICS_ALLOW_FROM`   — CSV of CIDRs (IPv4 or IPv6) and/or the
+//                              shortcuts `loopback` / `private`. Matched
+//                              against `req.ip` (which respects the
+//                              `trust proxy` setting).
+//
+// Either env var alone locks the endpoint down. With both set, a request
+// passes if it satisfies EITHER (so a Prometheus pod inside the private
+// network can scrape without a token, while an external dashboard with the
+// token can still scrape from anywhere). With NEITHER set we fall back to
+// the original open behaviour and emit a one-line startup warning so a
+// production deployment notices the gap during boot.
+// ---------------------------------------------------------------------------
+
+const ALLOW_FROM_SHORTCUTS: Record<string, string[]> = {
+  // Loopback only — for a sidecar Prometheus on the same host.
+  loopback: ["127.0.0.0/8", "::1/128"],
+  // RFC1918 IPv4 + ULA IPv6 + loopback. Matches the typical "anywhere
+  // inside the VPC" allow-list operators reach for first.
+  private: [
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "::1/128",
+    "fc00::/7",
+  ],
+};
+
+export interface MetricsAuthConfig {
+  /** Shared secret. When set, Bearer-token presentation is one valid path. */
+  token: string | null;
+  /** CSV string of CIDRs / shortcuts. When set, source-IP allow-list is one valid path. */
+  allowFrom: string | null;
+}
+
+/** Read the auth config from env. Empty / whitespace strings are treated as
+ *  "not set" so an unset Replit secret behaves the same as a deleted one. */
+export function loadMetricsAuthConfigFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): MetricsAuthConfig {
+  const token = env.METRICS_TOKEN?.trim();
+  const allowFrom = env.METRICS_ALLOW_FROM?.trim();
+  return {
+    token: token ? token : null,
+    allowFrom: allowFrom ? allowFrom : null,
+  };
+}
+
+/** Length-safe string compare. Avoids leaking the token length-prefix via
+ *  early-return timing differences on a guess. */
+function timingSafeStringEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) {
+    r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return r === 0;
+}
+
+// IPv4-mapped IPv6 (`::ffff:127.0.0.1`) is what Node hands you for an IPv4
+// connection on a dual-stack listener. Strip the prefix so the same allow
+// list entry matches both transports without operators having to dual-list.
+function normalizeIp(ip: string): string {
+  const lower = ip.toLowerCase();
+  if (lower.startsWith("::ffff:")) {
+    const rest = ip.slice(7);
+    if (isIPv4(rest)) return rest;
+  }
+  return ip;
+}
+
+function ipv4ToInt(ip: string): number {
+  const parts = ip.split(".");
+  return (
+    ((Number(parts[0]) << 24) >>> 0) +
+    (Number(parts[1]) << 16) +
+    (Number(parts[2]) << 8) +
+    Number(parts[3])
+  );
+}
+
+function matchIpv4Cidr(ip: string, base: string, bits: number): boolean {
+  if (!isIPv4(base) || !isIPv4(ip)) return false;
+  if (bits < 0 || bits > 32) return false;
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  return (ipv4ToInt(ip) & mask) === (ipv4ToInt(base) & mask);
+}
+
+// Tiny IPv6 parser — handles `::` shorthand. Returns 16 bytes or null on
+// anything unparseable. We only need this for CIDR-prefix matching, not for
+// rendering, so we don't bother with the canonicalisation algorithms.
+function ipv6ToBytes(ip: string): Uint8Array | null {
+  if (!isIPv6(ip)) return null;
+  const parts = ip.split("::");
+  if (parts.length > 2) return null;
+  const head = parts[0] === "" ? [] : parts[0].split(":");
+  const tail =
+    parts.length === 2 ? (parts[1] === "" ? [] : parts[1].split(":")) : [];
+  const fillCount = 8 - head.length - tail.length;
+  if (fillCount < 0) return null;
+  const groups = [...head, ...new Array(fillCount).fill("0"), ...tail];
+  if (groups.length !== 8) return null;
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    const v = parseInt(groups[i], 16);
+    if (Number.isNaN(v) || v < 0 || v > 0xffff) return null;
+    bytes[i * 2] = (v >> 8) & 0xff;
+    bytes[i * 2 + 1] = v & 0xff;
+  }
+  return bytes;
+}
+
+function matchIpv6Cidr(ip: string, base: string, bits: number): boolean {
+  if (bits < 0 || bits > 128) return false;
+  const a = ipv6ToBytes(ip);
+  const b = ipv6ToBytes(base);
+  if (!a || !b) return false;
+  const fullBytes = Math.floor(bits / 8);
+  for (let i = 0; i < fullBytes; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  const remBits = bits - fullBytes * 8;
+  if (remBits === 0) return true;
+  const mask = (0xff << (8 - remBits)) & 0xff;
+  return (a[fullBytes] & mask) === (b[fullBytes] & mask);
+}
+
+/** Expand the env-string into a flat list of CIDRs, resolving the
+ *  `loopback` / `private` shortcuts. Unrecognised shortcut names are
+ *  treated as raw entries — they'll just fail to match anything. */
+export function expandMetricsAllowList(raw: string): string[] {
+  const out: string[] = [];
+  for (const piece of raw.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const lower = piece.toLowerCase();
+    const expanded = ALLOW_FROM_SHORTCUTS[lower];
+    if (expanded) out.push(...expanded);
+    else out.push(piece);
+  }
+  return out;
+}
+
+function ipMatchesAny(ip: string, cidrs: string[]): boolean {
+  const norm = normalizeIp(ip);
+  for (const entry of cidrs) {
+    const slashIdx = entry.indexOf("/");
+    const base = slashIdx === -1 ? entry : entry.slice(0, slashIdx);
+    const bitsStr = slashIdx === -1 ? null : entry.slice(slashIdx + 1);
+    if (isIPv4(base)) {
+      const bits = bitsStr === null ? 32 : Number(bitsStr);
+      if (Number.isInteger(bits) && matchIpv4Cidr(norm, base, bits)) return true;
+    } else if (isIPv6(base)) {
+      const bits = bitsStr === null ? 128 : Number(bitsStr);
+      if (Number.isInteger(bits) && matchIpv6Cidr(norm, base, bits)) return true;
+    }
+  }
+  return false;
+}
+
+export type MetricsAuthDecision =
+  | { ok: true; reason: "open" | "token" | "allow-list" }
+  | { ok: false; status: 401 | 403; reason: "missing-or-bad-token" | "ip-not-allowed" };
+
+/**
+ * Decide whether a /metrics request is allowed under the given config.
+ * Pure function over (req, config) so the access-control logic is unit
+ * testable without standing up an HTTP server.
+ *
+ *   * If neither token nor allow-list configured → `{ ok: true, reason: "open" }`.
+ *   * If token configured AND a matching Bearer is presented → allowed.
+ *   * If allow-list configured AND req.ip matches → allowed.
+ *   * Otherwise denied. Status is 401 when a token was configured (so the
+ *     scraper has something to retry with credentials), 403 when ONLY the
+ *     IP allow-list was configured (no credential will help).
+ */
+export function authorizeMetricsRequest(
+  req: Request,
+  config: MetricsAuthConfig,
+): MetricsAuthDecision {
+  const tokenConfigured = !!config.token;
+  const allowConfigured = !!config.allowFrom;
+  if (!tokenConfigured && !allowConfigured) {
+    return { ok: true, reason: "open" };
+  }
+
+  if (tokenConfigured) {
+    const header =
+      req.header?.("authorization") ?? req.header?.("Authorization") ?? null;
+    if (header && /^Bearer\s+/i.test(header)) {
+      const presented = header.replace(/^Bearer\s+/i, "").trim();
+      if (timingSafeStringEqual(presented, config.token!)) {
+        return { ok: true, reason: "token" };
+      }
+    }
+  }
+
+  if (allowConfigured) {
+    // `req.ip` already respects `trust proxy`. Fall back to the raw socket
+    // address so a unit test that builds a bare Request still works.
+    const ip =
+      req.ip ??
+      (req.socket && req.socket.remoteAddress) ??
+      "";
+    if (ip && ipMatchesAny(ip, expandMetricsAllowList(config.allowFrom!))) {
+      return { ok: true, reason: "allow-list" };
+    }
+  }
+
+  return tokenConfigured
+    ? { ok: false, status: 401, reason: "missing-or-bad-token" }
+    : { ok: false, status: 403, reason: "ip-not-allowed" };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration. Kept here (instead of in `server/health.ts`) so the
 // metrics module owns its own route, but called from `registerHealthRoutes`
 // so all three monitoring endpoints mount in one place.
 // ---------------------------------------------------------------------------
 export interface MetricsRouteDeps {
   render?: (deps?: RenderMetricsDeps) => Promise<string>;
+  /** Inject auth config (tests). When omitted, loaded from process.env and
+   *  a one-line warning is logged on startup if neither var is set. */
+  authConfig?: MetricsAuthConfig;
+  /** Logger seam for the open-mode startup warning (tests use a noop). */
+  warn?: (msg: string) => void;
 }
+
+export const METRICS_OPEN_MODE_WARNING =
+  "[metrics] WARNING: /metrics is unauthenticated and exposes the route table " +
+  "and live DB pool stats. Set METRICS_TOKEN and/or METRICS_ALLOW_FROM to lock it down.";
 
 export function registerMetricsRoute(
   app: Express,
   deps: MetricsRouteDeps = {},
 ): void {
   const render = deps.render ?? renderMetrics;
-  app.get("/metrics", async (_req, res) => {
+  // When a caller (production) doesn't inject a config, read the env and
+  // emit the one-shot startup warning if both vars are unset. Tests that
+  // want to lock down /metrics inject `authConfig` directly and so don't
+  // trigger the warning regardless of the ambient env.
+  let authConfig: MetricsAuthConfig;
+  if (deps.authConfig) {
+    authConfig = deps.authConfig;
+  } else {
+    authConfig = loadMetricsAuthConfigFromEnv();
+    if (!authConfig.token && !authConfig.allowFrom) {
+      const warn = deps.warn ?? ((msg: string) => console.warn(msg));
+      warn(METRICS_OPEN_MODE_WARNING);
+    }
+  }
+
+  app.get("/metrics", async (req, res) => {
+    const auth = authorizeMetricsRequest(req, authConfig);
+    if (!auth.ok) {
+      // Deliberately terse — no route info, no version, no pool stats.
+      // We still emit the Prometheus content type so a scraper parser
+      // that's mid-stream doesn't choke trying to interpret an HTML page.
+      res.setHeader(
+        "Content-Type",
+        "text/plain; version=0.0.4; charset=utf-8",
+      );
+      res.setHeader("Cache-Control", "no-store");
+      if (auth.status === 401) {
+        // RFC 7235 — tells a credentialed client which scheme to retry with.
+        res.setHeader("WWW-Authenticate", 'Bearer realm="metrics"');
+      }
+      res.status(auth.status).send("# metrics access denied\n");
+      return;
+    }
     try {
       const body = await render();
       // Prometheus expects this exact content type (v0.0.4 text format).
