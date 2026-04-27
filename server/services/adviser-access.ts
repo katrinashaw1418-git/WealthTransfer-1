@@ -1144,7 +1144,7 @@ export async function getAdviserNotifications(
   const items: AdviserNotificationItem[] = [];
 
   for (const r of pendingConsentRows) {
-    const client = clientNameById.get(r.clientUserId) ?? `Client #${r.clientUserId}`;
+    const client = clientNameById.get(r.clientUserId) ?? clientDisplayName({}, r.clientUserId);
     items.push({
       id: `consent:${r.id}`,
       type: "consent",
@@ -1157,7 +1157,7 @@ export async function getAdviserNotifications(
   }
 
   for (const r of taskRows) {
-    const client = clientNameById.get(r.clientUserId) ?? `Client #${r.clientUserId}`;
+    const client = clientNameById.get(r.clientUserId) ?? clientDisplayName({}, r.clientUserId);
     items.push({
       id: `task:${r.id}`,
       type: "task",
@@ -1170,7 +1170,7 @@ export async function getAdviserNotifications(
   }
 
   for (const r of feeRows) {
-    const client = clientNameById.get(r.clientId) ?? `Client #${r.clientId}`;
+    const client = clientNameById.get(r.clientId) ?? clientDisplayName({}, r.clientId);
     const daysToExpiry = Math.max(
       0,
       Math.ceil((r.consentExpiryDate.getTime() - now.getTime()) / 86400_000),
@@ -1187,7 +1187,7 @@ export async function getAdviserNotifications(
   }
 
   for (const r of reportRows) {
-    const client = clientNameById.get(r.clientUserId) ?? `Client #${r.clientUserId}`;
+    const client = clientNameById.get(r.clientUserId) ?? clientDisplayName({}, r.clientUserId);
     items.push({
       id: `report:${r.id}`,
       type: "report",
