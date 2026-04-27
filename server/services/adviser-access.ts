@@ -41,6 +41,7 @@ import {
 } from "@shared/schema";
 import { and, eq, desc, lte, gte, sql, inArray, notInArray } from "drizzle-orm";
 import { calculatePortfolioTotalsAtDate } from "./portfolio-valuation";
+import { clientDisplayName } from "@shared/display-name";
 
 // -----------------------------------------------------------------------------
 // Link enforcement — the single chokepoint for "can this adviser see this
@@ -1137,9 +1138,8 @@ export async function getAdviserNotifications(
       : [];
   const clientNameById = new Map<number, string>();
   for (const r of clientNameRows) {
-    const name =
-      [r.firstName, r.lastName].filter(Boolean).join(" ").trim() || r.email || `Client #${r.id}`;
-    clientNameById.set(r.id, name);
+    // Task #283 — single source of truth in @shared/display-name.
+    clientNameById.set(r.id, clientDisplayName(r, r.id));
   }
 
   const items: AdviserNotificationItem[] = [];
@@ -1201,8 +1201,8 @@ export async function getAdviserNotifications(
   }
 
   for (const r of kycRows) {
-    const name =
-      [r.firstName, r.lastName].filter(Boolean).join(" ").trim() || r.email || `Client #${r.id}`;
+    // Task #283 — single source of truth in @shared/display-name.
+    const name = clientDisplayName(r, r.id);
     items.push({
       id: `kyc:${r.id}`,
       type: "kyc",
