@@ -22,14 +22,16 @@
 // =============================================================================
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
 import { operatorAlertPruneRuns, operatorAlerts } from "@shared/schema";
 import {
   DEFAULT_RETENTION_DAYS,
   DEFAULT_STALE_THRESHOLD_MS,
+  DEFAULT_SUPPRESSION_WINDOW_MS,
   checkOperatorAlertsPruneFreshness,
   getRetentionDays,
+  getWatchdogSuppressionMs,
   pruneOperatorAlerts,
   pruneOperatorAlertsAndRecord,
 } from "./operator-alerts-prune";
@@ -310,6 +312,8 @@ describe("checkOperatorAlertsPruneFreshness (Task #60)", () => {
 
     expect(result.fired).toBe(false);
     expect(result.reason).toBe("fresh");
+    expect(result.suppressed).toBe(false);
+    expect(result.previousAlertAt).toBeNull();
     expect(calls).toHaveLength(0);
     expect(result.thresholdMs).toBe(DEFAULT_STALE_THRESHOLD_MS);
     expect(result.alertId).toBeNull();
@@ -333,16 +337,24 @@ describe("checkOperatorAlertsPruneFreshness (Task #60)", () => {
       now,
       notify,
       serverUptimeMs: 30 * 24 * 60 * 60 * 1000,
+      // Disable suppression so this test stays focused on the
+      // staleness-detection path. Suppression is exercised separately
+      // below.
+      suppressionWindowMs: 0,
     });
 
     expect(result.fired).toBe(true);
     expect(result.reason).toBe("stale");
+    expect(result.suppressed).toBe(false);
     expect(result.alertId).toBe(999);
     expect(calls).toHaveLength(1);
     const alert = calls[0];
     expect(alert.severity).toBe("warning");
     expect(alert.source).toBe("operator-alerts-prune-watchdog");
     expect(alert.details.ageHours as number).toBeGreaterThanOrEqual(48);
+    // Task #83: persisted detail must include the reason so the next tick
+    // can compare and decide whether to suppress.
+    expect(alert.details.reason).toBe("stale");
   });
 
   it("stays quiet on a fresh deploy (empty table, low uptime)", async () => {
@@ -356,6 +368,7 @@ describe("checkOperatorAlertsPruneFreshness (Task #60)", () => {
 
     expect(result.fired).toBe(false);
     expect(result.reason).toBe("warming-up");
+    expect(result.suppressed).toBe(false);
     expect(calls).toHaveLength(0);
   });
 
@@ -383,14 +396,317 @@ describe("checkOperatorAlertsPruneFreshness (Task #60)", () => {
       notify,
       // 5 days uptime — well past the 48h threshold.
       serverUptimeMs: 5 * 24 * 60 * 60 * 1000,
+      // Disable suppression so this test exercises the never-run path
+      // independent of any prior watchdog row that might exist.
+      suppressionWindowMs: 0,
     });
 
     expect(result.fired).toBe(true);
     expect(result.reason).toBe("never-run");
+    expect(result.suppressed).toBe(false);
     expect(calls).toHaveLength(1);
     const alert = calls[0];
     expect(alert.severity).toBe("warning");
     expect(alert.source).toBe("operator-alerts-prune-watchdog");
     expect(alert.title).toMatch(/never recorded a successful run/);
+    // Task #83: reason carried in details for cross-tick comparison.
+    expect(alert.details.reason).toBe("never-run");
+  });
+});
+
+// ============================================================================
+// Task #83 — alert-suppression tests
+// ============================================================================
+// Locks in the new contract:
+//   1. The first stale tick fires.
+//   2. A subsequent tick inside the suppression window stays quiet.
+//   3. A tick AFTER the suppression window expires re-fires.
+//   4. A tick where the staleness reason has changed re-fires immediately
+//      (e.g. "never-run" → "stale", or vice versa) regardless of the window.
+//   5. A successful prune naturally clears suppression because the watchdog
+//      returns reason="fresh" without ever consulting the suppression
+//      bookkeeping.
+//   6. The env-var resolver honours valid values and falls back on invalid.
+// ============================================================================
+
+const insertedWatchdogAlertIds: number[] = [];
+
+/**
+ * Insert a pre-existing watchdog alert row into operator_alerts, with an
+ * explicit createdAt and reason in details. We bypass notifyOperator so
+ * we can backdate `createdAt` and pin the dedupe key to a unique value
+ * per test (avoiding cross-test interference with the dedupe coalescer).
+ */
+async function insertWatchdogAlertAt(opts: {
+  reason: string | null;
+  createdAt: Date;
+}): Promise<number> {
+  const detailsObj: Record<string, unknown> = {};
+  if (opts.reason !== null) detailsObj.reason = opts.reason;
+  const [row] = await db
+    .insert(operatorAlerts)
+    .values({
+      source: "operator-alerts-prune-watchdog",
+      severity: "warning",
+      title: `task83-test ${opts.reason ?? "no-reason"}`,
+      details: detailsObj,
+      channelsAttempted: ["log"],
+      channelOutcomes: [{ channel: "log", status: "success", durationMs: 0 }],
+      createdAt: sql`${opts.createdAt.toISOString()}::timestamp`,
+    })
+    .returning({ id: operatorAlerts.id });
+  insertedWatchdogAlertIds.push(row.id);
+  return row.id;
+}
+
+afterEach(async () => {
+  if (insertedWatchdogAlertIds.length > 0) {
+    await db
+      .delete(operatorAlerts)
+      .where(inArray(operatorAlerts.id, insertedWatchdogAlertIds));
+    insertedWatchdogAlertIds.length = 0;
+  }
+});
+
+describe("checkOperatorAlertsPruneFreshness suppression (Task #83)", () => {
+  type CapturedAlert = {
+    source: string;
+    severity: string;
+    title: string;
+    details: Record<string, unknown>;
+  };
+  function makeNotifyStub() {
+    const calls: CapturedAlert[] = [];
+    const notify = async (alert: CapturedAlert) => {
+      calls.push(alert);
+      return {
+        channelsAttempted: ["log" as const],
+        outcomes: [],
+        channels: ["log" as const],
+        alertId: 999,
+      };
+    };
+    return { notify, calls };
+  }
+
+  // The shared dev Postgres has long-lived production rows in
+  // `operator_alert_prune_runs` (real cron successes) and may also have
+  // `operator_alerts` rows from the watchdog itself. To keep these tests
+  // independent of that real history, every Task #83 test pins "now" to a
+  // far-future timestamp and inserts its fixtures relative to that. The
+  // most-recent successful prune run by `startedAt` is therefore the
+  // test-controlled row, regardless of how many production rows exist.
+  const FUTURE_NOW = new Date("2099-01-01T12:00:00.000Z");
+
+  /**
+   * Belt-and-braces guard: scrub any watchdog alert rows in the time
+   * vicinity of `now` that other tests in this file may have left
+   * behind. Bounded to a small window around the synthetic "now" so we
+   * never touch real production rows.
+   */
+  async function clearRecentWatchdogAlerts(now: Date): Promise<void> {
+    await db
+      .delete(operatorAlerts)
+      .where(
+        and(
+          eq(operatorAlerts.source, "operator-alerts-prune-watchdog"),
+          gte(
+            operatorAlerts.createdAt,
+            new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+          ),
+        ),
+      );
+  }
+
+  it("fires once, then suppresses follow-up ticks inside the window", async () => {
+    const now = FUTURE_NOW;
+    await clearRecentWatchdogAlerts(now);
+    // 3-day-old success — definitely stale (threshold is 2 days). Because
+    // `now` is in the year 2099, this row is the most recent success row
+    // in the table even with real prod history present.
+    await insertPruneRunRow({
+      status: "success",
+      startedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+    });
+    // Simulate a watchdog alert that fired ~6h ago for the same reason.
+    const priorAt = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+    const priorId = await insertWatchdogAlertAt({
+      reason: "stale",
+      createdAt: priorAt,
+    });
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now,
+      notify,
+      serverUptimeMs: 30 * 24 * 60 * 60 * 1000,
+      // Default 24h window: prior alert at -6h is well inside.
+      suppressionWindowMs: 24 * 60 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(false);
+    expect(result.suppressed).toBe(true);
+    expect(result.reason).toBe("stale");
+    expect(result.previousAlertAt).not.toBeNull();
+    expect(result.previousAlertAt!.toISOString()).toBe(priorAt.toISOString());
+    expect(calls).toHaveLength(0);
+    // Sanity: the existing row id we inserted should still be the one
+    // suppression matched against.
+    expect(priorId).toBeGreaterThan(0);
+  });
+
+  it("re-fires when the suppression window has elapsed", async () => {
+    const now = FUTURE_NOW;
+    await clearRecentWatchdogAlerts(now);
+    await insertPruneRunRow({
+      status: "success",
+      startedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+    });
+    // Prior alert was 26h ago — outside a 24h window.
+    await insertWatchdogAlertAt({
+      reason: "stale",
+      createdAt: new Date(now.getTime() - 26 * 60 * 60 * 1000),
+    });
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now,
+      notify,
+      serverUptimeMs: 30 * 24 * 60 * 60 * 1000,
+      suppressionWindowMs: 24 * 60 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(true);
+    expect(result.suppressed).toBe(false);
+    expect(result.reason).toBe("stale");
+    expect(result.previousAlertAt).toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].details.reason).toBe("stale");
+  });
+
+  it("re-fires inside the window when the staleness reason has changed", async () => {
+    // We exercise the reason-change path WITHOUT requiring an empty
+    // prune-runs table (which is impossible on the shared dev DB). The
+    // current state is "stale" (3-day-old success) and the prior
+    // watchdog alert claimed "never-run" — different reasons, so the
+    // watchdog must re-page even inside the suppression window.
+    const now = FUTURE_NOW;
+    await clearRecentWatchdogAlerts(now);
+    await insertPruneRunRow({
+      status: "success",
+      startedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+    });
+    await insertWatchdogAlertAt({
+      reason: "never-run",
+      createdAt: new Date(now.getTime() - 1 * 60 * 60 * 1000),
+    });
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now,
+      notify,
+      serverUptimeMs: 30 * 24 * 60 * 60 * 1000,
+      suppressionWindowMs: 24 * 60 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(true);
+    expect(result.suppressed).toBe(false);
+    expect(result.reason).toBe("stale");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].details.reason).toBe("stale");
+  });
+
+  it("a successful prune appearing later naturally clears suppression", async () => {
+    // A prior watchdog alert exists, AND a fresh successful prune has
+    // since landed. The watchdog must return reason="fresh" without
+    // even consulting suppression — the alert isn't withheld, it just
+    // isn't applicable.
+    const now = FUTURE_NOW;
+    await clearRecentWatchdogAlerts(now);
+    // Fresh success 1h ago → well within the 48h threshold.
+    await insertPruneRunRow({
+      status: "success",
+      startedAt: new Date(now.getTime() - 60 * 60 * 1000),
+    });
+    // Stale prior watchdog alert from before the prune recovered.
+    await insertWatchdogAlertAt({
+      reason: "stale",
+      createdAt: new Date(now.getTime() - 5 * 60 * 60 * 1000),
+    });
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now,
+      notify,
+      serverUptimeMs: 30 * 24 * 60 * 60 * 1000,
+      suppressionWindowMs: 24 * 60 * 60 * 1000,
+    });
+
+    expect(result.fired).toBe(false);
+    expect(result.suppressed).toBe(false);
+    expect(result.reason).toBe("fresh");
+    expect(result.previousAlertAt).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("suppressionWindowMs=0 disables suppression entirely (legacy behaviour)", async () => {
+    const now = FUTURE_NOW;
+    await clearRecentWatchdogAlerts(now);
+    await insertPruneRunRow({
+      status: "success",
+      startedAt: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000),
+    });
+    // Prior alert 1 minute ago — would normally suppress.
+    await insertWatchdogAlertAt({
+      reason: "stale",
+      createdAt: new Date(now.getTime() - 60 * 1000),
+    });
+
+    const { notify, calls } = makeNotifyStub();
+    const result = await checkOperatorAlertsPruneFreshness({
+      now,
+      notify,
+      serverUptimeMs: 30 * 24 * 60 * 60 * 1000,
+      suppressionWindowMs: 0,
+    });
+
+    expect(result.fired).toBe(true);
+    expect(result.suppressed).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("getWatchdogSuppressionMs honours valid env values and falls back on invalid", () => {
+    const originalSupp =
+      process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS;
+    try {
+      delete process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS;
+      expect(getWatchdogSuppressionMs()).toBe(DEFAULT_SUPPRESSION_WINDOW_MS);
+
+      process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS = "12";
+      expect(getWatchdogSuppressionMs()).toBe(12 * 60 * 60 * 1000);
+
+      // 0 is allowed — explicitly disables suppression.
+      process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS = "0";
+      expect(getWatchdogSuppressionMs()).toBe(0);
+
+      // Negative → fall back to default.
+      process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS = "-1";
+      expect(getWatchdogSuppressionMs()).toBe(DEFAULT_SUPPRESSION_WINDOW_MS);
+
+      // Non-numeric → fall back to default.
+      process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS = "abc";
+      expect(getWatchdogSuppressionMs()).toBe(DEFAULT_SUPPRESSION_WINDOW_MS);
+
+      // Whitespace → fall back to default.
+      process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS = "   ";
+      expect(getWatchdogSuppressionMs()).toBe(DEFAULT_SUPPRESSION_WINDOW_MS);
+    } finally {
+      if (originalSupp === undefined) {
+        delete process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS;
+      } else {
+        process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS =
+          originalSupp;
+      }
+    }
   });
 });

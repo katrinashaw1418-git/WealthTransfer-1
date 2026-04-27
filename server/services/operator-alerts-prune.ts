@@ -25,7 +25,7 @@
 //      `now()`, so the two cannot conflict on the same row.
 // =============================================================================
 
-import { desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, gte, lt, lte } from "drizzle-orm";
 import { db } from "../db";
 import {
   operatorAlertPruneRuns,
@@ -34,6 +34,48 @@ import {
 } from "@shared/schema";
 import { log } from "../vite";
 import { notifyOperator, type OperatorAlertResult } from "./operator-alerts";
+
+// =============================================================================
+// TASK #83 — Watchdog alert suppression
+// =============================================================================
+// Source string the watchdog uses for every alert it dispatches. Hoisted to
+// a constant so the suppression query (which has to find prior watchdog rows
+// in `operator_alerts`) can never drift out of sync with the dispatch site.
+// =============================================================================
+const WATCHDOG_SOURCE = "operator-alerts-prune-watchdog";
+
+const DEFAULT_SUPPRESSION_HOURS = 24;
+/**
+ * How long after a watchdog alert fires we will refuse to re-fire the same
+ * staleness reason. Re-exported in milliseconds so tests can address it by
+ * name. Default mirrors the cron interval (24h) — i.e. the watchdog will
+ * normally page operators at most once per stalled-prune outage, no matter
+ * how many days the outage lasts.
+ */
+export const DEFAULT_SUPPRESSION_WINDOW_MS =
+  DEFAULT_SUPPRESSION_HOURS * 60 * 60 * 1000;
+
+/**
+ * Resolve the suppression window from the environment. A value of `0`
+ * disables suppression entirely (every stale tick re-pages, which is the
+ * legacy Task #60 behaviour). Negative / non-numeric values fall back to
+ * the default and emit a warning so the misconfiguration is observable.
+ */
+export function getWatchdogSuppressionMs(): number {
+  const raw = process.env.OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS;
+  if (raw === undefined || raw === null || raw.trim() === "") {
+    return DEFAULT_SUPPRESSION_WINDOW_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(
+      `[operator-alerts-prune] OPERATOR_ALERTS_PRUNE_WATCHDOG_SUPPRESSION_HOURS=${raw} is not a non-negative number; ` +
+        `falling back to default ${DEFAULT_SUPPRESSION_HOURS}h`,
+    );
+    return DEFAULT_SUPPRESSION_WINDOW_MS;
+  }
+  return Math.floor(parsed * 60 * 60 * 1000);
+}
 
 export const DEFAULT_RETENTION_DAYS = 180;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -291,6 +333,12 @@ export interface CheckPruneFreshnessOptions {
    */
   serverUptimeMs?: number;
   /**
+   * Task #83 — override the suppression window (ms). Defaults to
+   * `getWatchdogSuppressionMs()`. Set to 0 to disable suppression and
+   * restore the original Task #60 fire-every-tick behaviour.
+   */
+  suppressionWindowMs?: number;
+  /**
    * Injection seam for tests. Defaults to the real `notifyOperator`.
    * Returning a falsy value short-circuits the audit-trail row id we
    * report back to the caller (we still consider the alert fired).
@@ -316,6 +364,58 @@ export interface PruneFreshnessResult {
   thresholdMs: number;
   /** notifyOperator's row id when fired=true; null otherwise (or on persist failure). */
   alertId: number | null;
+  /**
+   * Task #83 — true when the watchdog detected staleness but withheld the
+   * alert because a prior watchdog row for the same `reason` is inside the
+   * suppression window. `fired` is always false when this is true.
+   */
+  suppressed: boolean;
+  /**
+   * createdAt of the prior watchdog alert that drove the suppression
+   * decision, or null when no prior alert was found inside the window.
+   */
+  previousAlertAt: Date | null;
+}
+
+/**
+ * Task #83 — find the most recent watchdog alert that landed inside the
+ * suppression window. Returns null when none exists. We read both
+ * `createdAt` and `details.reason` so the caller can decide whether the
+ * staleness reason has changed (e.g. "never-run" → "stale"), in which
+ * case suppression is bypassed and we re-page operators.
+ *
+ * Read-only, so it cannot accidentally extend its own suppression window
+ * by writing to the table it queries.
+ */
+async function findRecentWatchdogAlert(
+  windowStart: Date,
+  now: Date,
+): Promise<{ createdAt: Date; reason: string | null } | null> {
+  const [row] = await db
+    .select({
+      createdAt: operatorAlerts.createdAt,
+      details: operatorAlerts.details,
+    })
+    .from(operatorAlerts)
+    .where(
+      and(
+        eq(operatorAlerts.source, WATCHDOG_SOURCE),
+        gte(operatorAlerts.createdAt, windowStart),
+        // Upper-bound at `now` so a future-dated row (clock skew, manual
+        // backfill) cannot extend its own suppression window forward in
+        // time and silence a real outage that started AFTER the bogus
+        // row was written.
+        lte(operatorAlerts.createdAt, now),
+      ),
+    )
+    .orderBy(desc(operatorAlerts.createdAt))
+    .limit(1);
+  if (!row) return null;
+  // `details` is JSONB and may be anything; defensively narrow.
+  const details = (row.details ?? {}) as Record<string, unknown>;
+  const reason =
+    typeof details.reason === "string" ? (details.reason as string) : null;
+  return { createdAt: row.createdAt, reason };
 }
 
 /**
@@ -361,12 +461,64 @@ export async function checkOperatorAlertsPruneFreshness(
       `checkOperatorAlertsPruneFreshness: staleThresholdMs must be a positive number (got ${thresholdMs})`,
     );
   }
+  const suppressionWindowMs =
+    options.suppressionWindowMs ?? getWatchdogSuppressionMs();
+  if (!Number.isFinite(suppressionWindowMs) || suppressionWindowMs < 0) {
+    throw new Error(
+      `checkOperatorAlertsPruneFreshness: suppressionWindowMs must be a non-negative number (got ${suppressionWindowMs})`,
+    );
+  }
   const now = options.now ?? new Date();
   const serverUptimeMs =
     options.serverUptimeMs ?? Math.floor(process.uptime() * 1000);
   const notify = options.notify ?? notifyOperator;
 
   const latest = await getMostRecentSuccessfulPruneRun();
+
+  // Internal helper — central place to apply Task #83 suppression before
+  // dispatching. We deliberately keep the staleness detection ABOVE this
+  // helper so the watchdog still returns a populated `reason`/`ageMs` even
+  // when the alert is withheld; that lets the cron's log line and the
+  // background-job runner record the suppression accurately.
+  const maybeFire = async (
+    reason: "stale" | "never-run",
+    alert: Parameters<typeof notifyOperator>[0],
+    base: Omit<PruneFreshnessResult, "fired" | "alertId" | "suppressed" | "previousAlertAt">,
+  ): Promise<PruneFreshnessResult> => {
+    if (suppressionWindowMs > 0) {
+      const windowStart = new Date(now.getTime() - suppressionWindowMs);
+      const prior = await findRecentWatchdogAlert(windowStart, now);
+      // Suppress only when the prior alert was for the SAME reason. A
+      // reason change (e.g. "never-run" → "stale", or vice versa) is a
+      // material state change and must always re-page operators so they
+      // notice the situation evolved. A prior row with no recorded reason
+      // (legacy / pre-Task-#83) is treated as a match for safety — better
+      // to suppress an already-paged outage than to spam during a rolling
+      // upgrade.
+      if (prior && (prior.reason === reason || prior.reason === null)) {
+        log(
+          `[operator-alerts-prune-watchdog] suppressed (reason=${reason}, ` +
+            `previousAlertAt=${prior.createdAt.toISOString()}, ` +
+            `windowMs=${suppressionWindowMs})`,
+        );
+        return {
+          ...base,
+          fired: false,
+          alertId: null,
+          suppressed: true,
+          previousAlertAt: prior.createdAt,
+        };
+      }
+    }
+    const result = await notify(alert);
+    return {
+      ...base,
+      fired: true,
+      alertId: result?.alertId ?? null,
+      suppressed: false,
+      previousAlertAt: null,
+    };
+  };
 
   if (!latest) {
     // Empty audit trail. On a fresh deploy this is normal — the prune
@@ -382,28 +534,37 @@ export async function checkOperatorAlertsPruneFreshness(
         ageMs: null,
         thresholdMs,
         alertId: null,
+        suppressed: false,
+        previousAlertAt: null,
       };
     }
-    const result = await notify({
-      source: "operator-alerts-prune-watchdog",
-      severity: "warning",
-      title: "Operator-alert prune has never recorded a successful run",
-      details: {
-        thresholdHours: Math.round(thresholdMs / (60 * 60 * 1000)),
-        serverUptimeHours: Math.round(serverUptimeMs / (60 * 60 * 1000)),
-        hint:
-          "The daily operator-alerts retention prune has not recorded any successful run. " +
-          "Check the application logs for `[operator-alerts-prune]` errors.",
+    return maybeFire(
+      "never-run",
+      {
+        source: WATCHDOG_SOURCE,
+        severity: "warning",
+        title: "Operator-alert prune has never recorded a successful run",
+        details: {
+          // Carried in the persisted row so the next watchdog tick can
+          // tell whether the prior alert was for the same reason.
+          reason: "never-run",
+          thresholdHours: Math.round(thresholdMs / (60 * 60 * 1000)),
+          serverUptimeHours: Math.round(serverUptimeMs / (60 * 60 * 1000)),
+          suppressionWindowHours: Math.round(
+            suppressionWindowMs / (60 * 60 * 1000),
+          ),
+          hint:
+            "The daily operator-alerts retention prune has not recorded any successful run. " +
+            "Check the application logs for `[operator-alerts-prune]` errors.",
+        },
       },
-    });
-    return {
-      fired: true,
-      reason: "never-run",
-      mostRecentSuccessAt: null,
-      ageMs: null,
-      thresholdMs,
-      alertId: result?.alertId ?? null,
-    };
+      {
+        reason: "never-run",
+        mostRecentSuccessAt: null,
+        ageMs: null,
+        thresholdMs,
+      },
+    );
   }
 
   const ageMs = now.getTime() - latest.startedAt.getTime();
@@ -415,27 +576,34 @@ export async function checkOperatorAlertsPruneFreshness(
       ageMs,
       thresholdMs,
       alertId: null,
+      suppressed: false,
+      previousAlertAt: null,
     };
   }
 
-  const result = await notify({
-    source: "operator-alerts-prune-watchdog",
-    severity: "warning",
-    title: "Operator-alert prune has not run successfully recently",
-    details: {
-      mostRecentSuccessAt: latest.startedAt.toISOString(),
-      ageHours: Math.round(ageMs / (60 * 60 * 1000)),
-      thresholdHours: Math.round(thresholdMs / (60 * 60 * 1000)),
-      hint:
-        "Check the application logs for `[operator-alerts-prune]` errors and confirm the daily cron is still scheduled.",
+  return maybeFire(
+    "stale",
+    {
+      source: WATCHDOG_SOURCE,
+      severity: "warning",
+      title: "Operator-alert prune has not run successfully recently",
+      details: {
+        reason: "stale",
+        mostRecentSuccessAt: latest.startedAt.toISOString(),
+        ageHours: Math.round(ageMs / (60 * 60 * 1000)),
+        thresholdHours: Math.round(thresholdMs / (60 * 60 * 1000)),
+        suppressionWindowHours: Math.round(
+          suppressionWindowMs / (60 * 60 * 1000),
+        ),
+        hint:
+          "Check the application logs for `[operator-alerts-prune]` errors and confirm the daily cron is still scheduled.",
+      },
     },
-  });
-  return {
-    fired: true,
-    reason: "stale",
-    mostRecentSuccessAt: latest.startedAt,
-    ageMs,
-    thresholdMs,
-    alertId: result?.alertId ?? null,
-  };
+    {
+      reason: "stale",
+      mostRecentSuccessAt: latest.startedAt,
+      ageMs,
+      thresholdMs,
+    },
+  );
 }

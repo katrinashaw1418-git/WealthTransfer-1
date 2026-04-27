@@ -491,6 +491,16 @@ app.use((req, res, next) => {
           );
           return `alert fired: reason=${result.reason}`;
         }
+        // Task #83: a stale prune that has already been paged inside the
+        // suppression window returns suppressed=true. Surface it here so the
+        // background-jobs admin UI can tell "watchdog ran fine" from
+        // "watchdog ran, prune is still broken, but we kept quiet".
+        if (result.suppressed) {
+          return (
+            `suppressed: reason=${result.reason}, ` +
+            `previousAlertAt=${result.previousAlertAt?.toISOString() ?? "none"}`
+          );
+        }
         return `ok (mostRecentSuccessAt=${result.mostRecentSuccessAt?.toISOString() ?? "none"})`;
       });
     } catch (e) {
