@@ -838,6 +838,278 @@ const _coveredKeys: Record<KillSwitchKey, true> = {
   fee_deductions: true,
 };
 
+// ---------------------------------------------------------------------------
+// 6. Entry-point coverage walk (Task #183)
+// ---------------------------------------------------------------------------
+// The compile-time `_coveredKeys` guard above catches the case where a new
+// KillSwitchKey lands without a test. This block catches the symmetric
+// failure mode: a new MONEY-MOVEMENT FUNCTION (the kind of code that
+// actually moves balances around) lands in `server/services/` without a
+// kill-switch guard at all, so engaging the switch leaves the code path
+// silently un-blocked.
+//
+// The check is intentionally a static walk of `server/services/*.ts`
+// rather than a runtime exercise: enumerating every callsite at runtime
+// would mean spinning up a real money-movement transaction per function,
+// which the kill-switch guard would (correctly) refuse to let proceed,
+// leaving us nothing to assert against. A grep-style scan over the
+// service source files gives us the strong "fail when a guard is missing"
+// signal while keeping the test cheap and DB-free.
+//
+// MATCHING POLICY
+//   We scan every `export function` / `export async function` whose name
+//   (case-insensitive) contains one of the canonical money-movement verbs:
+//     deposit, withdraw, transfer, settle, post, credit, debit
+//   For each match we classify it as one of:
+//
+//     guarded                       — function body calls assertKillSwitchOff(...)
+//     allowlisted_primitive         — low-level callee that is reachable ONLY
+//                                     through callers that themselves call
+//                                     assertKillSwitchOff. Adding a guard
+//                                     directly here would double-fire alerts
+//                                     and obscure WHICH entry-point engaged
+//                                     the switch in the operator alert
+//                                     payload.
+//     allowlisted_not_money_movement — function name happens to contain a
+//                                     verb (e.g. "Posting" in
+//                                     runPostingReceiptInvariantCheck) but
+//                                     the function does not write balances.
+//                                     Read-only checks live here.
+//
+// FAILURE MODES THE TEST CATCHES
+//   * A new exported function whose name matches the verb pattern but is
+//     not in the registry → fail with a message telling the author exactly
+//     what to do (add a guard, or register it as a primitive/non-mm with
+//     a documented reason).
+//   * A registry entry classified `guarded` whose body no longer contains
+//     `assertKillSwitchOff(` → fail (a refactor silently dropped the guard).
+//   * A registry entry classified `allowlisted_not_money_movement` whose
+//     body now does call `assertKillSwitchOff(` → fail (the function now
+//     looks like an entry point — re-classify it as `guarded`).
+//   * A registry entry that no longer corresponds to any source-file
+//     export → fail (the function was renamed/removed; clean up the
+//     registry so the doc-of-record stays accurate).
+//
+// HOW TO EXTEND
+//   When you add a new money-movement entry point:
+//     1. Call `await assertKillSwitchOff(<specific>, "transactions")` at
+//        the top of the function body, BEFORE any DB write.
+//     2. Add it to KILL_SWITCH_ENTRY_POINT_REGISTRY below as
+//        `{ classification: "guarded", reason: "<one-line summary>" }`.
+//     3. Add an HTTP/throw assertion to the appropriate `describe(...)`
+//        block above (Section 1, 2, or 3) so engagement actually surfaces
+//        as 503 / KillSwitchActiveError / canonical skip note.
+// ---------------------------------------------------------------------------
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SERVICES_DIR = path.dirname(fileURLToPath(import.meta.url));
+const MONEY_MOVEMENT_VERB_RE = /(deposit|withdraw|transfer|settle|post|credit|debit)/i;
+
+// Single source of truth for every money-movement-named export. Reviewers
+// can read this map top-to-bottom to see what is in scope at a glance.
+// New entry points MUST be classified here — the test below fails closed
+// on any unclassified match.
+type EntryPointClassification =
+  | "guarded"
+  | "allowlisted_primitive"
+  | "allowlisted_not_money_movement";
+
+const KILL_SWITCH_ENTRY_POINT_REGISTRY: Record<
+  string,
+  { classification: EntryPointClassification; reason: string }
+> = {
+  "fee-engine.ts:settleApprovedDeduction": {
+    classification: "guarded",
+    reason:
+      "Fee settlement entry point. Calls assertKillSwitchOff('fee_deductions', 'transactions') before opening its DB tx.",
+  },
+  "fee-engine.ts:reverseSettledDeduction": {
+    classification: "guarded",
+    reason:
+      "Fee reversal entry point. Calls assertKillSwitchOff('fee_deductions', 'transactions') before opening its DB tx.",
+  },
+  "ledger.ts:postLedgerEntries": {
+    classification: "allowlisted_primitive",
+    reason:
+      "Lowest-level ledger primitive — the only function permitted to insert into ledger_entries. Every caller (HTTP money-movement routes in routes.ts; settleApprovedDeduction / reverseSettledDeduction in fee-engine.ts; the insufficient-funds sweep) holds a kill-switch guard upstream. Adding a guard here would (a) double-fire operator alerts and (b) hide which entry point a 503 actually came from in the alert payload.",
+  },
+  "posting-receipt-invariant.ts:runPostingReceiptInvariantCheck": {
+    classification: "allowlisted_not_money_movement",
+    reason:
+      "Read-only invariant check — compares COUNT(DISTINCT transaction_id) FROM ledger_entries against COUNT(*) FROM ledger_postings and dispatches an operator alert on divergence. Never writes to ledger_entries, wallets, or transactions.",
+  },
+};
+
+type DiscoveredEntryPoint = {
+  id: string; // "<file>:<name>"
+  file: string;
+  name: string;
+  body: string;
+};
+
+async function discoverMoneyMovementExports(): Promise<DiscoveredEntryPoint[]> {
+  const dirents = await fs.readdir(SERVICES_DIR, { withFileTypes: true });
+  const found: DiscoveredEntryPoint[] = [];
+  for (const dirent of dirents) {
+    if (!dirent.isFile()) continue;
+    if (!dirent.name.endsWith(".ts")) continue;
+    if (dirent.name.endsWith(".test.ts")) continue;
+
+    const filePath = path.join(SERVICES_DIR, dirent.name);
+    const text = await fs.readFile(filePath, "utf8");
+    const lines = text.split("\n");
+
+    // Two passes per file:
+    //   pass 1 — locate every "export function NAME(" / "export async function NAME(" line.
+    //   pass 2 — for each match, take the body to be everything until the
+    //            next top-level `export ` line (or EOF). This is a
+    //            deliberately loose body-extraction heuristic: the only
+    //            string we care about inside the body is the literal
+    //            `assertKillSwitchOff(` call, which appears verbatim at
+    //            every guarded callsite. Including a few extra lines from
+    //            the next declaration in the slice is harmless because we
+    //            only test for substring presence — the next function is
+    //            either also a money-movement export (so we'd catch its
+    //            guard separately on its own iteration) or it is not
+    //            (so it can't smuggle a false-positive guard match in).
+    const exportLineIdxs: { idx: number; name: string }[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      // TODO: expand the discovery regex to cover `export const NAME = (async) (...) => ...`
+      // and `export default (async) function NAME(...)` if the services
+      // codebase ever adopts those export forms for money-movement work.
+      // Today every entry point in server/services/ is declared with the
+      // `export (async) function NAME(` shape this regex matches; a deviation
+      // would silently bypass this check.
+      const m = /^export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*[<(]/.exec(
+        lines[i],
+      );
+      if (!m) continue;
+      const name = m[1];
+      if (!MONEY_MOVEMENT_VERB_RE.test(name)) continue;
+      exportLineIdxs.push({ idx: i, name });
+    }
+
+    for (let k = 0; k < exportLineIdxs.length; k++) {
+      const { idx, name } = exportLineIdxs[k];
+      let endLine = lines.length;
+      for (let j = idx + 1; j < lines.length; j++) {
+        if (/^export\s/.test(lines[j])) {
+          endLine = j;
+          break;
+        }
+      }
+      const body = lines.slice(idx, endLine).join("\n");
+      found.push({
+        id: `${dirent.name}:${name}`,
+        file: dirent.name,
+        name,
+        body,
+      });
+    }
+  }
+  return found;
+}
+
+describe("entry-point coverage walk (Task #183)", () => {
+  it("every money-movement-named export in server/services/ is either guarded or registered with a reason", async () => {
+    const discovered = await discoverMoneyMovementExports();
+
+    // Sanity: if the discovery function returns nothing, something has gone
+    // wrong with the file walk (wrong directory, regex change, etc.) and
+    // every check below would silently pass. Anchor on the entry points
+    // we already KNOW exist so a future "discovery returns []" regression
+    // is loud.
+    expect(discovered.length).toBeGreaterThanOrEqual(
+      Object.keys(KILL_SWITCH_ENTRY_POINT_REGISTRY).length,
+    );
+
+    const issues: string[] = [];
+    const seenIds = new Set<string>();
+
+    for (const entry of discovered) {
+      seenIds.add(entry.id);
+      const guardsItself = /\bassertKillSwitchOff\s*\(/.test(entry.body);
+      const registered = KILL_SWITCH_ENTRY_POINT_REGISTRY[entry.id];
+
+      if (!registered) {
+        if (guardsItself) {
+          issues.push(
+            `${entry.id} calls assertKillSwitchOff() but is missing from KILL_SWITCH_ENTRY_POINT_REGISTRY. Add it as { classification: "guarded", reason: "<summary>" } so the in-scope set stays auditable.`,
+          );
+        } else {
+          issues.push(
+            `${entry.id} matches the money-movement verb pattern but neither calls assertKillSwitchOff() nor appears in KILL_SWITCH_ENTRY_POINT_REGISTRY. Either: (a) add \`await assertKillSwitchOff(<specific>, "transactions")\` at the top of the body and register it as "guarded"; (b) if it is reachable only through an already-guarded caller, register it as "allowlisted_primitive" with a reason explaining the upstream guards; or (c) if its name is misleading and it does not move money, register it as "allowlisted_not_money_movement".`,
+          );
+        }
+        continue;
+      }
+
+      switch (registered.classification) {
+        case "guarded":
+          if (!guardsItself) {
+            issues.push(
+              `${entry.id} is registered as "guarded" but its body no longer calls assertKillSwitchOff(). Either restore the guard or move the registry entry to "allowlisted_primitive" with a reason describing the upstream callers.`,
+            );
+          }
+          break;
+        case "allowlisted_primitive":
+          // No assertion on the body — the contract is "callers guard, I do not".
+          // We deliberately do not require the absence of the guard call
+          // here: a defensive double-guard is acceptable, just not required.
+          break;
+        case "allowlisted_not_money_movement":
+          if (guardsItself) {
+            issues.push(
+              `${entry.id} is registered as "allowlisted_not_money_movement" but its body now calls assertKillSwitchOff(). If the function does in fact move money, re-classify it as "guarded".`,
+            );
+          }
+          break;
+      }
+    }
+
+    for (const id of Object.keys(KILL_SWITCH_ENTRY_POINT_REGISTRY)) {
+      if (!seenIds.has(id)) {
+        issues.push(
+          `KILL_SWITCH_ENTRY_POINT_REGISTRY entry "${id}" no longer matches any exported function in server/services/. Remove the stale registry entry so the doc-of-record stays accurate.`,
+        );
+      }
+    }
+
+    if (issues.length > 0) {
+      throw new Error(
+        `Kill-switch entry-point coverage check failed:\n  - ${issues.join(
+          "\n  - ",
+        )}`,
+      );
+    }
+  });
+
+  it("registry covers the historically-guarded entry points (anchor)", () => {
+    // Belt-and-braces: independent of the discovery walk, assert the
+    // specific entry points the rest of this suite exercises are still
+    // listed in the registry. If someone deletes a registry entry AND
+    // the underlying function in the same change, the "stale entry"
+    // check above goes silent — this anchor keeps the headline guarded
+    // set explicit.
+    expect(KILL_SWITCH_ENTRY_POINT_REGISTRY).toHaveProperty(
+      "fee-engine.ts:settleApprovedDeduction",
+    );
+    expect(KILL_SWITCH_ENTRY_POINT_REGISTRY).toHaveProperty(
+      "fee-engine.ts:reverseSettledDeduction",
+    );
+    expect(
+      KILL_SWITCH_ENTRY_POINT_REGISTRY["fee-engine.ts:settleApprovedDeduction"]
+        .classification,
+    ).toBe("guarded");
+    expect(
+      KILL_SWITCH_ENTRY_POINT_REGISTRY["fee-engine.ts:reverseSettledDeduction"]
+        .classification,
+    ).toBe("guarded");
+  });
+});
+
 // Suppress unused-import lints in environments that don't strip them
 // automatically; these helpers are referenced via vitest patterns above.
 void drizzleSql;
