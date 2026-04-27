@@ -139,16 +139,43 @@ export async function listAdviserClients(
     .groupBy(feeConsents.clientId);
   const feeByClient = new Map(feeRows.map((r) => [r.clientId, r.count]));
 
-  // Portfolio totals (single query, all clients).
-  const portfolioRows = await db
-    .select({
-      userId: portfolios.userId,
-      totalValue: portfolios.totalValue,
-    })
-    .from(portfolios)
-    .where(inArray(portfolios.userId, clientIds));
+  // Portfolio totals — compute LIVE per client via the same valuation engine
+  // the per-client portfolio detail endpoint uses. Reading the
+  // `portfolios.totalValue` snapshot column directly would surface "$0" for
+  // every client whose snapshot was never refreshed (nothing in the codebase
+  // keeps it current), which makes the adviser's "Assets under advice" and
+  // "Top portfolios" displays misleading under AFSL.
+  //
+  // Run valuations in parallel so the list endpoint stays responsive for
+  // advisers with many linked clients. If a single client's valuation throws
+  // OR returns hasUnpricedWallets (some balances couldn't be priced), fall
+  // back to "0" for that one client and log enough detail to diagnose,
+  // rather than surfacing a partial total to the adviser or failing the
+  // whole list. This matches today's behaviour for clients with no snapshot
+  // row at all.
+  const now = new Date();
+  const valuationResults = await Promise.all(
+    clientIds.map(async (clientId) => {
+      try {
+        const totals = await calculatePortfolioTotalsAtDate(clientId, now);
+        if (totals.hasUnpricedWallets) {
+          console.error(
+            `[adviser-access] live portfolio valuation has unpriced wallets for client ${clientId} (adviser ${adviserUserId}); falling back to 0. unpricedCurrencies=${JSON.stringify(totals.unpricedCurrencies)}`,
+          );
+          return { clientId, value: "0" };
+        }
+        return { clientId, value: totals.totalValue.toFixed(2) };
+      } catch (err) {
+        console.error(
+          `[adviser-access] live portfolio valuation failed for client ${clientId} (adviser ${adviserUserId}); falling back to 0:`,
+          err,
+        );
+        return { clientId, value: "0" };
+      }
+    }),
+  );
   const portfolioByClient = new Map(
-    portfolioRows.map((r) => [r.userId, r.totalValue ?? "0"]),
+    valuationResults.map((r) => [r.clientId, r.value]),
   );
 
   return linkRows.map((r) => ({
