@@ -42,6 +42,149 @@ import {
 import { and, eq, desc, lte, gte, sql, inArray, notInArray } from "drizzle-orm";
 import { calculatePortfolioTotalsAtDate } from "./portfolio-valuation";
 import { clientDisplayName } from "@shared/display-name";
+import {
+  isTestFixtureEmail,
+  matchTestFixtureEmail,
+} from "./test-fixture-emails";
+
+// -----------------------------------------------------------------------------
+// Test-fixture email filter — defence in depth for adviser surfaces.
+//
+// Background (Task #286): a handful of fixture-pattern client accounts had
+// leaked into `adviser_clients` rows pointed at real advisers, and were
+// rendering on every adviser surface that enumerates linked clients (Top
+// Clients table, KYC coverage denominator, AUM headline, tier mix, dashboard
+// Client book, instructions/tasks/reports lists). The CI gates only block
+// fixture leakage at write time; this layer ensures even pre-existing
+// contamination can never render to a real adviser.
+//
+// Behaviour: the filter ONLY fires when the rendering adviser is itself a
+// real (non-fixture) user. Test scripts that intentionally create
+// fixture-on-fixture adviser-client links keep working unchanged.
+//
+// One structured warning per dropped (adviser, client) pair per request is
+// emitted, naming the matched pattern, so future leakage is investigable
+// without log spam (logs only fire when there's actual contamination).
+// -----------------------------------------------------------------------------
+function logFixtureFiltered(
+  adviserUserId: number,
+  clientUserId: number,
+  email: string,
+): void {
+  // PII minimisation: log adviser/client ids and the matched-pattern name
+  // only. The pattern alone is enough to investigate (it points back to
+  // the originating fixture script), and the client id is an internal
+  // surrogate — we never write the raw email to the warning channel.
+  const result = matchTestFixtureEmail(email);
+  const pattern = result.matched ? result.pattern : "unknown";
+  console.warn(
+    `[adviser-access] filtered fixture client from adviser surface: ` +
+      `adviserUserId=${adviserUserId} clientUserId=${clientUserId} ` +
+      `pattern=${pattern}`,
+  );
+}
+
+/**
+ * Cheap "is the rendering adviser themselves a fixture?" probe. Only runs
+ * when the caller has already established there is at least one fixture
+ * client to drop — most real advisers have zero contamination and never
+ * trigger this lookup, so the typical request still issues exactly the same
+ * SELECTs as before.
+ */
+async function isAdviserAFixture(adviserUserId: number): Promise<boolean> {
+  const [row] = await db
+    .select({ email: users.email })
+    .from(users)
+    .where(eq(users.id, adviserUserId))
+    .limit(1);
+  return !!row && isTestFixtureEmail(row.email);
+}
+
+/**
+ * Pre-filter (linkRow|email) tuples for any adviser surface that already
+ * has emails in hand (e.g. listAdviserClients). Returns the input unchanged
+ * when there are no fixture rows to drop or when the rendering adviser is
+ * itself a fixture.
+ */
+async function filterFixtureClientRows<T extends { userId: number; email: string }>(
+  adviserUserId: number,
+  rows: T[],
+): Promise<T[]> {
+  const fixtureRows = rows.filter((r) => isTestFixtureEmail(r.email));
+  if (fixtureRows.length === 0) return rows;
+  if (await isAdviserAFixture(adviserUserId)) return rows;
+  for (const r of fixtureRows) {
+    logFixtureFiltered(adviserUserId, r.userId, r.email);
+  }
+  return rows.filter((r) => !isTestFixtureEmail(r.email));
+}
+
+export interface AdviserFixtureFilterContext {
+  /** Client IDs the adviser is allowed to see, post-filter. */
+  visibleClientIds: number[];
+  /** Client IDs that were dropped because they look like test fixtures. */
+  excludedClientIds: number[];
+  /** True when the adviser themselves is a fixture (filter is a no-op). */
+  adviserIsFixture: boolean;
+}
+
+/**
+ * Compute the visible / excluded linked-client id partition for an adviser.
+ * Used by every adviser read path that doesn't already enumerate the join
+ * to users.email itself (instructions, tasks, reports, notifications,
+ * dashboard summary). Logs one warning per dropped (adviser, client) pair.
+ *
+ * Cheap when the adviser has no linked clients (one SELECT, returns empty).
+ * Cheap when no linked clients are fixture (one SELECT, returns full set).
+ */
+async function loadAdviserFixtureFilterContext(
+  adviserUserId: number,
+): Promise<AdviserFixtureFilterContext> {
+  const linkedRows = await db
+    .select({ id: users.id, email: users.email })
+    .from(adviserClients)
+    .innerJoin(users, eq(users.id, adviserClients.clientUserId))
+    .where(
+      and(
+        eq(adviserClients.adviserUserId, adviserUserId),
+        eq(adviserClients.isActive, true),
+      ),
+    );
+
+  if (linkedRows.length === 0) {
+    return { visibleClientIds: [], excludedClientIds: [], adviserIsFixture: false };
+  }
+
+  const fixtureRows = linkedRows.filter((r) => isTestFixtureEmail(r.email));
+  if (fixtureRows.length === 0) {
+    return {
+      visibleClientIds: linkedRows.map((r) => r.id),
+      excludedClientIds: [],
+      adviserIsFixture: false,
+    };
+  }
+
+  const adviserIsFixture = await isAdviserAFixture(adviserUserId);
+  if (adviserIsFixture) {
+    return {
+      visibleClientIds: linkedRows.map((r) => r.id),
+      excludedClientIds: [],
+      adviserIsFixture: true,
+    };
+  }
+
+  for (const r of fixtureRows) {
+    logFixtureFiltered(adviserUserId, r.id, r.email);
+  }
+  const excludedSet = new Set(fixtureRows.map((r) => r.id));
+  return {
+    visibleClientIds: linkedRows
+      .filter((r) => !excludedSet.has(r.id))
+      .map((r) => r.id),
+    excludedClientIds: fixtureRows.map((r) => r.id),
+    adviserIsFixture: false,
+  };
+}
 
 // -----------------------------------------------------------------------------
 // Link enforcement — the single chokepoint for "can this adviser see this
@@ -100,7 +243,7 @@ export async function listAdviserClients(
   adviserUserId: number,
 ): Promise<AdviserClientSummary[]> {
   // Pull links + user records in one query.
-  const linkRows = await db
+  const rawLinkRows = await db
     .select({
       userId: users.id,
       email: users.email,
@@ -120,6 +263,12 @@ export async function listAdviserClients(
       ),
     );
 
+  if (rawLinkRows.length === 0) return [];
+
+  // Drop fixture-pattern client rows before any downstream aggregation, so
+  // the post-filter set drives every count, total and "top N" the UI uses
+  // (KYC denominator, AUM, tier mix, fee-consent counts). See Task #286.
+  const linkRows = await filterFixtureClientRows(adviserUserId, rawLinkRows);
   if (linkRows.length === 0) return [];
 
   const clientIds = linkRows.map((r) => r.userId);
@@ -431,7 +580,7 @@ export interface AdviserInstructionRow extends InvestmentInstruction {
 export async function listAdviserInstructions(
   adviserUserId: number,
 ): Promise<AdviserInstructionRow[]> {
-  return db
+  const rows = await db
     .select({
       id: investmentInstructions.id,
       adviserUserId: investmentInstructions.adviserUserId,
@@ -463,6 +612,17 @@ export async function listAdviserInstructions(
     )
     .where(eq(investmentInstructions.adviserUserId, adviserUserId))
     .orderBy(desc(investmentInstructions.createdAt));
+
+  // Drop instructions whose client looks like a test fixture, so the
+  // instructions list can never surface fixture-on-real-adviser rows
+  // (Task #286). Each row already carries the joined client email.
+  const tagged = rows.map((r) => ({
+    row: r,
+    userId: r.clientUserId,
+    email: r.clientEmail,
+  }));
+  const kept = await filterFixtureClientRows(adviserUserId, tagged);
+  return kept.map((k) => k.row);
 }
 
 export interface CreateAdviserInstructionInput {
@@ -677,6 +837,18 @@ export async function listAdviserTasks(
   if (filters?.status) conditions.push(eq(adviserTasks.status, filters.status));
   if (filters?.clientUserId)
     conditions.push(eq(adviserTasks.clientUserId, filters.clientUserId));
+
+  // Defence in depth (Task #286): a task pinned to a fixture client must
+  // not appear on a real adviser's workflow page. Resolve the visible-
+  // client whitelist once and constrain the query when there is anything
+  // to drop.
+  const fixtureCtx = await loadAdviserFixtureFilterContext(adviserUserId);
+  if (fixtureCtx.excludedClientIds.length > 0) {
+    conditions.push(
+      notInArray(adviserTasks.clientUserId, fixtureCtx.excludedClientIds),
+    );
+  }
+
   return db
     .select()
     .from(adviserTasks)
@@ -735,10 +907,21 @@ export async function updateAdviserTask(
 export async function listAdviserReportRequests(
   adviserUserId: number,
 ): Promise<ReportRequest[]> {
+  // See Task #286: same defence as listAdviserTasks. A report request
+  // pinned to a fixture client must not appear in the adviser reports
+  // list; constrain the query when the visible-client set excludes any
+  // ids.
+  const conditions = [eq(reportRequests.adviserUserId, adviserUserId)];
+  const fixtureCtx = await loadAdviserFixtureFilterContext(adviserUserId);
+  if (fixtureCtx.excludedClientIds.length > 0) {
+    conditions.push(
+      notInArray(reportRequests.clientUserId, fixtureCtx.excludedClientIds),
+    );
+  }
   return db
     .select()
     .from(reportRequests)
-    .where(eq(reportRequests.adviserUserId, adviserUserId))
+    .where(and(...conditions))
     .orderBy(desc(reportRequests.requestedAt));
 }
 
@@ -773,51 +956,44 @@ export interface AdviserDashboardSummary {
 export async function getAdviserDashboardSummary(
   adviserUserId: number,
 ): Promise<AdviserDashboardSummary> {
-  // Linked clients
-  const [{ count: clientCount }] = await db
-    .select({ count: sql<number>`cast(count(*) as int)` })
-    .from(adviserClients)
-    .where(
-      and(
-        eq(adviserClients.adviserUserId, adviserUserId),
-        eq(adviserClients.isActive, true),
-      ),
-    );
+  // Compute the post-fixture-filter set of linked clients ONCE and use it as
+  // the basis for every count below. Without this, the headline "Linked
+  // clients" would still include fixture rows the rest of the UI no longer
+  // shows, and the "open tasks" / "pending reports" counts could include
+  // tasks/reports for fixture clients. See Task #286.
+  const fixtureCtx = await loadAdviserFixtureFilterContext(adviserUserId);
+  const visibleClientIds = fixtureCtx.visibleClientIds;
+  const hasExclusions = fixtureCtx.excludedClientIds.length > 0;
 
-  // Open tasks
+  // Open tasks — scoped to visible clients so a task on a fixture client
+  // can never inflate the dashboard counter.
+  const taskConditions = [
+    eq(adviserTasks.adviserUserId, adviserUserId),
+    inArray(adviserTasks.status, ["open", "in_progress"]),
+  ];
+  if (hasExclusions) {
+    taskConditions.push(
+      notInArray(adviserTasks.clientUserId, fixtureCtx.excludedClientIds),
+    );
+  }
   const [{ count: openTasks }] = await db
     .select({ count: sql<number>`cast(count(*) as int)` })
     .from(adviserTasks)
-    .where(
-      and(
-        eq(adviserTasks.adviserUserId, adviserUserId),
-        inArray(adviserTasks.status, ["open", "in_progress"]),
-      ),
-    );
+    .where(and(...taskConditions));
 
-  // Fee consents expiring ≤30 days for any of this adviser's linked clients.
-  // We compute the 30-day window in JS and pass timestamps so the SQL stays
-  // portable.
+  // Fee consents expiring ≤30 days for any of this adviser's visible
+  // (post-filter) linked clients. We compute the 30-day window in JS and
+  // pass timestamps so the SQL stays portable.
   const now = new Date();
   const in30Days = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-  const linkedClientIdRows = await db
-    .select({ clientUserId: adviserClients.clientUserId })
-    .from(adviserClients)
-    .where(
-      and(
-        eq(adviserClients.adviserUserId, adviserUserId),
-        eq(adviserClients.isActive, true),
-      ),
-    );
   let feeConsentsExpiringSoon = 0;
-  if (linkedClientIdRows.length > 0) {
-    const linkedClientIds = linkedClientIdRows.map((r) => r.clientUserId);
+  if (visibleClientIds.length > 0) {
     const [{ count: feeCount }] = await db
       .select({ count: sql<number>`cast(count(*) as int)` })
       .from(feeConsents)
       .where(
         and(
-          inArray(feeConsents.clientId, linkedClientIds),
+          inArray(feeConsents.clientId, visibleClientIds),
           eq(feeConsents.renewalStatus, "active"),
           lte(feeConsents.consentExpiryDate, in30Days),
           gte(feeConsents.consentExpiryDate, now),
@@ -826,19 +1002,23 @@ export async function getAdviserDashboardSummary(
     feeConsentsExpiringSoon = feeCount;
   }
 
-  // Pending reports
+  // Pending reports — also constrained to visible clients.
+  const reportConditions = [
+    eq(reportRequests.adviserUserId, adviserUserId),
+    inArray(reportRequests.status, ["requested", "generating"]),
+  ];
+  if (hasExclusions) {
+    reportConditions.push(
+      notInArray(reportRequests.clientUserId, fixtureCtx.excludedClientIds),
+    );
+  }
   const [{ count: pendingReports }] = await db
     .select({ count: sql<number>`cast(count(*) as int)` })
     .from(reportRequests)
-    .where(
-      and(
-        eq(reportRequests.adviserUserId, adviserUserId),
-        inArray(reportRequests.status, ["requested", "generating"]),
-      ),
-    );
+    .where(and(...reportConditions));
 
   return {
-    linkedClients: clientCount,
+    linkedClients: visibleClientIds.length,
     openTasks,
     feeConsentsExpiringSoon,
     pendingReports,
@@ -894,16 +1074,13 @@ export async function getAdviserNotifications(
   const now = new Date();
   const expiryHorizon = new Date(now.getTime() + FEE_EXPIRY_WINDOW_DAYS * 86400_000);
 
-  // Active linked clients only. EVERY bucket below is intersected with this
-  // set — including buckets that already filter by adviserUserId — so that
-  // deactivating a link immediately removes that client's data from the bell.
-  // (Architect-flagged scoping rule. Without this intersect, an orphaned row
-  // from a former client would still surface here.)
-  const linkedClientIdRows = await db
-    .select({ clientUserId: adviserClients.clientUserId })
-    .from(adviserClients)
-    .where(and(eq(adviserClients.adviserUserId, adviserUserId), eq(adviserClients.isActive, true)));
-  const linkedClientIds = linkedClientIdRows.map((r) => r.clientUserId);
+  // Active linked clients only, with test-fixture clients dropped (Task
+  // #286). EVERY bucket below is intersected with this set — including
+  // buckets that already filter by adviserUserId — so that deactivating
+  // a link, or contamination by a fixture-pattern client, immediately
+  // removes that client's data from the bell.
+  const fixtureCtx = await loadAdviserFixtureFilterContext(adviserUserId);
+  const linkedClientIds = fixtureCtx.visibleClientIds;
 
   // Hard short-circuit: an adviser with zero active links sees nothing,
   // regardless of what orphaned rows exist in the DB.
