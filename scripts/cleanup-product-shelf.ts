@@ -1,19 +1,68 @@
+/**
+ * Idempotent cleanup of the adviser product shelf in the database.
+ *
+ * This script applies the SAME source-of-truth catalogue defined in
+ * `scripts/seed-missing-products.ts` and `server/storage.ts` MemStorage to
+ * any environment whose `investment_products` table predates the cleanup.
+ *
+ * Specifically it:
+ *   1. Removes (or deactivates if referenced) the test "InRange825" record
+ *      that exists only in the database — it is not in any seed file.
+ *   2. Deactivates any other legacy active products whose names are NOT in
+ *      the canonical 14-product catalogue, so the adviser shelf shows the
+ *      expected 14 cleaned-up products.
+ *   3. Updates the canonical 14 products in place with the normalised
+ *      formatting (sentence-case risk, en-dash ranges with p.a., short
+ *      distribution labels, FCS instead of FDIC, Bitcoin "Market-linked"
+ *      label, etc.).
+ *
+ * Safe to re-run: every step is keyed by product name and is idempotent.
+ * Re-running on an already-clean DB is a no-op.
+ *
+ * --------------------------------------------------------------------------
+ * OPERATOR RUNBOOK NOTE — READ BEFORE RE-RUNNING
+ * --------------------------------------------------------------------------
+ * Step 2 (deactivateLegacyExtras) deactivates EVERY active product whose
+ * `name` is not in the `canonical` array below. That is intentional for the
+ * one-off shelf cleanup that ships with task #289, but it has an important
+ * implication for ongoing operations:
+ *
+ *   ❗ If a NEW legitimate product has been added to the catalogue since the
+ *      last time this script ran, you MUST add its name to the `canonical`
+ *      array (and ideally to the seed/MemStorage source-of-truth modules)
+ *      BEFORE re-running. Otherwise this script will silently deactivate it.
+ *
+ * Treat this script as a pinned-version migration, not a recurring cron
+ * job. If you need to re-apply the shelf hygiene without the deactivation
+ * step (for example, only to refresh the formatting of the 14 canonical
+ * products), comment out the `deactivateLegacyExtras` call in main().
+ * --------------------------------------------------------------------------
+ *
+ * Usage:
+ *   npx tsx scripts/cleanup-product-shelf.ts
+ */
 import { db } from "../server/db";
-import { investmentProducts } from "../shared/schema";
-import { eq } from "drizzle-orm";
+import { investmentProducts, userInvestments } from "../shared/schema";
+import { and, eq, inArray, not } from "drizzle-orm";
 
-type SeedProduct = typeof investmentProducts.$inferInsert;
+type ProductPatch = Pick<
+  typeof investmentProducts.$inferInsert,
+  | "name"
+  | "category"
+  | "subCategory"
+  | "investmentStrategy"
+  | "targetNetIrr"
+  | "term"
+  | "structure"
+  | "distributions"
+  | "liquidity"
+  | "minimumInvestment"
+  | "riskProfile"
+  | "returnType"
+  | "isActive"
+> & { lvr?: string | null; grossIrr?: string | null; moic?: string | null };
 
-// Source-of-truth catalogue for the 14-product adviser shelf.
-// Field formatting conventions (mirrored in MemStorage demo data):
-//   - riskProfile: sentence case ("Low" | "Moderate" | "Medium" | "High" | "Very High")
-//   - targetNetIrr: ranges with en dash, "p.a." suffix on numeric returns,
-//     no tilde, no trailing word "target". Bitcoin uses non-numeric label.
-//   - term: months/years with en dash; rolling/notice/recommended-hold
-//     qualifiers move into the structure field, never the main term.
-//   - distributions: short label only — Monthly | Quarterly | Semi-annual |
-//     Daily accrual | At exit | None | simple combinations.
-const seedProducts: SeedProduct[] = [
+const canonical: ProductPatch[] = [
   {
     name: "Real Estate Equity Fund",
     category: "real_estate",
@@ -252,27 +301,126 @@ const seedProducts: SeedProduct[] = [
   },
 ];
 
-async function main() {
+const canonicalNames = canonical.map((p) => p.name);
+
+async function removeInRange825(): Promise<void> {
+  const matches = await db
+    .select({ id: investmentProducts.id, name: investmentProducts.name })
+    .from(investmentProducts)
+    .where(eq(investmentProducts.name, "InRange825"));
+
+  if (matches.length === 0) {
+    console.log("  [skip] InRange825 not present");
+    return;
+  }
+
+  for (const m of matches) {
+    const refs = await db
+      .select({ id: userInvestments.id })
+      .from(userInvestments)
+      .where(eq(userInvestments.productId, m.id))
+      .limit(1);
+
+    if (refs.length > 0) {
+      await db
+        .update(investmentProducts)
+        .set({ isActive: false })
+        .where(eq(investmentProducts.id, m.id));
+      console.log(`  [deactivate] InRange825 (id=${m.id}) — has user_investments references`);
+    } else {
+      await db.delete(investmentProducts).where(eq(investmentProducts.id, m.id));
+      console.log(`  [delete    ] InRange825 (id=${m.id})`);
+    }
+  }
+}
+
+async function deactivateLegacyExtras(): Promise<void> {
+  const extras = await db
+    .select({ id: investmentProducts.id, name: investmentProducts.name })
+    .from(investmentProducts)
+    .where(
+      and(
+        eq(investmentProducts.isActive, true),
+        not(inArray(investmentProducts.name, canonicalNames)),
+      ),
+    );
+
+  if (extras.length === 0) {
+    console.log("  [skip] no legacy active extras to deactivate");
+    return;
+  }
+
+  for (const e of extras) {
+    await db
+      .update(investmentProducts)
+      .set({ isActive: false })
+      .where(eq(investmentProducts.id, e.id));
+    console.log(`  [deactivate] ${e.name} (id=${e.id}) — not in canonical 14`);
+  }
+}
+
+async function upsertCanonical(): Promise<void> {
+  let updated = 0;
   let inserted = 0;
-  let skipped = 0;
-  for (const p of seedProducts) {
+  for (const p of canonical) {
     const existing = await db
       .select({ id: investmentProducts.id })
       .from(investmentProducts)
       .where(eq(investmentProducts.name, p.name));
-    if (existing.length > 0) {
-      console.log(`  [skip] already exists: ${p.name}`);
-      skipped++;
+
+    if (existing.length === 0) {
+      await db.insert(investmentProducts).values(p);
+      console.log(`  [insert] ${p.name}`);
+      inserted++;
       continue;
     }
-    await db.insert(investmentProducts).values(p);
-    console.log(`  [add ] ${p.category.padEnd(18)} ${p.name}`);
-    inserted++;
-  }
-  console.log(`\nDone. Inserted: ${inserted}, skipped: ${skipped}`);
 
-  const all = await db.select().from(investmentProducts);
-  console.log(`Total products in DB now: ${all.length}`);
+    for (const row of existing) {
+      await db
+        .update(investmentProducts)
+        .set({
+          category: p.category,
+          subCategory: p.subCategory,
+          investmentStrategy: p.investmentStrategy,
+          targetNetIrr: p.targetNetIrr,
+          grossIrr: p.grossIrr ?? null,
+          moic: p.moic ?? null,
+          term: p.term,
+          structure: p.structure,
+          distributions: p.distributions,
+          liquidity: p.liquidity,
+          minimumInvestment: p.minimumInvestment,
+          riskProfile: p.riskProfile,
+          returnType: p.returnType,
+          lvr: p.lvr ?? null,
+          isActive: true,
+        })
+        .where(eq(investmentProducts.id, row.id));
+      updated++;
+    }
+  }
+  console.log(`  Updated: ${updated}, Inserted: ${inserted}`);
+}
+
+async function main() {
+  console.log("Cleanup: removing InRange825 (test data, not in seed files)");
+  await removeInRange825();
+
+  console.log("\nCleanup: deactivating legacy active products outside the canonical 14");
+  await deactivateLegacyExtras();
+
+  console.log("\nCleanup: normalising the canonical 14 products");
+  await upsertCanonical();
+
+  const finalActive = await db
+    .select({ id: investmentProducts.id, name: investmentProducts.name })
+    .from(investmentProducts)
+    .where(eq(investmentProducts.isActive, true));
+
+  console.log(`\nActive products on the shelf: ${finalActive.length}`);
+  for (const p of finalActive) {
+    console.log(`  - ${p.name} (id=${p.id})`);
+  }
   process.exit(0);
 }
 

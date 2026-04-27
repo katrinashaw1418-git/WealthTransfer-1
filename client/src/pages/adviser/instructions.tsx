@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -135,6 +136,7 @@ function formatDate(value: string | null): string {
 export default function AdviserInstructions() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
+  const [, setLocation] = useLocation();
 
   const instructions = useQuery<InstructionRow[]>({ queryKey: ["/api/adviser/instructions"] });
   const clients = useQuery<ClientLite[]>({ queryKey: ["/api/adviser/clients"] });
@@ -150,6 +152,24 @@ export default function AdviserInstructions() {
       notes: "",
     },
   });
+
+  // Deep-link support: when arriving from /adviser/products via the
+  // "Raise instruction" CTA, open the create dialog and pre-select the
+  // requested product. The query string is then cleared so a refresh
+  // doesn't keep re-opening the dialog.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("productId");
+    if (!raw) return;
+    const productId = Number(raw);
+    if (!Number.isFinite(productId) || productId <= 0) return;
+    form.setValue("productId", productId, { shouldValidate: false });
+    setOpen(true);
+    setLocation("/adviser/instructions", { replace: true });
+    // location is intentionally not in deps — we only act on the initial mount URL.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const createInstruction = useMutation({
     mutationFn: async (values: CreateInstructionForm) => {
