@@ -36,6 +36,14 @@ export const users = pgTable(
     emailVerificationToken: text("email_verification_token"),
     emailVerificationTokenExpiry: timestamp("email_verification_token_expiry"),
     emailOtp: text("email_otp"),
+    // Task #143 — demo-data marker. Set to true ONLY for the seeded demo
+    // accounts (wiseinvestor / wiseadviser / wise) that exist purely so the
+    // UI has realistic content in dev/demo mode. The wallet-vs-ledger and
+    // ledger-vs-custodian reconciliation services skip these users so the
+    // demo balances (which were never posted through the ledger) cannot
+    // generate misleading drift alerts on the admin reconciliation page or
+    // the operator alert feed. Real users always have isDemo=false.
+    isDemo: boolean("is_demo").notNull().default(false),
     createdAt: timestamp("created_at").defaultNow(),
   },
   (table) => ({
@@ -45,6 +53,10 @@ export const users = pgTable(
     // that resolve to the same identity. Application code MUST normalise on
     // write (see normalizeEmail above) — this index is the safety net.
     emailLowerUnique: uniqueIndex("users_email_lower_unique").on(sql`lower(${table.email})`),
+    // Task #143 — partial index supporting the "exclude demo users" filter
+    // applied by the reconciliation services and admin views. Cheap because
+    // the predicate matches at most a handful of rows on any environment.
+    isDemoIdx: index("users_is_demo_idx").on(table.isDemo).where(sql`${table.isDemo} = true`),
   }),
 );
 

@@ -165,6 +165,10 @@ export class MemStorage implements IStorage {
 
   private initializeData() {
     // Create demo user
+    // Task #143 — `isDemo: true` marks this account as demo data so the
+    // wallet-vs-ledger and ledger-vs-custodian reconciliation services skip
+    // it (its multi-currency balances were never posted through the ledger
+    // and would otherwise generate misleading drift alerts).
     const demoUser: User = {
       id: 1,
       username: "Wiseinvestor",
@@ -179,6 +183,7 @@ export class MemStorage implements IStorage {
       emailVerificationToken: null,
       emailVerificationTokenExpiry: null,
       emailOtp: null,
+      isDemo: true,
       createdAt: new Date(),
     };
     this.users.set(1, demoUser);
@@ -3022,6 +3027,9 @@ export class MemStorage implements IStorage {
       emailVerificationToken: insertUser.emailVerificationToken ?? null,
       emailVerificationTokenExpiry: insertUser.emailVerificationTokenExpiry ?? null,
       emailOtp: insertUser.emailOtp ?? null,
+      // Task #143 — propagate the demo-data marker so callers can pre-flag
+      // an account on insert. Defaults to false to match the DB column.
+      isDemo: insertUser.isDemo ?? false,
       createdAt: new Date(),
     };
     this.users.set(id, user);

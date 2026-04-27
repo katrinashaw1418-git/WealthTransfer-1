@@ -1299,6 +1299,12 @@ export function registerAdminRoutes(app: Express): void {
       // is bounded by the number of distinct (user, currency) pairs, so this
       // stays cheap even at 10k+ users. Mismatches are bubbled to the top
       // so admins can triage drift first.
+      //
+      // Task #143 — exclude rows that belong to demo users (`users.is_demo`).
+      // The reconciliation service no longer writes new rows for demo users
+      // (see `runWalletLedgerReconciliation`), but historical rows from
+      // before the fix are still in the table; we filter them out here so
+      // the admin Reconciliation page is not dominated by demo-data noise.
       const itemsResult = await db.execute(sql`
         WITH ranked AS (
           SELECT
@@ -1319,6 +1325,7 @@ export function registerAdminRoutes(app: Express): void {
           FROM ranked r
           LEFT JOIN users u ON u.id = r.user_id
          WHERE r.rn = 1
+           AND COALESCE(u.is_demo, FALSE) = FALSE
          ${statusFilter}
          ${currencyFilter}
          ${pairsFilter}
@@ -1336,7 +1343,9 @@ export function registerAdminRoutes(app: Express): void {
         )
         SELECT COUNT(*)::int AS count
           FROM ranked r
+          LEFT JOIN users u ON u.id = r.user_id
          WHERE r.rn = 1
+           AND COALESCE(u.is_demo, FALSE) = FALSE
          ${statusFilter}
          ${currencyFilter}
          ${pairsFilter}
@@ -1632,6 +1641,21 @@ export function registerAdminRoutes(app: Express): void {
       if (validSeverity) conditions.push(eq(operatorAlerts.severity, validSeverity));
       if (fromDate) conditions.push(gte(operatorAlerts.createdAt, fromDate));
       if (toDate) conditions.push(lte(operatorAlerts.createdAt, toDate));
+      // Task #143 — exclude alerts attributable to demo users so the admin
+      // operator-alert feed isn't dominated by demo-data noise. Most
+      // reconciliation alerts carry the originating user id in
+      // `details.userId`; we filter on it via a NOT EXISTS subquery against
+      // `users.is_demo`. Alerts with no `userId` in their details (e.g.
+      // process-level alerts) are always shown — the predicate only
+      // suppresses an alert when its referenced user is explicitly flagged
+      // as demo.
+      conditions.push(
+        sql`NOT EXISTS (
+          SELECT 1 FROM ${users} u
+          WHERE u.is_demo = TRUE
+            AND (${operatorAlerts.details} ->> 'userId') = u.id::text
+        )`,
+      );
       if (validQ) {
         // Escape LIKE meta-characters (\, %, _) so a literal "100%" is
         // matched literally rather than as a wildcard. The pattern is then

@@ -682,6 +682,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     // Seed the `wiseinvestor` demo account if it doesn't exist (idempotent on every boot).
     // Used for live demos; password is intentionally well-known.
+    //
+    // Task #143 — `isDemo: true` is set on create AND back-filled on existing
+    // rows that pre-date the column. The wallet-vs-ledger and ledger-vs-
+    // custodian reconciliation services skip demo-flagged users so the demo
+    // multi-currency balances (which live in `wallets` but were never posted
+    // through the ledger) cannot generate misleading drift alerts.
     try {
       const existing = await storage.getUserByUsername("wiseinvestor");
       const desiredHash = await hashPassword("wise888");
@@ -695,9 +701,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           kycStatus: "verified",
           userTier: "professional",
           emailVerified: true,
+          isDemo: true,
         } as any);
-      } else if (!(await verifyPassword("wise888", existing.password))) {
-        await storage.updateUser(existing.id, { password: desiredHash, emailVerified: true });
+      } else {
+        const updates: any = {};
+        if (!(await verifyPassword("wise888", existing.password))) {
+          updates.password = desiredHash;
+          updates.emailVerified = true;
+        }
+        if (!existing.isDemo) updates.isDemo = true;
+        if (Object.keys(updates).length) await storage.updateUser(existing.id, updates);
       }
     } catch (err) {
       console.warn("[seed] wiseinvestor demo account seed failed:", (err as Error).message);
@@ -716,6 +729,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (existingWise.role !== "adviser") updates.role = "adviser";
         if (!existingWise.emailVerified) updates.emailVerified = true;
         if (!(await verifyPassword("wise888", existingWise.password))) updates.password = desiredHash;
+        // Task #143 — back-fill demo flag on rows that pre-date the column.
+        if (!existingWise.isDemo) updates.isDemo = true;
         if (Object.keys(updates).length) await storage.updateUser(existingWise.id, updates);
       } else if (existingDemo) {
         // One-time rename: keeps existing adviser_clients links + audit history intact.
@@ -724,6 +739,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           password: desiredHash,
           role: "adviser",
           emailVerified: true,
+          isDemo: true,
         } as any);
       } else {
         await storage.createUser({
@@ -735,6 +751,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           role: "adviser",
           kycStatus: "verified",
           emailVerified: true,
+          isDemo: true,
         } as any);
       }
     } catch (err) {
@@ -757,6 +774,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (existingWise.role !== "admin") updates.role = "admin";
           if (!existingWise.emailVerified) updates.emailVerified = true;
           if (!(await verifyPassword("wise888", existingWise.password))) updates.password = desiredHash;
+          // Task #143 — back-fill demo flag on rows that pre-date the column.
+          if (!existingWise.isDemo) updates.isDemo = true;
           if (Object.keys(updates).length) await storage.updateUser(existingWise.id, updates);
         } else if (existingAdmin) {
           // One-time rename: keeps audit history attached to the same user id.
@@ -765,6 +784,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             password: desiredHash,
             role: "admin",
             emailVerified: true,
+            isDemo: true,
           } as any);
         } else {
           await storage.createUser({
@@ -777,6 +797,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             kycStatus: "verified",
             userTier: "professional",
             emailVerified: true,
+            isDemo: true,
           } as any);
         }
       } catch (err) {

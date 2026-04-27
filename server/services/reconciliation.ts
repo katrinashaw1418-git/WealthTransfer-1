@@ -28,6 +28,7 @@ import { db } from "../db";
 import {
   ledgerEntries,
   reconciliations,
+  users,
   wallets,
   walletLedgerReconciliations,
   walletLedgerDriftAcknowledgements,
@@ -110,12 +111,19 @@ export async function runLedgerReconciliation(): Promise<ReconciliationSummary> 
   // 1. Find every (userId, currency) pair with at least one ledger entry.
   //    Pairs with zero entries don't need reconciliation — there's nothing
   //    on our side to compare against.
+  //
+  //    Task #143 — exclude users flagged `is_demo = true`. Their balances
+  //    exist purely so the dev/demo UI has realistic content; they were
+  //    never posted through the ledger and would otherwise generate
+  //    misleading drift rows in the reconciliations audit trail.
   const pairs = await db
     .selectDistinct({
       userId: ledgerEntries.userId,
       currency: ledgerEntries.currency,
     })
-    .from(ledgerEntries);
+    .from(ledgerEntries)
+    .leftJoin(users, eq(users.id, ledgerEntries.userId))
+    .where(sql`${users.isDemo} IS NOT TRUE`);
 
   const summary: ReconciliationSummary = {
     pairsChecked: pairs.length,
@@ -306,6 +314,14 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
   // vice versa: a ledger entry against a user with no wallet row yet) is
   // still examined. The alternative — iterating only one side — silently
   // hides a category of drift.
+  //
+  // Task #143 — exclude users flagged `is_demo = true` (the seeded
+  // wiseinvestor / wiseadviser / wise demo accounts). Their wallet rows
+  // carry illustrative balances that were never posted through the ledger,
+  // so reconciling them produces a permanent flood of mismatch rows AND
+  // operator alerts that have no real-money meaning. The skip happens at
+  // the SOURCE — neither a `wallet_ledger_reconciliations` row nor an
+  // `operator_alerts` row is created for these users on subsequent runs.
   const pairsRaw = await db.execute(sql`
     SELECT user_id AS "userId", currency
     FROM (
@@ -313,6 +329,7 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
       UNION
       SELECT user_id, currency FROM ${ledgerEntries}
     ) AS combined
+    WHERE user_id NOT IN (SELECT id FROM ${users} WHERE is_demo = true)
     GROUP BY user_id, currency
   `);
 
