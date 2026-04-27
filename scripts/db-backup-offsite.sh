@@ -30,6 +30,15 @@
 #   DB_BACKUP_OFFSITE_REGION   Passed to aws as --region.
 #   AWS_PROFILE                Passed to aws as --profile.
 #   DB_BACKUP_OFFSITE_SSE      --sse value, e.g. AES256. Default unset.
+#   DATABASE_URL               If set, the outcome (success or failure) is
+#                              recorded into `background_job_runs` via
+#                              `scripts/record-offsite-backup-run.ts` so the
+#                              `database-backup-watchdog` (Task #260) can
+#                              page when the offsite cron silently breaks.
+#                              When unset, the script still runs and exits
+#                              with the same code; the absence of recorded
+#                              runs is itself what eventually trips the
+#                              watchdog (offsite-never-run / offsite-stale).
 #
 # Exit codes:
 #   0  success (bytes uploaded or already in sync)
@@ -84,14 +93,72 @@ sync_extra+=("--exclude" "*" "--include" "amax-db-backup-*.dump")
 
 log "starting sync src=$DB_BACKUP_DIR dst=$DEST"
 
+# Capture timing on both sides of `aws s3 sync` so the recorded
+# background_job_runs row carries an accurate duration. epoch-ms via `date
+# +%s%3N` (GNU coreutils) — falls back to seconds×1000 on macOS / BusyBox.
+now_ms() {
+  local ms
+  ms=$(date +%s%3N 2>/dev/null || true)
+  if [[ -z "$ms" || "$ms" == *N ]]; then
+    ms=$(( $(date +%s) * 1000 ))
+  fi
+  printf '%s' "$ms"
+}
+
+started_at_ms=$(now_ms)
+
 set +e
 aws "${aws_args[@]}" s3 sync "$DB_BACKUP_DIR" "$DEST" "${sync_extra[@]}"
 sync_status=$?
 set -e
 
+finished_at_ms=$(now_ms)
+
+# Best-effort: record the outcome into background_job_runs so the
+# database-backup-watchdog (Task #260) can page when the offsite cron
+# silently breaks. The recorder needs DATABASE_URL; if it isn't set we
+# skip with a warning rather than failing the cron — the absence of rows
+# will itself trip the watchdog after the freshness window.
+record_run() {
+  local status="$1"
+  local detail="$2"
+  if [[ -z "${DATABASE_URL:-}" ]]; then
+    log "WARN: DATABASE_URL not set; skipping background_job_runs record (watchdog will eventually page)."
+    return 0
+  fi
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local recorder="$script_dir/record-offsite-backup-run.ts"
+  if [[ ! -f "$recorder" ]]; then
+    log "WARN: $recorder not found; skipping background_job_runs record."
+    return 0
+  fi
+  local args=(
+    "--status=$status"
+    "--started-at-ms=$started_at_ms"
+    "--finished-at-ms=$finished_at_ms"
+  )
+  if [[ "$status" == "success" ]]; then
+    args+=("--summary=$detail")
+  else
+    args+=("--message=$detail")
+  fi
+  set +e
+  npx --no-install tsx "$recorder" "${args[@]}"
+  local rec_status=$?
+  set -e
+  if [[ $rec_status -ne 0 ]]; then
+    log "WARN: recorder exited $rec_status; watchdog row not written."
+  fi
+}
+
 if [[ $sync_status -ne 0 ]]; then
+  record_run "error" "aws s3 sync exited $sync_status (dst=$DEST)"
   fail "aws s3 sync exited $sync_status" 2
 fi
+
+duration_ms=$(( finished_at_ms - started_at_ms ))
+record_run "success" "src=$DB_BACKUP_DIR dst=$DEST duration_ms=$duration_ms"
 
 log "OK sync complete dst=$DEST"
 exit 0

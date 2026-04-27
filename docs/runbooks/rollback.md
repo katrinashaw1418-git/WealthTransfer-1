@@ -359,15 +359,24 @@ The pieces this runbook depends on are all visible at
 | ---------------------------- | ----------- | ----------------------------------------- |
 | `database-backup`            | daily       | `pg_dump` → `DB_BACKUP_DIR` + retention   |
 | `database-restore-drill`     | weekly      | Restore latest dump → scratch DB → check  |
-| `database-backup-watchdog`   | daily       | Pages an operator if either is stale      |
+| `database-backup-offsite`    | daily       | `aws s3 sync` of `DB_BACKUP_DIR` → S3     |
+| `database-backup-watchdog`   | daily       | Pages an operator if any of the above is stale |
 
 Stale thresholds (defaults):
 
   * Backup: 48 h since last `success` row in `database_backup_runs`.
   * Drill: 14 d since last `success` row in `database_restore_drill_runs`.
+  * Offsite sync: 48 h since last `success` row in `background_job_runs`
+    where `job_name='database-backup-offsite'`. Override via the
+    `DB_BACKUP_OFFSITE_STALE_HOURS` env var (positive integer hours; any
+    other value falls back to the 48-hour default — **fail-closed**, so a
+    typo can never silently disable the watchdog).
 
 Operator-page firing means **the rollback safety net is degraded** — fix it
-before the next deploy.
+before the next deploy. The watchdog rolls every failing axis (backup,
+drill, offsite) into a single alert with the per-axis ages + thresholds in
+the `details` payload, so a permanently broken pipeline does not fire
+multiple simultaneous pages.
 
 ## Reference: production storage & offsite shipping (Task #170, #259)
 
@@ -384,6 +393,7 @@ production environment** of `.replit` (`[userenv.production]`, NOT in
 | `DB_BACKUP_OFFSITE_PREFIX`          | `dumps`                                     | Path inside the bucket. Final keys look like `s3://amax-db-backups-prod/dumps/amax-db-backup-…dump`. |
 | `DB_BACKUP_OFFSITE_REGION`          | _operator-set_ — region the bucket lives in | Passed to the aws CLI as `--region`. Set on the host that runs the offsite cron. |
 | `DB_BACKUP_OFFSITE_SSE`             | `AES256`                                    | Server-side encryption header on every uploaded object. |
+| `DB_BACKUP_OFFSITE_STALE_HOURS`     | _unset_ (defaults to 48 h)                  | Override the offsite-stale watchdog threshold (Task #260). Operator-tunable knob; values ≤ 0 or non-numeric fall back to 48 h. |
 
 > **Deployment-target note (Task #259).** Production runs on a
 > **Reserved VM** (`.replit` → `[deployment].deploymentTarget = "vm"`).
@@ -426,8 +436,23 @@ DB_BACKUP_OFFSITE_PREFIX=dumps
 DB_BACKUP_OFFSITE_REGION=eu-west-1
 DB_BACKUP_OFFSITE_SSE=AES256
 AWS_PROFILE=amax-db-backups
+DATABASE_URL=postgres://...
 15 2 * * * runner /opt/amax/scripts/db-backup-offsite.sh >> /var/log/amax-db-backup-offsite.log 2>&1
 ```
+
+`DATABASE_URL` is required so the script can record the run's outcome
+(success or failure) into `background_job_runs` via
+`scripts/record-offsite-backup-run.ts`. The
+`database-backup-watchdog` (Task #260) reads that table — without it
+the watchdog will eventually page on `offsite-never-run`, which is the
+deliberate fail-loud behaviour and IS the safety net, but you'll see
+the failure later than necessary. Setting `DATABASE_URL` here does not
+need full DB privileges — `INSERT ON background_job_runs` is enough.
+
+If the recorder cannot reach the database (transient outage, missing
+env var) the bash script logs a `WARN` and still exits with the sync's
+own status code, so a recorder failure never breaks the actual offsite
+shipping.
 
 The IAM principal behind `AWS_PROFILE=amax-db-backups` only needs
 `s3:PutObject`, `s3:GetObject`, and `s3:ListBucket` on the bucket — no

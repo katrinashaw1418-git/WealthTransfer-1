@@ -29,10 +29,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { promises as fs } from "fs";
 import * as os from "os";
 import * as path from "path";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 import { db } from "../db";
 import {
+  backgroundJobRuns,
   databaseBackupRuns,
   databaseRestoreDrillRuns,
 } from "@shared/schema";
@@ -40,10 +41,13 @@ import type { OperatorAlert, OperatorAlertResult } from "./operator-alerts";
 import {
   DEFAULT_BACKUP_STALE_THRESHOLD_MS,
   DEFAULT_DRILL_STALE_THRESHOLD_MS,
+  DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
   DEFAULT_RETENTION_COUNT,
+  OFFSITE_BACKUP_JOB_NAME,
   assertNotLiveTarget,
   checkBackupFreshness,
   describeDbTarget,
+  getOffsiteStaleThresholdMs,
   getRetentionCount,
   listExistingDumps,
 } from "./database-backups";
@@ -256,6 +260,17 @@ describe("checkBackupFreshness", () => {
   const FAR_FUTURE = new Date("3000-06-01T12:00:00Z");
   const insertedBackupIds: number[] = [];
   const insertedDrillIds: number[] = [];
+  const insertedOffsiteIds: number[] = [];
+
+  beforeEach(async () => {
+    // Defensive: if a previous test (in this file or elsewhere in the dev
+    // DB) left a `database-backup-offsite` row behind, the freshness check
+    // would observe it and skew the result. Wipe just our jobName so we
+    // never pollute the wider background_job_runs table.
+    await db
+      .delete(backgroundJobRuns)
+      .where(eq(backgroundJobRuns.jobName, OFFSITE_BACKUP_JOB_NAME));
+  });
 
   afterEach(async () => {
     if (insertedBackupIds.length > 0) {
@@ -270,6 +285,17 @@ describe("checkBackupFreshness", () => {
           inArray(databaseRestoreDrillRuns.id, insertedDrillIds.splice(0)),
         );
     }
+    if (insertedOffsiteIds.length > 0) {
+      await db
+        .delete(backgroundJobRuns)
+        .where(inArray(backgroundJobRuns.id, insertedOffsiteIds.splice(0)));
+    }
+    // Belt-and-braces — also clear any rows we may have inserted via the
+    // shared jobName even if the per-id list got out of sync. Always
+    // scoped to OUR jobName so we never touch other jobs' rows.
+    await db
+      .delete(backgroundJobRuns)
+      .where(eq(backgroundJobRuns.jobName, OFFSITE_BACKUP_JOB_NAME));
   });
 
   async function insertBackup(
@@ -322,6 +348,25 @@ describe("checkBackupFreshness", () => {
     insertedDrillIds.push(row.id);
   }
 
+  async function insertOffsite(
+    startedAt: Date,
+    status: "success" | "error" = "success",
+  ): Promise<void> {
+    const [row] = await db
+      .insert(backgroundJobRuns)
+      .values({
+        jobName: OFFSITE_BACKUP_JOB_NAME,
+        startedAt,
+        finishedAt: startedAt,
+        status,
+        summary: status === "success" ? "test offsite sync" : null,
+        errorMessage: status === "error" ? "boom" : null,
+        durationMs: 50,
+      })
+      .returning({ id: backgroundJobRuns.id });
+    insertedOffsiteIds.push(row.id);
+  }
+
   function makeNotifySpy(): {
     calls: OperatorAlert[];
     notify: (alert: OperatorAlert) => Promise<OperatorAlertResult>;
@@ -345,11 +390,13 @@ describe("checkBackupFreshness", () => {
   it("uses the documented default thresholds", () => {
     expect(DEFAULT_BACKUP_STALE_THRESHOLD_MS).toBe(2 * DAY_MS);
     expect(DEFAULT_DRILL_STALE_THRESHOLD_MS).toBe(14 * DAY_MS);
+    expect(DEFAULT_OFFSITE_STALE_THRESHOLD_MS).toBe(2 * DAY_MS);
   });
 
-  it("returns fresh and pages no one when both backup + drill are within threshold", async () => {
+  it("returns fresh and pages no one when backup, drill, and offsite are all within threshold", async () => {
     await insertBackup(new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000)); // 1h old
     await insertDrill(new Date(FAR_FUTURE.getTime() - 1 * DAY_MS)); // 1d old
+    await insertOffsite(new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000)); // 1h old
     const { calls, notify } = makeNotifySpy();
 
     const r = await checkBackupFreshness({ now: FAR_FUTURE, notify });
@@ -359,6 +406,8 @@ describe("checkBackupFreshness", () => {
     expect(r.alertId).toBeNull();
     expect(r.backup.ageMs).toBeLessThan(DEFAULT_BACKUP_STALE_THRESHOLD_MS);
     expect(r.drill.ageMs).toBeLessThan(DEFAULT_DRILL_STALE_THRESHOLD_MS);
+    expect(r.offsite.ageMs).toBeLessThan(DEFAULT_OFFSITE_STALE_THRESHOLD_MS);
+    expect(r.offsite.thresholdMs).toBe(DEFAULT_OFFSITE_STALE_THRESHOLD_MS);
     expect(calls).toHaveLength(0);
   });
 
@@ -388,18 +437,27 @@ describe("checkBackupFreshness", () => {
   it("pages once warming-up has elapsed and no run history exists", async () => {
     await db.delete(databaseBackupRuns);
     await db.delete(databaseRestoreDrillRuns);
+    // Offsite rows are scoped by jobName so we don't blast the whole table.
+    await db
+      .delete(backgroundJobRuns)
+      .where(eq(backgroundJobRuns.jobName, OFFSITE_BACKUP_JOB_NAME));
 
     const { calls, notify } = makeNotifySpy();
     const r = await checkBackupFreshness({
       now: FAR_FUTURE,
-      // Uptime well past both thresholds: warming-up suppression no longer
-      // applies, so the absence of any successful run becomes a real page.
+      // Uptime well past every threshold: warming-up suppression no longer
+      // applies on any axis, so the absence of any successful run becomes
+      // a real page on all three.
       serverUptimeMs: 30 * DAY_MS,
       notify,
     });
 
     expect(r.fired).toBe(true);
-    expect(r.reasons.sort()).toEqual(["backup-never-run", "drill-never-run"]);
+    expect(r.reasons.slice().sort()).toEqual([
+      "backup-never-run",
+      "drill-never-run",
+      "offsite-never-run",
+    ]);
     expect(r.alertId).toBe(999_001);
     expect(calls).toHaveLength(1);
   });
@@ -492,6 +550,256 @@ describe("checkBackupFreshness", () => {
     expect(strictResult.fired).toBe(true);
     expect(strictResult.reasons).toEqual(["backup-stale"]);
     expect(strict.calls).toHaveLength(1);
+  });
+
+  it("pages when the offsite sync is stale but backup + drill are fresh", async () => {
+    // The motivating scenario for Task #260: local backup tile stays green
+    // (recent backup + drill) but the offsite cron silently broke and the
+    // last successful S3 sync was days ago. Until this watchdog landed, the
+    // operator only found out during a real incident.
+    await insertBackup(new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000));
+    await insertDrill(new Date(FAR_FUTURE.getTime() - 1 * DAY_MS));
+    await insertOffsite(new Date(FAR_FUTURE.getTime() - 5 * DAY_MS));
+    const { calls, notify } = makeNotifySpy();
+
+    const r = await checkBackupFreshness({ now: FAR_FUTURE, notify });
+
+    expect(r.fired).toBe(true);
+    expect(r.reasons).toEqual(["offsite-stale"]);
+    expect(r.alertId).toBe(999_001);
+    expect(calls).toHaveLength(1);
+
+    const alert = calls[0];
+    expect(alert.source).toBe("database-backup-watchdog");
+    expect(alert.severity).toBe("alert");
+    expect(alert.title).toMatch(/offsite sync/i);
+    const details = alert.details as
+      | {
+          reasons: string[];
+          offsiteAgeHours: number | null;
+          offsiteThresholdHours: number;
+          offsiteMostRecentSuccessAt: string | null;
+          hint: string;
+        }
+      | undefined;
+    expect(details).toBeDefined();
+    expect(details?.reasons).toEqual(["offsite-stale"]);
+    expect(details?.offsiteAgeHours).toBe(5 * 24);
+    expect(details?.offsiteThresholdHours).toBe(48);
+    expect(details?.offsiteMostRecentSuccessAt).toBe(
+      new Date(FAR_FUTURE.getTime() - 5 * DAY_MS).toISOString(),
+    );
+    // The hint must point operators at the runbook the task spec calls out.
+    expect(details?.hint).toMatch(/docs\/runbooks\/rollback\.md/);
+  });
+
+  it("ignores offsite rows whose status is 'error' when computing freshness", async () => {
+    // A recent failed offsite-sync row must NOT silence the watchdog —
+    // mirrors the same rule for backup / drill rows.
+    await insertBackup(new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000));
+    await insertDrill(new Date(FAR_FUTURE.getTime() - 1 * DAY_MS));
+    await insertOffsite(
+      new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000),
+      "error",
+    );
+    await insertOffsite(new Date(FAR_FUTURE.getTime() - 5 * DAY_MS), "success");
+    const { calls, notify } = makeNotifySpy();
+
+    const r = await checkBackupFreshness({ now: FAR_FUTURE, notify });
+
+    expect(r.fired).toBe(true);
+    expect(r.reasons).toEqual(["offsite-stale"]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rolls a stale offsite reason into a single alert with stale backup/drill", async () => {
+    // Three failing axes still produce ONE page, not three.
+    await insertBackup(new Date(FAR_FUTURE.getTime() - 5 * DAY_MS));
+    await insertDrill(new Date(FAR_FUTURE.getTime() - 30 * DAY_MS));
+    await insertOffsite(new Date(FAR_FUTURE.getTime() - 5 * DAY_MS));
+    const { calls, notify } = makeNotifySpy();
+
+    const r = await checkBackupFreshness({ now: FAR_FUTURE, notify });
+
+    expect(r.fired).toBe(true);
+    expect(r.reasons.slice().sort()).toEqual([
+      "backup-stale",
+      "drill-stale",
+      "offsite-stale",
+    ]);
+    expect(calls).toHaveLength(1);
+    const details = calls[0].details as { reasons: string[] };
+    expect(details.reasons.slice().sort()).toEqual([
+      "backup-stale",
+      "drill-stale",
+      "offsite-stale",
+    ]);
+  });
+
+  it("pages offsite-never-run once warming-up has elapsed", async () => {
+    // Offsite cron has NEVER recorded a success but local backup + drill
+    // have. Once we're past the offsite threshold, that absence pages on
+    // its own — the most-likely failure mode for a new bucket / IAM role.
+    await insertBackup(new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000));
+    await insertDrill(new Date(FAR_FUTURE.getTime() - 1 * DAY_MS));
+    const { calls, notify } = makeNotifySpy();
+
+    const r = await checkBackupFreshness({
+      now: FAR_FUTURE,
+      serverUptimeMs: 30 * DAY_MS,
+      notify,
+    });
+
+    expect(r.fired).toBe(true);
+    expect(r.reasons).toEqual(["offsite-never-run"]);
+    expect(calls).toHaveLength(1);
+    expect(r.offsite.mostRecentSuccessAt).toBeNull();
+  });
+
+  it("respects a custom offsiteStaleThresholdMs override", async () => {
+    // Offsite is 36h old. Default threshold (48h) → fresh; tightened
+    // threshold (24h) → stale. Mirrors the `respects custom thresholds`
+    // test for the backup axis.
+    await insertBackup(new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000));
+    await insertDrill(new Date(FAR_FUTURE.getTime() - 1 * DAY_MS));
+    await insertOffsite(new Date(FAR_FUTURE.getTime() - 36 * 60 * 60 * 1000));
+
+    const lax = makeNotifySpy();
+    const laxResult = await checkBackupFreshness({
+      now: FAR_FUTURE,
+      notify: lax.notify,
+    });
+    expect(laxResult.fired).toBe(false);
+    expect(lax.calls).toHaveLength(0);
+
+    const strict = makeNotifySpy();
+    const strictResult = await checkBackupFreshness({
+      now: FAR_FUTURE,
+      offsiteStaleThresholdMs: 24 * 60 * 60 * 1000,
+      notify: strict.notify,
+    });
+    expect(strictResult.fired).toBe(true);
+    expect(strictResult.reasons).toEqual(["offsite-stale"]);
+    expect(strict.calls).toHaveLength(1);
+  });
+
+  it("honours the DB_BACKUP_OFFSITE_STALE_HOURS env var as the default", async () => {
+    // The env var is the documented operator knob — confirm a value of 24
+    // tightens the default and a value of 168 (1 week) loosens it. Mirrors
+    // the env-var assertions for `getRetentionCount`.
+    const original = process.env.DB_BACKUP_OFFSITE_STALE_HOURS;
+    try {
+      // Backup + drill must be present so the only axis under test is the
+      // offsite-stale one (otherwise the warming-up branch could intervene).
+      await insertBackup(new Date(FAR_FUTURE.getTime() - 60 * 60 * 1000));
+      await insertDrill(new Date(FAR_FUTURE.getTime() - 1 * DAY_MS));
+      await insertOffsite(new Date(FAR_FUTURE.getTime() - 36 * 60 * 60 * 1000));
+
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "24";
+      expect(getOffsiteStaleThresholdMs()).toBe(24 * 60 * 60 * 1000);
+      const tight = makeNotifySpy();
+      const tightResult = await checkBackupFreshness({
+        now: FAR_FUTURE,
+        notify: tight.notify,
+      });
+      expect(tightResult.fired).toBe(true);
+      expect(tightResult.reasons).toEqual(["offsite-stale"]);
+      expect(tight.calls).toHaveLength(1);
+
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "168"; // 7 days
+      expect(getOffsiteStaleThresholdMs()).toBe(168 * 60 * 60 * 1000);
+      const loose = makeNotifySpy();
+      const looseResult = await checkBackupFreshness({
+        now: FAR_FUTURE,
+        notify: loose.notify,
+      });
+      expect(looseResult.fired).toBe(false);
+      expect(loose.calls).toHaveLength(0);
+    } finally {
+      if (original === undefined) {
+        delete process.env.DB_BACKUP_OFFSITE_STALE_HOURS;
+      } else {
+        process.env.DB_BACKUP_OFFSITE_STALE_HOURS = original;
+      }
+    }
+  });
+
+  it("falls back to the default when DB_BACKUP_OFFSITE_STALE_HOURS is non-numeric, zero, whitespace, or has trailing junk", () => {
+    const original = process.env.DB_BACKUP_OFFSITE_STALE_HOURS;
+    try {
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "many";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "0";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "-12";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "   ";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      // Trailing junk — `parseInt("24h", 10)` would return 24 and silently
+      // accept the misconfiguration. Strict-parser must reject it so the
+      // fail-closed contract advertised in docs/runbooks/rollback.md holds.
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "24h";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "24abc";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      // Decimals and exponent forms should also be rejected — the
+      // threshold is documented as "positive integer hours".
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "24.5";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      process.env.DB_BACKUP_OFFSITE_STALE_HOURS = "1e3";
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+      delete process.env.DB_BACKUP_OFFSITE_STALE_HOURS;
+      expect(getOffsiteStaleThresholdMs()).toBe(
+        DEFAULT_OFFSITE_STALE_THRESHOLD_MS,
+      );
+    } finally {
+      if (original === undefined) {
+        delete process.env.DB_BACKUP_OFFSITE_STALE_HOURS;
+      } else {
+        process.env.DB_BACKUP_OFFSITE_STALE_HOURS = original;
+      }
+    }
+  });
+
+  it("rejects a non-positive offsiteStaleThresholdMs", async () => {
+    const { notify } = makeNotifySpy();
+    await expect(
+      checkBackupFreshness({
+        offsiteStaleThresholdMs: 0,
+        now: FAR_FUTURE,
+        notify,
+      }),
+    ).rejects.toThrow(/offsiteStaleThresholdMs must be positive/);
+    await expect(
+      checkBackupFreshness({
+        offsiteStaleThresholdMs: -5,
+        now: FAR_FUTURE,
+        notify,
+      }),
+    ).rejects.toThrow(/offsiteStaleThresholdMs must be positive/);
+    await expect(
+      checkBackupFreshness({
+        offsiteStaleThresholdMs: Number.NaN,
+        now: FAR_FUTURE,
+        notify,
+      }),
+    ).rejects.toThrow(/offsiteStaleThresholdMs must be positive/);
   });
 
   it("rejects a non-positive backupStaleThresholdMs", async () => {

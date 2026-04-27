@@ -41,10 +41,11 @@
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import * as path from "path";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "../db";
 import {
+  backgroundJobRuns,
   databaseBackupRuns,
   databaseRestoreDrillRuns,
   type DatabaseBackupRun,
@@ -72,6 +73,16 @@ export const DEFAULT_RETENTION_COUNT = 14;
 export const DEFAULT_BACKUP_STALE_THRESHOLD_MS = 2 * DAY_MS;
 /** Weekly drill considered stale once it falls outside this window. */
 export const DEFAULT_DRILL_STALE_THRESHOLD_MS = 14 * DAY_MS;
+/**
+ * Offsite-sync (`scripts/db-backup-offsite.sh`) considered stale once it
+ * falls outside this window. Default mirrors the local-backup window
+ * because the offsite cron runs the same day as the local cron — anything
+ * older than 2 days means the S3 sync has been broken for at least one
+ * full day, which is exactly what we want to page on.
+ */
+export const DEFAULT_OFFSITE_STALE_THRESHOLD_MS = 2 * DAY_MS;
+/** Stable jobName persisted by the offsite-sync recorder. */
+export const OFFSITE_BACKUP_JOB_NAME = "database-backup-offsite";
 /** Cap on stored error / detail strings so a runaway message can't bloat a row. */
 const MAX_ERROR_LEN = 1000;
 
@@ -102,6 +113,26 @@ export function getRetentionCount(): number {
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 1) return DEFAULT_RETENTION_COUNT;
   return n;
+}
+
+/**
+ * Resolve the offsite-stale threshold from the environment. Honours
+ * `DB_BACKUP_OFFSITE_STALE_HOURS` (positive integer hours) and falls back
+ * to `DEFAULT_OFFSITE_STALE_THRESHOLD_MS` on any non-positive / unparseable
+ * value so a typo in the deployment config cannot silently disable the
+ * watchdog.
+ */
+export function getOffsiteStaleThresholdMs(): number {
+  const raw = process.env.DB_BACKUP_OFFSITE_STALE_HOURS;
+  if (!raw) return DEFAULT_OFFSITE_STALE_THRESHOLD_MS;
+  const trimmed = raw.trim();
+  // Strict positive-integer parser. We deliberately reject decimals, signs,
+  // exponents, and trailing junk like "24h" or "24abc" so a typo in the
+  // deployment config cannot silently disable the watchdog (fail-closed).
+  if (!/^[1-9][0-9]*$/.test(trimmed)) return DEFAULT_OFFSITE_STALE_THRESHOLD_MS;
+  const n = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(n) || n < 1) return DEFAULT_OFFSITE_STALE_THRESHOLD_MS;
+  return n * 60 * 60 * 1000;
 }
 
 function truncate(s: string | null | undefined): string | null {
@@ -881,6 +912,45 @@ export async function getMostRecentSuccessfulRestoreDrill(): Promise<DatabaseRes
   return row ?? null;
 }
 
+export interface OffsiteSyncRecord {
+  startedAt: Date;
+  finishedAt: Date | null;
+  durationMs: number | null;
+  summary: string | null;
+}
+
+/**
+ * Most recent successful offsite-sync run, recorded by
+ * `scripts/db-backup-offsite.sh` via the `database-backup-offsite` jobName
+ * in `background_job_runs`. Returns `null` when the offsite cron has never
+ * reported a success — which the watchdog treats as `offsite-never-run`
+ * (subject to the warming-up window so a brand-new server is not paged on
+ * a job that simply hasn't ticked yet).
+ *
+ * Read-only — never inserts a row, so the watchdog cannot accidentally
+ * reset the staleness clock and silence itself.
+ */
+export async function getMostRecentSuccessfulOffsiteSync(): Promise<OffsiteSyncRecord | null> {
+  const [row] = await db
+    .select()
+    .from(backgroundJobRuns)
+    .where(
+      and(
+        eq(backgroundJobRuns.jobName, OFFSITE_BACKUP_JOB_NAME),
+        eq(backgroundJobRuns.status, "success"),
+      ),
+    )
+    .orderBy(desc(backgroundJobRuns.startedAt))
+    .limit(1);
+  if (!row) return null;
+  return {
+    startedAt: row.startedAt,
+    finishedAt: row.finishedAt,
+    durationMs: row.durationMs,
+    summary: row.summary,
+  };
+}
+
 export interface BackupStatusSummary {
   enabled: boolean;
   backupDir: string | null;
@@ -945,6 +1015,12 @@ export interface CheckBackupFreshnessOptions {
   backupStaleThresholdMs?: number;
   /** Override the drill-stale threshold. */
   drillStaleThresholdMs?: number;
+  /**
+   * Override the offsite-stale threshold. Defaults to
+   * `getOffsiteStaleThresholdMs()` (env-configurable via
+   * `DB_BACKUP_OFFSITE_STALE_HOURS`, default 48 h).
+   */
+  offsiteStaleThresholdMs?: number;
   /** Override "now". */
   now?: Date;
   /** Override server uptime (ms) used for the warming-up suppression. */
@@ -959,7 +1035,9 @@ export type BackupFreshnessReason =
   | "backup-stale"
   | "backup-never-run"
   | "drill-stale"
-  | "drill-never-run";
+  | "drill-never-run"
+  | "offsite-stale"
+  | "offsite-never-run";
 
 export interface BackupFreshnessResult {
   fired: boolean;
@@ -970,6 +1048,11 @@ export interface BackupFreshnessResult {
     thresholdMs: number;
   };
   drill: {
+    mostRecentSuccessAt: Date | null;
+    ageMs: number | null;
+    thresholdMs: number;
+  };
+  offsite: {
     mostRecentSuccessAt: Date | null;
     ageMs: number | null;
     thresholdMs: number;
@@ -994,6 +1077,8 @@ export async function checkBackupFreshness(
     options.backupStaleThresholdMs ?? DEFAULT_BACKUP_STALE_THRESHOLD_MS;
   const drillThresholdMs =
     options.drillStaleThresholdMs ?? DEFAULT_DRILL_STALE_THRESHOLD_MS;
+  const offsiteThresholdMs =
+    options.offsiteStaleThresholdMs ?? getOffsiteStaleThresholdMs();
   if (!Number.isFinite(backupThresholdMs) || backupThresholdMs <= 0) {
     throw new Error(
       `checkBackupFreshness: backupStaleThresholdMs must be positive (got ${backupThresholdMs})`,
@@ -1004,6 +1089,11 @@ export async function checkBackupFreshness(
       `checkBackupFreshness: drillStaleThresholdMs must be positive (got ${drillThresholdMs})`,
     );
   }
+  if (!Number.isFinite(offsiteThresholdMs) || offsiteThresholdMs <= 0) {
+    throw new Error(
+      `checkBackupFreshness: offsiteStaleThresholdMs must be positive (got ${offsiteThresholdMs})`,
+    );
+  }
   const now = options.now ?? new Date();
   const serverUptimeMs =
     options.serverUptimeMs ?? Math.floor(process.uptime() * 1000);
@@ -1011,16 +1101,24 @@ export async function checkBackupFreshness(
 
   const backup = await getMostRecentSuccessfulBackup();
   const drill = await getMostRecentSuccessfulRestoreDrill();
+  const offsite = await getMostRecentSuccessfulOffsiteSync();
 
   const reasons: BackupFreshnessReason[] = [];
   const backupAgeMs = backup ? now.getTime() - backup.startedAt.getTime() : null;
   const drillAgeMs = drill ? now.getTime() - drill.startedAt.getTime() : null;
+  const offsiteAgeMs = offsite
+    ? now.getTime() - offsite.startedAt.getTime()
+    : null;
 
   // Warming-up suppression: brand-new server with no run history is not
   // paged unless uptime exceeds the relevant threshold. This mirrors the
-  // operator-alerts-prune watchdog so the two behave consistently.
+  // operator-alerts-prune watchdog so the two behave consistently. Each
+  // axis is suppressed independently — a missing offsite row on a server
+  // that has been up for years still pages, but on a freshly-restored
+  // host it stays quiet for the warming-up window.
   const warmingUpForBackup = !backup && serverUptimeMs < backupThresholdMs;
   const warmingUpForDrill = !drill && serverUptimeMs < drillThresholdMs;
+  const warmingUpForOffsite = !offsite && serverUptimeMs < offsiteThresholdMs;
 
   if (!backup) {
     if (!warmingUpForBackup) reasons.push("backup-never-run");
@@ -1032,46 +1130,77 @@ export async function checkBackupFreshness(
   } else if (drillAgeMs !== null && drillAgeMs > drillThresholdMs) {
     reasons.push("drill-stale");
   }
+  if (!offsite) {
+    if (!warmingUpForOffsite) reasons.push("offsite-never-run");
+  } else if (offsiteAgeMs !== null && offsiteAgeMs > offsiteThresholdMs) {
+    reasons.push("offsite-stale");
+  }
+
+  const backupSlice = {
+    mostRecentSuccessAt: backup?.startedAt ?? null,
+    ageMs: backupAgeMs,
+    thresholdMs: backupThresholdMs,
+  };
+  const drillSlice = {
+    mostRecentSuccessAt: drill?.startedAt ?? null,
+    ageMs: drillAgeMs,
+    thresholdMs: drillThresholdMs,
+  };
+  const offsiteSlice = {
+    mostRecentSuccessAt: offsite?.startedAt ?? null,
+    ageMs: offsiteAgeMs,
+    thresholdMs: offsiteThresholdMs,
+  };
 
   if (reasons.length === 0) {
-    if (warmingUpForBackup || warmingUpForDrill) {
+    if (warmingUpForBackup || warmingUpForDrill || warmingUpForOffsite) {
       return {
         fired: false,
         reasons: ["warming-up"],
-        backup: {
-          mostRecentSuccessAt: backup?.startedAt ?? null,
-          ageMs: backupAgeMs,
-          thresholdMs: backupThresholdMs,
-        },
-        drill: {
-          mostRecentSuccessAt: drill?.startedAt ?? null,
-          ageMs: drillAgeMs,
-          thresholdMs: drillThresholdMs,
-        },
+        backup: backupSlice,
+        drill: drillSlice,
+        offsite: offsiteSlice,
         alertId: null,
       };
     }
     return {
       fired: false,
       reasons: ["fresh"],
-      backup: {
-        mostRecentSuccessAt: backup?.startedAt ?? null,
-        ageMs: backupAgeMs,
-        thresholdMs: backupThresholdMs,
-      },
-      drill: {
-        mostRecentSuccessAt: drill?.startedAt ?? null,
-        ageMs: drillAgeMs,
-        thresholdMs: drillThresholdMs,
-      },
+      backup: backupSlice,
+      drill: drillSlice,
+      offsite: offsiteSlice,
       alertId: null,
     };
   }
 
+  // Title is the union of the failing axes so the operator-alerts UI
+  // doesn't surface "backup OR drill is stale" when only the offsite cron
+  // is broken (the most-likely real-world failure mode this task targets).
+  const failingAxes: string[] = [];
+  if (
+    reasons.includes("backup-stale") ||
+    reasons.includes("backup-never-run")
+  ) {
+    failingAxes.push("backup");
+  }
+  if (reasons.includes("drill-stale") || reasons.includes("drill-never-run")) {
+    failingAxes.push("restore drill");
+  }
+  if (
+    reasons.includes("offsite-stale") ||
+    reasons.includes("offsite-never-run")
+  ) {
+    failingAxes.push("offsite sync");
+  }
+  const title =
+    failingAxes.length === 0
+      ? "Database backup or restore drill is stale"
+      : `Database ${failingAxes.join(", ")} is stale`;
+
   const result = await notify({
     source: "database-backup-watchdog",
     severity: "alert",
-    title: "Database backup or restore drill is stale",
+    title,
     details: {
       reasons,
       backupAgeHours:
@@ -1082,25 +1211,28 @@ export async function checkBackupFreshness(
         drillAgeMs !== null ? Math.round(drillAgeMs / (60 * 60 * 1000)) : null,
       drillThresholdHours: Math.round(drillThresholdMs / (60 * 60 * 1000)),
       drillMostRecentSuccessAt: drill?.startedAt.toISOString() ?? null,
+      offsiteAgeHours:
+        offsiteAgeMs !== null
+          ? Math.round(offsiteAgeMs / (60 * 60 * 1000))
+          : null,
+      offsiteThresholdHours: Math.round(offsiteThresholdMs / (60 * 60 * 1000)),
+      offsiteMostRecentSuccessAt: offsite?.startedAt.toISOString() ?? null,
       hint:
-        "See docs/runbooks/rollback.md. Verify DB_BACKUP_DIR is writable, " +
-        "pg_dump is on PATH, and the daily backup cron is registered.",
+        "See docs/runbooks/rollback.md. For local-backup failures verify " +
+        "DB_BACKUP_DIR is writable, pg_dump is on PATH, and the daily " +
+        "backup cron is registered. For offsite failures verify the " +
+        "scripts/db-backup-offsite.sh host cron, the AWS credentials / " +
+        "DB_BACKUP_OFFSITE_BUCKET, and that the script is recording its " +
+        "outcome to background_job_runs.",
     },
   });
 
   return {
     fired: true,
     reasons,
-    backup: {
-      mostRecentSuccessAt: backup?.startedAt ?? null,
-      ageMs: backupAgeMs,
-      thresholdMs: backupThresholdMs,
-    },
-    drill: {
-      mostRecentSuccessAt: drill?.startedAt ?? null,
-      ageMs: drillAgeMs,
-      thresholdMs: drillThresholdMs,
-    },
+    backup: backupSlice,
+    drill: drillSlice,
+    offsite: offsiteSlice,
     alertId: result?.alertId ?? null,
   };
 }

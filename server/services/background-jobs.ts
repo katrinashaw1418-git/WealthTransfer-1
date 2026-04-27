@@ -133,6 +133,12 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
       "Daily check that both the daily backup and the weekly restore drill have run successfully within their freshness windows.",
   },
   {
+    name: "database-backup-offsite",
+    label: "Database backup offsite sync",
+    description:
+      "Daily aws s3 sync of $DB_BACKUP_DIR up to s3://$DB_BACKUP_OFFSITE_BUCKET/$DB_BACKUP_OFFSITE_PREFIX/, recorded by scripts/db-backup-offsite.sh + scripts/record-offsite-backup-run.ts so the watchdog can page when the offsite cron silently breaks.",
+  },
+  {
     name: "nightly-go-no-go",
     label: "Nightly launch readiness gate",
     description:
