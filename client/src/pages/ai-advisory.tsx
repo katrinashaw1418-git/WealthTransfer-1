@@ -7,18 +7,6 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/queryClient";
 import { ExternalLink } from "lucide-react";
 
-const allocationData = [
-  { asset: "Cash allocation (fiat)", current: 47, benchmark: 30, diff: -17 },
-  { asset: "Digital asset exposure", current: 1, benchmark: 10, diff: 9 },
-  { asset: "USD-denominated digital", current: 2, benchmark: 25, diff: 23 },
-  { asset: "Investment products", current: 50, benchmark: 30, diff: -20 },
-];
-
-const soaItems = [
-  { title: "Initial SOA — portfolio strategy", desc: "Requested 2 Aug 2025 · Pending adviser review", status: "Pending", color: "bg-amber-100 text-amber-700" },
-  { title: "Risk questionnaire acknowledgement", desc: "Completed 2 Aug 2025", status: "Complete", color: "bg-green-100 text-green-700" },
-  { title: "Fact-find submission", desc: "Submitted 2 Aug 2025", status: "Complete", color: "bg-green-100 text-green-700" },
-];
 
 function getRiskLabel(v: number) {
   if (v <= 20) return "Conservative";
@@ -160,29 +148,12 @@ export default function AiAdvisory() {
             <p className="text-sm text-gray-600">Not a suggestion to act. Any rebalancing must be discussed with your adviser and documented in a Statement of Advice.</p>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-gray-500">
-                  <th className="text-left py-2 font-medium">Asset class</th>
-                  <th className="text-left py-2 font-medium">Current</th>
-                  <th className="text-left py-2 font-medium">Illustrative benchmark</th>
-                  <th className="text-left py-2 font-medium">Difference</th>
-                </tr>
-              </thead>
-              <tbody>
-                {allocationData.map((row, i) => (
-                  <tr key={i} className="border-b border-gray-100">
-                    <td className="py-3 text-gray-900">{row.asset}</td>
-                    <td className="py-3">{row.current}%</td>
-                    <td className="py-3">{row.benchmark}%</td>
-                    <td className={`py-3 ${row.diff > 0 ? "text-green-600" : row.diff < 0 ? "text-red-600" : ""}`}>
-                      {row.diff > 0 ? "+" : ""}{row.diff}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center">
+            <p className="text-sm font-medium text-gray-700">No personal allocation comparison available</p>
+            <p className="mt-1 text-xs text-gray-500">
+              A personalised benchmark must be set by your licensed adviser as part of a Statement of Advice.
+              No illustrative comparison is shown until then.
+            </p>
           </div>
 
           <Button variant="outline" size="sm" className="text-blue-600 border-blue-200">
@@ -204,15 +175,13 @@ export default function AiAdvisory() {
       <Card>
         <CardContent className="p-6 space-y-4">
           <p className="font-semibold text-gray-900">Statements of Advice</p>
-          {soaItems.map((item, i) => (
-            <div key={i} className="flex items-center justify-between py-3 border-b border-gray-100 last:border-0">
-              <div>
-                <p className="font-medium text-gray-900">{item.title}</p>
-                <p className="text-sm text-gray-500">{item.desc}</p>
-              </div>
-              <Badge className={item.color}>{item.status}</Badge>
-            </div>
-          ))}
+          <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center">
+            <p className="text-sm font-medium text-gray-700">No Statements of Advice on record</p>
+            <p className="mt-1 text-xs text-gray-500">
+              Your adviser will list any issued or pending SOAs here once they have been generated and
+              recorded against your file. Nothing is displayed here until then.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

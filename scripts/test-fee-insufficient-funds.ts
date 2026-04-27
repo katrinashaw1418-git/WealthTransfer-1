@@ -112,7 +112,9 @@ async function ensureFreshTestWallet(userId: number): Promise<void> {
 }
 
 async function cleanupForUser(userId: number): Promise<void> {
-  // ledger_entries → transactions (FK), then deductions / wallets / accounts.
+  // FK chain: ledger_entries / ledger_postings → transactions ← adviser_fee_deductions.
+  // Order: drop ledger refs, drop fee_deductions (which FK transactions), then transactions,
+  // then wallets / accounts (which transactions and ledger_entries reference).
   await db.execute(sql`
     DELETE FROM ledger_entries
     WHERE transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})
@@ -121,13 +123,19 @@ async function cleanupForUser(userId: number): Promise<void> {
     DELETE FROM ledger_entries
     WHERE account_id IN (SELECT id FROM accounts WHERE user_id = ${userId})
   `);
-  await db.delete(transactions).where(eq(transactions.userId, userId));
+  await db.execute(sql`
+    DELETE FROM ledger_postings
+    WHERE transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})
+  `);
+  // adviser_fee_deductions has FKs settled_transaction_id / reversal_transaction_id → transactions.
+  // Must drop before deleting the tx rows they point at.
   await db
     .delete(adviserFeeDeductions)
     .where(eq(adviserFeeDeductions.clientUserId, userId));
   await db
     .delete(adviserFeeDeductions)
     .where(eq(adviserFeeDeductions.adviserUserId, userId));
+  await db.delete(transactions).where(eq(transactions.userId, userId));
   await db.delete(wallets).where(eq(wallets.userId, userId));
   await db.delete(accounts).where(eq(accounts.userId, userId));
 }

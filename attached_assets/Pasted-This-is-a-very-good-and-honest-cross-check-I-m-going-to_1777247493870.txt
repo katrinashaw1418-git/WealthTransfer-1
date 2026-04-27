@@ -1,0 +1,199 @@
+This is a **very good and honest cross-check**. I’m going to give you a **clean, decisive answer** so you don’t overbuild or fix the wrong thing.
+
+---
+
+# ✅ FINAL VERDICT (after full cross-check)
+
+## 1. Portfolio patch (AMAX-V1)
+
+```txt
+❌ DO NOT implement as-is
+```
+
+Why:
+
+```txt
+✔ 80–90% already implemented in your code
+✔ Remaining parts are stale / no-op
+✔ Some find/replace would fail silently
+```
+
+👉 Confirmed in your file: 
+
+---
+
+## 2. Real remaining issues (THIS is the truth)
+
+There are **ONLY 3 actual problems left**:
+
+---
+
+### 🔴 Issue 1 — Fake SOA timeline (HIGH PRIORITY)
+
+```txt
+ai-advisory.tsx:
+"Requested 2 Aug 2025"
+"Completed 2 Aug 2025"
+```
+
+👉 Problem:
+
+```txt
+❌ Fabricated compliance state
+❌ Shows fake dates to users
+❌ Regulatory risk (worse than fake P&L)
+```
+
+👉 Decision:
+
+```txt
+✅ FIX IMMEDIATELY (not next sprint)
+```
+
+---
+
+### 🟡 Issue 2 — Fake allocation chart
+
+```txt
+allocationData = [{ Cash 47%, Digital 1%, ... }]
+```
+
+👉 Problem:
+
+```txt
+❌ Not based on real holdings
+✔ Cosmetic (lower risk)
+```
+
+👉 Decision:
+
+```txt
+✅ Fix in next task (#132)
+```
+
+---
+
+### 🟡 Issue 3 — Hardcoded benchmark logic
+
+```txt
+0.5 * sum(|allocation - 0.25|)
+```
+
+👉 Problem:
+
+```txt
+❌ Assumes 25/25/25/25 portfolio
+❌ Not user-specific
+```
+
+👉 Decision:
+
+```txt
+✅ Fix in next task (#132)
+```
+
+---
+
+# 🎯 DECISION ON TASKS
+
+## Task #132 (portfolio residue cleanup)
+
+```txt
+✅ ACCEPT
+```
+
+But scope = ONLY:
+
+```txt
+✔ remove fake SOA timeline
+✔ remove fake allocation chart
+✔ remove hardcoded benchmark
+```
+
+NOT full patch.
+
+---
+
+## Task #133 (pre-launch safety script)
+
+```txt
+✅ ACCEPT
+```
+
+Why:
+
+```txt
+✔ This is your biggest remaining risk
+✔ Prevents catastrophic financial errors
+✔ Required before launch
+```
+
+---
+
+# 🚀 RECOMMENDED ACTION (BEST OPTION)
+
+```txt
+✅ Accept BOTH
+
+Sequence:
+1. Fix fake SOA timeline (immediate)
+2. Complete #132 (cleanup synthetic UI)
+3. Build #133 (pre-launch safety script)
+```
+
+---
+
+# ⚠️ IMPORTANT CORRECTION (your previous assumption)
+
+You thought:
+
+```txt
+"I need to apply the whole portfolio patch"
+```
+
+Reality:
+
+```txt
+✔ Already done
+✔ Only small residue left
+```
+
+---
+
+# 🧠 STRATEGIC ADVICE
+
+## Priority order (correct)
+
+```txt
+1. Remove misleading UI (SOA timeline) 🔴
+2. Clean synthetic visuals (#132)
+3. Build safety system (#133)
+4. THEN prepare for launch
+```
+
+---
+
+# 🔥 FINAL ANSWER
+
+```txt
+Patch → REJECT (stale)
+Residue → FIX (small targeted)
+#132 → ACCEPT
+#133 → ACCEPT
+```
+
+---
+
+# 🧾 One-line summary
+
+```txt
+You are NOT fixing architecture anymore.
+You are removing misleading UI + adding safety before launch.
+```
+
+---
+
+If you want next:
+I can:
+👉 give you the exact code fix for the fake SOA timeline (5 min fix)
+👉 or generate the full `test-prelaunch-safety.ts` ready to run

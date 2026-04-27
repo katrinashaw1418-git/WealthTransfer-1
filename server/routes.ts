@@ -2244,13 +2244,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? +(weightedInvReturn / totalInvested * 100).toFixed(2)
         : null;
 
-      // Rebalancing gap — one-sided turnover from equal-weight benchmark [0, 50%]
+      // Rebalancing gap — one-sided turnover from a 25/25/25/25 equal-weight benchmark [0, 50%].
+      // ILLUSTRATIVE math metric only — NOT a personal target. A personalised target must be set
+      // by an adviser in a Statement of Advice. Surfaced alongside `rebalancingBenchmarkType` so
+      // callers can present it honestly to the user.
       const rebalancingGap = 0.5 * (
         Math.abs(alloc.fiat       - 0.25) +
         Math.abs(alloc.crypto     - 0.25) +
         Math.abs(alloc.stablecoin - 0.25) +
         Math.abs(alloc.investment - 0.25)
       ) * 100;
+      const rebalancingBenchmarkType = "equal_weight_illustrative" as const;
+      const rebalancingBenchmarkNote =
+        "Compared against an illustrative equal-weight (25/25/25/25) benchmark. A personalised benchmark must be set by your adviser in a Statement of Advice.";
 
       // Snapshot history for period returns
       const now = new Date();
@@ -2389,6 +2395,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         contractedInvestmentReturn,
         hasProductRateCoverage,
         rebalancingGap: +rebalancingGap.toFixed(1),
+        rebalancingBenchmarkType,
+        rebalancingBenchmarkNote,
         historySource,
         hasSufficientHistory,
         hasMeaningfulHistory,
@@ -2653,9 +2661,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         totalValue,
       };
 
-      // Patch 6: Rebalancing gap — sum of absolute deviations from an equal-weight benchmark,
-      // scaled by 0.5 so the result is a "one-sided" turnover measure (0 = perfectly balanced).
-      // currentAllocation values are percentages [0–100]; convert to fractions [0–1] first.
+      // Rebalancing gap — sum of absolute deviations from a 25/25/25/25 equal-weight
+      // benchmark, scaled by 0.5 so the result is a "one-sided" turnover measure
+      // (0 = perfectly balanced). This is an ILLUSTRATIVE math metric only — it is
+      // NOT a personal target benchmark. A personalised target is set by an adviser
+      // in a Statement of Advice. The response surfaces `rebalancingBenchmarkType`
+      // so callers can present it honestly to the user.
       const allocationFractions = {
         fiat:       currentAllocation.fiat       / 100,
         crypto:     currentAllocation.crypto     / 100,
@@ -2668,6 +2679,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         Math.abs(allocationFractions.stablecoin - 0.25) +
         Math.abs(allocationFractions.investment - 0.25)
       );
+      const rebalancingBenchmarkType = "equal_weight_illustrative" as const;
+      const rebalancingBenchmarkNote =
+        "Compared against an illustrative equal-weight (25/25/25/25) benchmark. A personalised benchmark must be set by your adviser in a Statement of Advice.";
 
       // Generate recommendations based on risk profile
       const recommendations: Array<{ userId: number; type: string; title: string; description: string; severity: string; isRead: boolean }> = [];
@@ -2884,6 +2898,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         success: true,
         recommendations: decoratedRecommendations,
         rebalancingGap: +(rebalancingGap * 100).toFixed(1),
+        rebalancingBenchmarkType,
+        rebalancingBenchmarkNote,
         message: "AI recommendations generated successfully",
         disclaimer: "General advice only. Execution requires a Statement of Advice issued by a licensed adviser.",
       });
