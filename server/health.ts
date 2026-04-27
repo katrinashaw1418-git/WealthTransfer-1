@@ -1,8 +1,9 @@
 // =============================================================================
 // Task #157 — /health and /ready endpoints for uptime monitoring
+// (extended in Task #173 with /metrics — see registerMetricsRoute below)
 // =============================================================================
-// Two small unauthenticated GET endpoints intended for external monitors
-// (load balancers, uptime checkers, on-call rotas):
+// Three small unauthenticated GET endpoints intended for external monitors
+// (load balancers, uptime checkers, on-call rotas, Prometheus scrapers):
 //
 //   GET /health  — "is the process up and the primary DB reachable?"
 //                  200 ok | 503 degraded. Cheap enough to be hit on a
@@ -13,7 +14,12 @@
 //                  flagged isOverdue by the background-jobs health
 //                  snapshot)?" 200 ok | 503 degraded.
 //
-// Both endpoints:
+//   GET /metrics — Task #173. Prometheus text-format snapshot of HTTP
+//                  request count + latency histogram, DB pool saturation,
+//                  and background-job duration + success/error counts.
+//                  Mounted by `registerMetricsRoute` (server/metrics.ts).
+//
+// All three endpoints:
 //   * Do NOT require auth (uptime monitors don't carry credentials).
 //   * Are mounted outside `/api`, so the per-IP rate limiter and the
 //     `/api`-only request logger in `server/index.ts` never touch them.
@@ -47,6 +53,7 @@ import {
   getWriteKillSwitchState,
   type WriteKillSwitchState,
 } from "./services/write-kill-switch";
+import { registerMetricsRoute } from "./metrics";
 
 /** Hard cap on how long the DB ping is allowed to take before we mark the
  *  endpoint degraded. Matches the spec ("short timeout, e.g. 1s"). */
@@ -251,4 +258,10 @@ export function registerHealthRoutes(
     };
     res.status(ready ? 200 : 503).json(payload);
   });
+
+  // Task #173 — Prometheus /metrics endpoint. Mounted here so all three
+  // monitoring endpoints (/health, /ready, /metrics) come up together and
+  // share the same "outside /api, no auth, no rate limit, exempt from the
+  // request logger" envelope established for /health and /ready.
+  registerMetricsRoute(app);
 }

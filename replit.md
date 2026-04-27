@@ -1,5 +1,26 @@
 # Wealth Management Platform
 
+## Recent Changes (April 2026) — Task #173: Prometheus /metrics endpoint for trend dashboards
+
+The Task #157 `/health` and `/ready` endpoints answer "is the service up right now?". Task #173 adds the missing trend signal: a Prometheus-format `GET /metrics` endpoint mounted alongside them so an operator dashboard can chart request rates, latency percentiles, error counts per route, DB pool saturation, and background-job durations over time.
+
+**New module** (`server/metrics.ts`):
+- Zero-dependency hand-rendered Prometheus text format (v0.0.4) — no `prom-client` pulled in.
+- `metricsMiddleware` records every HTTP response into a module-level histogram keyed by `(route, method, status_class)`. Route is the **Express-matched pattern** (`req.route?.path`), so `/api/users/:id` collapses every individual id into one series; unmatched 404s bucket into `<unmatched>`. A `MAX_LABEL_TUPLES=500` cap folds runaway cardinality (URL fuzzing, etc.) into a single `__overflow__` series so the endpoint stays cheap to render.
+- Standard Prometheus default histogram buckets in seconds: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10` plus the mandatory `+Inf`. Cumulative buckets per spec.
+- The middleware skips `/metrics`, `/health`, `/ready` so monitor traffic doesn't contaminate the request-rate signal.
+- DB pool gauges read live off `pool.totalCount / idleCount / waitingCount` (the neon-serverless Pool extends pg-pool, which exposes them) plus a derived `db_pool_in_use = total - idle` so dashboards don't have to do the math per panel.
+- Background-job metrics (`background_job_runs_total{job,status}` counter, `background_job_last_duration_seconds{job}` gauge, `background_job_last_success_age_seconds{job}` gauge) are sourced **live from `background_job_runs`** so what `/metrics` reports always matches the admin "Background Jobs" page. Jobs registered in `KNOWN_BACKGROUND_JOBS` but never run still appear with zeroed counters so a never-fired cron flat-lines on the dashboard rather than disappearing entirely.
+- `registerMetricsRoute` returns the body with `Content-Type: text/plain; version=0.0.4; charset=utf-8` and `Cache-Control: no-store` so an upstream proxy can't serve a stale snapshot. Render failures return HTTP 500 with a `# metrics render failed: …` Prometheus comment line so a scraper parser doesn't choke on an HTML error page.
+
+**Wiring** (`server/health.ts`, `server/index.ts`):
+- `registerHealthRoutes` now also calls `registerMetricsRoute(app)` so `/health`, `/ready`, and `/metrics` come up together and share the same envelope: outside `/api`, no auth, exempt from the `/api`-only rate limiter and request logger.
+- `metricsMiddleware` is mounted globally in `server/index.ts` AFTER the request-id middleware and AFTER the rate limiter / write-kill-switch (so blocked writes still get counted in the 4xx panel) but BEFORE `registerRoutes` (so `req.route` is populated by the time `res.on('finish')` fires).
+
+**Tests** (`server/metrics.test.ts`, 15 cases): cover bucket-classification, status-class bucketing, multi-hit aggregation, MAX_LABEL_TUPLES overflow, all-eleven-bucket rendering, full HELP/TYPE preamble, DB pool gauge rendering, background-job rendering (including the "never ran" omission for the two gauges), the matched-route-pattern collapse (two hits to `/api/echo/abc` and `/api/echo/xyz` fold into one `/api/echo/:id` series), 5xx classification, the `/health/ready/metrics` exemption, and the render-failure 500 path.
+
+**Files**: `server/metrics.ts` (new), `server/metrics.test.ts` (new), `server/health.ts` (import + `registerMetricsRoute(app)` call + header docstring), `server/index.ts` (import + `app.use(metricsMiddleware)`).
+
 ## Recent Changes (April 2026) — Task #185: Stop withdrawals and other money routes from returning 500 on simultaneous retries
 
 Extended the Task #160 catch-block fix from `/api/deposit` to the four other money-movement routes that share the same SERIALIZABLE-race shape — `/api/withdraw`, `/api/fx-exchange`, `/api/wallets/transfer`, `/api/investments`. All five now hoist `idemKey` and `userIdForReplay` out of the try block and call `replayIdempotentOnSerializationFailure(error, userIdForReplay, "<route>", idemKey)` FIRST in the catch, returning 200 + `{ idempotent: true, ... }` when the winning request's stored response is found. This means a retried request that races another in-flight retry sharing the same Idempotency-Key now gets the winner's clean 200 instead of a 500 the client would naively retry (increasing duplicate-processing risk).

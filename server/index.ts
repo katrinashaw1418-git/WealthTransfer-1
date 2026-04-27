@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import rateLimit from "express-rate-limit";
 import { registerRoutes } from "./routes";
 import { registerHealthRoutes } from "./health";
+import { metricsMiddleware } from "./metrics";
 import { setupVite, serveStatic, log } from "./vite";
 import { recordServerError } from "./services/error-log";
 import { writeKillSwitchMiddleware } from "./middleware/write-kill-switch";
@@ -128,6 +129,18 @@ app.use(
 // against the abuse window) and BEFORE registerRoutes so no route handler
 // runs for a blocked write. GETs and admin requests pass through.
 app.use("/api", writeKillSwitchMiddleware);
+
+// Task #173 — Prometheus metrics collector. Mounted globally (not /api-
+// scoped) so it observes every request that reaches the app, then skips
+// the three monitor endpoints internally (/metrics, /health, /ready) so
+// scraper traffic doesn't skew the request-rate signal. Sits BEFORE
+// `registerRoutes` so `req.route` is populated by the time the response
+// finishes (we use that to label series with the matched route pattern,
+// e.g. `/api/users/:id`, instead of the raw URL — keeps cardinality
+// bounded). The /metrics endpoint itself is mounted by
+// `registerHealthRoutes` above and so is exempt from rate limiting and
+// the /api-only request logger.
+app.use(metricsMiddleware);
 
 app.use((req, res, next) => {
   const start = Date.now();
