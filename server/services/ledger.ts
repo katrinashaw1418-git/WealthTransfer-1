@@ -268,10 +268,17 @@ export async function getUserCurrencyBalance(
 //
 // Validation enforced before any insert:
 //   - Minimum 2 entries (debit + credit pair)
-//   - All entries share the same currency (multi-currency FX is its own pattern;
-//     it must produce two balanced single-currency journals, one per leg)
-//   - Total credits == total debits to within 1e-8 (the smallest unit of an
-//     8-decimal currency like BTC)
+//   - For each currency present in `entries`, total credits == total debits
+//     to within 1e-8 (the smallest unit of an 8-decimal currency like BTC).
+//     A single journal MAY span multiple currencies (e.g. an FX leg that
+//     debits the source currency on the client and credits the target
+//     currency on the client in the same posting), AS LONG AS each currency
+//     balances independently — that is the correct double-entry shape for
+//     FX/transfer flows. The previous "single-currency only" rule was a
+//     placeholder from before any caller posted FX through the primitive;
+//     callers that still want a single-currency journal pass entries that
+//     all share one currency and the per-currency check is identical to
+//     the old global check.
 // ---------------------------------------------------------------------------
 
 const EPSILON = 1e-8;
@@ -489,16 +496,14 @@ export async function postLedgerEntries(
     throw new Error("Ledger transaction must have at least two entries");
   }
 
-  const currency = entries[0].currency;
-  if (entries.some((e) => e.currency !== currency)) {
-    throw new Error(
-      "Multi-currency ledger entries require explicit FX transaction handling: " +
-        "split into two single-currency journals."
-    );
-  }
-
-  let totalCredits = 0;
-  let totalDebits = 0;
+  // Per-currency balance check. Group entries by currency and require each
+  // currency's debits and credits to match within EPSILON. This accepts a
+  // single multi-currency journal for FX-shaped flows while still catching
+  // any drift inside an individual currency leg. Iteration order over the
+  // Map is insertion order, so the FIRST currency seen is the FIRST leg
+  // checked — important so the LedgerUnbalancedError surfaces against the
+  // currency that actually tripped (instead of an arbitrary one).
+  const byCurrency = new Map<string, { credits: number; debits: number }>();
   for (const e of entries) {
     const amt = Number(e.amount);
     if (!Number.isFinite(amt) || amt <= 0) {
@@ -506,25 +511,54 @@ export async function postLedgerEntries(
         `Ledger entry amount must be a positive finite number; got: ${e.amount}`
       );
     }
-    if (e.direction === "credit") totalCredits += amt;
-    else if (e.direction === "debit") totalDebits += amt;
+    let bucket = byCurrency.get(e.currency);
+    if (!bucket) {
+      bucket = { credits: 0, debits: 0 };
+      byCurrency.set(e.currency, bucket);
+    }
+    if (e.direction === "credit") bucket.credits += amt;
+    else if (e.direction === "debit") bucket.debits += amt;
     else throw new Error(`Invalid ledger direction: ${e.direction}`);
   }
 
-  if (Math.abs(totalCredits - totalDebits) > EPSILON) {
-    // Task #54 — typed error so callers can map this specific failure to a
-    // 422 + clean user message and fire an operator alert. The throw must
-    // happen BEFORE any DB write (no claim row, no entries, no cache
-    // refresh) — that ordering is depended on by the route-level mapping
-    // (it's safe to early-return without rolling back state) and by the
-    // ledger.test.ts assertion that no entries leak.
-    throw new LedgerUnbalancedError(
-      transactionId,
-      totalCredits,
-      totalDebits,
-      currency,
-      entries.length,
-    );
+  // `forEach` instead of `for…of byCurrency` so this compiles without
+  // needing `--downlevelIteration` / a higher TS target — the project's
+  // tsconfig keeps Map iteration off by default. Iteration order is still
+  // insertion order (Map guarantees this), so the FIRST currency to
+  // imbalance is the one named in the LedgerUnbalancedError. We use a
+  // throw-from-callback by capturing into a local and throwing after.
+  let imbalance: { cur: string; credits: number; debits: number } | null = null;
+  byCurrency.forEach((bucket, cur) => {
+    if (
+      imbalance === null &&
+      Math.abs(bucket.credits - bucket.debits) > EPSILON
+    ) {
+      imbalance = { cur, credits: bucket.credits, debits: bucket.debits };
+    }
+  });
+  if (imbalance !== null) {
+    const { cur, credits, debits } = imbalance as {
+      cur: string;
+      credits: number;
+      debits: number;
+    };
+    {
+      // Task #54 — typed error so callers can map this specific failure to
+      // a 422 + clean user message and fire an operator alert. The throw
+      // must happen BEFORE any DB write (no claim row, no entries, no
+      // cache refresh) — that ordering is depended on by the route-level
+      // mapping (it's safe to early-return without rolling back state) and
+      // by the ledger.test.ts assertion that no entries leak. The currency
+      // carried in the error is the SPECIFIC leg that imbalanced, not an
+      // arbitrary one — operator alert routing depends on this.
+      throw new LedgerUnbalancedError(
+        transactionId,
+        credits,
+        debits,
+        cur,
+        entries.length,
+      );
+    }
   }
 
   // -----------------------------------------------------------------------

@@ -66,7 +66,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Express, Request } from "express";
-import { and, desc, eq, gt, inArray, like, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 
 import { db } from "../server/db";
@@ -632,49 +632,18 @@ async function assertPlatformLegInvariantAndScrub(
   }
 }
 
-// Scrub the platform-side ledger residue introduced by Stage 2 lifecycle
-// scenarios BEFORE Stage 3 reconciliation runs.
-//
-// Background: the fx-exchange / wallets-transfer / investments / withdraw
-// routes (lifecycle 2b–2e) post a SUSPENSE leg against PLATFORM_USER_ID
-// via the ledger primitive while writing the client side of the wallet
-// directly. Each scenario refreshes its own fixture-user wallet cache
-// from the ledger sum so its (user, currency) pair reconciles cleanly,
-// but the platform-side legs accumulate and surface in the Stage 3
-// wallet-vs-ledger clean-room as a critical/alert mismatch on user 11
-// (the wallets table has a non-negative check constraint, so the
-// platform wallet cache cannot match the negative ledger sum the
-// suspense leg produces).
-//
-// Fix: reuse `resetScenarioState`, which deletes both legs of every
-// transaction owned by the listed fixture users (catching the platform
-// side via `ledger_entries.transaction_id IN (txs of fixtureUsers)`) and
-// zeroes the fixture-user wallet caches (which now match their empty
-// ledger). This is the same idiom subprocess tests use; doing it ONCE
-// here, after all lifecycle scenarios complete, also catches drift
-// introduced by any future lifecycle scenario added later.
-async function scrubLifecyclePlatformLegs(): Promise<void> {
-  // Dynamic selector: every fixture user this script provisions has a
-  // username prefixed with `__prelaunch_`. We exclude PLATFORM_USERNAME
-  // (`__prelaunch_platform`, the test-side suspense user — NOT user 11)
-  // because deleting its txns would also delete the matching client-side
-  // legs we just verified. Selecting by prefix (instead of a hardcoded
-  // list) genuinely catches drift introduced by any future lifecycle
-  // scenario, as long as the new scenario follows the naming convention.
-  const fixtureRows = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(
-      and(
-        like(users.username, "__prelaunch_%"),
-        ne(users.username, PLATFORM_USERNAME),
-      ),
-    );
-  const fixtureUserIds = fixtureRows.map((r) => r.id);
-  if (fixtureUserIds.length > 0) {
-    await resetScenarioState(fixtureUserIds);
-  }
-}
+// Note: Task #201 removed the bulk `scrubLifecyclePlatformLegs()` helper
+// that previously ran at end of Stage 2. Two later changes superseded it:
+//   1. Task #202 wraps every lifecycle scenario in
+//      `runScenarioWithPlatformLegAssert`, which scrubs the fixture user's
+//      transactions PER-SCENARIO (cascading to delete the platform-side
+//      legs immediately after each scenario asserts its invariant).
+//   2. Task #201 flags the platform user `is_demo=true` at provisioning
+//      time, which makes the wallet-vs-ledger reconciler skip its
+//      (user, currency) pairs entirely. So even if a stray platform-side
+//      leg slipped past the per-scenario scrub, it would not surface as
+//      a wallet-vs-ledger reconciliation alert.
+// Together these make the bulk Stage-2.5 scrub redundant.
 
 async function ensureWallet(userId: number, currency: string): Promise<void> {
   const [existing] = await db
@@ -1438,6 +1407,22 @@ async function lifecycle2c_idempotencyConcurrencyFxExchange(): Promise<void> {
     await captureNewIdemIds(userId);
 
     const newTxIds = await newTxIdsSince(userId, txIdsBefore);
+    const [{ entryCount }] = await db
+      .select({ entryCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerEntries)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerEntries.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
+    const [{ receiptCount }] = await db
+      .select({ receiptCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerPostings)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerPostings.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
     const [{ idemCount }] = await db
       .select({ idemCount: sql<number>`COUNT(*)::int` })
       .from(idempotencyKeys)
@@ -1449,25 +1434,24 @@ async function lifecycle2c_idempotencyConcurrencyFxExchange(): Promise<void> {
         ),
       );
 
-    // /api/fx-exchange writes wallet balances directly (no ledger pair —
-    // pre-existing caveat noted in lifecycle1). So the assertion is: 1 new
-    // tx row, 1 idem row, 200/200.
+    // Task #201 — /api/fx-exchange now posts a single multi-currency
+    // journal: source-currency leg (DEBIT clientSrc + CREDIT suspenseSrc)
+    // = 2 entries, target-currency leg (DEBIT suspenseTgt + CREDIT
+    // clientTgt + CREDIT feeAccountTgt) = 3 entries. Total = 5 entries
+    // and exactly 1 receipt for the new tx. Two parallel calls under
+    // the same idempotency key → 1 new tx, 1 idem row, 200/200.
     const ok =
       newTxIds.length === 1 &&
+      Number(entryCount) === 5 &&
+      Number(receiptCount) === 1 &&
       Number(idemCount) === 1 &&
       r1.statusCode === 200 &&
       r2.statusCode === 200;
 
     const detail =
-      `parallel fx-exchange: new tx=${newTxIds.length}, idem rows=${idemCount}, ` +
+      `parallel fx-exchange: new tx=${newTxIds.length}, entries=${entryCount}, ` +
+      `receipts=${receiptCount}, idem rows=${idemCount}, ` +
       `http=[${r1.statusCode},${r2.statusCode}]`;
-
-    // /api/fx-exchange writes wallet balances directly without a matching
-    // ledger pair (pre-existing caveat noted in lifecycle1). Re-derive the
-    // wallet caches from the ledger so the downstream wallet-vs-ledger
-    // reconciliation clean-room doesn't see drift introduced by THIS gate.
-    await refreshWalletCacheBalance(db, userId, "AUD");
-    await refreshWalletCacheBalance(db, userId, "USD");
 
     if (ok) pass(NAME, detail);
     else fail(NAME, detail);
@@ -1531,6 +1515,22 @@ async function lifecycle2d_idempotencyConcurrencyWalletTransfer(): Promise<void>
     await captureNewIdemIds(userId);
 
     const newTxIds = await newTxIdsSince(userId, txIdsBefore);
+    const [{ entryCount }] = await db
+      .select({ entryCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerEntries)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerEntries.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
+    const [{ receiptCount }] = await db
+      .select({ receiptCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerPostings)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerPostings.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
     const [{ idemCount }] = await db
       .select({ idemCount: sql<number>`COUNT(*)::int` })
       .from(idempotencyKeys)
@@ -1542,22 +1542,20 @@ async function lifecycle2d_idempotencyConcurrencyWalletTransfer(): Promise<void>
         ),
       );
 
-    // Same shape as fx-exchange: wallet writes only, no ledger pair.
+    // Task #201 — same FX-shaped multi-currency journal as fx-exchange:
+    // 5 entries (2 source-currency + 3 target-currency), 1 receipt.
     const ok =
       newTxIds.length === 1 &&
+      Number(entryCount) === 5 &&
+      Number(receiptCount) === 1 &&
       Number(idemCount) === 1 &&
       r1.statusCode === 200 &&
       r2.statusCode === 200;
 
     const detail =
-      `parallel wallets/transfer: new tx=${newTxIds.length}, idem rows=${idemCount}, ` +
+      `parallel wallets/transfer: new tx=${newTxIds.length}, entries=${entryCount}, ` +
+      `receipts=${receiptCount}, idem rows=${idemCount}, ` +
       `http=[${r1.statusCode},${r2.statusCode}]`;
-
-    // Same caveat as fx-exchange — re-derive wallet caches from the ledger
-    // so the downstream wallet-vs-ledger reconciliation clean-room is not
-    // polluted by the direct-write the route performs.
-    await refreshWalletCacheBalance(db, userId, "AUD");
-    await refreshWalletCacheBalance(db, userId, "USD");
 
     if (ok) pass(NAME, detail);
     else fail(NAME, detail);
@@ -1654,6 +1652,22 @@ async function lifecycle2e_idempotencyConcurrencyInvestments(): Promise<void> {
     await captureNewIdemIds(userId);
 
     const newTxIds = await newTxIdsSince(userId, txIdsBefore);
+    const [{ entryCount }] = await db
+      .select({ entryCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerEntries)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerEntries.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
+    const [{ receiptCount }] = await db
+      .select({ receiptCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerPostings)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerPostings.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
     const [{ idemCount }] = await db
       .select({ idemCount: sql<number>`COUNT(*)::int` })
       .from(idempotencyKeys)
@@ -1669,26 +1683,22 @@ async function lifecycle2e_idempotencyConcurrencyInvestments(): Promise<void> {
       .from(userInvestments)
       .where(eq(userInvestments.userId, userId));
 
-    // /api/investments writes wallet directly + creates one user_investments
-    // row + one transactions row. After two parallel calls under the same
-    // idempotency key: 1 new tx, 1 user_investments row, 1 idem row, 200/200.
+    // Task #201 — /api/investments now posts a single-currency journal:
+    // DEBIT clientSrc + CREDIT suspenseSrc = 2 entries, 1 receipt.
+    // Plus 1 new tx, 1 user_investments row, 1 idem row, 200/200.
     const ok =
       newTxIds.length === 1 &&
+      Number(entryCount) === 2 &&
+      Number(receiptCount) === 1 &&
       Number(invCount) === 1 &&
       Number(idemCount) === 1 &&
       r1.statusCode === 200 &&
       r2.statusCode === 200;
 
     const detail =
-      `parallel investments: new tx=${newTxIds.length}, ` +
-      `user_investments=${invCount}, idem rows=${idemCount}, ` +
+      `parallel investments: new tx=${newTxIds.length}, entries=${entryCount}, ` +
+      `receipts=${receiptCount}, user_investments=${invCount}, idem rows=${idemCount}, ` +
       `http=[${r1.statusCode},${r2.statusCode}]`;
-
-    // /api/investments writes the source wallet directly without a matching
-    // ledger pair (pre-existing caveat). Re-derive the wallet cache from
-    // the ledger so the downstream wallet-vs-ledger reconciliation
-    // clean-room doesn't see drift introduced by THIS gate.
-    await refreshWalletCacheBalance(db, userId, "USD");
 
     if (ok) pass(NAME, detail);
     else fail(NAME, detail);
@@ -1880,14 +1890,14 @@ async function reconLedgerVsCustodianCleanRoom(): Promise<void> {
     const baselineMaxId = await snapshotMaxAlertId();
     const summary = await runLedgerReconciliation();
     if (summary.pairsChecked === 0) {
-      // After scrubLifecyclePlatformLegs() removes the lifecycle fixture
-      // transactions, this gate may legitimately find zero (user, currency)
-      // pairs in a clean dev DB. The gate's actual contract is "no NEW
-      // critical/alert rows since baseline" — with zero rows to inspect,
-      // that contract is trivially satisfied (vacuously true). Treat as
-      // PASS rather than SKIP so --strict mode doesn't conflate "nothing
-      // to check" with "policy violation". In production the DB is always
-      // populated so this branch is unreachable in real launch checks.
+      // The gate's contract is "no NEW critical/alert rows since baseline"
+      // — with zero (user, currency) pairs to inspect, that contract is
+      // trivially satisfied (vacuously true). Treat as PASS rather than
+      // SKIP so --strict mode doesn't conflate "nothing to check" with
+      // "policy violation". In production the DB is always populated so
+      // this branch is unreachable in real launch checks. (Task #201
+      // removed the lifecycle-platform-leg scrub; the platform user is
+      // now flagged is_demo=true and excluded from reconciliation.)
       pass(
         NAME,
         `pairs=0 (no ledger entries to inspect; trivially 0 new alerts) baseline max_id=${baselineMaxId}`,
@@ -1938,11 +1948,10 @@ async function reconPostingReceiptCleanRoom(): Promise<void> {
     const baselineMaxId = await snapshotMaxAlertId();
     const result = await runPostingReceiptInvariantCheck();
     if (result.txWithEntries === 0 && result.receipts === 0) {
-      // Same rationale as reconLedgerVsCustodianCleanRoom above: after
-      // scrubLifecyclePlatformLegs() empties the lifecycle fixtures, this
-      // invariant has zero rows to inspect — but the contract "no NEW
-      // critical/alert rows since baseline" is trivially satisfied. Treat
-      // as PASS rather than SKIP. In production this branch is unreachable.
+      // Same rationale as reconLedgerVsCustodianCleanRoom above: with
+      // zero rows to inspect, the contract "no NEW critical/alert rows
+      // since baseline" is trivially satisfied. Treat as PASS rather
+      // than SKIP. In production this branch is unreachable.
       pass(
         NAME,
         `txWithEntries=0, receipts=0 (nothing to inspect; trivially 0 new alerts) baseline max_id=${baselineMaxId}`,
@@ -2137,6 +2146,36 @@ async function main(): Promise<void> {
     }
 
     // -------------------------------------------------------------------
+    // Task #201 — ALWAYS mark the resolved platform user `is_demo=true`,
+    // whether it was pre-bound by the env var (`system` user 11 in dev)
+    // or freshly provisioned by the block above (`__prelaunch_platform`).
+    //
+    // Why: the platform user is a synthetic accounting endpoint. It owns
+    // the platform_suspense / fee accounts that hold the OTHER side of
+    // every client-side leg posted by every test in this run, so its
+    // per-currency ledger sums are NOT zero — and the wallets table's
+    // non-negative check constraint means we cannot mirror those sums
+    // in a wallet row anyway. `is_demo=true` is the only mechanism that
+    // makes the wallet-vs-ledger reconciler ignore this user (see
+    // server/services/reconciliation.ts ~line 126). Without it, every
+    // pre-launch run produces a critical wallet-vs-ledger mismatch
+    // against the platform user.
+    //
+    // The flip is idempotent and only touches the single platform row,
+    // so re-runs are cheap. We do this AFTER the resolution block above
+    // so it covers both code paths uniformly.
+    // -------------------------------------------------------------------
+    {
+      const platformIdResolved = parseInt(process.env.PLATFORM_USER_ID!, 10);
+      if (Number.isInteger(platformIdResolved) && platformIdResolved > 0) {
+        await db
+          .update(users)
+          .set({ isDemo: true })
+          .where(eq(users.id, platformIdResolved));
+      }
+    }
+
+    // -------------------------------------------------------------------
     // Stage 1: run the four existing safety scripts in sequence.
     //
     // Task #193 — every Stage-1 script is also wrapped in a per-script
@@ -2310,22 +2349,14 @@ async function main(): Promise<void> {
     });
 
     // -------------------------------------------------------------------
-    // Stage 2.5: scrub the platform-side ledger residue introduced by
-    // the Stage 2 lifecycle scenarios BEFORE Stage 3 reconciliation
-    // runs. The fx-exchange / wallets-transfer / investments / withdraw
-    // routes (lifecycle 2b–2e, added in Task #185) post a SUSPENSE leg
-    // against PLATFORM_USER_ID via the ledger primitive. Each scenario
-    // refreshes its own fixture-user cache, but the wallets table has
-    // a non-negative check constraint, so the platform user's wallet
-    // cache cannot be made to match the negative suspense ledger sum.
-    // Removing the lifecycle transactions (both legs) is the only way
-    // to make the Stage 3 wallet-vs-ledger clean-room see a quiet
-    // platform user. Doing it in ONE place catches drift introduced
-    // by any future lifecycle scenario added later.
-    // -------------------------------------------------------------------
-    await scrubLifecyclePlatformLegs();
-
-    // -------------------------------------------------------------------
+    // Task #201 removed the previous Stage 2.5 scrub. The platform user
+    // is now flagged is_demo=true at provisioning time, which makes the
+    // wallet-vs-ledger reconciler skip its (user, currency) pairs
+    // entirely. The lifecycle scenarios' SUSPENSE legs therefore land
+    // on a user the reconciler ignores, so no critical wallet-vs-
+    // ledger mismatch can surface from the Stage 2 traffic — WITHOUT
+    // having to delete the audit trail of those balanced ledger pairs.
+    //
     // Stage 3: operator-alert clean rooms (Task #142 — one gate per
     // reconciliation service). Runs LAST so any drift the lifecycle
     // scenarios inadvertently introduced shows up here as a new

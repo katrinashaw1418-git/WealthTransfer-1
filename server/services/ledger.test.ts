@@ -359,32 +359,111 @@ describe("postLedgerEntries — double-post guard (Task #22)", () => {
 });
 
 // ===========================================================================
-// Task #41 — automated test for the mixed-currency journal guard
+// Task #41 + Task #201 — automated test for the per-currency balance guard
 // ===========================================================================
-// Locks in the rule in postLedgerEntries() that every entry in a single
-// journal must share one currency. Multi-currency FX must be split into two
-// single-currency journals (one per leg). The guard fires synchronously on
-// the in-memory entries array BEFORE any DB write, so this test does not
-// need to create accounts, transactions, or ledger rows — and therefore
-// has nothing to clean up. We deliberately use sentinel non-existent
-// account/user ids: if a regression ever lets execution reach the insert,
-// the FK constraint on ledger_entries.account_id will surface as a
-// distinct (non-Error-message) failure rather than a silent pass.
+// Locks in the rule in postLedgerEntries() that EACH currency present in a
+// journal must balance independently (debits == credits within EPSILON).
+// A single multi-currency journal is permitted (and required by the
+// FX/transfer routes — see Task #201) AS LONG AS each currency leg is
+// internally balanced. The guard fires synchronously on the in-memory
+// entries array BEFORE any DB write, so this test does not need to create
+// accounts, transactions, or ledger rows — and therefore has nothing to
+// clean up. We deliberately use sentinel non-existent account/user ids: if
+// a regression ever lets execution reach the insert, the FK constraint on
+// ledger_entries.account_id will surface as a distinct (non-Error-message)
+// failure rather than a silent pass.
 // ===========================================================================
-describe("postLedgerEntries — mixed-currency guard (Task #41)", () => {
-  it("throws when entries in the same journal use different currencies", async () => {
+describe("postLedgerEntries — per-currency balance guard (Tasks #41, #201)", () => {
+  it("throws when one currency in a multi-currency journal does not balance", async () => {
     const SENTINEL_TX_ID = -1;
     const SENTINEL_ACCT_ID = -1;
     const SENTINEL_USER_ID = -1;
 
-    const mixedCurrencyJournal = [
+    // USD leg balances (debit==credit), EUR leg does NOT (debit-only).
+    const imbalancedMultiCurrency = [
       {
         accountId: SENTINEL_ACCT_ID,
         userId: SENTINEL_USER_ID,
         currency: "USD",
         direction: "debit" as const,
         amount: TEST_AMOUNT,
-        description: "mixed-currency test (USD leg)",
+        description: "balanced USD leg (debit)",
+      },
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "USD",
+        direction: "credit" as const,
+        amount: TEST_AMOUNT,
+        description: "balanced USD leg (credit)",
+      },
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "EUR",
+        direction: "debit" as const,
+        amount: TEST_AMOUNT,
+        description: "imbalanced EUR leg (debit-only)",
+      },
+    ];
+
+    const promise = postLedgerEntries(SENTINEL_TX_ID, imbalancedMultiCurrency);
+    await expect(promise).rejects.toBeInstanceOf(LedgerUnbalancedError);
+    // The error must name the SPECIFIC currency that imbalanced (EUR), not
+    // the unrelated balanced one (USD), so operator-alert routing keys off
+    // the right leg.
+    await expect(promise).rejects.toMatchObject({
+      transactionId: SENTINEL_TX_ID,
+      currency: "EUR",
+      status: 422,
+    });
+
+    // The guard fires before any DB access, so no ledger entries can have
+    // been inserted against our sentinel transactionId.
+    const leaked = await db
+      .select({ id: ledgerEntries.id })
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, SENTINEL_TX_ID));
+    expect(leaked).toHaveLength(0);
+  });
+
+  it("accepts a multi-currency journal where each currency balances (FX shape, Task #201)", async () => {
+    // Task #201 — fx-exchange / wallets-transfer post both legs in ONE
+    // journal: source-currency leg (DEBIT clientSrc, CREDIT suspenseSrc)
+    // plus target-currency leg (DEBIT suspenseTgt, CREDIT clientTgt). Each
+    // currency balances independently. With sentinel (non-existent) account
+    // ids the FK insert will then fail — which is exactly what we assert: a
+    // DB error, NOT the unbalanced-journal error. This proves the per-
+    // currency guard accepts the FX shape rather than rejecting it as it
+    // did before Task #201.
+    const SENTINEL_TX_ID = -10;
+    const SENTINEL_ACCT_ID = -1;
+    const SENTINEL_USER_ID = -1;
+
+    const fxShapedJournal = [
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "USD",
+        direction: "debit" as const,
+        amount: TEST_AMOUNT,
+        description: "FX source leg (client USD debit)",
+      },
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "USD",
+        direction: "credit" as const,
+        amount: TEST_AMOUNT,
+        description: "FX source leg (suspense USD credit)",
+      },
+      {
+        accountId: SENTINEL_ACCT_ID,
+        userId: SENTINEL_USER_ID,
+        currency: "EUR",
+        direction: "debit" as const,
+        amount: TEST_AMOUNT,
+        description: "FX target leg (suspense EUR debit)",
       },
       {
         accountId: SENTINEL_ACCT_ID,
@@ -392,18 +471,23 @@ describe("postLedgerEntries — mixed-currency guard (Task #41)", () => {
         currency: "EUR",
         direction: "credit" as const,
         amount: TEST_AMOUNT,
-        description: "mixed-currency test (EUR leg)",
+        description: "FX target leg (client EUR credit)",
       },
     ];
 
-    await expect(
-      postLedgerEntries(SENTINEL_TX_ID, mixedCurrencyJournal),
-    ).rejects.toThrow(
-      "Multi-currency ledger entries require explicit FX transaction handling",
-    );
+    let captured: unknown = null;
+    try {
+      await postLedgerEntries(SENTINEL_TX_ID, fxShapedJournal);
+    } catch (err) {
+      captured = err;
+    }
+    expect(captured).not.toBeNull();
+    // The guard must NOT trip — the failure must come from somewhere
+    // downstream (FK violation on the sentinel account ids), not from the
+    // per-currency balance check.
+    expect(captured).not.toBeInstanceOf(LedgerUnbalancedError);
 
-    // The guard fires before any DB access, so no ledger entries can have
-    // been inserted against our sentinel transactionId.
+    // No entries leaked under our sentinel transactionId.
     const leaked = await db
       .select({ id: ledgerEntries.id })
       .from(ledgerEntries)

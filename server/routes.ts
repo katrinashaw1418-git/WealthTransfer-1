@@ -45,6 +45,7 @@ import { registerClientRoutes } from "./client-routes";
 import {
   getOrCreateClientAccount,
   getOrCreateSuspenseAccount,
+  getOrCreateFeeAccount,
   postLedgerEntries,
   refreshWalletCacheBalance,
   getUserLedgerSumsByCurrency,
@@ -3219,6 +3220,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const fee = converted.mul("0.005");
       const netConverted = converted.minus(fee);
 
+      // -----------------------------------------------------------------
+      // Task #201 — LEDGER IS THE SOURCE OF TRUTH for FX as well.
+      // Post BOTH legs as ONE multi-currency journal:
+      //   source-currency leg : DEBIT clientSrc(amount), CREDIT suspenseSrc(amount)
+      //   target-currency leg : DEBIT suspenseTgt(converted),
+      //                         CREDIT clientTgt(netConverted),
+      //                         CREDIT feeAccountTgt(fee)
+      // Each currency balances independently; the per-currency guard in
+      // postLedgerEntries enforces this. Wallet caches for both currencies
+      // are then derived from the ledger via refreshWalletCacheBalance —
+      // we never call `tx.update(wallets).set({ balance, ... })` directly.
+      // -----------------------------------------------------------------
       let txRecord: any;
       await db.transaction(async (tx) => {
         await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
@@ -3238,14 +3251,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .for("update");
         if (!toWallet) throw Object.assign(new Error("Target wallet not found"), { status: 404 });
 
-        await tx.update(wallets)
-          .set({ balance: new Decimal(fromWallet.balance).minus(amount).toFixed(8), availableBalance: available.minus(amount).toFixed(8) })
-          .where(eq(wallets.id, fromWallet.id));
-
-        await tx.update(wallets)
-          .set({ balance: new Decimal(toWallet.balance).plus(netConverted).toFixed(8), availableBalance: new Decimal(toWallet.availableBalance).plus(netConverted).toFixed(8) })
-          .where(eq(wallets.id, toWallet.id));
-
         [txRecord] = await tx.insert(transactions).values({
           userId, type: "exchange", fromCurrency, toCurrency,
           amount: amount.toFixed(8), fee: fee.toFixed(8),
@@ -3254,6 +3259,60 @@ export async function registerRoutes(app: Express): Promise<Server> {
           description: `${fromCurrency} to ${toCurrency} Exchange`,
           sourceExchange: null, blockchainTxHash: null,
         }).returning();
+
+        const clientFrom = await getOrCreateClientAccount(userId, fromCurrency, tx);
+        const suspenseFrom = await getOrCreateSuspenseAccount(fromCurrency, tx);
+        const clientTo = await getOrCreateClientAccount(userId, toCurrency, tx);
+        const suspenseTo = await getOrCreateSuspenseAccount(toCurrency, tx);
+        const feeAccountTo = await getOrCreateFeeAccount(toCurrency, tx);
+
+        await postLedgerEntries(txRecord.id, [
+          // Source-currency leg
+          {
+            accountId: clientFrom.id,
+            userId,
+            currency: fromCurrency,
+            direction: "debit",
+            amount: amount.toFixed(8),
+            description: `FX exchange (source client leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: suspenseFrom.id,
+            userId: suspenseFrom.userId,
+            currency: fromCurrency,
+            direction: "credit",
+            amount: amount.toFixed(8),
+            description: `FX exchange (source suspense leg) tx#${txRecord.id}`,
+          },
+          // Target-currency leg
+          {
+            accountId: suspenseTo.id,
+            userId: suspenseTo.userId,
+            currency: toCurrency,
+            direction: "debit",
+            amount: converted.toFixed(8),
+            description: `FX exchange (target suspense leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: clientTo.id,
+            userId,
+            currency: toCurrency,
+            direction: "credit",
+            amount: netConverted.toFixed(8),
+            description: `FX exchange (target client leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: feeAccountTo.id,
+            userId: feeAccountTo.userId,
+            currency: toCurrency,
+            direction: "credit",
+            amount: fee.toFixed(8),
+            description: `FX exchange (target fee leg) tx#${txRecord.id}`,
+          },
+        ], tx);
+
+        await refreshWalletCacheBalance(tx, userId, fromCurrency);
+        await refreshWalletCacheBalance(tx, userId, toCurrency);
       });
 
       const responseBody = { transaction: txRecord, convertedAmount: netConverted.toNumber(), exchangeRate: exchangeRate.toNumber(), fee: fee.toNumber() };
@@ -3273,6 +3332,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (replay) {
           return res.status(200).json({ ...(replay as object), idempotent: true });
         }
+      }
+      // Task #201 — fx-exchange now posts a multi-currency journal via
+      // postLedgerEntries; surface a tripped balance guard the same way
+      // deposit/withdraw do (stable 422 + operator alert) instead of
+      // leaking the internal credit/debit numbers as a generic 500.
+      if (
+        await mapLedgerUnbalancedToHttpResponse(res, error, "fx_exchange", {
+          route: "/api/fx-exchange",
+          ipAddress: req.ip ?? null,
+        })
+      ) {
+        return;
       }
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
@@ -3970,6 +4041,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const exchangeRateStr = currency !== "USD" ? investmentAmount.div(deductionAmount).toFixed(8) : null;
 
+      // -----------------------------------------------------------------
+      // Task #201 — single-currency journal: DEBIT clientSrc(deduction),
+      // CREDIT suspenseSrc(deduction). The investment row records what the
+      // money was used for; the ledger records WHERE the money went.
+      // The wallet cache is then derived from the ledger.
+      // -----------------------------------------------------------------
       let txRecord: any;
       let investRecord: any;
       await db.transaction(async (tx) => {
@@ -3982,11 +4059,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (available.lt(deductionAmount)) throw Object.assign(
           new Error(`Insufficient balance. Available: ${available.toFixed(2)} ${currency}`), { status: 400 }
         );
-
-        await tx.update(wallets).set({
-          balance: new Decimal(sourceWallet.balance).minus(deductionAmount).toFixed(8),
-          availableBalance: available.minus(deductionAmount).toFixed(8),
-        }).where(eq(wallets.id, sourceWallet.id));
 
         [txRecord] = await tx.insert(transactions).values({
           userId, type: "investment", fromCurrency: currency,
@@ -4008,6 +4080,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
           maturityDate: null,
         }).returning();
         investRecord = inv;
+
+        const clientAcct = await getOrCreateClientAccount(userId, currency, tx);
+        const suspenseAcct = await getOrCreateSuspenseAccount(currency, tx);
+
+        await postLedgerEntries(txRecord.id, [
+          {
+            accountId: clientAcct.id,
+            userId,
+            currency,
+            direction: "debit",
+            amount: deductionAmount.toFixed(8),
+            description: `Investment in ${product.name} tx#${txRecord.id} (client leg)`,
+          },
+          {
+            accountId: suspenseAcct.id,
+            userId: suspenseAcct.userId,
+            currency,
+            direction: "credit",
+            amount: deductionAmount.toFixed(8),
+            description: `Investment in ${product.name} tx#${txRecord.id} (suspense leg)`,
+          },
+        ], tx);
+
+        await refreshWalletCacheBalance(tx, userId, currency);
       });
 
       await saveActualSnapshot(userId);
@@ -4027,6 +4123,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (replay) {
           return res.status(200).json({ ...(replay as object), idempotent: true });
         }
+      }
+      // Task #201 — surface a tripped balance guard the same way the other
+      // money-movement routes do (stable 422 + operator alert) instead of
+      // leaking the internal credit/debit numbers as a generic 500.
+      if (
+        await mapLedgerUnbalancedToHttpResponse(res, error, "investment", {
+          route: "/api/investments",
+          ipAddress: req.ip ?? null,
+        })
+      ) {
+        return;
       }
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
@@ -4080,6 +4187,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const fee = converted.mul("0.005");
       const finalAmount = converted.minus(fee);
 
+      // -----------------------------------------------------------------
+      // Task #201 — same FX-shaped multi-currency posting as fx-exchange.
+      // Source-currency leg: DEBIT clientSrc(amount), CREDIT suspenseSrc(amount).
+      // Target-currency leg: DEBIT suspenseTgt(converted),
+      //                      CREDIT clientTgt(finalAmount),
+      //                      CREDIT feeAccountTgt(fee).
+      // Wallet caches for both currencies are derived from the ledger via
+      // refreshWalletCacheBalance — no direct `tx.update(wallets)` writes.
+      // -----------------------------------------------------------------
       let txRecord: any;
       await db.transaction(async (tx) => {
         await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
@@ -4096,16 +4212,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .where(and(eq(wallets.userId, userId), eq(wallets.currency, toCurrency))).for("update");
         if (!tgtWallet) throw Object.assign(new Error("Target wallet not found"), { status: 404 });
 
-        await tx.update(wallets).set({
-          balance: new Decimal(srcWallet.balance).minus(amount).toFixed(8),
-          availableBalance: available.minus(amount).toFixed(8),
-        }).where(eq(wallets.id, srcWallet.id));
-
-        await tx.update(wallets).set({
-          balance: new Decimal(tgtWallet.balance).plus(finalAmount).toFixed(8),
-          availableBalance: new Decimal(tgtWallet.availableBalance).plus(finalAmount).toFixed(8),
-        }).where(eq(wallets.id, tgtWallet.id));
-
         [txRecord] = await tx.insert(transactions).values({
           userId, type: "exchange", fromCurrency, toCurrency,
           amount: amount.toFixed(8), fee: fee.toFixed(8),
@@ -4114,6 +4220,58 @@ export async function registerRoutes(app: Express): Promise<Server> {
           description: `Converted ${rawAmount} ${fromCurrency} to ${finalAmount.toFixed(8)} ${toCurrency}`,
           sourceExchange: null, blockchainTxHash: null,
         }).returning();
+
+        const clientFrom = await getOrCreateClientAccount(userId, fromCurrency, tx);
+        const suspenseFrom = await getOrCreateSuspenseAccount(fromCurrency, tx);
+        const clientTo = await getOrCreateClientAccount(userId, toCurrency, tx);
+        const suspenseTo = await getOrCreateSuspenseAccount(toCurrency, tx);
+        const feeAccountTo = await getOrCreateFeeAccount(toCurrency, tx);
+
+        await postLedgerEntries(txRecord.id, [
+          {
+            accountId: clientFrom.id,
+            userId,
+            currency: fromCurrency,
+            direction: "debit",
+            amount: amount.toFixed(8),
+            description: `Wallet transfer (source client leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: suspenseFrom.id,
+            userId: suspenseFrom.userId,
+            currency: fromCurrency,
+            direction: "credit",
+            amount: amount.toFixed(8),
+            description: `Wallet transfer (source suspense leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: suspenseTo.id,
+            userId: suspenseTo.userId,
+            currency: toCurrency,
+            direction: "debit",
+            amount: converted.toFixed(8),
+            description: `Wallet transfer (target suspense leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: clientTo.id,
+            userId,
+            currency: toCurrency,
+            direction: "credit",
+            amount: finalAmount.toFixed(8),
+            description: `Wallet transfer (target client leg) tx#${txRecord.id}`,
+          },
+          {
+            accountId: feeAccountTo.id,
+            userId: feeAccountTo.userId,
+            currency: toCurrency,
+            direction: "credit",
+            amount: fee.toFixed(8),
+            description: `Wallet transfer (target fee leg) tx#${txRecord.id}`,
+          },
+        ], tx);
+
+        await refreshWalletCacheBalance(tx, userId, fromCurrency);
+        await refreshWalletCacheBalance(tx, userId, toCurrency);
       });
 
       const responseBody = { transaction: txRecord, exchangeRate: exchangeRate.toNumber(), convertedAmount: converted.toNumber(), fee: fee.toNumber(), finalAmount: finalAmount.toNumber() };
@@ -4132,6 +4290,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (replay) {
           return res.status(200).json({ ...(replay as object), idempotent: true });
         }
+      }
+      // Task #201 — surface a tripped balance guard the same way deposit /
+      // withdraw / fx-exchange do (stable 422 + operator alert) instead of
+      // leaking the internal credit/debit numbers as a generic 500.
+      if (
+        await mapLedgerUnbalancedToHttpResponse(res, error, "wallet_transfer", {
+          route: "/api/wallets/transfer",
+          ipAddress: req.ip ?? null,
+        })
+      ) {
+        return;
       }
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
