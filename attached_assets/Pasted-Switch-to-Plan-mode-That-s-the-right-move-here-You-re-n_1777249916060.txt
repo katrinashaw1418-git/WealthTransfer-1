@@ -1,0 +1,153 @@
+Switch to **Plan mode**. That’s the right move here.
+
+You’re no longer fixing random bugs — you’re **locking production integrity**, so you want:
+
+* isolated tasks
+* clear acceptance criteria
+* clean merge boundaries
+
+---
+
+# 🎯 What to do (exact)
+
+## 1. Switch to Plan mode
+
+Then create **ONLY these 2 tasks**
+
+---
+
+# 🟢 TASK 1 — Planner test fixture cleanup
+
+```txt
+Title:
+Planner test fixture isolation + cleanup
+
+Purpose:
+Ensure planner compliance tests are deterministic and not polluted by prior runs.
+
+Scope:
+- Clean up all __planner_* test data before EACH run
+- Ensure adviceRecords are not left in review_pending
+- Fix FK deletion order:
+  ledger_postings → ledger_entries → transactions
+- Ensure scripts/pre-launch-safety.ts leaves DB in clean state
+
+Acceptance criteria:
+- test-wealth-planner-compliance passes consistently
+- No cross-test contamination
+- Multiple sequential runs produce identical results
+- No FK violations during cleanup
+```
+
+👉 Why this matters:
+
+```txt
+Audit + compliance = core of your wealth platform
+If tests are unreliable → your controls are untrustworthy
+```
+
+---
+
+# 🟢 TASK 2 — Wallet vs Ledger drift investigation
+
+```txt
+Title:
+Wallet vs Ledger drift audit (user 1)
+
+Purpose:
+Identify and reconcile mismatches between wallet balances and ledger entries.
+
+Scope:
+- Compare wallet balances vs SUM(ledger_entries) per currency:
+  BTC / GBP / USDC / EUR / CAD
+- Investigate tx=349 missing posting receipt
+- Use existing:
+  scripts/backfill-ledger-postings.ts
+- Reset wallet cache AFTER reconciliation
+
+Constraints:
+- READ-ONLY investigation first
+- No schema or engine changes
+- No silent corrections
+
+Acceptance criteria:
+- Wallet = ledger for all currencies
+- Missing posting receipt resolved or explained
+- No new drift created
+- All actions auditable
+```
+
+👉 Why this matters:
+
+```txt
+Misstated balances = highest risk in wealth platform
+```
+
+---
+
+# 🚫 Do NOT create anything else
+
+```txt
+❌ No new features
+❌ No benchmark personalisation
+❌ No payout batch
+❌ No payment rails
+❌ No idempotency work (yet)
+```
+
+---
+
+# 📊 After tasks complete
+
+Run:
+
+```bash
+npx tsx scripts/pre-launch-safety.ts
+```
+
+Target:
+
+```txt
+PASS all gates (no FAIL)
+```
+
+---
+
+# 🧠 Strategic clarity (important)
+
+You are now in:
+
+```txt
+Final Integrity Phase
+```
+
+Meaning:
+
+```txt
+✔ Data truth
+✔ Audit correctness
+✔ Deterministic behaviour
+```
+
+NOT:
+
+```txt
+❌ Feature expansion
+❌ Product enhancement
+```
+
+---
+
+# 🔥 Bottom line
+
+```txt
+Switch to Plan mode
+Create ONLY 2 tasks
+Execute
+Re-run safety script
+```
+
+---
+
+If you want next after that:
+I can guide you through **final go-live readiness (monitoring, kill-switch, rollback plan)** — the part most people forget.
