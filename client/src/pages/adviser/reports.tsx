@@ -1,14 +1,17 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, Fragment } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { clientDisplayName } from "@shared/display-name";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useAuth } from "@/contexts/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
   DialogContent,
@@ -40,7 +43,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, FileText, Download, AlertCircle, RotateCcw, Layers } from "lucide-react";
+import { Plus, FileText, Download, AlertCircle, RotateCcw, Layers, Info } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Tooltip,
@@ -58,12 +61,16 @@ interface PriorVersion {
 
 interface ReportRequest {
   id: number;
+  adviserUserId: number;
   clientUserId: number;
   reportType: string;
   format: string;
   status: string;
   requestedAt: string | null;
   generatedAt: string | null;
+  expiresAt: string | null;
+  periodFrom: string | null;
+  periodTo: string | null;
   downloadUrl: string | null;
   failureReason: string | null;
   notes: string | null;
@@ -76,6 +83,13 @@ interface ReportRequest {
 interface ReportsListResponse {
   rows: ReportRequest[];
   counts: Record<string, number>;
+}
+
+interface ClientLite {
+  userId: number;
+  firstName: string;
+  lastName: string;
+  email: string;
 }
 
 const TOKEN_KEY = "amax_jwt";
@@ -121,12 +135,6 @@ async function downloadReport(reportId: number, toast: ReturnType<typeof useToas
   }
 }
 
-interface ClientLite {
-  userId: number;
-  firstName: string;
-  lastName: string;
-}
-
 const REPORT_TYPES = [
   { value: "portfolio_summary", label: "Portfolio summary" },
   { value: "fee_summary", label: "Fee summary" },
@@ -134,12 +142,76 @@ const REPORT_TYPES = [
   { value: "full_statement", label: "Full statement" },
 ];
 
-const formSchema = z.object({
-  clientUserId: z.coerce.number().int().positive(),
-  reportType: z.string().min(1),
-  notes: z.string().max(2000).optional(),
-});
+const PERIOD_PRESETS = [
+  { value: "this_month", label: "This month" },
+  { value: "last_quarter", label: "Last quarter" },
+  { value: "fytd", label: "FYTD" },
+  { value: "custom", label: "Custom" },
+];
+
+// YYYY-MM-DD ISO date string. Validated server-side too.
+const isoDateRe = /^\d{4}-\d{2}-\d{2}$/;
+
+const formSchema = z
+  .object({
+    clientUserId: z.coerce.number().int().positive("Pick a client"),
+    reportType: z.string().min(1),
+    periodPreset: z.enum(["this_month", "last_quarter", "fytd", "custom"]),
+    periodFrom: z.string().regex(isoDateRe, "Pick a start date"),
+    periodTo: z.string().regex(isoDateRe, "Pick an end date"),
+    notes: z.string().max(2000).optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.periodFrom > val.periodTo) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["periodTo"],
+        message: "End date must be on or after start date",
+      });
+    }
+  });
 type FormValues = z.infer<typeof formSchema>;
+
+function toIsoDate(d: Date): string {
+  // Local-date YYYY-MM-DD. Avoid toISOString() because that converts to UTC
+  // and silently shifts the calendar day for users east of UTC.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// Australian fiscal year runs 1 July → 30 June.
+function presetToRange(preset: string, today: Date = new Date()): { from: string; to: string } {
+  const t = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (preset === "this_month") {
+    const from = new Date(t.getFullYear(), t.getMonth(), 1);
+    return { from: toIsoDate(from), to: toIsoDate(t) };
+  }
+  if (preset === "last_quarter") {
+    const q = Math.floor(t.getMonth() / 3); // 0..3 (current quarter)
+    const lastQStartMonth = (q - 1) * 3;
+    let year = t.getFullYear();
+    let startMonth = lastQStartMonth;
+    if (lastQStartMonth < 0) {
+      year -= 1;
+      startMonth = 9; // Q4 of prev year (Oct-Dec)
+    }
+    const from = new Date(year, startMonth, 1);
+    const to = new Date(year, startMonth + 3, 0); // last day of the quarter
+    return { from: toIsoDate(from), to: toIsoDate(to) };
+  }
+  if (preset === "fytd") {
+    // If we're on/after July 1, FY started this calendar year. Otherwise it
+    // started 1 July of the previous calendar year.
+    const fyStartYear = t.getMonth() >= 6 ? t.getFullYear() : t.getFullYear() - 1;
+    const from = new Date(fyStartYear, 6, 1); // 1 July
+    return { from: toIsoDate(from), to: toIsoDate(t) };
+  }
+  // custom: caller fills in manually; default to "this_month" so the pickers
+  // start populated rather than empty (and the user edits from there).
+  return presetToRange("this_month", today);
+}
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "—";
@@ -150,6 +222,31 @@ function formatDateTime(value: string | null | undefined): string {
   }
 }
 
+function formatDate(value: string | null | undefined): string {
+  if (!value) return "—";
+  try {
+    return new Date(value).toLocaleDateString("en-AU", {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+    });
+  } catch {
+    return "—";
+  }
+}
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+function isExpiringSoon(expiresAt: string | null): boolean {
+  if (!expiresAt) return false;
+  const ts = new Date(expiresAt).getTime();
+  if (!Number.isFinite(ts)) return false;
+  const remaining = ts - Date.now();
+  return remaining > 0 && remaining < ONE_DAY_MS;
+}
+
+// Task #298 — explicit five-status mapping. Anything not in this map renders
+// as a neutral "Unknown" badge so a future status (e.g. "cancelled") cannot
+// accidentally render as "Ready".
 function statusBadge(status: string) {
   const variant: "default" | "secondary" | "destructive" | "outline" =
     status === "ready"
@@ -162,6 +259,10 @@ function statusBadge(status: string) {
       {status.replace(/_/g, " ")}
     </Badge>
   );
+}
+
+function reportTypeLabel(type: string): string {
+  return REPORT_TYPES.find((t) => t.value === type)?.label ?? type.replace(/_/g, " ");
 }
 
 // Status counts strip — order is fixed so the visual layout is stable
@@ -177,6 +278,7 @@ const COUNT_BUCKETS: Array<{ key: string; label: string; chipClass: string }> = 
 
 export default function AdviserReports() {
   const { toast } = useToast();
+  const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
 
@@ -186,19 +288,47 @@ export default function AdviserReports() {
   const clientsResponse = useQuery<{ asOfDate: string; clients: ClientLite[] }>({
     queryKey: ["/api/adviser/clients"],
   });
-  const clients = {
-    data: clientsResponse.data?.clients,
-    isLoading: clientsResponse.isLoading,
-  };
+  const clients = clientsResponse.data?.clients;
+
+  // Build a single client lookup map so each table row resolves the display
+  // name without an N+1 round-trip. Falls back gracefully when the clients
+  // query is still loading or when a client has been unlinked since the
+  // report was generated.
+  const clientMap = useMemo(() => {
+    const m = new Map<number, ClientLite>();
+    (clients ?? []).forEach((c) => m.set(c.userId, c));
+    return m;
+  }, [clients]);
+
+  const adviserDisplayName = (() => {
+    if (!user) return "—";
+    const full = `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim();
+    if (full) return full;
+    return user.email ?? user.username ?? "—";
+  })();
+
+  const initialPreset = "this_month";
+  const initialRange = presetToRange(initialPreset);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: { clientUserId: 0, reportType: "portfolio_summary", notes: "" },
+    defaultValues: {
+      clientUserId: 0,
+      reportType: "portfolio_summary",
+      periodPreset: initialPreset,
+      periodFrom: initialRange.from,
+      periodTo: initialRange.to,
+      notes: "",
+    },
   });
 
-  const createReport = useMutation({
+  const periodPreset = form.watch("periodPreset");
+  const isCustomRange = periodPreset === "custom";
+
+  const submitReport = useMutation({
     mutationFn: async (values: FormValues) => {
-      const res = await apiRequest("POST", "/api/adviser/reports", values);
+      const { periodPreset: _preset, ...payload } = values;
+      const res = await apiRequest("POST", "/api/adviser/reports", payload);
       return res.json();
     },
     onSuccess: (data: ReportRequest) => {
@@ -223,7 +353,14 @@ export default function AdviserReports() {
         });
       }
       setOpen(false);
-      form.reset();
+      form.reset({
+        clientUserId: 0,
+        reportType: "portfolio_summary",
+        periodPreset: initialPreset,
+        periodFrom: initialRange.from,
+        periodTo: initialRange.to,
+        notes: "",
+      });
     },
     onError: (err: any) => {
       // Task #315 — duplicate guard (409, code=duplicate_report_request)
@@ -245,6 +382,19 @@ export default function AdviserReports() {
       }
     },
   });
+
+  function applyPreset(preset: string) {
+    form.setValue("periodPreset", preset as FormValues["periodPreset"]);
+    if (preset !== "custom") {
+      const { from, to } = presetToRange(preset);
+      form.setValue("periodFrom", from, { shouldValidate: true });
+      form.setValue("periodTo", to, { shouldValidate: true });
+    }
+  }
+
+  function onSubmit(values: FormValues) {
+    submitReport.mutate(values);
+  }
 
   // Task #315 — Regenerate. Inserts a new versioned row and runs the
   // generator inline; on success we invalidate the list so the new row
@@ -297,11 +447,9 @@ export default function AdviserReports() {
             <DialogHeader>
               <DialogTitle>Request a report</DialogTitle>
             </DialogHeader>
+
             <Form {...form}>
-              <form
-                onSubmit={form.handleSubmit((v) => createReport.mutate(v))}
-                className="space-y-4"
-              >
+              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
                 <FormField
                   control={form.control}
                   name="clientUserId"
@@ -318,7 +466,7 @@ export default function AdviserReports() {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          {clients.data?.map((c) => (
+                          {clients?.map((c) => (
                             <SelectItem key={c.userId} value={String(c.userId)}>
                               {clientDisplayName(c, c.userId)}
                             </SelectItem>
@@ -353,6 +501,71 @@ export default function AdviserReports() {
                     </FormItem>
                   )}
                 />
+
+                <FormField
+                  control={form.control}
+                  name="periodPreset"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Period</FormLabel>
+                      <Select onValueChange={(v) => applyPreset(v)} value={field.value}>
+                        <FormControl>
+                          <SelectTrigger data-testid="select-period-preset">
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {PERIOD_PRESETS.map((p) => (
+                            <SelectItem key={p.value} value={p.value}>
+                              {p.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <div className="grid grid-cols-2 gap-3">
+                  <FormField
+                    control={form.control}
+                    name="periodFrom"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>From</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type="date"
+                            disabled={!isCustomRange}
+                            data-testid="input-period-from"
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="periodTo"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>To</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type="date"
+                            disabled={!isCustomRange}
+                            data-testid="input-period-to"
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+
                 <FormField
                   control={form.control}
                   name="notes"
@@ -372,10 +585,10 @@ export default function AdviserReports() {
                 />
                 <Button
                   type="submit"
-                  disabled={createReport.isPending}
+                  disabled={submitReport.isPending}
                   data-testid="button-submit-report"
                 >
-                  {createReport.isPending ? "Submitting…" : "Submit request"}
+                  {submitReport.isPending ? "Submitting…" : "Submit request"}
                 </Button>
               </form>
             </Form>
@@ -416,6 +629,17 @@ export default function AdviserReports() {
         })}
       </div>
 
+      <Alert
+        className="border-violet-200 bg-violet-50 text-violet-900"
+        data-testid="alert-reports-access-notice"
+      >
+        <Info className="h-4 w-4 text-violet-600" />
+        <AlertDescription>
+          Every report download is logged to the adviser audit trail.
+          Only request reports for clients you have an active engagement with.
+        </AlertDescription>
+      </Alert>
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
@@ -444,7 +668,7 @@ export default function AdviserReports() {
                 <TableRow>
                   <TableHead>Client</TableHead>
                   <TableHead>Type</TableHead>
-                  <TableHead>Version</TableHead>
+                  <TableHead>Period</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Requested</TableHead>
                   <TableHead>Actions</TableHead>
@@ -457,6 +681,9 @@ export default function AdviserReports() {
                   const showRetry = isFailed || isExpiredLink || r.status === "expired";
                   const versionNum = r.versionNumber ?? 1;
                   const priorCount = r.versions?.length ?? 0;
+                  const client = clientMap.get(r.clientUserId);
+                  const clientName = client ? `${client.firstName ?? ""} ${client.lastName ?? ""}`.trim() : `Client #${r.clientUserId}`;
+
                   return (
                     <TableRow
                       key={r.id}
@@ -469,34 +696,46 @@ export default function AdviserReports() {
                             : ""
                       }
                     >
-                      <TableCell className="text-sm">#{r.clientUserId}</TableCell>
+                      <TableCell className="text-sm">
+                        <div className="font-medium text-gray-900">{clientName}</div>
+                        {client?.email && <div className="text-xs text-gray-500">{client.email}</div>}
+                      </TableCell>
                       <TableCell className="capitalize text-sm">
-                        {r.reportType.replace(/_/g, " ")}
+                        <div className="flex flex-col">
+                          <span>{reportTypeLabel(r.reportType)}</span>
+                          {priorCount > 0 ? (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span
+                                    className="inline-flex items-center text-[10px] gap-1 text-violet-700 bg-violet-50 border border-violet-200 px-1.5 py-0 rounded w-fit mt-1 cursor-help"
+                                    data-testid={`chip-version-${r.id}`}
+                                  >
+                                    <Layers className="h-2.5 w-2.5" />v{versionNum}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p className="text-xs">
+                                    {priorCount} prior version{priorCount === 1 ? "" : "s"}: {" "}
+                                    {r.versions!
+                                      .map((v) => `#${v.id} v${v.versionNumber}`)
+                                      .join(", ")}
+                                  </p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          ) : (
+                            <span className="text-[10px] text-slate-500" data-testid={`chip-version-${r.id}`}>v{versionNum}</span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>
-                        {priorCount > 0 ? (
-                          <TooltipProvider>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span
-                                  className="inline-flex items-center text-xs gap-1 text-violet-700 bg-violet-50 border border-violet-200 px-2 py-0.5 rounded cursor-help"
-                                  data-testid={`chip-version-${r.id}`}
-                                >
-                                  <Layers className="h-3 w-3" />v{versionNum}
-                                </span>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                <p className="text-xs">
-                                  {priorCount} prior version{priorCount === 1 ? "" : "s"}: {" "}
-                                  {r.versions!
-                                    .map((v) => `#${v.id} v${v.versionNumber}`)
-                                    .join(", ")}
-                                </p>
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                        {r.periodFrom && r.periodTo ? (
+                          <span className="text-xs text-gray-600">
+                            {formatDate(r.periodFrom)} – {formatDate(r.periodTo)}
+                          </span>
                         ) : (
-                          <span className="text-xs text-slate-500" data-testid={`chip-version-${r.id}`}>v{versionNum}</span>
+                          <span className="text-xs text-gray-400">All on record</span>
                         )}
                       </TableCell>
                       <TableCell>

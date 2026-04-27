@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import { eq, desc, asc, and, lt, inArray, gte, sql } from "drizzle-orm";
+import { eq, desc, asc, and, or, lt, gte, isNull, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   reportRequests,
@@ -36,6 +36,43 @@ export const DUPLICATE_GUARD_WINDOW_MS = 30 * 60 * 1000;
 // later "real wording" sweep is a single search-and-replace.
 const PLATFORM_AFSL_NUMBER = "AFSL placeholder";
 const PLATFORM_NAME = "AMAX Wealth";
+
+// Task #298 — single named constant. A row stuck in `requested` or
+// `generating` for longer than this is considered abandoned (the generator
+// crashed mid-flight) and the next list-endpoint hit will flip it to
+// `failed` with a clear reason. Configurable via env so ops can tune it
+// without a redeploy if a real generator ever takes longer.
+export const STALE_REPORT_JOB_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.ADVISER_REPORT_STALE_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return 10 * 60 * 1000; // 10 minutes
+})();
+export const STALE_REPORT_JOB_FAILURE_REASON = "Generation timed out";
+
+// -----------------------------------------------------------------------------
+// Sweep stale jobs. Called from the top of every list endpoint so the UI
+// never has to render an indefinitely-stuck "Requested" pill. Idempotent:
+// safe to call from concurrent requests; the WHERE clause re-checks the
+// timeout so two parallel sweeps converge on the same outcome.
+// -----------------------------------------------------------------------------
+export async function sweepStaleReportJobs(adviserUserId: number): Promise<number> {
+  const cutoff = new Date(Date.now() - STALE_REPORT_JOB_TIMEOUT_MS);
+  const result = await db
+    .update(reportRequests)
+    .set({
+      status: "failed",
+      failureReason: STALE_REPORT_JOB_FAILURE_REASON,
+    })
+    .where(
+      and(
+        eq(reportRequests.adviserUserId, adviserUserId),
+        inArray(reportRequests.status, ["requested", "generating"]),
+        lt(reportRequests.requestedAt, cutoff),
+      ),
+    )
+    .returning({ id: reportRequests.id });
+  return result.length;
+}
 
 export type ReportResult =
   | { status: "ready"; downloadUrl: string; filePath: string }
@@ -399,55 +436,101 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
     const wantsTxns = row.reportType === "transaction_history" || row.reportType === "full_statement";
     const wantsFees = row.reportType === "fee_summary" || row.reportType === "full_statement";
 
+    // Task #298 — resolve the optional reporting window. Both columns are
+    // nullable: when both are null the generator preserves its prior
+    // behaviour (everything-on-record) so older queued rows that predate
+    // the column still render. When set, slices below filter by:
+    //   - transactions.createdAt within [periodFrom, periodTo + 1 day)
+    //   - fee consents by consentedAt within the same window
+    //   - holdings by overlap with [investmentDate, maturityDate ?? +∞]
+    const periodFrom = row.periodFrom ? new Date(`${row.periodFrom}T00:00:00.000Z`) : null;
+    const periodTo = row.periodTo ? new Date(`${row.periodTo}T00:00:00.000Z`) : null;
+    // Inclusive upper bound: shift by one day so a To = 2026-04-30 captures
+    // anything stamped on that date.
+    const periodToExclusive = periodTo ? new Date(periodTo.getTime() + 86_400_000) : null;
+    const hasWindow = periodFrom !== null && periodTo !== null;
+
     const holdings = wantsHoldings
-      ? await db
-          .select({
-            productName: investmentProducts.name,
-            productCategory: investmentProducts.category,
-            investedAmount: userInvestments.investedAmount,
-            currentValue: userInvestments.currentValue,
-            totalReturn: userInvestments.totalReturn,
-            returnPercent: userInvestments.returnPercent,
-            status: userInvestments.status,
-            investmentDate: userInvestments.investmentDate,
-            maturityDate: userInvestments.maturityDate,
-          })
-          .from(userInvestments)
-          .innerJoin(investmentProducts, eq(investmentProducts.id, userInvestments.productId))
-          .where(eq(userInvestments.userId, row.clientUserId))
-          .orderBy(desc(userInvestments.investmentDate))
+      ? await (() => {
+          const conds = [eq(userInvestments.userId, row.clientUserId)];
+          if (hasWindow) {
+            // Holdings overlap the window if they were opened strictly
+            // before periodTo + 1 day (so a holding stamped at 15:00 on the
+            // periodTo calendar date is still in scope) AND have either no
+            // maturity or mature on/after periodFrom.
+            conds.push(lt(userInvestments.investmentDate, periodToExclusive!));
+            conds.push(
+              or(
+                isNull(userInvestments.maturityDate),
+                gte(userInvestments.maturityDate, periodFrom!),
+              )!,
+            );
+          }
+          return db
+            .select({
+              productName: investmentProducts.name,
+              productCategory: investmentProducts.category,
+              investedAmount: userInvestments.investedAmount,
+              currentValue: userInvestments.currentValue,
+              totalReturn: userInvestments.totalReturn,
+              returnPercent: userInvestments.returnPercent,
+              status: userInvestments.status,
+              investmentDate: userInvestments.investmentDate,
+              maturityDate: userInvestments.maturityDate,
+            })
+            .from(userInvestments)
+            .innerJoin(investmentProducts, eq(investmentProducts.id, userInvestments.productId))
+            .where(and(...conds))
+            .orderBy(desc(userInvestments.investmentDate));
+        })()
       : [];
 
     // Cash balances are LEDGER-DERIVED (per Session 12 requirement). The
     // ledger is the single source of truth for cash; product current value
     // continues to come from `userInvestments` (product NAV is its own truth).
+    // Cash totals are point-in-time and not window-scoped — the brief calls
+    // for window-filtered transactions/holdings/fees only.
     const cashAud = wantsHoldings ? await getUserCurrencyBalance(row.clientUserId, "AUD") : "0";
     const cashUsd = wantsHoldings ? await getUserCurrencyBalance(row.clientUserId, "USD") : "0";
 
     const txns = wantsTxns
-      ? await db
-          .select()
-          .from(transactions)
-          .where(eq(transactions.userId, row.clientUserId))
-          .orderBy(desc(transactions.createdAt))
-          .limit(TXN_LIMIT)
+      ? await (() => {
+          const conds = [eq(transactions.userId, row.clientUserId)];
+          if (hasWindow) {
+            conds.push(gte(transactions.createdAt, periodFrom!));
+            conds.push(lt(transactions.createdAt, periodToExclusive!));
+          }
+          return db
+            .select()
+            .from(transactions)
+            .where(and(...conds))
+            .orderBy(desc(transactions.createdAt))
+            .limit(TXN_LIMIT);
+        })()
       : [];
 
     const fees = wantsFees
-      ? await db
-          .select({
-            id: feeConsents.id,
-            feeType: feeConsents.feeType,
-            amountType: feeConsents.amountType,
-            amount: feeConsents.amount,
-            deductionFrequency: feeConsents.deductionFrequency,
-            consentedAt: feeConsents.consentedAt,
-            consentExpiryDate: feeConsents.consentExpiryDate,
-            renewalStatus: feeConsents.renewalStatus,
-          })
-          .from(feeConsents)
-          .where(eq(feeConsents.clientId, row.clientUserId))
-          .orderBy(desc(feeConsents.consentedAt))
+      ? await (() => {
+          const conds = [eq(feeConsents.clientId, row.clientUserId)];
+          if (hasWindow) {
+            conds.push(gte(feeConsents.consentedAt, periodFrom!));
+            conds.push(lt(feeConsents.consentedAt, periodToExclusive!));
+          }
+          return db
+            .select({
+              id: feeConsents.id,
+              feeType: feeConsents.feeType,
+              amountType: feeConsents.amountType,
+              amount: feeConsents.amount,
+              deductionFrequency: feeConsents.deductionFrequency,
+              consentedAt: feeConsents.consentedAt,
+              consentExpiryDate: feeConsents.consentExpiryDate,
+              renewalStatus: feeConsents.renewalStatus,
+            })
+            .from(feeConsents)
+            .where(and(...conds))
+            .orderBy(desc(feeConsents.consentedAt));
+        })()
       : [];
 
     // ---- Render PDF ----------------------------------------------------------
@@ -459,6 +542,11 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       notes: row.notes,
       versionNumber: row.versionNumber ?? 1,
       generatedAt,
+      // Task #298 — pass the resolved window through verbatim so the rendered
+      // header explicitly states the data slice. Both ISO date strings or
+      // null (older queued rows that predate the column).
+      periodFrom: row.periodFrom,
+      periodTo: row.periodTo,
       client: {
         userId: row.clientUserId,
         firstName: client.firstName,
@@ -515,6 +603,11 @@ interface RenderInput {
   notes: string | null;
   versionNumber: number;
   generatedAt: Date;
+  // Task #298 — when both are set, the rendered header explicitly states
+  // the window the data was scoped to. When null, the existing
+  // "everything-on-record" rendering is preserved.
+  periodFrom: string | null;
+  periodTo: string | null;
   client: { userId: number; firstName: string; lastName: string; email: string; kycStatus: string };
   adviser: { firstName: string; lastName: string; afslNumber: string };
   holdings: Array<{
@@ -597,6 +690,15 @@ async function renderPdf(filePath: string, data: RenderInput): Promise<void> {
     doc.text(
       `Generated ${fmtDate(data.generatedAt)} · Report #${data.reportId} · Version ${data.versionNumber}`,
     );
+    // Task #298 — explicit reporting window so the recipient never has to
+    // guess what data was sliced into this PDF. When the request had no
+    // window set (older queued rows) we mark it as such rather than
+    // silently rendering "everything".
+    if (data.periodFrom && data.periodTo) {
+      doc.text(`Period: ${fmtDate(data.periodFrom)} – ${fmtDate(data.periodTo)}`);
+    } else {
+      doc.text(`Period: All data on record`);
+    }
     if (data.notes) {
       doc.moveDown(0.3);
       doc.fillColor("#475569").fontSize(9).font("Helvetica-Oblique").text(`Note: ${data.notes}`);

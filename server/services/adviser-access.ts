@@ -41,7 +41,7 @@ import {
   type InvestmentProduct,
   type InvestmentInstruction,
 } from "@shared/schema";
-import { and, eq, desc, lte, gte, sql, inArray, notInArray } from "drizzle-orm";
+import { and, eq, desc, lt, lte, gte, sql, inArray, notInArray, or, isNull } from "drizzle-orm";
 import {
   calculatePortfolioTotalsAtDate,
   calculateWalletValuationsAtDate,
@@ -1472,6 +1472,52 @@ export async function createReportRequest(
     .values({ ...input, adviserUserId })
     .returning();
   return row;
+}
+
+// -----------------------------------------------------------------------------
+// Task #298 — single-source lookup for "is there already an active row for
+// this (adviser, client, reportType)?". Used both by:
+//   - the duplicate-prevention check in POST /api/adviser/reports
+//   - the "Latest version" / "Previous versions" sub-row UX, which is keyed
+//     off the same most-recent active row.
+//
+// "Active" means:
+//   - status in {requested, generating}, OR
+//   - status = ready AND (expires_at IS NULL OR expires_at > now())
+//
+// terminal failures and explicitly-expired rows are excluded so a fresh
+// request after a failure is never blocked.
+// -----------------------------------------------------------------------------
+export async function findActiveReportRequest(
+  adviserUserId: number,
+  clientUserId: number,
+  reportType: string,
+): Promise<ReportRequest | null> {
+  const now = new Date();
+  const [row] = await db
+    .select()
+    .from(reportRequests)
+    .where(
+      and(
+        eq(reportRequests.adviserUserId, adviserUserId),
+        eq(reportRequests.clientUserId, clientUserId),
+        eq(reportRequests.reportType, reportType),
+        or(
+          eq(reportRequests.status, "requested"),
+          eq(reportRequests.status, "generating"),
+          and(
+            eq(reportRequests.status, "ready"),
+            or(
+              isNull(reportRequests.expiresAt),
+              gte(reportRequests.expiresAt, now),
+            ),
+          ),
+        ),
+      ),
+    )
+    .orderBy(desc(reportRequests.requestedAt))
+    .limit(1);
+  return row ?? null;
 }
 
 // -----------------------------------------------------------------------------

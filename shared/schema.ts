@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, decimal, timestamp, jsonb, uniqueIndex, index, check } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, decimal, timestamp, date, jsonb, uniqueIndex, index, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1689,6 +1689,13 @@ export const reportRequests = pgTable("report_requests", {
   status: text("status").notNull().default("requested"),
   // Optional natural-language note ("for the Q2 review meeting on Friday")
   notes: text("notes"),
+  // Task #298 — explicit reporting window picked by the adviser at request
+  // time (date-only; the generator uses these to slice transactions /
+  // holdings / fee consents). Nullable so older rows survive the migration;
+  // when both are null the generator preserves its prior behaviour
+  // (everything-on-record).
+  periodFrom: date("period_from"),
+  periodTo: date("period_to"),
   // Set by the generator when ready; null while generating.
   downloadUrl: text("download_url"),
   // Failure reason — also re-used by the sweeper (Task #315) which writes
@@ -1716,6 +1723,16 @@ export const reportRequests = pgTable("report_requests", {
   // versions does this original have?"). Both are point reads, so a
   // single index on supersedesReportId is sufficient.
   supersedesIdx: index("report_requests_supersedes_idx").on(table.supersedesReportId),
+  // Task #298 — duplicate-prevention lookup ("most recent active row for
+  // this adviser + client + reportType") and "previous versions" expand
+  // both run off this composite. requestedAt trails so we can sort the
+  // matching rows by recency in the same index scan.
+  adviserClientTypeIdx: index("report_requests_adviser_client_type_idx").on(
+    table.adviserUserId,
+    table.clientUserId,
+    table.reportType,
+    table.requestedAt,
+  ),
 }));
 
 export const insertReportRequestSchema = createInsertSchema(reportRequests).omit({

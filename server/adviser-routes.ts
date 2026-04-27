@@ -39,7 +39,11 @@ import { getUserNameMap } from "./services/user-name-map";
 // columns from non-IF rows so the adviser surface can never accidentally
 // render stale "still held" notification metadata for a settled-formerly-IF row.
 import { projectDeductionForApiContract } from "../shared/fee-deduction-status";
-import { generateReportPdf, REPORTS_DIR } from "./services/reports";
+import {
+  generateReportPdf,
+  REPORTS_DIR,
+  sweepStaleReportJobs,
+} from "./services/reports";
 import path from "node:path";
 import {
   listAdviserClients,
@@ -52,6 +56,7 @@ import {
   updateAdviserTask,
   listAdviserReportRequests,
   createReportRequest,
+  findActiveReportRequest,
   getAdviserDashboardSummary,
   getAdviserNotifications,
   listAdviserProducts,
@@ -150,6 +155,12 @@ function handleError(res: any, error: any, fallbackMessage: string) {
     if (typeof error.code === "string") {
       body.code = error.code;
     }
+    // Task #298 — structured 409 from POST /api/adviser/reports carries the
+    // existing row so the UI can immediately offer Regenerate / Latest /
+    // Previous versions without a follow-up GET.
+    if (error.existingReport && typeof error.existingReport === "object") {
+      body.existingReport = error.existingReport;
+    }
     return res.status(error.status).json(body);
   }
   console.error(`[adviser-routes] ${fallbackMessage}:`, error);
@@ -200,11 +211,40 @@ const updateTaskSchema = z.object({
   nextReviewAt: z.coerce.date().optional().nullable(),
 });
 
+// Task #298 — date-only ISO string (YYYY-MM-DD). Stored in a Postgres `date`
+// column so the timezone of the issuing browser is irrelevant; the rendered
+// PDF header and the stored audit row both use the literal date the adviser
+// picked.
+const isoDateString = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD");
+
 const createReportSchema = insertReportRequestSchema
-  .omit({ adviserUserId: true })
+  .omit({ adviserUserId: true, periodFrom: true, periodTo: true })
   .extend({
     reportType: z.enum(REPORT_TYPES),
     format: z.enum(["pdf"]).optional(),
+    // Task #298 — explicit reporting window. Required so the generated PDF
+    // is unambiguous about what slice of the client's history was rendered.
+    // Both fields are kept independent (rather than a single tuple) so a
+    // future CSV/XLSX path can serialise them in whichever order it wants
+    // without re-plumbing the schema.
+    periodFrom: isoDateString,
+    periodTo: isoDateString,
+    // Set by the UI when the adviser explicitly chose Regenerate against an
+    // existing ready row — opt-in cancellation of the prior version.
+    regenerate: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    // Validate the calendar order without doing timezone arithmetic — the
+    // strings sort lexically when both are YYYY-MM-DD.
+    if (val.periodFrom > val.periodTo) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["periodTo"],
+        message: "End date must be on or after start date",
+      });
+    }
   });
 
 const INSTRUCTION_ACTIONS = ["buy", "sell", "switch"] as const;
@@ -569,6 +609,9 @@ export function registerAdviserRoutes(app: Express): void {
     adviserRoute(async (_req, auth) => {
       // Task #315 — augment each row with the prior-version chain so the UI
       // can render a "v2 (prior: v1, v0)" chip without a second round-trip.
+      // Task #298's on-demand stale sweep was dropped here in favour of
+      // Task #315's `report-sweeper` cron (server/index.ts) which runs every
+      // 60s and writes the same failed/timeout transition.
       const rows = await listAdviserReportRequests(auth.userId);
       const { listPriorVersions } = await import("./services/reports");
       const enriched = await Promise.all(
@@ -597,10 +640,82 @@ export function registerAdviserRoutes(app: Express): void {
           { status: 400 },
         );
       }
-      const report = await createReportRequest(auth.userId, parsed.data);
+      const { regenerate, periodFrom, periodTo, ...insertData } = parsed.data;
+
+      // Task #298 — duplicate prevention. Look up the most recent active row
+      // for this (adviser, client, reportType) BEFORE inserting:
+      //   - in-flight (requested/generating): always block; explain that
+      //     "another request is already in progress" so the adviser doesn't
+      //     spam the queue with N copies of the same report.
+      //   - ready and not-expired: block UNLESS the caller passed
+      //     regenerate=true. If they did, we mark the prior row as
+      //     "superseded" (download URL cleared so the old PDF can no
+      //     longer be downloaded) and continue with a fresh insert.
+      const existing = await findActiveReportRequest(
+        auth.userId,
+        insertData.clientUserId,
+        insertData.reportType,
+      );
+      if (existing) {
+        if (existing.status === "requested" || existing.status === "generating") {
+          throw Object.assign(
+            new Error(
+              `A ${insertData.reportType.replace(/_/g, " ")} report for this client is already in progress.`,
+            ),
+            {
+              status: 409,
+              code: "REPORT_ALREADY_IN_PROGRESS",
+              existingReport: existing,
+            },
+          );
+        }
+        // existing.status === "ready" and still within expiry
+        if (!regenerate) {
+          throw Object.assign(
+            new Error(
+              `A ready ${insertData.reportType.replace(/_/g, " ")} report for this client already exists. Download it directly or regenerate it.`,
+            ),
+            {
+              status: 409,
+              code: "REPORT_ALREADY_EXISTS",
+              existingReport: existing,
+            },
+          );
+        }
+        // Adviser explicitly chose Regenerate — supersede the prior ready
+        // row so the UI's "latest version" only ever points at the freshly
+        // generated PDF. Keep the audit trail intact (status flipped to
+        // "expired" rather than deleted), and write an audit row so the
+        // supersession itself is reviewable.
+        await db
+          .update(reportRequests)
+          .set({ status: "expired", downloadUrl: null })
+          .where(eq(reportRequests.id, existing.id));
+        await audit(
+          auth.userId,
+          "adviser_report_superseded",
+          "report_request",
+          String(existing.id),
+          { clientUserId: existing.clientUserId, reportType: existing.reportType },
+          (req as Request).ip || null,
+        );
+      }
+
+      const report = await createReportRequest(auth.userId, {
+        ...insertData,
+        periodFrom,
+        periodTo,
+      });
       await audit(auth.userId, "adviser_report_requested", "report_request", String(report.id), {
         clientUserId: report.clientUserId,
         reportType: report.reportType,
+        // Task #298 — capture the requested window in the audit payload so
+        // a later reviewer can answer "what slice was this PDF promised to
+        // cover?" without re-reading the report_requests row (which may
+        // have moved on by then).
+        periodFrom: report.periodFrom,
+        periodTo: report.periodTo,
+        regenerate: regenerate === true,
       }, (req as Request).ip || null);
 
       // Generate the PDF synchronously. Datasets are small (one client, ≤100
@@ -612,12 +727,16 @@ export function registerAdviserRoutes(app: Express): void {
           clientUserId: report.clientUserId,
           reportType: report.reportType,
           downloadUrl: result.downloadUrl,
+          periodFrom: report.periodFrom,
+          periodTo: report.periodTo,
         }, (req as Request).ip || null);
       } else {
         await audit(auth.userId, "adviser_report_failed", "report_request", String(report.id), {
           clientUserId: report.clientUserId,
           reportType: report.reportType,
           failureReason: result.failureReason,
+          periodFrom: report.periodFrom,
+          periodTo: report.periodTo,
         }, (req as Request).ip || null);
       }
 
