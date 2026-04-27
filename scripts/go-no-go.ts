@@ -86,6 +86,7 @@ import "./_bootstrap-test-env";
 import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { Express, Request } from "express";
 import { and, desc, eq, gt, sql } from "drizzle-orm";
@@ -527,7 +528,7 @@ async function monitoringSection(
 // ---------------------------------------------------------------------------
 // 4. Alerting
 // ---------------------------------------------------------------------------
-const KNOWN_ALERT_SOURCES: Array<{
+export const KNOWN_ALERT_SOURCES: Array<{
   source: string;
   severity: OperatorAlertSeverity;
   title: string;
@@ -543,7 +544,34 @@ const KNOWN_ALERT_SOURCES: Array<{
   { source: "operator-alerts-prune-watchdog", severity: "info", title: "Pre-launch alerting drill" },
 ];
 
-async function alertingSection(): Promise<Section> {
+export interface AlertingSectionOptions {
+  /**
+   * Override the module-level DEPLOY_GATE_MODE for the duration of this
+   * call. Used by `scripts/test-deploy-gate-rollup.ts` (Task #225) to
+   * exercise both branches end-to-end without spawning two subprocesses.
+   */
+  deployGateMode?: boolean;
+  /**
+   * Override the module-level RUN_ID. Tests pass a deterministic value so
+   * assertions over the rollup payload do not have to allow-list the
+   * runtime-generated id.
+   */
+  runId?: string;
+  /**
+   * Inject a stand-in for `notifyOperator()`. Used by the regression test
+   * (Task #225) to count per-source dispatches and observe whether the
+   * webhook env var was visible at call time, without touching a real
+   * webhook receiver.
+   */
+  dispatcher?: typeof notifyOperator;
+}
+
+export async function alertingSection(
+  options: AlertingSectionOptions = {},
+): Promise<Section> {
+  const deployGateMode = options.deployGateMode ?? DEPLOY_GATE_MODE;
+  const runId = options.runId ?? RUN_ID;
+  const dispatch = options.dispatcher ?? notifyOperator;
   const checks: Check[] = [];
   const webhookConfigured = Boolean(process.env.OPERATOR_ALERT_WEBHOOK_URL?.trim());
 
@@ -552,13 +580,13 @@ async function alertingSection(): Promise<Section> {
   // per-source webhook posts with one rolled-up "drill complete" alert
   // dispatched at the end of this section. See the file-header "Modes"
   // block (Task #218).
-  const expectWebhookPerSource = webhookConfigured && !DEPLOY_GATE_MODE;
+  const expectWebhookPerSource = webhookConfigured && !deployGateMode;
 
   // Top-level info on which channels are configured. NO-GO if no
   // off-stdout channel is wired — running production behind log-only
   // alerting means an outage at 02:00 reaches nobody.
   if (webhookConfigured) {
-    const detail = DEPLOY_GATE_MODE
+    const detail = deployGateMode
       ? "OPERATOR_ALERT_WEBHOOK_URL is set — per-source drills go log+DB only; one rolled-up alert is dispatched to the webhook (--deploy-gate)."
       : "OPERATOR_ALERT_WEBHOOK_URL is set — alerts dispatch to log + webhook.";
     checks.push(
@@ -588,7 +616,7 @@ async function alertingSection(): Promise<Section> {
   let perSourcePass = 0;
   let perSourceFail = 0;
   const savedWebhookUrl = process.env.OPERATOR_ALERT_WEBHOOK_URL;
-  if (DEPLOY_GATE_MODE && webhookConfigured) {
+  if (deployGateMode && webhookConfigured) {
     delete process.env.OPERATOR_ALERT_WEBHOOK_URL;
   }
   try {
@@ -599,17 +627,17 @@ async function alertingSection(): Promise<Section> {
         title: `${spec.title} — ${spec.source}`,
         details: {
           drill: true,
-          runId: RUN_ID,
-          message: DEPLOY_GATE_MODE
+          runId,
+          message: deployGateMode
             ? "Pre-launch go/no-go drill (deploy-gate). NOT a real incident. Webhook suppressed for per-source firings; see the rolled-up summary alert for confirmation."
             : "Pre-launch go/no-go drill. NOT a real incident. Confirm receipt in the configured channel.",
-          scheduledBy: DEPLOY_GATE_MODE
+          scheduledBy: deployGateMode
             ? "scripts/go-no-go.ts (--deploy-gate)"
             : "scripts/go-no-go.ts",
         },
       };
       try {
-        const result = await notifyOperator(alert);
+        const result = await dispatch(alert);
         const logOk = result.outcomes.find(
           (o) => o.channel === "log" && o.status === "success",
         );
@@ -657,7 +685,7 @@ async function alertingSection(): Promise<Section> {
               ),
             );
           }
-        } else if (DEPLOY_GATE_MODE && webhookConfigured) {
+        } else if (deployGateMode && webhookConfigured) {
           // Webhook is configured but suppressed for this dispatch by
           // deploy-gate mode. The pass criteria are log success + DB row
           // written; the rolled-up alert below proves the webhook itself
@@ -717,7 +745,7 @@ async function alertingSection(): Promise<Section> {
       }
     }
   } finally {
-    if (DEPLOY_GATE_MODE && webhookConfigured && savedWebhookUrl !== undefined) {
+    if (deployGateMode && webhookConfigured && savedWebhookUrl !== undefined) {
       process.env.OPERATOR_ALERT_WEBHOOK_URL = savedWebhookUrl;
     }
   }
@@ -729,7 +757,7 @@ async function alertingSection(): Promise<Section> {
   // / persistence machinery as a real alert. The runId in `details`
   // makes the dedupe key unique per run, so back-to-back deploys are
   // not silently coalesced.
-  if (DEPLOY_GATE_MODE && webhookConfigured) {
+  if (deployGateMode && webhookConfigured) {
     const total = KNOWN_ALERT_SOURCES.length;
     const rollup: OperatorAlert = {
       source: "launch-readiness-gate",
@@ -738,7 +766,7 @@ async function alertingSection(): Promise<Section> {
       details: {
         drill: true,
         rolledUp: true,
-        runId: RUN_ID,
+        runId,
         sourcesChecked: total,
         sourcesPassed: perSourcePass,
         sourcesFailed: perSourceFail,
@@ -753,7 +781,7 @@ async function alertingSection(): Promise<Section> {
       },
     };
     try {
-      const result = await notifyOperator(rollup);
+      const result = await dispatch(rollup);
       const logOk = result.outcomes.find(
         (o) => o.channel === "log" && o.status === "success",
       );
@@ -792,7 +820,7 @@ async function alertingSection(): Promise<Section> {
 
   return {
     name: "Alerting",
-    summary: DEPLOY_GATE_MODE
+    summary: deployGateMode
       ? "Per-source drills are dispatched log+DB only (webhook suppressed) and a " +
         "single rolled-up alert is dispatched through the webhook so the on-call " +
         "channel sees one drill per deploy instead of one per source. A configured " +
@@ -1684,7 +1712,19 @@ async function main(): Promise<void> {
   process.exit(verdict === "GO" ? 0 : 1);
 }
 
-main().catch((err) => {
-  console.error("[go-no-go] orchestrator crashed:", err);
-  process.exit(1);
-});
+// Only run the orchestrator when this file is executed as the program
+// entrypoint (e.g. `npx tsx scripts/go-no-go.ts`). When another script
+// imports `alertingSection` / `KNOWN_ALERT_SOURCES` for testing
+// (scripts/test-deploy-gate-rollup.ts, Task #225), we MUST NOT also
+// kick off main() — doing so would re-run the entire pre-launch
+// pipeline as a side effect of `import`, which is exactly the kind of
+// silent foot-gun this regression test is here to prevent.
+const invokedDirectly =
+  typeof process.argv[1] === "string" &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error("[go-no-go] orchestrator crashed:", err);
+    process.exit(1);
+  });
+}

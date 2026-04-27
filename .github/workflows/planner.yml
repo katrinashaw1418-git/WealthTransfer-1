@@ -85,17 +85,40 @@ jobs:
         run: npx tsx scripts/test-no-synthetic-portfolio-data.ts
 
   predeploy-gate-smoke:
-    # Pure-bash smoke test for scripts/predeploy-build.sh exit semantics
-    # (Task #180). Stubs npx/npm on PATH so the wrapper exercises every
-    # branch — NO-GO + report, crash without report, GO + report — without
-    # touching the live launch readiness gate. Guards the deploy wiring
-    # against regressions like surfacing a stale report on a crash, or
-    # shipping a GO build without an attached current-run report.
+    # Two checks that together pin the predeploy gate's externally-
+    # visible contract:
+    #   1. Pure-bash smoke test for scripts/predeploy-build.sh exit
+    #      semantics (Task #180). Stubs npx/npm on PATH so the wrapper
+    #      exercises every branch — NO-GO + report, crash without
+    #      report, GO + report — without touching the live launch
+    #      readiness gate. Guards the deploy wiring against regressions
+    #      like surfacing a stale report on a crash, or shipping a GO
+    #      build without an attached current-run report.
+    #   2. Deploy-gate rollup regression (Task #225). Imports
+    #      `alertingSection()` from scripts/go-no-go.ts with a stubbed
+    #      dispatcher and asserts that --deploy-gate emits exactly one
+    #      webhook-eligible alert per Publish (the rollup) and the
+    #      default mode emits one per known source. Pins the on-call
+    #      "one page per deploy" behaviour added by Task #218.
     runs-on: ubuntu-latest
+    env:
+      # Test harness only — JWT/DB are stubbed by `_bootstrap-stub-db`,
+      # but server/auth.ts and server/db.ts still validate at module
+      # init. The placeholder DB URL is never connected to because the
+      # rollup test injects a fake dispatcher.
+      NODE_ENV: test
+      JWT_SECRET: ci-predeploy-gate-test-secret
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
       - name: Predeploy wrapper smoke test (Task #180)
         run: bash scripts/test-predeploy-gate.sh
+      - name: Deploy-gate rollup regression (Task #225)
+        run: npx tsx scripts/test-deploy-gate-rollup.ts
 
   ledger-leak-gate:
     runs-on: ubuntu-latest
