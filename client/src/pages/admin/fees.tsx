@@ -1131,18 +1131,22 @@ export default function AdminFeesPage() {
   function downloadExceptionsCsv() {
     const d = exceptionsQ.data;
     if (!d) return;
-    // Task #204 — `failureReason` is IF-only metadata that lingers on the
-    // row after settle. Only surface it to non-IF kinds via the synthetic
-    // fallback so a stuck/role_corruption row from a previously-IF
-    // deduction can't leak the old IF text into the CSV.
+    // Task #208 / #229 — the server-side projectFeeExceptionRow helper now
+    // nulls failureReason / lastRecheckedAt / clientNotifiedAt and zeroes
+    // clientNotificationCount on every non-held row, so we can rely on the
+    // server-supplied falsy values directly instead of re-implementing the
+    // kind === "held" gate here. The synthetic fallback below only fires
+    // when failureReason is absent (held with no recorded reason, or any
+    // non-held kind).
     const reasonFor = (x: FeeExceptionRow): string =>
-      x.kind === "held"
-        ? (x.deduction.failureReason ?? "Insufficient client balance")
-        : x.kind === "stuck"
-          ? "Pending approval > 7 days"
-          : x.kind === "role_corruption"
-            ? "Settled or reversed against a non-adviser user"
-            : "Last attempt failed";
+      x.deduction.failureReason ??
+      (x.kind === "stuck"
+        ? "Pending approval > 7 days"
+        : x.kind === "role_corruption"
+          ? "Settled or reversed against a non-adviser user"
+          : x.kind === "failed"
+            ? "Last attempt failed"
+            : "Insufficient client balance");
     const rows: (string | number)[][] = [
       ["Period from", d.period.from],
       ["Period to", d.period.to],
@@ -1166,10 +1170,6 @@ export default function AdminFeesPage() {
       ...d.items.map((x) => {
         const c = d.users[x.deduction.clientUserId];
         const a = d.users[x.deduction.adviserUserId];
-        // Task #204 — gate IF bookkeeping fields by kind === "held" so
-        // stuck/role_corruption/failed rows don't carry over stale IF
-        // re-check / notification data from a previous IF episode.
-        const heldOnly = x.kind === "held";
         return [
           x.kind,
           x.deduction.id,
@@ -1184,9 +1184,16 @@ export default function AdminFeesPage() {
           x.deduction.totalAccrued,
           x.deduction.currency,
           x.ageDays,
-          heldOnly ? (x.deduction.lastRecheckedAt ?? "") : "",
-          heldOnly ? (x.deduction.clientNotifiedAt ?? "") : "",
-          heldOnly ? x.deduction.clientNotificationCount : "",
+          x.deduction.lastRecheckedAt ?? "",
+          x.deduction.clientNotifiedAt ?? "",
+          // Count column was previously gated by `kind === "held"` so non-held
+          // rows rendered as blank. The server now nulls clientNotifiedAt on
+          // non-held rows, so we lean on that falsy value to keep the column
+          // blank for non-held while still emitting the held row's count
+          // (including 0) verbatim, preserving prior CSV output.
+          x.deduction.clientNotifiedAt
+            ? x.deduction.clientNotificationCount
+            : "",
           reasonFor(x),
         ];
       }),
@@ -2558,21 +2565,22 @@ export default function AdminFeesPage() {
                                 {x.deduction.currency}
                               </TableCell>
                               <TableCell>{x.ageDays}d</TableCell>
-                              {/* Task #204 — IF bookkeeping (lastRecheckedAt /
-                                  clientNotifiedAt / clientNotificationCount /
-                                  failureReason) is intentionally retained on
-                                  the row after settle for cron debounce. It
-                                  must NOT leak onto non-IF exception kinds
-                                  (stuck / failed / role_corruption) — those
-                                  rows can hold stale IF text from a previous
-                                  IF episode. Gate every IF-only column on
-                                  kind === "held". */}
+                              {/* Task #208 / #229 — IF bookkeeping
+                                  (lastRecheckedAt / clientNotifiedAt /
+                                  clientNotificationCount / failureReason) is
+                                  intentionally retained in the DB after
+                                  settle for cron debounce, but the server's
+                                  projectFeeExceptionRow helper now nulls /
+                                  zeroes those fields on every non-held
+                                  exception kind before they ship over the
+                                  wire. The cells below therefore lean on the
+                                  server-supplied falsy values directly
+                                  instead of re-checking kind === "held". */}
                               <TableCell
                                 className="text-xs whitespace-nowrap"
                                 data-testid={`text-exception-recheck-${x.deduction.id}`}
                               >
-                                {x.kind === "held" &&
-                                x.deduction.lastRecheckedAt ? (
+                                {x.deduction.lastRecheckedAt ? (
                                   <span title={x.deduction.lastRecheckedAt}>
                                     {formatRelative(x.deduction.lastRecheckedAt)}
                                   </span>
@@ -2584,8 +2592,7 @@ export default function AdminFeesPage() {
                                 className="text-xs whitespace-nowrap"
                                 data-testid={`text-exception-notified-${x.deduction.id}`}
                               >
-                                {x.kind === "held" &&
-                                x.deduction.clientNotifiedAt ? (
+                                {x.deduction.clientNotifiedAt ? (
                                   <span title={x.deduction.clientNotifiedAt}>
                                     {formatRelative(x.deduction.clientNotifiedAt)}
                                     {x.deduction.clientNotificationCount > 1 && (
@@ -2601,24 +2608,24 @@ export default function AdminFeesPage() {
                               <TableCell
                                 className="text-xs max-w-[240px] truncate"
                                 title={
-                                  x.kind === "held"
-                                    ? (x.deduction.failureReason ??
-                                      "Insufficient client balance")
-                                    : x.kind === "stuck"
-                                      ? "Pending approval > 7 days"
-                                      : x.kind === "role_corruption"
-                                        ? "Settled or reversed against a non-adviser user"
-                                        : "Last attempt failed"
+                                  x.deduction.failureReason ??
+                                  (x.kind === "stuck"
+                                    ? "Pending approval > 7 days"
+                                    : x.kind === "role_corruption"
+                                      ? "Settled or reversed against a non-adviser user"
+                                      : x.kind === "failed"
+                                        ? "Last attempt failed"
+                                        : "Insufficient client balance")
                                 }
                               >
-                                {x.kind === "held"
-                                  ? (x.deduction.failureReason ??
-                                    "Insufficient client balance")
-                                  : x.kind === "stuck"
+                                {x.deduction.failureReason ??
+                                  (x.kind === "stuck"
                                     ? "Pending > 7d"
                                     : x.kind === "role_corruption"
                                       ? "Non-adviser user"
-                                      : "Last attempt failed"}
+                                      : x.kind === "failed"
+                                        ? "Last attempt failed"
+                                        : "Insufficient client balance")}
                               </TableCell>
                               <TableCell>
                                 <Button
