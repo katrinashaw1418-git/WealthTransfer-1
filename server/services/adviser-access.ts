@@ -40,6 +40,7 @@ import {
   type InvestmentInstruction,
 } from "@shared/schema";
 import { and, eq, desc, lte, gte, sql, inArray, notInArray } from "drizzle-orm";
+import { calculatePortfolioTotalsAtDate } from "./portfolio-valuation";
 
 // -----------------------------------------------------------------------------
 // Link enforcement — the single chokepoint for "can this adviser see this
@@ -184,13 +185,25 @@ export async function getAdviserClientDetail(
 
 // -----------------------------------------------------------------------------
 // Client portfolio — read-only summary (portfolio row + wallet list).
+//
+// IMPORTANT: the `portfolios` table row is a stale snapshot — nothing in the
+// codebase keeps `portfolios.totalValue` (or the per-bucket fields) refreshed
+// after the row is first inserted, so reading it directly would surface "$0"
+// or "—" to the adviser even when the client has live wallet balances and
+// completed investments. Under AFSL that's a misleading display.
+//
+// This endpoint therefore computes a LIVE total via the same engine the
+// client portfolio page uses (calculatePortfolioTotalsAtDate) and overlays
+// the live numbers onto the snapshot shape so the frontend contract is
+// preserved. The snapshot row's monthlyPnl / monthlyPnlPercent fields are
+// kept as-is — they are out of scope for this read path.
 // -----------------------------------------------------------------------------
 export async function getAdviserClientPortfolio(
   adviserUserId: number,
   clientUserId: number,
 ) {
   await assertAdviserClientLink(adviserUserId, clientUserId);
-  const [portfolio] = await db
+  const [snapshot] = await db
     .select()
     .from(portfolios)
     .where(eq(portfolios.userId, clientUserId))
@@ -199,7 +212,29 @@ export async function getAdviserClientPortfolio(
     .select()
     .from(wallets)
     .where(eq(wallets.userId, clientUserId));
-  return { portfolio: portfolio ?? null, wallets: walletRows };
+
+  const live = await calculatePortfolioTotalsAtDate(clientUserId, new Date());
+
+  // Build the live portfolio object. Reuse snapshot identifiers (id, userId,
+  // updatedAt) when present so existing test fixtures and clients that key
+  // off them keep working; fall back to a synthetic shape when there's no
+  // snapshot row at all.
+  const portfolio = {
+    id: snapshot?.id ?? null,
+    userId: clientUserId,
+    totalValue: live.totalValue.toFixed(2),
+    fiatValue: live.fiatValue.toFixed(2),
+    cryptoValue: live.cryptoValue.toFixed(2),
+    stablecoinValue: live.stablecoinValue.toFixed(2),
+    investmentValue: live.investmentValue.toFixed(2),
+    monthlyPnl: snapshot?.monthlyPnl ?? "0.00",
+    monthlyPnlPercent: snapshot?.monthlyPnlPercent ?? "0.00",
+    updatedAt: new Date(),
+    hasUnpricedWallets: live.hasUnpricedWallets,
+    unpricedCurrencies: live.unpricedCurrencies,
+  };
+
+  return { portfolio, wallets: walletRows };
 }
 
 // -----------------------------------------------------------------------------
