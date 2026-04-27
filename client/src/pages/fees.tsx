@@ -20,8 +20,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ShieldAlert, Receipt, ExternalLink, Undo2 } from "lucide-react";
+// Task #204 — banner + client-side IF predicate. Resolved during rebase to
+// use the canonical client/src/components + client/src/lib homes from main
+// (more polished — the banner has parsed-shortfall + compact variants and
+// the predicate file also exports parseShortfallFromFailureReason). The
+// shared/fee-deduction-status helpers from this task remain in use on the
+// server side (admin + adviser routes + projection contract).
 import { InsufficientFundsBanner } from "@/components/insufficient-funds-banner";
-import { isInsufficientFundsRow } from "@/lib/insufficient-funds";
 
 interface UserRef {
   id: number;

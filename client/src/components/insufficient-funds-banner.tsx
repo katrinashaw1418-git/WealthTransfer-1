@@ -51,8 +51,20 @@ interface InsufficientFundsBannerProps {
 export function InsufficientFundsBanner({
   compact = false,
 }: InsufficientFundsBannerProps) {
+  // Code-review follow-up — the global queryClient default is staleTime
+  // Infinity, which would pin the banner to its first-load value for the
+  // life of the session. After a client tops up their wallet on /wallets
+  // and the IF cron (or admin manual sweep) settles the held row, the
+  // dashboard banner would otherwise keep showing the old shortfall until
+  // a hard refresh. We override with a short staleTime + a 60s background
+  // refetch so the banner clears (or updates the shortfall amount) within
+  // a minute of the underlying state changing, without requiring every
+  // top-up flow to remember to invalidate this exact query key.
   const q = useQuery<ClientFeeDeductionsPayload>({
     queryKey: ["/api/client/fee-deductions"],
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
   });
 
   // Loading / errored: render nothing. The banner is opportunistic — it

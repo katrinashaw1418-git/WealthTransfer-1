@@ -35,6 +35,10 @@ import {
 import { storage } from "./storage";
 import { requireAuth, requireRole } from "./auth";
 import { getUserNameMap } from "./services/user-name-map";
+// Task #204 — centralised "show as IF?" projection. Strips IF-only bookkeeping
+// columns from non-IF rows so the adviser surface can never accidentally
+// render stale "still held" notification metadata for a settled-formerly-IF row.
+import { projectDeductionForApiContract } from "../shared/fee-deduction-status";
 import { generateReportPdf, REPORTS_DIR } from "./services/reports";
 import path from "node:path";
 import {
@@ -1013,7 +1017,14 @@ export function registerAdviserRoutes(app: Express): void {
       const usersMap = await getUserNameMap(
         rows.flatMap((r) => [r.clientUserId, r.adviserUserId]),
       );
-      res.json({ items: rows, users: usersMap });
+      // Task #204 — strip IF-only bookkeeping columns (lastRecheckedAt,
+      // clientNotifiedAt, clientNotificationCount) from non-IF rows. Even
+      // though the adviser UI doesn't currently render those columns, the
+      // contract is enforced server-side so a future consumer adding a
+      // "client notified" column can't accidentally show stale data on a
+      // settled-formerly-IF row.
+      const projected = rows.map((r) => projectDeductionForApiContract(r));
+      res.json({ items: projected, users: usersMap });
     } catch (error: any) {
       handleError(res, error, "Failed to list fee deductions");
     }

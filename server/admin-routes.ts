@@ -64,7 +64,6 @@ import {
   // Task #144 — admin metrics tile reads transaction failures
   transactions,
 } from "@shared/schema";
-import { accrueFeeForRule, rollupAccrualsToDeduction } from "./services/fee-engine";
 import {
   acknowledgeWalletLedgerDrift,
   clearWalletLedgerDriftAcknowledgement,
@@ -83,6 +82,16 @@ import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 // advice + fee-engine surfaces. Other admin paths still use auditTx; only the
 // fee-deduction settle/reverse routes below have been migrated.
 import { writeAuditLog } from "./services/audit";
+// Task #204 — manual insufficient-funds sweep button calls the same service
+// the daily cron uses, so there is exactly one settlement code path to audit.
+import {
+  runInsufficientFundsSweep,
+  type InsufficientFundsSweepSummary,
+} from "./services/insufficient-funds-sweep";
+// Task #204 — centralised "show as IF?" projection. Strips IF-only bookkeeping
+// columns from non-IF rows before they ship over the wire so settled-formerly-
+// IF rows can never leak stale notification metadata into the admin table.
+import { projectDeductionForApiContract } from "../shared/fee-deduction-status";
 import {
   getInProcessCounters,
   getLastSuccessfulHealthProbeAt,
@@ -99,8 +108,6 @@ import {
   setKillSwitchState,
   type KillSwitchKey,
 } from "./services/kill-switch";
-// Task #204 — admin manual trigger for the insufficient-funds sweep.
-import { runInsufficientFundsSweep } from "./services/insufficient-funds-sweep";
 // Task #155 — global write kill switch (admin toggle + read-only state).
 import {
   getWriteKillSwitchState,
@@ -3649,14 +3656,71 @@ export function registerAdminRoutes(app: Express): void {
       const usersMap = await getUserNameMap(
         rows.flatMap((r) => [r.clientUserId, r.adviserUserId, r.approvedByUserId]),
       );
+      // Task #204 — strip IF-only bookkeeping columns (lastRecheckedAt,
+      // clientNotifiedAt, clientNotificationCount) from any row whose status
+      // is no longer `insufficient_funds` so the admin UI cannot accidentally
+      // render stale "still held" notification text on a settled row.
+      const projected = rows.map((r) => projectDeductionForApiContract(r));
       return {
-        items: rows,
+        items: projected,
         page,
         limit,
         total: Number(totalRow[0]?.count ?? 0),
         users: usersMap,
         heldCount: Number(heldRow[0]?.count ?? 0),
       };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #204 — manual insufficient-funds sweep trigger.
+  //
+  // The daily cron in server/index.ts already calls
+  // runInsufficientFundsSweep() once per day. Operators occasionally need to
+  // re-run the sweep on demand (e.g. after a batch of clients deposit funds
+  // following an outage) without waiting for the next cron tick. This route
+  // is the manual entry point: it calls the SAME service function the cron
+  // uses, so there is exactly one settlement code path. It honours the
+  // `fee_deductions` kill switch transparently — when the switch is engaged
+  // the service returns an empty summary without selecting any candidates.
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/admin/insufficient-funds-sweep/run",
+    adminRoute(async (req, auth) => {
+      // Code-review follow-up — surface the kill-switch state explicitly so
+      // the admin UI can show "no rows checked because the fee_deductions
+      // kill switch is engaged" instead of a bare checked=0 summary that's
+      // ambiguous (no IF rows vs sweep blocked). We probe the switch
+      // BEFORE invoking the service so the response carries an accurate
+      // pre-run snapshot; the service itself still re-checks and bails
+      // cleanly if the operator flips the switch mid-run.
+      const killSwitchActive = await isKillSwitchActive("fee_deductions");
+      const summary: InsufficientFundsSweepSummary =
+        await runInsufficientFundsSweep({
+          approverUserId: auth.userId,
+        });
+      const message = killSwitchActive
+        ? "Sweep skipped: fee_deductions kill switch is engaged. " +
+          "Disable the switch on the kill switches page to allow the next run to process held rows."
+        : `Sweep complete: checked ${summary.checked}, settled ${summary.settled}, ` +
+          `still insufficient ${summary.stillInsufficient}, errors ${summary.errors}.`;
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "insufficient_funds_sweep.manual_run",
+        entityType: "insufficient_funds_sweep",
+        // No persistent run-row identity (the sweep doesn't write a runs
+        // table the way fee_accruals_run does), so use the timestamp as the
+        // entity id — uniquely identifies this manual trigger in the audit
+        // log and is enough to correlate with downstream
+        // fee_deduction.auto_resettled / client_notified rows the sweep
+        // itself writes.
+        entityId: new Date().toISOString(),
+        before: null,
+        after: { trigger: "manual", invokedByUserId: auth.userId },
+        extra: { summary, killSwitchActive },
+        ipAddress: req.ip ?? null,
+      });
+      return { trigger: "manual", killSwitchActive, message, ...summary };
     }),
   );
 
@@ -3902,74 +3966,6 @@ export function registerAdminRoutes(app: Express): void {
         ipAddress: req.ip ?? null,
       });
       return reversed;
-    }),
-  );
-
-  // ===========================================================================
-  // TASK #204 — Admin manual trigger for the insufficient-funds sweep.
-  // ---------------------------------------------------------------------------
-  // POST /api/admin/insufficient-funds-sweep/run
-  //   Calls the EXACT same `runInsufficientFundsSweep()` entry point that the
-  //   daily cron uses (`server/services/cron-fee-deductions.ts`). We deliberately
-  //   do NOT duplicate any sweep logic here — the cron service is the single
-  //   sweep entry point, this endpoint just wraps it with admin auth + audit
-  //   + a JSON response so the admin fees page can show a summary card.
-  //
-  // Hard rules (mirror the cron):
-  //   - Honour the `fee_deductions` kill switch — if engaged, return early
-  //     with a structured response and DO NOT touch any rows. The sweep
-  //     itself also short-circuits, but we surface the reason here so the
-  //     admin UI can render "skipped — kill switch active" instead of an
-  //     all-zeros summary that looks like nothing happened.
-  //   - One sweep per call. No batching, no scheduling, no background fork.
-  //   - Always write an audit row with the summary so post-mortems can
-  //     reconstruct who triggered which retry and what it accomplished.
-  // ===========================================================================
-  app.post(
-    "/api/admin/insufficient-funds-sweep/run",
-    adminRoute(async (req, auth) => {
-      // Defence-in-depth: surface the kill switch with a clear payload so
-      // the admin UI doesn't show "0 settled" and look like a no-op. The
-      // sweep itself bails on the same check internally, so the row state
-      // is identical either way.
-      if (await isKillSwitchActive("fee_deductions")) {
-        await writeAuditLog({
-          userId: auth.userId,
-          action: "fee_deduction.manual_sweep_skipped",
-          entityType: "adviser_fee_deductions_sweep",
-          entityId: null,
-          before: null,
-          after: null,
-          extra: { reason: "fee_deductions kill switch is engaged" },
-          ipAddress: req.ip ?? null,
-        });
-        return {
-          ok: false,
-          skipped: true,
-          reason: "fee_deductions_kill_switch_active",
-          message:
-            "The fee_deductions kill switch is engaged — disable it before re-running the sweep.",
-        };
-      }
-
-      const summary = await runInsufficientFundsSweep();
-
-      await writeAuditLog({
-        userId: auth.userId,
-        action: "fee_deduction.manual_sweep_run",
-        entityType: "adviser_fee_deductions_sweep",
-        entityId: null,
-        before: null,
-        // Spread into a plain object so the type satisfies the
-        // Record<string, unknown> shape writeAuditLog expects. The
-        // InsufficientFundsSweepSummary interface has explicit fields, not
-        // an index signature, so we widen it for the audit row.
-        after: { ...summary },
-        extra: { trigger: "admin_manual" },
-        ipAddress: req.ip ?? null,
-      });
-
-      return { ok: true, skipped: false, summary };
     }),
   );
 
@@ -4620,7 +4616,17 @@ export function registerAdminRoutes(app: Express): void {
         )
           kind = "stuck";
         else kind = "failed";
-        return { kind, deduction: d, ageDays };
+        // Code-review fix — apply the centralised projection BEFORE the
+        // row leaves this report. `failed` and `stuck` rows are not in the
+        // insufficient_funds state, so they must not surface
+        // lastRecheckedAt / clientNotifiedAt / clientNotificationCount.
+        // `held` rows pass through unchanged because the projection
+        // preserves IF metadata when status === 'insufficient_funds'.
+        return {
+          kind,
+          deduction: projectDeductionForApiContract(d) as typeof d,
+          ageDays,
+        };
       });
 
       // Role-corruption sweep: settled OR reversed deductions in the window
@@ -4662,9 +4668,18 @@ export function registerAdminRoutes(app: Express): void {
           0,
           Math.floor((now - createdAtMs) / (24 * 60 * 60 * 1000)),
         );
+        // Code-review fix — corruption rows are settled or reversed by
+        // definition (the WHERE clause filters status IN settled/reversed),
+        // so they MUST be projected to strip IF-only bookkeeping columns.
+        // We project first and then layer the failureReason normalisation
+        // on top so the final shape matches the held/stuck/failed branch.
+        const projected = projectDeductionForApiContract(row.d);
         items.push({
           kind: "role_corruption",
-          deduction: { ...row.d, failureReason: row.d.failureReason ?? null },
+          deduction: {
+            ...(projected as typeof row.d),
+            failureReason: row.d.failureReason ?? null,
+          },
           ageDays,
         });
       }

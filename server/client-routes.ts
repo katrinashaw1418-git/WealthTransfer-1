@@ -31,6 +31,14 @@ import {
 } from "@shared/schema";
 import { requireAuth } from "./auth";
 import { getUserNameMap } from "./services/user-name-map";
+// Task #204 — banner shortfall is computed from the live ledger-derived
+// balance per currency, not from the failureReason text (which is
+// operator-only and can be stale across re-checks).
+import { getUserCurrencyBalance } from "./services/ledger";
+import {
+  isInsufficientFundsStatus,
+  FEE_DEDUCTION_STATUS_INSUFFICIENT_FUNDS,
+} from "../shared/fee-deduction-status";
 import {
   listClientPendingInstructions,
   consentClientInstruction,
@@ -628,6 +636,118 @@ export function registerClientRoutes(app: Express): void {
       handleError(res, error, "Failed to load client fee deductions");
     }
   });
+
+  // ===========================================================================
+  // TASK #204 — INSUFFICIENT-FUNDS BANNER PAYLOAD (CLIENT-SCOPED)
+  // ---------------------------------------------------------------------------
+  // GET /api/client/fee-deductions/insufficient-funds-summary
+  //   Lightweight banner-shaped projection of the client's currently-held
+  //   deductions. Powers the red banner on /client/fees AND /dashboard. We
+  //   compute the live shortfall per currency from the ledger-derived
+  //   balance (not from the cached failureReason text, which can be stale
+  //   across sweep re-checks). When the client has no IF rows, the response
+  //   is `{ hasInsufficientFunds: false, items: [], shortfallsByCurrency: {} }`
+  //   so the UI can simply call .hasInsufficientFunds to decide whether to
+  //   render the banner — no extra "is this empty?" logic required.
+  //
+  //   Self-scoped (where clientUserId = auth.userId). Honours the centralised
+  //   isInsufficientFundsStatus() predicate so a row that races to settled
+  //   between the cron tick and this read drops out of the banner cleanly.
+  // ===========================================================================
+  app.get(
+    "/api/client/fee-deductions/insufficient-funds-summary",
+    async (req, res) => {
+      try {
+        const auth = requireAuth(req);
+        const rows = await db
+          .select({
+            id: adviserFeeDeductions.id,
+            adviserUserId: adviserFeeDeductions.adviserUserId,
+            periodStart: adviserFeeDeductions.periodStart,
+            periodEnd: adviserFeeDeductions.periodEnd,
+            totalAccrued: adviserFeeDeductions.totalAccrued,
+            currency: adviserFeeDeductions.currency,
+            status: adviserFeeDeductions.status,
+          })
+          .from(adviserFeeDeductions)
+          .where(
+            and(
+              eq(adviserFeeDeductions.clientUserId, auth.userId),
+              eq(
+                adviserFeeDeductions.status,
+                FEE_DEDUCTION_STATUS_INSUFFICIENT_FUNDS,
+              ),
+              // Never include reversed rows — once refunded, the client owes
+              // nothing on that batch even if it transiently sat at IF.
+              sql`${adviserFeeDeductions.reversedAt} IS NULL`,
+            ),
+          )
+          .orderBy(desc(adviserFeeDeductions.createdAt));
+
+        // Belt-and-braces: drop any row that the centralised predicate says
+        // is no longer IF (defensive — the WHERE above already enforces it).
+        const heldRows = rows.filter((r) => isInsufficientFundsStatus(r));
+
+        // Sum totalAccrued per currency, then look up the live ledger
+        // balance per distinct currency exactly once.
+        const currencies = Array.from(new Set(heldRows.map((r) => r.currency)));
+        const balanceByCurrency: Record<string, string> = {};
+        await Promise.all(
+          currencies.map(async (cur) => {
+            balanceByCurrency[cur] = await getUserCurrencyBalance(
+              auth.userId,
+              cur,
+            );
+          }),
+        );
+
+        const shortfallsByCurrency: Record<
+          string,
+          { totalAccrued: string; available: string; shortfall: string }
+        > = {};
+        for (const cur of currencies) {
+          const totalAccrued = heldRows
+            .filter((r) => r.currency === cur)
+            .reduce((s, r) => s + Number(r.totalAccrued), 0);
+          const available = Number(balanceByCurrency[cur] ?? "0");
+          const shortfall = Math.max(0, totalAccrued - available);
+          shortfallsByCurrency[cur] = {
+            totalAccrued: totalAccrued.toFixed(4),
+            available: available.toFixed(4),
+            shortfall: shortfall.toFixed(4),
+          };
+        }
+
+        const items = heldRows.map((r) => {
+          const available = Number(balanceByCurrency[r.currency] ?? "0");
+          const required = Number(r.totalAccrued);
+          const shortfall = Math.max(0, required - available);
+          return {
+            deductionId: r.id,
+            adviserUserId: r.adviserUserId,
+            periodStart: r.periodStart,
+            periodEnd: r.periodEnd,
+            totalAccrued: r.totalAccrued,
+            currency: r.currency,
+            available: available.toFixed(4),
+            shortfall: shortfall.toFixed(4),
+          };
+        });
+
+        res.json({
+          hasInsufficientFunds: heldRows.length > 0,
+          items,
+          shortfallsByCurrency,
+        });
+      } catch (error: any) {
+        handleError(
+          res,
+          error,
+          "Failed to load insufficient-funds summary",
+        );
+      }
+    },
+  );
 
   // ===========================================================================
   // TASK #94 — Client read-only views over the wealth-planner tables.

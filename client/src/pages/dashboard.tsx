@@ -48,7 +48,9 @@ export default function Dashboard() {
     <div className="p-6 space-y-6">
       {/* Task #204 — surface held adviser-fee deductions across the app.
           Renders nothing when no IF rows exist; harmless on dashboards
-          for non-clients (the query 401s and stays silent). */}
+          for non-clients (the query 401s and stays silent). The banner
+          uses its compact one-liner variant on the dashboard so the page
+          chrome stays focused. */}
       <InsufficientFundsBanner compact />
 
       {application && (
