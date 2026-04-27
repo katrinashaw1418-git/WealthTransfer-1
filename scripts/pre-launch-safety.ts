@@ -97,6 +97,10 @@ import {
   runWalletLedgerReconciliation,
 } from "../server/services/reconciliation";
 import { runPostingReceiptInvariantCheck } from "../server/services/posting-receipt-invariant";
+import {
+  evaluateInvariantCleanRoomGate,
+  evaluateReconCleanRoomGate,
+} from "./lib/clean-room-gate";
 
 // ---------------------------------------------------------------------------
 // Result reporter (canonical PASS/FAIL/SKIP block, mirrors the other scripts).
@@ -1584,15 +1588,42 @@ async function reconWalletLedgerCleanRoom(): Promise<void> {
       return;
     }
     const newRows = await newCriticalOrAlertRows(baselineMaxId);
-    if (newRows.length === 0) {
+    // Task #200 — also fail when the reconciliation pass itself classified
+    // ANY (user, currency) pair as `alert` or `critical` severity, even
+    // when no new `operator_alerts` row was inserted. notifyOperator()
+    // coalesces repeat firings inside its dedupe window by bumping the
+    // existing row's `occurrences` counter instead of inserting a fresh
+    // row, so a persistent critical drift can re-trigger every gate run
+    // while baselineMaxId stays still — producing a false PASS that hides
+    // a real money-correctness problem from the launch operator. The
+    // decision is delegated to evaluateReconCleanRoomGate so the Task
+    // #200 regression test exercises the EXACT logic the live gate runs.
+    const verdict = evaluateReconCleanRoomGate({
+      newCriticalOrAlertRowCount: newRows.length,
+      summaryAlerts: summary.alerts,
+      summaryCriticals: summary.criticals,
+    });
+    const reconAlertCount = summary.alerts + summary.criticals;
+    if (verdict.outcome === "pass") {
       pass(
         NAME,
-        `pairs=${summary.pairsChecked}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows`,
+        `pairs=${summary.pairsChecked}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows, recon classified 0 pair(s) as alert/critical`,
+      );
+    } else if (verdict.reason === "dedupe_suppressed_drift") {
+      fail(
+        NAME,
+        `recon classified ${summary.criticals} critical + ${summary.alerts} alert drift pair(s) ` +
+          `but 0 new operator_alerts rows since baseline max_id=${baselineMaxId} ` +
+          `(notifyOperator dedupe is masking a persistent drift; inspect operator_alerts ` +
+          `with severity in ('alert','critical') and id<=${baselineMaxId} for the suppressed firings)`,
       );
     } else {
       fail(
         NAME,
-        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}`,
+        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}` +
+          (reconAlertCount > 0
+            ? ` (recon also classified ${summary.criticals} critical + ${summary.alerts} alert pair(s) this pass)`
+            : ""),
       );
     }
   } catch (err: any) {
@@ -1621,15 +1652,36 @@ async function reconLedgerVsCustodianCleanRoom(): Promise<void> {
       return;
     }
     const newRows = await newCriticalOrAlertRows(baselineMaxId);
-    if (newRows.length === 0) {
+    // Task #200 — same dedupe-suppression escape hatch as the wallet-ledger
+    // clean-room above. Inspect the recon summary directly so a persistent
+    // drift that re-fires under notifyOperator's dedupe window still trips
+    // the gate. Decision delegated to the shared helper for symmetry with
+    // the regression test in scripts/test-task-200-recon-gate.ts.
+    const verdict = evaluateReconCleanRoomGate({
+      newCriticalOrAlertRowCount: newRows.length,
+      summaryAlerts: summary.alerts,
+      summaryCriticals: summary.criticals,
+    });
+    const reconAlertCount = summary.alerts + summary.criticals;
+    if (verdict.outcome === "pass") {
       pass(
         NAME,
-        `pairs=${summary.pairsChecked}, externalUnavailable=${summary.externalUnavailable}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows`,
+        `pairs=${summary.pairsChecked}, externalUnavailable=${summary.externalUnavailable}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows, recon classified 0 pair(s) as alert/critical`,
+      );
+    } else if (verdict.reason === "dedupe_suppressed_drift") {
+      fail(
+        NAME,
+        `recon classified ${summary.criticals} critical + ${summary.alerts} alert mismatch(es) ` +
+          `but 0 new operator_alerts rows since baseline max_id=${baselineMaxId} ` +
+          `(notifyOperator dedupe is masking a persistent ledger-vs-custodian drift)`,
       );
     } else {
       fail(
         NAME,
-        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}`,
+        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}` +
+          (reconAlertCount > 0
+            ? ` (recon also classified ${summary.criticals} critical + ${summary.alerts} alert mismatch(es) this pass)`
+            : ""),
       );
     }
   } catch (err: any) {
@@ -1655,15 +1707,41 @@ async function reconPostingReceiptCleanRoom(): Promise<void> {
       return;
     }
     const newRows = await newCriticalOrAlertRows(baselineMaxId);
-    if (newRows.length === 0) {
+    // Task #200 — also fail when the invariant check itself observed a
+    // divergence (missingCount !== 0), regardless of whether a new
+    // operator_alerts row was inserted. notifyOperator()'s dedupe window
+    // means a persistent missing-receipt or orphan-receipt condition can
+    // re-fire on every run while baselineMaxId stays still — the gate
+    // would silently PASS even though the invariant is still broken.
+    // Decision delegated to evaluateInvariantCleanRoomGate so the
+    // regression test uses the same logic.
+    const divergent = result.missingCount !== 0;
+    const verdict = evaluateInvariantCleanRoomGate({
+      newCriticalOrAlertRowCount: newRows.length,
+      divergent,
+    });
+    if (verdict.outcome === "pass") {
       pass(
         NAME,
-        `txWithEntries=${result.txWithEntries}, receipts=${result.receipts}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows`,
+        `txWithEntries=${result.txWithEntries}, receipts=${result.receipts}, baseline max_id=${baselineMaxId}, 0 new critical/alert rows, missingCount=0`,
+      );
+    } else if (verdict.reason === "dedupe_suppressed_divergence") {
+      fail(
+        NAME,
+        `posting-receipt invariant divergent (txWithEntries=${result.txWithEntries}, receipts=${result.receipts}, missingCount=${result.missingCount}` +
+          (result.missingSample.length > 0
+            ? `, sample=[${result.missingSample.join(",")}]`
+            : "") +
+          `) but 0 new operator_alerts rows since baseline max_id=${baselineMaxId} ` +
+          `(notifyOperator dedupe is masking a persistent invariant break)`,
       );
     } else {
       fail(
         NAME,
-        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}`,
+        `${newRows.length} new critical/alert row(s) since baseline max_id=${baselineMaxId}: ${summarizeAlertRows(newRows)}` +
+          (divergent
+            ? ` (invariant also divergent: missingCount=${result.missingCount})`
+            : ""),
       );
     }
   } catch (err: any) {
