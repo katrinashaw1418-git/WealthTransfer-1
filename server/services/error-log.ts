@@ -26,8 +26,9 @@
 //     loggers like Sentry / Datadog.
 // =============================================================================
 
-import { existsSync, mkdirSync, renameSync, statSync } from "fs";
+import { createReadStream, existsSync, mkdirSync, renameSync, statSync } from "fs";
 import { appendFile } from "fs/promises";
+import readline from "readline";
 import path from "path";
 
 // ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ function getErrorLogPath(): string {
 // at ~500 bytes/line that's ~10k entries before rotation. Keep three rotated
 // copies (errors.log.1 … errors.log.3) before the oldest is dropped.
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
-const MAX_ROTATIONS = 3;
+export const MAX_ROTATIONS = 3;
 
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -278,4 +279,267 @@ export function recordSuccessfulHealthProbe(): void {
 
 export function getLastSuccessfulHealthProbeAt(): number | null {
   return lastSuccessfulHealthProbeAt;
+}
+
+// ---------------------------------------------------------------------------
+// Read-only access for the admin UI (Task #165)
+// ---------------------------------------------------------------------------
+// Operators previously had to SSH into the box to tail logs/errors.log. The
+// helpers below let an admin route surface the same data without ever
+// loading a whole file into memory: every read uses a line-by-line stream
+// and a fixed-size sliding window so memory is bounded by `limit`, not by
+// total file size.
+// ---------------------------------------------------------------------------
+
+/** Absolute path to the active errors.log file. */
+export function getActiveErrorLogPath(): string {
+  return getErrorLogPath();
+}
+
+/**
+ * Path to the active or rotated error log file, by index:
+ *   0 → errors.log (active)
+ *   1 → errors.log.1
+ *   …
+ *   MAX_ROTATIONS → errors.log.<MAX_ROTATIONS>
+ *
+ * Throws if `index` is outside the supported range — callers should validate
+ * their query input first.
+ */
+export function getErrorLogPathByIndex(index: number): string {
+  if (!Number.isInteger(index) || index < 0 || index > MAX_ROTATIONS) {
+    throw new Error(`error-log file index out of range: ${index}`);
+  }
+  const base = getErrorLogPath();
+  return index === 0 ? base : `${base}.${index}`;
+}
+
+/**
+ * Returns metadata for every error log file that exists on disk, ordered from
+ * NEWEST first (errors.log) to OLDEST last (errors.log.<n>). Useful for the
+ * admin UI's "available files" listing and for the download button.
+ */
+export interface ErrorLogFileInfo {
+  index: number;
+  name: string;
+  path: string;
+  bytes: number;
+  modifiedAt: string;
+}
+
+export function listErrorLogFiles(): ErrorLogFileInfo[] {
+  const out: ErrorLogFileInfo[] = [];
+  for (let i = 0; i <= MAX_ROTATIONS; i++) {
+    const filePath = getErrorLogPathByIndex(i);
+    try {
+      if (!existsSync(filePath)) continue;
+      const stat = statSync(filePath);
+      out.push({
+        index: i,
+        name: i === 0 ? "errors.log" : `errors.log.${i}`,
+        path: filePath,
+        bytes: stat.size,
+        modifiedAt: stat.mtime.toISOString(),
+      });
+    } catch (err) {
+      console.error(`[error-log] stat failed for ${filePath}`, err);
+    }
+  }
+  return out;
+}
+
+/**
+ * One parsed entry as written by `recordServerError`. Anything we can't parse
+ * (corrupt lines, partial flushes) is surfaced via the `_raw` shape so the
+ * admin UI can still render it instead of silently dropping it.
+ */
+export interface ParsedErrorLogEntry {
+  ts: string | null;
+  tag: string | null;
+  requestId: string | null;
+  method: string | null;
+  path: string | null;
+  status: number | null;
+  userId: number | null;
+  message: string | null;
+  stack: string | null;
+  /** Source file name (errors.log, errors.log.1, …). */
+  source: string;
+  /** Set when the line did not parse as JSON — `message` carries the raw text. */
+  parseError?: boolean;
+}
+
+export interface TailErrorLogOptions {
+  /** Hard ceiling on entries returned. Default 200. */
+  limit?: number;
+  /** Filter to entries whose `tag` equals this value (exact match). */
+  tag?: string | null;
+  /** Free-text substring (case-insensitive) tested against message + path. */
+  q?: string | null;
+  /** Inclusive lower bound on `ts` (ISO 8601). */
+  fromIso?: string | null;
+  /** Inclusive upper bound on `ts` (ISO 8601). */
+  toIso?: string | null;
+}
+
+export interface TailErrorLogResult {
+  /** Newest first. */
+  entries: ParsedErrorLogEntry[];
+  /** Total parsed lines scanned across all files. */
+  scannedLines: number;
+  /** Total entries that matched filters (may exceed entries.length when truncated). */
+  matchedLines: number;
+  /** Files actually opened. */
+  files: ErrorLogFileInfo[];
+  /** Distinct tags seen across the scanned entries — handy for a tag filter dropdown. */
+  tagsSeen: string[];
+  /** True iff the limit cut entries out of the response. */
+  truncated: boolean;
+}
+
+const DEFAULT_TAIL_LIMIT = 200;
+const MAX_TAIL_LIMIT = 1000;
+
+function parseLine(line: string, source: string): ParsedErrorLogEntry | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    const obj = JSON.parse(trimmed);
+    if (!obj || typeof obj !== "object") {
+      return {
+        ts: null,
+        tag: null,
+        requestId: null,
+        method: null,
+        path: null,
+        status: null,
+        userId: null,
+        message: trimmed,
+        stack: null,
+        source,
+        parseError: true,
+      };
+    }
+    const o = obj as Record<string, unknown>;
+    return {
+      ts: typeof o.ts === "string" ? o.ts : null,
+      tag: typeof o.tag === "string" ? o.tag : null,
+      requestId: typeof o.requestId === "string" ? o.requestId : null,
+      method: typeof o.method === "string" ? o.method : null,
+      path: typeof o.path === "string" ? o.path : null,
+      status: typeof o.status === "number" ? o.status : null,
+      userId: typeof o.userId === "number" ? o.userId : null,
+      message: typeof o.message === "string" ? o.message : null,
+      stack: typeof o.stack === "string" ? o.stack : null,
+      source,
+    };
+  } catch {
+    return {
+      ts: null,
+      tag: null,
+      requestId: null,
+      method: null,
+      path: null,
+      status: null,
+      userId: null,
+      message: trimmed,
+      stack: null,
+      source,
+      parseError: true,
+    };
+  }
+}
+
+/**
+ * Stream-read the rotated error log files (oldest first) and return the most
+ * recent `limit` entries that match the supplied filters, newest first.
+ *
+ * Memory is bounded by `limit` plus the size of one log line (we never hold
+ * a whole file in memory at once — readline streams line-by-line and we keep
+ * a sliding window of matched entries).
+ */
+export async function tailErrorLogEntries(
+  opts: TailErrorLogOptions = {},
+): Promise<TailErrorLogResult> {
+  const limit = Math.min(
+    Math.max(1, Math.trunc(opts.limit ?? DEFAULT_TAIL_LIMIT)),
+    MAX_TAIL_LIMIT,
+  );
+  const tagFilter = opts.tag?.trim() || null;
+  const qRaw = opts.q?.trim() || null;
+  const qLower = qRaw ? qRaw.toLowerCase() : null;
+  const fromMs = opts.fromIso ? Date.parse(opts.fromIso) : NaN;
+  const toMs = opts.toIso ? Date.parse(opts.toIso) : NaN;
+
+  const allFiles = listErrorLogFiles();
+  // Stream oldest → newest so the sliding window naturally retains the most
+  // recent matches across rotations. listErrorLogFiles returns newest-first,
+  // so we reverse for iteration.
+  const filesOldestFirst = [...allFiles].reverse();
+
+  const window: ParsedErrorLogEntry[] = [];
+  const tagsSeen = new Set<string>();
+  let scannedLines = 0;
+  let matchedLines = 0;
+
+  for (const file of filesOldestFirst) {
+    let stream;
+    try {
+      stream = createReadStream(file.path, { encoding: "utf8" });
+    } catch (err) {
+      console.error(`[error-log] open failed for ${file.path}`, err);
+      continue;
+    }
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of rl) {
+        const entry = parseLine(line, file.name);
+        if (!entry) continue;
+        scannedLines++;
+        if (entry.tag) tagsSeen.add(entry.tag);
+
+        if (tagFilter && entry.tag !== tagFilter) continue;
+        if (!Number.isNaN(fromMs) && entry.ts) {
+          const t = Date.parse(entry.ts);
+          if (!Number.isNaN(t) && t < fromMs) continue;
+        }
+        if (!Number.isNaN(toMs) && entry.ts) {
+          const t = Date.parse(entry.ts);
+          if (!Number.isNaN(t) && t > toMs) continue;
+        }
+        if (qLower) {
+          const hayMessage = (entry.message ?? "").toLowerCase();
+          const hayPath = (entry.path ?? "").toLowerCase();
+          if (!hayMessage.includes(qLower) && !hayPath.includes(qLower)) {
+            continue;
+          }
+        }
+
+        matchedLines++;
+        window.push(entry);
+        if (window.length > limit) window.shift();
+      }
+    } catch (err) {
+      console.error(`[error-log] read failed for ${file.path}`, err);
+    } finally {
+      rl.close();
+      try {
+        stream.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // Newest first.
+  window.reverse();
+
+  return {
+    entries: window,
+    scannedLines,
+    matchedLines,
+    files: allFiles,
+    tagsSeen: Array.from(tagsSeen).sort(),
+    truncated: matchedLines > window.length,
+  };
 }

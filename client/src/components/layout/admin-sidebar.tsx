@@ -17,6 +17,7 @@ import {
   Scale,
   Coins,
   Activity,
+  FileWarning,
   Power,
   X,
 } from "lucide-react";
@@ -43,6 +44,7 @@ const NAV_ITEMS = [
   { to: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
   { to: "/admin/operator-alerts", label: "Operator Alerts", icon: Siren },
   { to: "/admin/background-jobs", label: "Background Jobs", icon: Activity },
+  { to: "/admin/error-log", label: "Error log", icon: FileWarning },
   { to: "/admin/kill-switches", label: "Kill switches", icon: Power },
 ] as const;
 

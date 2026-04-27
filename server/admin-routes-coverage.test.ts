@@ -51,10 +51,16 @@ const ROUTE_FILES = [
 
 // The wrappers that satisfy the "auth + role" requirement. `adminRoute`
 // requires role === 'admin'; `feeReportingRoute` allows admin OR
-// compliance_admin (used by the read-only fee reporting endpoints). Any
-// future wrapper that also enforces an admin-or-equivalent role MUST be
-// listed here for the static check to recognise it.
-const APPROVED_ADMIN_WRAPPERS = ["adminRoute", "feeReportingRoute"];
+// compliance_admin (used by the read-only fee reporting endpoints);
+// `adminStreamRoute` is the streaming variant of `adminRoute` for endpoints
+// that must own the response body themselves (downloads, text/markdown).
+// Any future wrapper that also enforces an admin-or-equivalent role MUST
+// be listed here for the static check to recognise it.
+const APPROVED_ADMIN_WRAPPERS = [
+  "adminRoute",
+  "feeReportingRoute",
+  "adminStreamRoute",
+];
 
 // Match `app.get("/api/admin/...", <next-token>` and capture both the path
 // and the next non-whitespace token after the path-string + comma.

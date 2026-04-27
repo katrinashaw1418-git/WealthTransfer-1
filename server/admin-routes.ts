@@ -98,6 +98,10 @@ import {
 import {
   getInProcessCounters,
   getLastSuccessfulHealthProbeAt,
+  getErrorLogPathByIndex,
+  listErrorLogFiles,
+  tailErrorLogEntries,
+  MAX_ROTATIONS as ERROR_LOG_MAX_ROTATIONS,
 } from "./services/error-log";
 import {
   getAllKillSwitchStates,
@@ -314,6 +318,36 @@ export function registerAdminRoutes(app: Express): void {
         requireRole(auth, "admin");
         const result = await handler(req, auth);
         res.json(result);
+      } catch (error: any) {
+        handleError(res, error, "Admin request failed");
+      }
+    };
+  }
+
+  // Streaming variant of `adminRoute` for endpoints that must write the
+  // response body themselves (e.g. text/markdown, file downloads). Same
+  // auth + role + handleError envelope, but the handler owns the response
+  // and is expected to call res.send / res.pipe / etc. We deliberately do
+  // NOT call res.json afterwards — handlers that forget to write a body
+  // will hang their request, which is a clearer signal than silently
+  // returning an empty JSON object.
+  //
+  // Listed alongside adminRoute / feeReportingRoute in the static
+  // coverage check (server/admin-routes-coverage.test.ts) so future
+  // contributors can't drop the auth+role guard on streaming endpoints
+  // either.
+  function adminStreamRoute(
+    handler: (
+      req: Request,
+      res: any,
+      auth: { userId: number; username: string; email: string; role: string },
+    ) => Promise<void>,
+  ) {
+    return async (req: Request, res: any) => {
+      try {
+        const auth = requireAuth(req);
+        requireRole(auth, "admin");
+        await handler(req, res, auth);
       } catch (error: any) {
         handleError(res, error, "Admin request failed");
       }
@@ -635,10 +669,9 @@ export function registerAdminRoutes(app: Express): void {
   // dashboard can read it inline in a new tab without needing repo access.
   // Slug-restricted to known runbooks so this route cannot be coaxed into
   // serving arbitrary repo files.
-  app.get("/api/admin/runbooks/:slug", async (req, res) => {
-    try {
-      const auth = requireAuth(req);
-      requireRole(auth, "admin");
+  app.get(
+    "/api/admin/runbooks/:slug",
+    adminStreamRoute(async (req, res) => {
       const slug = String(req.params.slug ?? "");
       const KNOWN_RUNBOOKS: Record<string, string> = {
         rollback: "docs/runbooks/rollback.md",
@@ -655,10 +688,117 @@ export function registerAdminRoutes(app: Express): void {
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-store");
       res.send(body);
-    } catch (error: any) {
-      handleError(res, error, "Failed to load runbook");
-    }
-  });
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #165 — admin error log viewer
+  // -------------------------------------------------------------------------
+  // The persistent 5xx log lives on disk at logs/errors.log (with rotated
+  // copies errors.log.1 … errors.log.<MAX_ROTATIONS>). Operators previously
+  // had to SSH into the box to read it. These two endpoints expose the same
+  // data over the admin API:
+  //
+  //   GET /api/admin/error-log
+  //     Returns the latest N parsed entries (newest first) across all rotated
+  //     files, with optional tag / free-text / date filters. Stream-reads the
+  //     files line-by-line so a multi-megabyte log never lands on the heap.
+  //
+  //   GET /api/admin/error-log/download[?file=N]
+  //     Streams the raw log file as text/plain so an operator can grab the
+  //     full file for offline analysis. `file` defaults to 0 (active log);
+  //     1..MAX_ROTATIONS pick a rotated copy.
+  //
+  // Both are admin-only (the wrapper enforces requireAuth + requireRole) and
+  // never write anywhere — no audit log entry is needed for read-only
+  // observability tooling.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/error-log",
+    adminRoute(async (req) => {
+      const limitRaw = req.query.limit;
+      const parsedLimit =
+        typeof limitRaw === "string" && limitRaw.trim().length > 0
+          ? Number(limitRaw)
+          : NaN;
+      const limit = Number.isInteger(parsedLimit) && parsedLimit > 0
+        ? Math.min(parsedLimit, 1000)
+        : 200;
+
+      const tag = typeof req.query.tag === "string" ? req.query.tag : null;
+      const q = typeof req.query.q === "string" ? req.query.q : null;
+      const fromIso = typeof req.query.from === "string" ? req.query.from : null;
+      const toIso = typeof req.query.to === "string" ? req.query.to : null;
+
+      const result = await tailErrorLogEntries({
+        limit,
+        tag: tag && tag.trim().length > 0 ? tag : null,
+        q: q && q.trim().length > 0 ? q : null,
+        fromIso: fromIso && fromIso.trim().length > 0 ? fromIso : null,
+        toIso: toIso && toIso.trim().length > 0 ? toIso : null,
+      });
+
+      return {
+        entries: result.entries,
+        scannedLines: result.scannedLines,
+        matchedLines: result.matchedLines,
+        truncated: result.truncated,
+        tagsSeen: result.tagsSeen,
+        // Strip absolute paths from the file listing — the UI only needs the
+        // logical name + size + modified time, and leaking the box's
+        // filesystem layout serves no purpose.
+        files: result.files.map((f) => ({
+          index: f.index,
+          name: f.name,
+          bytes: f.bytes,
+          modifiedAt: f.modifiedAt,
+        })),
+        limit,
+        maxRotations: ERROR_LOG_MAX_ROTATIONS,
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/error-log/download",
+    adminStreamRoute(async (req, res) => {
+      const fileRaw = req.query.file;
+      const fileIndex = (() => {
+        if (typeof fileRaw !== "string" || fileRaw.trim().length === 0) return 0;
+        const n = Number(fileRaw);
+        if (!Number.isInteger(n) || n < 0 || n > ERROR_LOG_MAX_ROTATIONS) {
+          throw Object.assign(new Error("Invalid file index"), { status: 400 });
+        }
+        return n;
+      })();
+
+      const filePath = getErrorLogPathByIndex(fileIndex);
+      const files = listErrorLogFiles();
+      const meta = files.find((f) => f.index === fileIndex);
+      if (!meta) {
+        res.status(404).json({ error: "Log file not found" });
+        return;
+      }
+
+      const fs = await import("node:fs");
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${meta.name}"`,
+      );
+      res.setHeader("Cache-Control", "no-store");
+      const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+      stream.on("error", (err) => {
+        console.error("[admin/error-log/download] stream error", err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Failed to read log file" });
+        } else {
+          res.end();
+        }
+      });
+      stream.pipe(res);
+    }),
+  );
 
 
   // -------------------------------------------------------------------------
