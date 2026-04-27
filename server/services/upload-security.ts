@@ -42,6 +42,7 @@
 
 import multer from "multer";
 import type { Request, Response, NextFunction, RequestHandler } from "express";
+import { fileTypeFromBuffer } from "file-type";
 
 export const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MiB
 
@@ -91,6 +92,92 @@ class DisallowedMimeTypeError extends Error {
   readonly code = "UPLOAD_MIME_REJECTED";
   constructor(public readonly mimeType: string) {
     super(`File type "${mimeType || "(unknown)"}" is not allowed`);
+  }
+}
+
+// =============================================================================
+// TASK #161 — content-based mime-type sniffing
+// -----------------------------------------------------------------------------
+// The declared mime type on a multipart upload is just the value the BROWSER
+// sends. An attacker can rename evil.exe to evil.pdf and set
+// Content-Type: application/pdf, and it will sail through the declared-mime
+// allow-list above. To close that bypass we additionally inspect the leading
+// bytes of the buffer (magic-number / "file-type" detection) and require:
+//
+//   1. The detected real type is in the allow-list, AND
+//   2. The detected real type matches (or is compatible with) the declared
+//      type the caller sent on the multipart headers.
+//
+// "Compatible" is needed because:
+//   * Plain-text formats (text/plain, text/csv) have NO magic number, so
+//     `fileTypeFromBuffer` returns `undefined`. We accept that for the
+//     specific text mimes our allow-list lets through.
+//   * Legacy Office formats (.doc, .xls, .ppt) all share the same Compound
+//     File Binary container, which `file-type` reports as
+//     `application/x-cfb` — not the OLE-specific application mime. So we
+//     accept `application/x-cfb` as the detected type for those legacy
+//     declared mimes.
+//
+// Any other mismatch — declared application/pdf but detected
+// application/x-msdownload, declared image/png but detected image/jpeg,
+// declared anything but detected something outside the allow-list — is
+// rejected with a stable `UPLOAD_MIME_MISMATCH` 400 BEFORE the route handler
+// sees the file.
+// =============================================================================
+
+// Declared-mime → list of detected mimes that are considered a legitimate
+// match even though they don't equal the declared mime byte-for-byte.
+// `null` in the list means "detection returned undefined and that's OK"
+// (used for text formats with no magic number).
+const COMPATIBLE_DETECTED_MIME_TYPES: Record<string, ReadonlyArray<string | null>> = {
+  "text/plain": [null],
+  "text/csv": [null],
+  // Legacy Office (OLE Compound File) formats all detect as application/x-cfb.
+  "application/msword": ["application/x-cfb"],
+  "application/vnd.ms-excel": ["application/x-cfb"],
+  "application/vnd.ms-powerpoint": ["application/x-cfb"],
+};
+
+export interface SniffedMimeResult {
+  // The mime detected from the file's leading bytes. `null` when no signature
+  // was recognised (e.g. plain text) — callers should still use the declared
+  // mime in that case, but only after isMimeMatch() approves the pairing.
+  detectedMimeType: string | null;
+}
+
+export async function sniffMimeType(buffer: Buffer): Promise<SniffedMimeResult> {
+  // file-type is happy with empty buffers (returns undefined), but we guard
+  // anyway so a future caller doesn't pay the import cost for nothing.
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    return { detectedMimeType: null };
+  }
+  const result = await fileTypeFromBuffer(buffer);
+  return { detectedMimeType: result?.mime?.toLowerCase() ?? null };
+}
+
+export function isMimeMatch(
+  declaredMimeType: string,
+  detectedMimeType: string | null,
+): boolean {
+  const declared = (declaredMimeType ?? "").toLowerCase();
+  const detected = detectedMimeType?.toLowerCase() ?? null;
+  if (detected !== null && detected === declared) return true;
+  const compatible = COMPATIBLE_DETECTED_MIME_TYPES[declared];
+  if (compatible && compatible.includes(detected)) return true;
+  return false;
+}
+
+class MimeTypeMismatchError extends Error {
+  readonly status = 400;
+  readonly code = "UPLOAD_MIME_MISMATCH";
+  constructor(
+    public readonly declaredMimeType: string,
+    public readonly detectedMimeType: string | null,
+  ) {
+    super(
+      `Declared file type "${declaredMimeType || "(unknown)"}" does not match the file's actual contents` +
+        (detectedMimeType ? ` (detected as "${detectedMimeType}")` : ""),
+    );
   }
 }
 
@@ -151,7 +238,7 @@ export function buildUploadMiddleware(
   const parser = upload.single(fieldName);
 
   const handler: RequestHandler = (req, res, next) => {
-    parser(req, res, (err: unknown) => {
+    parser(req, res, async (err: unknown) => {
       if (err) {
         respondWithUploadRejection(err, res, maxBytes, allowed);
         return;
@@ -161,10 +248,50 @@ export function buildUploadMiddleware(
       // contract holds for those callers too.
       const file = (req as unknown as { file?: Express.Multer.File }).file;
       if (file && file.mimetype) {
-        const mt = String(file.mimetype).toLowerCase();
-        if (!allowedSet.has(mt)) {
+        const declared = String(file.mimetype).toLowerCase();
+        if (!allowedSet.has(declared)) {
           respondWithUploadRejection(
-            new DisallowedMimeTypeError(mt),
+            new DisallowedMimeTypeError(declared),
+            res,
+            maxBytes,
+            allowed,
+          );
+          return;
+        }
+        // Task #161 — content-based mime sniffing. Multer has by now buffered
+        // the bytes (memoryStorage), so we can read the magic number directly
+        // off file.buffer. We reject in two cases:
+        //   1. The detected real type is in NEITHER the allow-list nor the
+        //      compatible-pair table for the declared type. That catches the
+        //      classic "evil.exe renamed to evil.pdf" — declared
+        //      application/pdf but bytes start with MZ → detected
+        //      application/x-msdownload → not in the allow-list.
+        //   2. The detected real type IS in the allow-list but doesn't match
+        //      what the caller declared. That catches subtler swaps like a
+        //      PNG declared as image/jpeg, which would otherwise sail past.
+        // The detected mime is also stashed on `file` so the route handler
+        // can pick it up for the upload audit-log entry without re-reading
+        // the buffer.
+        try {
+          const sniffed = await sniffMimeType(file.buffer);
+          (file as Express.Multer.File & { detectedMimeType?: string | null }).detectedMimeType =
+            sniffed.detectedMimeType;
+          if (!isMimeMatch(declared, sniffed.detectedMimeType)) {
+            respondWithUploadRejection(
+              new MimeTypeMismatchError(declared, sniffed.detectedMimeType),
+              res,
+              maxBytes,
+              allowed,
+            );
+            return;
+          }
+        } catch (sniffErr) {
+          // file-type can throw on truly malformed buffers; treat as a
+          // mismatch (safe default) so we never accept a file we couldn't
+          // even inspect.
+          console.error("[upload-security] sniff failed", sniffErr);
+          respondWithUploadRejection(
+            new MimeTypeMismatchError(declared, null),
             res,
             maxBytes,
             allowed,
@@ -190,6 +317,16 @@ function respondWithUploadRejection(
       error: err.message,
       code: err.code,
       mimeType: err.mimeType || null,
+      allowedMimeTypes: allowed,
+    });
+    return;
+  }
+  if (err instanceof MimeTypeMismatchError) {
+    res.status(400).json({
+      error: err.message,
+      code: err.code,
+      declaredMimeType: err.declaredMimeType || null,
+      detectedMimeType: err.detectedMimeType,
       allowedMimeTypes: allowed,
     });
     return;

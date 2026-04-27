@@ -1183,7 +1183,9 @@ export function registerAdviserRoutes(app: Express): void {
       // req.body. The verification script bypasses multer and supplies
       // req.file + req.body directly, so the handler reads from the same
       // shape either way.
-      const file = (req as unknown as { file?: Express.Multer.File }).file;
+      const file = (req as unknown as {
+        file?: Express.Multer.File & { detectedMimeType?: string | null };
+      }).file;
       if (!file || !Buffer.isBuffer(file.buffer) || file.buffer.length === 0) {
         throw Object.assign(new Error("Missing or empty 'file' upload"), {
           status: 400,
@@ -1194,12 +1196,19 @@ export function registerAdviserRoutes(app: Express): void {
         throw Object.assign(new Error("Invalid upload metadata"), { status: 400 });
       }
       const fileName = parsed.data.fileName ?? file.originalname ?? "upload.bin";
-      // The mime persisted on the document row is the one we actually saw on
-      // the wire (file.mimetype) — the caller can override only if absent.
-      // The audit row below records BOTH so an auditor can see what the
-      // browser claimed AND what the row was stored with.
-      const detectedMimeType = file.mimetype ?? null;
-      const mimeType = detectedMimeType ?? parsed.data.mimeType ?? null;
+      // The declared mime type is what the browser sent on the multipart
+      // headers; we persist that on the document row so the existing
+      // download contract stays stable.
+      const declaredMimeType = file.mimetype ?? null;
+      const mimeType = declaredMimeType ?? parsed.data.mimeType ?? null;
+      // Task #161 — detectedMimeType is now the value sniffed from the file's
+      // leading bytes by buildUploadMiddleware (file-type / magic numbers),
+      // NOT the declared mime. The middleware has already rejected mismatches
+      // by this point, so on the happy path detected and declared are the
+      // "same" type from a content perspective; the audit log records both
+      // so a regulator can see what the browser claimed AND what we actually
+      // received bytes-for.
+      const detectedMimeType = file.detectedMimeType ?? null;
 
       const row = await uploadClientDocument(
         auth.userId,
@@ -1222,9 +1231,16 @@ export function registerAdviserRoutes(app: Express): void {
           clientId: row.clientId,
           documentType: row.documentType,
           uploaded: true,
-          // Task #148 — record file size + detected mime alongside the
-          // upload audit entry so a regulator can see exactly what landed
-          // in object storage without joining back to client_documents.
+          // Task #148 — record file size alongside the upload audit entry so
+          // a regulator can see exactly what landed in object storage
+          // without joining back to client_documents.
+          // Task #161 — `mimeType` is what the browser declared on the
+          // multipart headers; `detectedMimeType` is what we sniffed from
+          // the file's leading bytes. The middleware enforces compatibility
+          // before we get here, but recording both keeps the audit trail
+          // forensically useful (e.g. for future "browser said PDF, we
+          // stored bytes that detected as application/x-cfb" investigations
+          // around legacy Office files).
           sizeBytes: row.fileSizeBytes,
           mimeType: row.mimeType,
           detectedMimeType,

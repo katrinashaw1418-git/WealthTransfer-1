@@ -33,9 +33,47 @@ import {
   DEFAULT_ALLOWED_MIME_TYPES,
   DEFAULT_MAX_UPLOAD_BYTES,
   buildUploadMiddleware,
+  isMimeMatch,
   resolveAllowedMimeTypes,
   resolveMaxUploadBytes,
+  sniffMimeType,
 } from "./upload-security";
+
+// Task #161 — fixtures for content-based mime sniffing tests. All buffers
+// here are constructed from real magic numbers so file-type detects them
+// the same way it would in production. Keeping the bytes inline (rather
+// than reading test fixture files) keeps the test suite hermetic.
+
+// Minimal valid-enough PDF: starts with "%PDF-" magic + binary marker so
+// file-type confidently classifies it as application/pdf. Trailing bytes
+// don't matter for sniffing.
+const REAL_PDF_BYTES = Buffer.concat([
+  Buffer.from("%PDF-1.4\n%\xe2\xe3\xcf\xd3\n", "binary"),
+  Buffer.from("1 0 obj<<>>endobj\n%%EOF"),
+]);
+
+// Minimal Windows PE/EXE: "MZ" header followed by enough zeroes to satisfy
+// the DOS stub layout. file-type returns application/x-msdownload for this.
+const FAKE_EXE_BYTES = (() => {
+  const header = Buffer.alloc(64, 0);
+  header.write("MZ", 0, "ascii");
+  // Offset 0x3c is the e_lfanew pointer to the PE header.
+  header.writeUInt32LE(64, 60);
+  const pe = Buffer.alloc(24, 0);
+  pe.write("PE\0\0", 0, "ascii");
+  return Buffer.concat([header, pe]);
+})();
+
+// Smallest legal-looking PNG: 8-byte signature + an IHDR chunk. file-type
+// recognises this as image/png.
+const REAL_PNG_BYTES = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+  0x00, 0x00, 0x00, 0x0d, // IHDR length
+  0x49, 0x48, 0x44, 0x52, // "IHDR"
+  0x00, 0x00, 0x00, 0x01, // width = 1
+  0x00, 0x00, 0x00, 0x01, // height = 1
+  0x08, 0x02, 0x00, 0x00, 0x00, // bit depth, colour type, etc.
+]);
 
 function makeApp(opts?: Parameters<typeof buildUploadMiddleware>[0]) {
   const app = express();
@@ -59,10 +97,9 @@ function makeApp(opts?: Parameters<typeof buildUploadMiddleware>[0]) {
 describe("buildUploadMiddleware", () => {
   it("accepts a small PDF inside both the size and mime allow-list", async () => {
     const { app, onUploaded, mw } = makeApp();
-    const body = Buffer.from("%PDF-1.4 tiny");
     const res = await request(app)
       .post("/upload")
-      .attach("file", body, {
+      .attach("file", REAL_PDF_BYTES, {
         filename: "ok.pdf",
         contentType: "application/pdf",
       });
@@ -70,7 +107,7 @@ describe("buildUploadMiddleware", () => {
     expect(res.body).toMatchObject({
       ok: true,
       mimeType: "application/pdf",
-      sizeBytes: body.length,
+      sizeBytes: REAL_PDF_BYTES.length,
     });
     expect(onUploaded).toHaveBeenCalledTimes(1);
     // Sanity-check the helper resolved the env-defaulted limits.
@@ -150,7 +187,7 @@ describe("buildUploadMiddleware", () => {
     // should now be rejected.
     const res = await request(app)
       .post("/upload")
-      .attach("file", Buffer.from("%PDF tiny"), {
+      .attach("file", REAL_PDF_BYTES, {
         filename: "ok.pdf",
         contentType: "application/pdf",
       });
@@ -158,6 +195,191 @@ describe("buildUploadMiddleware", () => {
     expect(res.body.code).toBe("UPLOAD_MIME_REJECTED");
     expect(res.body.allowedMimeTypes).toEqual(["image/png"]);
     expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  // ===========================================================================
+  // Task #161 — content-based mime sniffing tests
+  // ---------------------------------------------------------------------------
+  // The declared-mime tests above only protect against callers who are honest
+  // about what they're sending. These tests cover the disguise-the-extension
+  // attack: bytes whose real type does NOT match the multipart Content-Type
+  // header. Even though the declared type is in the allow-list, the upload
+  // must be rejected because the actual bytes are something else.
+  // ===========================================================================
+
+  it("rejects an EXE renamed to .pdf even when the declared mime is application/pdf", async () => {
+    // The classic disguise: attacker takes a Windows executable and uploads
+    // it as Content-Type: application/pdf to bypass the mime allow-list.
+    // The declared type IS allowed, so the old declared-mime check would
+    // accept this. The new sniffer should detect application/x-msdownload
+    // from the leading "MZ" bytes and reject with UPLOAD_MIME_MISMATCH.
+    const { app, onUploaded } = makeApp();
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", FAKE_EXE_BYTES, {
+        filename: "evil.pdf",
+        contentType: "application/pdf",
+      });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: "UPLOAD_MIME_MISMATCH",
+      declaredMimeType: "application/pdf",
+      detectedMimeType: "application/x-msdownload",
+    });
+    expect(res.body.error).toMatch(/does not match/i);
+    // The route handler — which would have written the EXE to object
+    // storage — must never run.
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it("accepts a legitimate PDF whose magic bytes match the declared mime", async () => {
+    // The positive-control to the test above. Without this we'd be one wrong
+    // refactor away from rejecting every legitimate PDF the advisers upload.
+    const { app, onUploaded } = makeApp();
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", REAL_PDF_BYTES, {
+        filename: "client-statement.pdf",
+        contentType: "application/pdf",
+      });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      mimeType: "application/pdf",
+      sizeBytes: REAL_PDF_BYTES.length,
+    });
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a PNG that's been declared as image/jpeg (mismatch within the allow-list)", async () => {
+    // Subtler than the EXE case: both image/png and image/jpeg are in the
+    // allow-list, so a pure declared-mime check would happily accept a PNG
+    // labelled as JPEG. The sniffer must catch the mismatch — otherwise we
+    // can't trust the mime we persist on the document row.
+    const { app, onUploaded } = makeApp();
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", REAL_PNG_BYTES, {
+        filename: "looks-like.jpg",
+        contentType: "image/jpeg",
+      });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: "UPLOAD_MIME_MISMATCH",
+      declaredMimeType: "image/jpeg",
+      detectedMimeType: "image/png",
+    });
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it("accepts plain text declared as text/plain even though file-type returns no signature", async () => {
+    // text/plain has no magic number — `fileTypeFromBuffer` returns
+    // `undefined`. The compatible-pair table explicitly accepts that for
+    // the small set of text mimes our allow-list lets through. Without this
+    // exemption every CSV / TXT upload would be falsely rejected.
+    const { app, onUploaded } = makeApp();
+    const body = Buffer.from("dear adviser,\nplease find enclosed...\n");
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", body, {
+        filename: "note.txt",
+        contentType: "text/plain",
+      });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      mimeType: "text/plain",
+      sizeBytes: body.length,
+    });
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes the sniffed mime type on req.file.detectedMimeType for the route handler", async () => {
+    // The adviser document upload route needs the detected mime so it can
+    // record BOTH the declared and the sniffed types in the audit log.
+    // This test pins the contract that the middleware decorates `req.file`
+    // with `detectedMimeType` — without it, the audit row would silently
+    // record `null` and the regulator-facing forensics would be useless.
+    const app = express();
+    const mw = buildUploadMiddleware();
+    let capturedDetected: unknown;
+    app.post("/upload", mw.handler, (req, res) => {
+      const file = (req as unknown as {
+        file?: Express.Multer.File & { detectedMimeType?: string | null };
+      }).file;
+      capturedDetected = file?.detectedMimeType;
+      res.json({ ok: true });
+    });
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", REAL_PDF_BYTES, {
+        filename: "ok.pdf",
+        contentType: "application/pdf",
+      });
+    expect(res.status).toBe(200);
+    expect(capturedDetected).toBe("application/pdf");
+  });
+});
+
+describe("sniffMimeType / isMimeMatch", () => {
+  it("detects a PDF from its leading bytes", async () => {
+    expect(await sniffMimeType(REAL_PDF_BYTES)).toEqual({
+      detectedMimeType: "application/pdf",
+    });
+  });
+
+  it("detects a Windows executable as application/x-msdownload", async () => {
+    expect(await sniffMimeType(FAKE_EXE_BYTES)).toEqual({
+      detectedMimeType: "application/x-msdownload",
+    });
+  });
+
+  it("returns null for plain-text input that has no magic number", async () => {
+    expect(await sniffMimeType(Buffer.from("just words\n"))).toEqual({
+      detectedMimeType: null,
+    });
+  });
+
+  it("returns null for an empty buffer instead of throwing", async () => {
+    expect(await sniffMimeType(Buffer.alloc(0))).toEqual({
+      detectedMimeType: null,
+    });
+  });
+
+  it("treats matching declared and detected types as a match", () => {
+    expect(isMimeMatch("application/pdf", "application/pdf")).toBe(true);
+    expect(isMimeMatch("IMAGE/PNG", "image/png")).toBe(true);
+  });
+
+  it("treats mismatched detected types as a non-match even when both are allowed", () => {
+    expect(isMimeMatch("image/jpeg", "image/png")).toBe(false);
+    expect(isMimeMatch("application/pdf", "application/x-msdownload")).toBe(
+      false,
+    );
+  });
+
+  it("accepts null detection for the text mimes that have no magic number", () => {
+    expect(isMimeMatch("text/plain", null)).toBe(true);
+    expect(isMimeMatch("text/csv", null)).toBe(true);
+  });
+
+  it("rejects null detection for binary mimes that should always have a signature", () => {
+    expect(isMimeMatch("application/pdf", null)).toBe(false);
+    expect(isMimeMatch("image/png", null)).toBe(false);
+  });
+
+  it("accepts application/x-cfb as the detected type for legacy Office formats", () => {
+    // file-type reports the OLE Compound File container for .doc/.xls/.ppt
+    // rather than the OLE-specific application mime. The compatible-pair
+    // table must let those through or every legacy-Office upload would be
+    // rejected.
+    expect(isMimeMatch("application/msword", "application/x-cfb")).toBe(true);
+    expect(isMimeMatch("application/vnd.ms-excel", "application/x-cfb")).toBe(
+      true,
+    );
+    expect(
+      isMimeMatch("application/vnd.ms-powerpoint", "application/x-cfb"),
+    ).toBe(true);
   });
 });
 
