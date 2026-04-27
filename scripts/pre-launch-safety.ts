@@ -126,15 +126,35 @@ const CANONICAL_ORDER: string[] = [
   "existing: test-task-35-suppression",
   "ledger-leak: test-task-35-suppression",
   "lifecycle: happy-path wallet matches ledger",
+  // Task #202 — platform-leg invariant. Runs IMMEDIATELY after each
+  // Stage 2 lifecycle scenario so a regression that contaminates the
+  // platform user (PLATFORM_USER_ID) is localized to the exact scenario
+  // that introduced it, instead of being unmasked much later in Stage 3
+  // reconciliation. Each gate snapshots the platform user's per-currency
+  // signed ledger sum BEFORE the scenario, runs the scenario, scrubs
+  // the fixture user's transactions (which cascades to delete the
+  // scenario's platform-side legs by tx_id), then asserts the AFTER sum
+  // equals the BEFORE sum (within an explicit epsilon) for every
+  // currency the scenario touched. A non-zero delta means the scenario
+  // posted platform-user ledger entries via a transaction NOT owned by
+  // the fixture user (or via a single-leg posting), which is the exact
+  // regression pattern this gate catches.
+  "platform-leg: lifecycle 1 (happy path)",
   "lifecycle: idempotency under concurrency",
+  "platform-leg: lifecycle 2 (idempotency: deposit)",
   // Task #185 — same idempotency-under-concurrency invariant for the
   // OTHER money-movement routes. The deposit handler proved the pattern;
   // these gates prove the catch-block fix has been applied symmetrically.
   "lifecycle: idempotency under concurrency (withdraw)",
+  "platform-leg: lifecycle 2b (idempotency: withdraw)",
   "lifecycle: idempotency under concurrency (fx-exchange)",
+  "platform-leg: lifecycle 2c (idempotency: fx-exchange)",
   "lifecycle: idempotency under concurrency (wallets/transfer)",
+  "platform-leg: lifecycle 2d (idempotency: wallets/transfer)",
   "lifecycle: idempotency under concurrency (investments)",
+  "platform-leg: lifecycle 2e (idempotency: investments)",
   "lifecycle: reversal symmetry",
+  "platform-leg: lifecycle 3 (reversal symmetry)",
   "reconciliation: wallet-ledger clean-room",
   "reconciliation: ledger-vs-custodian clean-room",
   "reconciliation: posting-receipt invariant clean-room",
@@ -387,6 +407,229 @@ async function ensureUser(opts: {
     .returning();
   pushUnique(created.userIds, row.id);
   return row.id;
+}
+
+// ---------------------------------------------------------------------------
+// Task #202 — per-scenario platform-leg invariant.
+//
+// Today's regression: a Stage 2 lifecycle scenario can quietly contaminate
+// PLATFORM_USER_ID's ledger and the script only notices when reconciliation
+// runs much later (Stage 3), pointing the operator at "the recon gate" when
+// the ACTUAL culprit was one specific lifecycle scenario several steps
+// earlier. This gate localizes the failure: snapshot the platform user's
+// per-currency signed ledger sum BEFORE each scenario, run the scenario,
+// scrub the scenario's fixture user (which cascades to delete the
+// scenario's platform-side legs by tx_id), then assert the AFTER sum
+// equals the BEFORE sum (within `PLATFORM_LEG_EPSILON`) for every currency
+// the scenario touched.
+//
+// A non-zero delta means the scenario posted platform-user ledger entries
+// via a transaction NOT owned by the fixture user (e.g. a bare
+// postLedgerEntries call against the platform user, or a single-leg
+// posting bypassing the double-entry primitive). The error message names
+// the scenario AND the offending currency so the operator can grep the
+// scenario's source for the offending write in seconds.
+//
+// Epsilon: 0.00000001 — one unit at the schema's 8-decimal-place precision.
+// Postgres SUM over the `decimal` ledger amounts is exact, so a clean
+// scenario produces an exact zero delta; the epsilon is a defensive cushion
+// against any future column-type or rounding change, not a real tolerance.
+// ---------------------------------------------------------------------------
+const PLATFORM_LEG_EPSILON = new Decimal("0.00000001");
+
+type PlatformPerCurrency = Map<string, string>;
+
+async function snapshotPlatformPerCurrency(
+  platformUserId: number,
+  currencies: string[],
+): Promise<PlatformPerCurrency> {
+  const out: PlatformPerCurrency = new Map();
+  for (const cur of currencies) {
+    out.set(cur, await getUserCurrencyBalance(platformUserId, cur));
+  }
+  return out;
+}
+
+// Wrap a Stage 2 scenario: snapshot platform per-currency BEFORE, run
+// the scenario, then run `assertPlatformLegInvariantAndScrub` which scrubs
+// the fixture user's transactions (cascading to delete the scenario's
+// platform-side legs) and asserts the per-currency delta is zero.
+//
+// Runs the scenario inside a try so an exception inside the scenario does
+// NOT skip the platform-leg gate — we still want to report contamination
+// the scenario may have caused before throwing. The scenario itself records
+// its own pass/fail/skip via the existing `pass()`/`fail()`/`skip()` helpers.
+//
+// SKIP semantics (mirrors the per-script ledger-leak gate at Stage 1):
+//   - PLATFORM_USER_ID unresolvable     → SKIP with reason
+//   - pre-snapshot of platform ledger throws → SKIP with reason (we won't
+//     fall back to a `0` baseline because that would let drift hide as a
+//     false PASS or surface as a false FAIL — both are worse than SKIP).
+//   - the scenario itself recorded SKIP → SKIP (nothing for us to gate
+//     against; matches the Stage 1 leak-gate's "sub-script did not
+//     complete" branch).
+async function runScenarioWithPlatformLegAssert(cfg: {
+  gateName: string;
+  scenarioName: string;
+  scenarioGateName: string;
+  fixtureUsername: string;
+  currencies: string[];
+  run: () => Promise<void>;
+}): Promise<void> {
+  const platformUserIdRaw = process.env.PLATFORM_USER_ID;
+  let platformUserId = 0;
+  let baseline: PlatformPerCurrency = new Map();
+  let baselineCaptured = false;
+  let baselineError: string | null = null;
+  if (platformUserIdRaw) {
+    const parsed = parseInt(platformUserIdRaw, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      platformUserId = parsed;
+      try {
+        baseline = await snapshotPlatformPerCurrency(
+          platformUserId,
+          cfg.currencies,
+        );
+        baselineCaptured = true;
+      } catch (err: any) {
+        // Mirrors the per-script leak-gate handling in Stage 1: if we
+        // cannot capture the BEFORE snapshot, we have nothing to compare
+        // AFTER against, so the gate genuinely cannot run. Record the
+        // error and SKIP downstream rather than fall through to a false
+        // PASS/FAIL produced from an empty baseline.
+        baselineError = err?.message ?? String(err);
+        console.error(
+          `pre-launch: platform-leg snapshot (before) failed for ${cfg.scenarioName}:`,
+          baselineError,
+        );
+      }
+    }
+  }
+
+  // Run the scenario. Its own pass/fail/skip is recorded inside `cfg.run`.
+  // We do NOT swallow scenario throws here — by contract every scenario
+  // function is wrapped in its own try/catch and records `fail()` on throw,
+  // so reaching this point is normal regardless of scenario outcome.
+  await cfg.run();
+
+  // Tie platform-leg outcome to the scenario's actual execution state.
+  // If the scenario itself reported SKIP (e.g. a route handler wasn't
+  // captured, or a precondition like an FX-rate seed failed), it never
+  // exercised the ledger paths this gate is meant to protect — so we
+  // SKIP too, with the scenario's own SKIP reason for context. This
+  // matches the Stage 1 per-script leak-gate's behaviour and prevents
+  // the platform-leg gate from PASSing on a fixture user that already
+  // existed from a prior run when the scenario itself didn't actually
+  // run this time.
+  const scenarioOutcome = results.get(cfg.scenarioGateName);
+  if (scenarioOutcome?.outcome === "skip") {
+    skip(
+      cfg.gateName,
+      `scenario "${cfg.scenarioName}" itself was skipped (${scenarioOutcome.details}); ` +
+        `nothing for the platform-leg gate to verify`,
+    );
+    return;
+  }
+
+  await assertPlatformLegInvariantAndScrub(
+    cfg.gateName,
+    cfg.scenarioName,
+    cfg.fixtureUsername,
+    cfg.currencies,
+    baseline,
+    platformUserId,
+    baselineCaptured,
+    baselineError,
+  );
+}
+
+async function assertPlatformLegInvariantAndScrub(
+  gateName: string,
+  scenarioName: string,
+  fixtureUsername: string,
+  currencies: string[],
+  baseline: PlatformPerCurrency,
+  platformUserId: number,
+  baselineCaptured: boolean,
+  baselineError: string | null,
+): Promise<void> {
+  try {
+    if (platformUserId <= 0) {
+      skip(
+        gateName,
+        `PLATFORM_USER_ID not resolvable; cannot assert platform-leg invariant for "${scenarioName}"`,
+      );
+      return;
+    }
+    if (!baselineCaptured) {
+      skip(
+        gateName,
+        `pre-snapshot of platform ledger failed for "${scenarioName}": ` +
+          `${baselineError ?? "see error above"}`,
+      );
+      return;
+    }
+
+    const [fixtureRow] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.username, fixtureUsername));
+    if (!fixtureRow) {
+      // Scenario was skipped before creating the fixture user (e.g. a
+      // route handler wasn't registered, or a precondition like an FX
+      // rate seed failed). Nothing to scrub, nothing to assert.
+      skip(
+        gateName,
+        `fixture user "${fixtureUsername}" does not exist (scenario "${scenarioName}" likely skipped before creating it)`,
+      );
+      return;
+    }
+
+    // Per-scenario scrub: delete the fixture user's transactions, which
+    // cascades to delete the scenario's platform-side legs (they share
+    // the same transaction_id). This is the per-scenario counterpart to
+    // `scrubLifecyclePlatformLegs()` at end of Stage 2.
+    await resetScenarioState([fixtureRow.id]);
+
+    const after = await snapshotPlatformPerCurrency(platformUserId, currencies);
+
+    const drifted: string[] = [];
+    for (const cur of currencies) {
+      const baselineVal = new Decimal(baseline.get(cur) ?? "0");
+      const afterVal = new Decimal(after.get(cur) ?? "0");
+      const delta = afterVal.minus(baselineVal);
+      if (delta.abs().gt(PLATFORM_LEG_EPSILON)) {
+        drifted.push(
+          `${cur}: ${baselineVal.toString()} -> ${afterVal.toString()} ` +
+            `(delta ${delta.gte(0) ? "+" : ""}${delta.toString()})`,
+        );
+      }
+    }
+
+    if (drifted.length === 0) {
+      pass(
+        gateName,
+        `scenario "${scenarioName}" produced no net drift vs pre-scenario ` +
+          `baseline on platform user (id=${platformUserId}) ` +
+          `(within ±${PLATFORM_LEG_EPSILON.toString()}) for ` +
+          `currencies [${currencies.join(", ")}]`,
+      );
+    } else {
+      fail(
+        gateName,
+        `scenario "${scenarioName}" contaminated platform user (id=${platformUserId}) ` +
+          `vs pre-scenario baseline: ` +
+          drifted.join("; ") +
+          ` — the per-fixture-user scrub did not neutralise these legs, ` +
+          `meaning the scenario posted platform-user ledger entries via a ` +
+          `transaction NOT owned by fixture user "${fixtureUsername}" (or via ` +
+          `a single-leg posting that bypassed the double-entry primitive). ` +
+          `Inspect the scenario's ledger writes for the offending currency.`,
+      );
+    }
+  } catch (err: any) {
+    fail(gateName, `threw: ${err?.message ?? err}`);
+  }
 }
 
 // Scrub the platform-side ledger residue introduced by Stage 2 lifecycle
@@ -1986,27 +2229,85 @@ async function main(): Promise<void> {
     console.log("\n--- pre-launch: capturing money routes ---");
     await captureMoneyRoutes();
 
+    // Task #202 — every Stage 2 lifecycle scenario is now wrapped in
+    // `runScenarioWithPlatformLegAssert`, which snapshots PLATFORM_USER_ID's
+    // per-currency ledger sum BEFORE the scenario, runs the scenario, scrubs
+    // the fixture user's transactions (cascading to delete the scenario's
+    // platform-side legs), and asserts the per-currency delta is zero
+    // within an explicit epsilon. A failure names the scenario AND the
+    // offending currency so an operator can localize the contamination
+    // to the exact scenario that introduced it, instead of having to
+    // back-track from a Stage 3 reconciliation alert.
     console.log("\n--- pre-launch: lifecycle 1 (happy path) ---");
-    await lifecycle1_happyPath();
+    await runScenarioWithPlatformLegAssert({
+      gateName: "platform-leg: lifecycle 1 (happy path)",
+      scenarioName: "lifecycle 1 (happy path)",
+      scenarioGateName: "lifecycle: happy-path wallet matches ledger",
+      fixtureUsername: HAPPY_USERNAME,
+      currencies: ["AUD", "BTC"],
+      run: lifecycle1_happyPath,
+    });
 
     console.log("\n--- pre-launch: lifecycle 2 (idempotency under concurrency) ---");
-    await lifecycle2_idempotencyConcurrency();
+    await runScenarioWithPlatformLegAssert({
+      gateName: "platform-leg: lifecycle 2 (idempotency: deposit)",
+      scenarioName: "lifecycle 2 (idempotency: deposit)",
+      scenarioGateName: "lifecycle: idempotency under concurrency",
+      fixtureUsername: IDEM_USERNAME,
+      currencies: ["AUD"],
+      run: lifecycle2_idempotencyConcurrency,
+    });
 
     // Task #185 — same gate, applied to the OTHER money-movement routes.
     console.log("\n--- pre-launch: lifecycle 2b (idempotency: withdraw) ---");
-    await lifecycle2b_idempotencyConcurrencyWithdraw();
+    await runScenarioWithPlatformLegAssert({
+      gateName: "platform-leg: lifecycle 2b (idempotency: withdraw)",
+      scenarioName: "lifecycle 2b (idempotency: withdraw)",
+      scenarioGateName: "lifecycle: idempotency under concurrency (withdraw)",
+      fixtureUsername: IDEM_WITHDRAW_USERNAME,
+      currencies: ["AUD"],
+      run: lifecycle2b_idempotencyConcurrencyWithdraw,
+    });
 
     console.log("\n--- pre-launch: lifecycle 2c (idempotency: fx-exchange) ---");
-    await lifecycle2c_idempotencyConcurrencyFxExchange();
+    await runScenarioWithPlatformLegAssert({
+      gateName: "platform-leg: lifecycle 2c (idempotency: fx-exchange)",
+      scenarioName: "lifecycle 2c (idempotency: fx-exchange)",
+      scenarioGateName: "lifecycle: idempotency under concurrency (fx-exchange)",
+      fixtureUsername: IDEM_FXEX_USERNAME,
+      currencies: ["AUD", "USD"],
+      run: lifecycle2c_idempotencyConcurrencyFxExchange,
+    });
 
     console.log("\n--- pre-launch: lifecycle 2d (idempotency: wallets/transfer) ---");
-    await lifecycle2d_idempotencyConcurrencyWalletTransfer();
+    await runScenarioWithPlatformLegAssert({
+      gateName: "platform-leg: lifecycle 2d (idempotency: wallets/transfer)",
+      scenarioName: "lifecycle 2d (idempotency: wallets/transfer)",
+      scenarioGateName: "lifecycle: idempotency under concurrency (wallets/transfer)",
+      fixtureUsername: IDEM_WTRANSFER_USERNAME,
+      currencies: ["AUD", "USD"],
+      run: lifecycle2d_idempotencyConcurrencyWalletTransfer,
+    });
 
     console.log("\n--- pre-launch: lifecycle 2e (idempotency: investments) ---");
-    await lifecycle2e_idempotencyConcurrencyInvestments();
+    await runScenarioWithPlatformLegAssert({
+      gateName: "platform-leg: lifecycle 2e (idempotency: investments)",
+      scenarioName: "lifecycle 2e (idempotency: investments)",
+      scenarioGateName: "lifecycle: idempotency under concurrency (investments)",
+      fixtureUsername: IDEM_INVEST_USERNAME,
+      currencies: ["USD"],
+      run: lifecycle2e_idempotencyConcurrencyInvestments,
+    });
 
     console.log("\n--- pre-launch: lifecycle 3 (reversal symmetry) ---");
-    await lifecycle3_reversalSymmetry();
+    await runScenarioWithPlatformLegAssert({
+      gateName: "platform-leg: lifecycle 3 (reversal symmetry)",
+      scenarioName: "lifecycle 3 (reversal symmetry)",
+      scenarioGateName: "lifecycle: reversal symmetry",
+      fixtureUsername: REVERSAL_USERNAME,
+      currencies: ["AUD"],
+      run: lifecycle3_reversalSymmetry,
+    });
 
     // -------------------------------------------------------------------
     // Stage 2.5: scrub the platform-side ledger residue introduced by
