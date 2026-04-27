@@ -429,36 +429,62 @@ async function main() {
   await ensureFreshTestWallet(clientUserId);
   await ensureFreshTestWallet(adviserUserId);
 
-  const deductionId = await testInsufficient({
-    clientUserId,
-    adviserUserId,
-    approverUserId: adviserUserId,
-  });
+  let exitCode = 0;
+  try {
+    const deductionId = await testInsufficient({
+      clientUserId,
+      adviserUserId,
+      approverUserId: adviserUserId,
+    });
 
-  await testSufficient({
-    deductionId,
-    clientUserId,
-    adviserUserId,
-    approverUserId: adviserUserId,
-  });
+    await testSufficient({
+      deductionId,
+      clientUserId,
+      adviserUserId,
+      approverUserId: adviserUserId,
+    });
 
-  console.log("");
-  for (const r of results) {
-    const tag = r.passed ? "PASS" : "FAIL";
-    const tail = r.details ? ` — ${r.details}` : "";
-    console.log(`${tag} ${r.name}${tail}`);
+    console.log("");
+    for (const r of results) {
+      const tag = r.passed ? "PASS" : "FAIL";
+      const tail = r.details ? ` — ${r.details}` : "";
+      console.log(`${tag} ${r.name}${tail}`);
+    }
+
+    const failed = results.filter((r) => !r.passed);
+    if (failed.length > 0) {
+      console.error(
+        `\n${failed.length} fee insufficient-funds test(s) failed.`,
+      );
+      exitCode = 1;
+    } else {
+      console.log("\nALL FEE INSUFFICIENT-FUNDS TESTS PASSED \u2705");
+    }
+  } finally {
+    // Task #187 — mirror the Task #158 pattern from
+    // scripts/test-transaction-safety.ts and
+    // scripts/test-fee-deduction-gate-b.ts: run cleanup at end-of-script
+    // so the platform-side suspense and fee-account legs that
+    // settleApprovedDeduction posts (whose user_id is the platform user
+    // but whose transaction_id is owned by our test client) don't
+    // accumulate on user 11's ledger sum between runs. cleanupForUser
+    // already does the FK walk by `transaction_id IN (SELECT id FROM
+    // transactions WHERE user_id = ${userId})`, which catches those
+    // platform legs because every settle/top-up transaction is written
+    // with `userId: deduction.clientUserId`. Without the end-of-run
+    // sweep the leftover settle entries net to zero per-currency but
+    // still appear as a non-baseline ledger sum until the *next* run's
+    // start-of-run cleanup, which is enough to trip the wallet-ledger
+    // reconciliation clean-room gate in pre-launch-safety.ts.
+    try {
+      await cleanupForUser(clientUserId);
+      await cleanupForUser(adviserUserId);
+    } catch (cleanupErr) {
+      console.error("Post-run cleanup threw:", cleanupErr);
+      if (exitCode === 0) exitCode = 1;
+    }
   }
-
-  const failed = results.filter((r) => !r.passed);
-  if (failed.length > 0) {
-    console.error(
-      `\n${failed.length} fee insufficient-funds test(s) failed.`,
-    );
-    process.exit(1);
-  }
-
-  console.log("\nALL FEE INSUFFICIENT-FUNDS TESTS PASSED \u2705");
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 main().catch((err) => {
