@@ -1210,33 +1210,60 @@ async function main() {
   await ensureFreshTestWallet(userId);
   await ensureFreshWalletFor(adviserUserId);
 
-  await test1_depositIdempotency(userId);
-  await test2_pendingNoLedger(userId);
-  await test3_settlementSingleEntry(userId);
-  await test4_failedNoLedger(userId);
-  await test5_reversalOffset(userId);
-  await test6_reconciliationMismatch(userId);
-  await test7_concurrentDoublePost(userId);
-  await test8_reverseSettledDeductionUnwindsLedger(userId, adviserUserId);
+  let exitCode = 0;
+  try {
+    await test1_depositIdempotency(userId);
+    await test2_pendingNoLedger(userId);
+    await test3_settlementSingleEntry(userId);
+    await test4_failedNoLedger(userId);
+    await test5_reversalOffset(userId);
+    await test6_reconciliationMismatch(userId);
+    await test7_concurrentDoublePost(userId);
+    await test8_reverseSettledDeductionUnwindsLedger(userId, adviserUserId);
 
-  console.log("");
-  for (const r of results) {
-    const tag = r.passed ? "PASS" : "FAIL";
-    const tail = r.details ? ` — ${r.details}` : "";
-    console.log(`${tag} ${r.name}${tail}`);
+    console.log("");
+    for (const r of results) {
+      const tag = r.passed ? "PASS" : "FAIL";
+      const tail = r.details ? ` — ${r.details}` : "";
+      console.log(`${tag} ${r.name}${tail}`);
+    }
+
+    const failed = results.filter((r) => !r.passed);
+    if (failed.length > 0) {
+      console.error(
+        `\n${failed.length} transaction safety test(s) failed. ` +
+          "Do not proceed to fee-engine money movement.",
+      );
+      exitCode = 1;
+    } else {
+      console.log("\nALL TRANSACTION SAFETY TESTS PASSED \u2705");
+    }
+  } finally {
+    // Task #158 — drop ALL ledger entries written during this run, including
+    // the platform-side suspense and fee-account legs of every test
+    // transaction. cleanupTestUser deletes ledger_entries by
+    // `transaction_id IN (SELECT id FROM transactions WHERE user_id = ...)`,
+    // and every test transaction is owned by the test client user — even
+    // the adviser-fee-deduction settle/reverse transactions, which the
+    // fee-engine inserts with `userId: deduction.clientUserId`. That
+    // single delete therefore cascades to the platform fee/suspense legs
+    // as well, returning user_id=11 to its starting balance.
+    //
+    // Running cleanup AT THE END (not just at start-of-next-run) is what
+    // keeps the operator-alert clean-room gate in pre-launch-safety.ts
+    // green: between this script's exit and the recon clean-room, the
+    // ledger sum on the platform user must already be back to its
+    // baseline so the wallet-vs-ledger reconciliation does not flag a
+    // critical drift.
+    try {
+      await cleanupAdviserTestUser(adviserUserId);
+      await cleanupTestUser(userId);
+    } catch (cleanupErr) {
+      console.error("Post-run cleanup threw:", cleanupErr);
+      if (exitCode === 0) exitCode = 1;
+    }
   }
-
-  const failed = results.filter((r) => !r.passed);
-  if (failed.length > 0) {
-    console.error(
-      `\n${failed.length} transaction safety test(s) failed. ` +
-        "Do not proceed to fee-engine money movement.",
-    );
-    process.exit(1);
-  }
-
-  console.log("\nALL TRANSACTION SAFETY TESTS PASSED \u2705");
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 main().catch((err) => {

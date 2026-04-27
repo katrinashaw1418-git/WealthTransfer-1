@@ -1735,6 +1735,15 @@ function dumpConsoleBuffer(): void {
   }
 }
 
+// Task #158 — populated by runAllTests() once the deterministic test users
+// are resolved. Used by main()'s finally block to re-discover EVERY row a
+// test created under those users (including settle/reverse transactions
+// that the fee-engine writes internally without returning a PK we could
+// push into `created.transactionIds`). Excludes the platform fallback
+// user — discovering by that user_id would sweep up production-side
+// suspense / fee accounts that are NOT owned by this test.
+let endOfRunDiscoveryUserIds: number[] = [];
+
 async function main(): Promise<void> {
   let status: RunStatus = { exitCode: 0 };
   silenceConsole();
@@ -1747,6 +1756,20 @@ async function main(): Promise<void> {
     // Restore stdout before cleanup so cleanup errors are visible.
     restoreConsole();
     try {
+      // Task #158 — re-walk the FK from every deterministic test user before
+      // cleaning up, so transactions written by the fee-engine inside
+      // settleApprovedDeduction / reverseSettledDeduction (which we never
+      // see a PK for at the call site) get tracked too. Phase 1 of
+      // cleanupTrackedRows then discovers their ledger_entries by
+      // transactionId IN tracked tx — including the platform-side
+      // suspense and fee-account legs whose user_id is the platform user
+      // but whose transaction_id belongs to one of OUR tx rows. Without
+      // this, those platform legs accumulated in user_id=11's ledger
+      // sum every run and tripped the wallet-ledger reconciliation
+      // critical alert in pre-launch-safety.ts's clean-room gate.
+      if (endOfRunDiscoveryUserIds.length > 0) {
+        await discoverPriorRunRows(endOfRunDiscoveryUserIds);
+      }
       await cleanupTrackedRows();
     } catch (cleanupErr) {
       originalConsole.error("Post-run cleanup threw:", cleanupErr);
@@ -1834,6 +1857,10 @@ async function runAllTests(): Promise<RunStatus> {
     consentRenewalClientUserId,
   ];
   for (const uid of allTestUserIds) pushUnique(created.userIds, uid);
+  // Task #158 — expose the deterministic test-user list to main()'s finally
+  // block so end-of-run cleanup can re-walk the same FKs and sweep up
+  // tx rows the fee-engine wrote internally during settle/reverse.
+  endOfRunDiscoveryUserIds = allTestUserIds.slice();
 
   // Wipe any residual rows from a prior run BEFORE we touch fixtures so
   // assertions about row counts are deterministic. We do this via the
