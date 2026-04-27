@@ -836,7 +836,35 @@ export function registerClientRoutes(app: Express): void {
         req.ip ?? null,
       );
 
-      res.setHeader("Content-Type", row.mimeType ?? "application/octet-stream");
+      // Task #117 — harden the response headers against MIME-sniffing-based
+      // XSS. Two complementary controls:
+      //
+      //   1. Force `application/octet-stream` for everything except a small
+      //      allow-list of "known browser-safe to render" types (PDF +
+      //      common image formats). A document stored with mime
+      //      `text/html` (or any other rich type a future bug somehow lets
+      //      slip past the upload allow-list) is therefore served as an
+      //      opaque binary blob — the browser can't render it inline.
+      //
+      //   2. Add `X-Content-Type-Options: nosniff` so even browsers that
+      //      ignore `Content-Disposition: attachment` cannot fall back to
+      //      sniffing the body and rendering it as HTML.
+      const SAFE_INLINE_MIME_TYPES = new Set([
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "image/heic",
+        "image/heif",
+        "image/tiff",
+      ]);
+      const storedMime = (row.mimeType ?? "").toLowerCase();
+      const safeContentType = SAFE_INLINE_MIME_TYPES.has(storedMime)
+        ? storedMime
+        : "application/octet-stream";
+      res.setHeader("Content-Type", safeContentType);
+      res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Content-Length", String(head.sizeBytes));
       // Quote the filename and strip CR/LF so a hostile filename cannot
       // inject extra response headers.

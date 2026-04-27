@@ -35,6 +35,11 @@ import {
 import { assertAdviserClientLink } from "./adviser-access";
 import { requireAdviceRecordWritable } from "./advice-write-gate";
 import * as objectStorage from "./object-storage";
+// Task #117 — magic-byte sniff before bytes are written to object storage,
+// so an HTML payload labelled `image/png` (or any other allow-listed mime
+// it doesn't actually match) is refused even though multer's mime filter
+// trusted the multipart Content-Type header.
+import { assertContentMatchesDeclaredMime } from "./upload-content-sniffer";
 
 // Drizzle's `db` and the tx handle returned by `db.transaction(async tx =>)`
 // share the same query surface; we type the executor loosely to accept either.
@@ -534,6 +539,12 @@ export async function uploadClientDocument(
   if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
     throw Object.assign(new Error("Empty upload"), { status: 400 });
   }
+
+  // Task #117 — magic-byte sniff. Throws 415 (UploadContentMismatchError)
+  // if the buffer's leading bytes don't match the declared mime type.
+  // Runs BEFORE objectStorage.putObject so a rejected upload never lands
+  // in the bucket (no orphan key to garbage-collect later).
+  assertContentMatchesDeclaredMime(input.mimeType ?? null, bytes);
 
   const { storageKey, sizeBytes } = await objectStorage.putObject({
     prefix: `client-documents/${input.clientId}`,

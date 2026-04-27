@@ -143,6 +143,13 @@ function handleError(res: any, error: any, fallbackMessage: string) {
     if (typeof error.reason === "string") {
       body.reason = error.reason;
     }
+    // Task #117 — surface a machine-readable error code when an error class
+    // sets one (e.g. UploadContentMismatchError → "UPLOAD_CONTENT_MISMATCH").
+    // Mirrors the rejection envelope used by buildUploadMiddleware so the
+    // client UI can branch on `code` instead of fragile message matching.
+    if (typeof error.code === "string") {
+      body.code = error.code;
+    }
     return res.status(error.status).json(body);
   }
   console.error(`[adviser-routes] ${fallbackMessage}:`, error);
