@@ -7,3 +7,4 @@ vite.config.ts.*
 .local/reports/
 .local/object-storage/
 .env
+logs/
