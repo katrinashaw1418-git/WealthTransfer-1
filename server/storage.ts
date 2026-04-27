@@ -3368,7 +3368,7 @@ export class MemStorage implements IStorage {
 
   async createApplication(application: InsertApplication): Promise<Application> {
     const id = this.applicationIdCounter++;
-    const app: Application = { ...application, id, status: application.status || "email_unverified", entityName: application.entityName || null, abn: application.abn || null, consentOwnBehalf: application.consentOwnBehalf ?? false, consentAmlCtf: application.consentAmlCtf ?? false, consentContact: application.consentContact ?? false, reviewNote: null, emailVerified: application.emailVerified ?? false, emailOtp: application.emailOtp ?? null, emailOtpExpiry: application.emailOtpExpiry ?? null, emailOtpAttempts: application.emailOtpAttempts ?? 0, createdAt: new Date(), reviewedAt: null };
+    const app: Application = { ...application, id, status: application.status || "email_unverified", entityName: application.entityName || null, abn: application.abn || null, consentOwnBehalf: application.consentOwnBehalf ?? false, consentAmlCtf: application.consentAmlCtf ?? false, consentContact: application.consentContact ?? false, consentGeneralAdvice: application.consentGeneralAdvice ?? false, reviewNote: null, emailVerified: application.emailVerified ?? false, emailOtp: application.emailOtp ?? null, emailOtpExpiry: application.emailOtpExpiry ?? null, emailOtpAttempts: application.emailOtpAttempts ?? 0, createdAt: new Date(), reviewedAt: null };
     this.applicationsStore.set(id, app);
     return app;
   }
@@ -3401,6 +3401,7 @@ export class MemStorage implements IStorage {
       capitalRange: lead.capitalRange,
       recommendedStrategy: lead.recommendedStrategy,
       privateAccess: lead.privateAccess ?? false,
+      updatedAt: null,
       source: lead.source ?? "flow_a",
       ipAddress: lead.ipAddress ?? null,
       createdAt: new Date(),
