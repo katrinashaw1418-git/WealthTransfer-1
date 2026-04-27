@@ -22,13 +22,23 @@
 //        currency ledger (SUM + COUNT). Excludes the shared
 //        `__prelaunch_platform` user, which IS the platform user and is
 //        captured separately above.
-//     3. spawn the script via `npx tsx <script>` (inheriting stdio so
+//     3. Snapshot the platform user's COUNT(*) of `transactions` and
+//        `accounts` (Task #198). The ledger snapshots above only catch
+//        leaks that touch `ledger_entries`; a script that creates a
+//        `transactions` row or `accounts` row owned by the platform
+//        user but writes no ledger entries (or writes balanced entries
+//        that net to zero with the same row count) would otherwise slip
+//        through. A POSITIVE count delta on either of these tables fails
+//        the gate too — naming the offending script AND the table.
+//     4. spawn the script via `npx tsx <script>` (inheriting stdio so
 //        the operator sees its normal output).
-//     4. Snapshot both again.
-//     5. If anything drifted (per-currency net OR row count, on EITHER
-//        snapshot), the script LEAKED — fail with a clear diff naming
-//        the script and the offending currency.
-//     6. If the script's own exit code is non-zero, fail it too (the
+//     5. Snapshot all three again.
+//     6. If anything drifted (per-currency net OR row count on either
+//        ledger snapshot, OR a positive count delta on the platform
+//        user's `transactions` / `accounts`), the script LEAKED — fail
+//        with a clear diff naming the script and the offending
+//        currency / table.
+//     7. If the script's own exit code is non-zero, fail it too (the
 //        leak gate is also a hard reminder that the script must pass).
 //
 // SUM/COUNT shape mirrors the wallet-ledger reconciliation in
@@ -56,7 +66,12 @@ import { eq, inArray, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 
 import { db } from "../server/db";
-import { users, ledgerEntries } from "../shared/schema";
+import {
+  users,
+  ledgerEntries,
+  transactions,
+  accounts,
+} from "../shared/schema";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -87,6 +102,20 @@ type CurrencyStat = {
   count: number;
 };
 type Snapshot = Map<string, CurrencyStat>;
+
+// Task #198 — orphan-row counts for the platform user. Snapshotted in
+// addition to the ledger snapshot above. The ledger snapshot only
+// catches leaks that touch `ledger_entries`; a script that creates a
+// `transactions` row or `accounts` row owned by the platform user but
+// writes no ledger entries (or writes balanced entries that net to
+// zero with the same row count) would otherwise slip through. We
+// track raw COUNT(*) per table — the platform user is a long-lived
+// fixture, not a per-test fixture, so absolute counts here are stable
+// across runs and the meaningful signal is the BEFORE/AFTER delta.
+type OrphanCounts = {
+  transactions: number;
+  accounts: number;
+};
 
 // ---------------------------------------------------------------------------
 // CLI parsing
@@ -208,6 +237,32 @@ async function snapshotForUser(userId: number): Promise<Snapshot> {
   return out;
 }
 
+// Task #198 — platform-user orphan-row counts for `transactions` and
+// `accounts`. Mirrors snapshotForUser() in shape (BEFORE/AFTER + diff)
+// but tracks plain row counts since neither table carries the same
+// per-currency signed-sum shape that ledger_entries does. We snapshot
+// these for the PLATFORM USER ONLY — the per-test `__`-prefixed
+// fixture users can legitimately own transactions / accounts as part
+// of their scenario, but the platform user is a long-lived
+// suspense / fee bucket that no test script should ever leave new
+// rows on once it cleans up.
+async function snapshotPlatformOrphanCounts(
+  platformUserId: number,
+): Promise<OrphanCounts> {
+  const [txRow] = await db
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(transactions)
+    .where(eq(transactions.userId, platformUserId));
+  const [acctRow] = await db
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(accounts)
+    .where(eq(accounts.userId, platformUserId));
+  return {
+    transactions: Number(txRow?.count ?? 0),
+    accounts: Number(acctRow?.count ?? 0),
+  };
+}
+
 // Every `__`-prefixed test user's per-currency ledger.
 // This catches leaks against deterministic test fixtures the way it
 // would catch leaks against the platform user (e.g. `__feegate_test_*`,
@@ -280,6 +335,37 @@ async function snapshotByUsernamePrefix(
 // running each script once with the gate, then re-baselining) and
 // subsequent runs are clean. CI starts from a clean DB, so this is a
 // one-time dev-env consideration only.
+// Task #198 — orphan-count diff. Unlike diffSnapshot() above, this only
+// fails on a POSITIVE delta. Rationale per the task spec: the failure
+// we care about is rows ADDED to the platform user that the script
+// forgot to clean up. A negative delta means a script's start-of-run
+// cleanup legitimately reaped leftover rows from a previous (pre-gate)
+// run, which is desirable behaviour and would generate noisy false
+// failures here on the first run after this gate is introduced. The
+// per-table label is included in every drift line so the FAIL message
+// satisfies the spec's "naming the script and the table" requirement.
+function diffOrphanCounts(
+  before: OrphanCounts,
+  after: OrphanCounts,
+): string[] {
+  const drift: string[] = [];
+  const dTx = after.transactions - before.transactions;
+  if (dTx > 0) {
+    drift.push(
+      `transactions: ${before.transactions} -> ${after.transactions} ` +
+        `(delta +${dTx})`,
+    );
+  }
+  const dAcct = after.accounts - before.accounts;
+  if (dAcct > 0) {
+    drift.push(
+      `accounts: ${before.accounts} -> ${after.accounts} ` +
+        `(delta +${dAcct})`,
+    );
+  }
+  return drift;
+}
+
 function diffSnapshot(before: Snapshot, after: Snapshot): string[] {
   const drift: string[] = [];
   const currencies = new Set<string>([...before.keys(), ...after.keys()]);
@@ -333,6 +419,10 @@ type ScriptResult = {
   signal: NodeJS.Signals | null;
   spawnError: string | null;
   platformDrift: string[];
+  // Task #198 — orphan transactions/accounts drift on the platform user.
+  // Reported alongside platformDrift but kept in its own field so the
+  // FAIL message can label the table that leaked, per spec.
+  platformOrphanDrift: string[];
   testUserDrift: TestUserDrift[];
 };
 
@@ -367,13 +457,21 @@ async function main(): Promise<void> {
     console.log(`--- ledger-leak gate: ${script} ---`);
     const platformBefore = await snapshotForUser(platformUserId);
     const testUsersBefore = await snapshotByUsernamePrefix("__");
+    const platformOrphansBefore =
+      await snapshotPlatformOrphanCounts(platformUserId);
 
     const r = runScript(script);
 
     const platformAfter = await snapshotForUser(platformUserId);
     const testUsersAfter = await snapshotByUsernamePrefix("__");
+    const platformOrphansAfter =
+      await snapshotPlatformOrphanCounts(platformUserId);
 
     const platformDrift = diffSnapshot(platformBefore, platformAfter);
+    const platformOrphanDrift = diffOrphanCounts(
+      platformOrphansBefore,
+      platformOrphansAfter,
+    );
     const testUserDrift: TestUserDrift[] = [];
     const allUsernames = new Set<string>([
       ...testUsersBefore.keys(),
@@ -393,6 +491,7 @@ async function main(): Promise<void> {
       signal: r.signal,
       spawnError: r.error,
       platformDrift,
+      platformOrphanDrift,
       testUserDrift,
     });
   }
@@ -402,6 +501,7 @@ async function main(): Promise<void> {
   let failures = 0;
   for (const r of results) {
     const leaked = r.platformDrift.length > 0 || r.testUserDrift.length > 0;
+    const orphaned = r.platformOrphanDrift.length > 0;
     const subFailed = r.exitCode !== 0;
     if (subFailed) {
       failures += 1;
@@ -430,7 +530,27 @@ async function main(): Promise<void> {
           `for the Task #158 reference fix).`,
       );
     }
-    if (!subFailed && !leaked) {
+    // Task #198 — orphan transactions/accounts on the platform user.
+    // Reported as its own FAIL line so the message names the script
+    // AND the offending table(s), per spec.
+    if (orphaned) {
+      failures += 1;
+      console.error(
+        `FAIL ${r.script} — leaked orphan rows on platform user ` +
+          `(id=${platformUserId}):`,
+      );
+      for (const line of r.platformOrphanDrift) {
+        console.error(`    ${line}`);
+      }
+      console.error(
+        `  HINT: the script created a transaction or account row owned by ` +
+          `the platform user and did not clean it up. Wrap the test body in ` +
+          `try/finally and DELETE the offending rows by primary key at ` +
+          `end-of-script (do NOT delete by user_id alone — that risks ` +
+          `wiping platform rows owned by other test scripts).`,
+      );
+    }
+    if (!subFailed && !leaked && !orphaned) {
       console.log(`PASS ${r.script}`);
     }
   }

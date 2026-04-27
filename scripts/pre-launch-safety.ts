@@ -323,6 +323,20 @@ function runExistingScript(scriptPath: string): ExistingScriptOutcome {
 type CurrencyStat = { net: string; count: number };
 type PlatformSnapshot = Map<string, CurrencyStat>;
 
+// Task #198 — orphan-row counts for the platform user. Snapshotted in
+// addition to the per-currency ledger snapshot above. The ledger
+// snapshot only catches leaks that touch `ledger_entries`; a script
+// that creates a `transactions` row or `accounts` row owned by the
+// platform user but writes no ledger entries (or writes balanced
+// entries that net to zero with the same row count) would otherwise
+// slip through. Captured by the same per-script wrap below so a
+// regression on EITHER table fails its sub-script's leak gate with a
+// FAIL message naming the script AND the offending table.
+type PlatformOrphanCounts = {
+  transactions: number;
+  accounts: number;
+};
+
 async function snapshotPlatformLedger(
   platformUserId: number,
 ): Promise<PlatformSnapshot> {
@@ -342,10 +356,62 @@ async function snapshotPlatformLedger(
   return out;
 }
 
+// Task #198 — companion to snapshotPlatformLedger() above. Mirrors the
+// `snapshotPlatformOrphanCounts` shape used by scripts/ci-ledger-leak-gate.ts
+// so the two harnesses report the same kind of leak the same way.
+async function snapshotPlatformOrphanCounts(
+  platformUserId: number,
+): Promise<PlatformOrphanCounts> {
+  const [txRow] = await db
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(transactions)
+    .where(eq(transactions.userId, platformUserId));
+  const [acctRow] = await db
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(accounts)
+    .where(eq(accounts.userId, platformUserId));
+  return {
+    transactions: Number(txRow?.count ?? 0),
+    accounts: Number(acctRow?.count ?? 0),
+  };
+}
+
 // Strict leak definition per task spec: fail on ANY per-currency drift in
 // either net OR row count. Mirrors scripts/ci-ledger-leak-gate.ts. A clean
 // script that wraps its body in try/finally with end-of-script per-user
 // cleanup leaves both unchanged.
+// Task #198 — orphan-count diff. Unlike diffPlatformLedger() above,
+// this only fails on a POSITIVE delta: the leak we care about is rows
+// ADDED to the platform user that the script forgot to clean up. A
+// negative delta means a script's start-of-run cleanup legitimately
+// reaped leftover rows from a previous (pre-gate) run, which is
+// desirable behaviour and would otherwise produce noisy false
+// failures here on the first run after the gate is introduced. The
+// per-table label is included in every drift line so the FAIL
+// message satisfies the spec's "naming the script and the table"
+// requirement once the lines are emitted by the per-script wrap.
+function diffPlatformOrphanCounts(
+  before: PlatformOrphanCounts,
+  after: PlatformOrphanCounts,
+): string[] {
+  const drift: string[] = [];
+  const dTx = after.transactions - before.transactions;
+  if (dTx > 0) {
+    drift.push(
+      `transactions: ${before.transactions} -> ${after.transactions} ` +
+        `(delta +${dTx})`,
+    );
+  }
+  const dAcct = after.accounts - before.accounts;
+  if (dAcct > 0) {
+    drift.push(
+      `accounts: ${before.accounts} -> ${after.accounts} ` +
+        `(delta +${dAcct})`,
+    );
+  }
+  return drift;
+}
+
 function diffPlatformLedger(
   before: PlatformSnapshot,
   after: PlatformSnapshot,
@@ -2243,9 +2309,17 @@ async function main(): Promise<void> {
     for (const s of EXISTING_SCRIPTS) {
       console.log(`\n--- pre-launch: running ${s.file} ---`);
       let leakBefore: PlatformSnapshot | null = null;
+      // Task #198 — orphan-row baseline for the platform user. Captured
+      // alongside the ledger baseline so a sub-script that creates a
+      // `transactions` or `accounts` row owned by the platform user
+      // and forgets to clean it up trips the same per-script leak gate.
+      let orphanBefore: PlatformOrphanCounts | null = null;
       try {
         if (platformUserIdForLeak > 0) {
           leakBefore = await snapshotPlatformLedger(platformUserIdForLeak);
+          orphanBefore = await snapshotPlatformOrphanCounts(
+            platformUserIdForLeak,
+          );
         }
       } catch (err: any) {
         // Snapshot failure shouldn't block the script run; we'll SKIP
@@ -2267,10 +2341,14 @@ async function main(): Promise<void> {
           s.leakLabel,
           `PLATFORM_USER_ID not resolvable; cannot snapshot platform ledger`,
         );
-      } else if (!leakBefore) {
+      } else if (!leakBefore || !orphanBefore) {
+        // Task #198 — either the ledger baseline or the orphan-count
+        // baseline failed to capture; without BOTH baselines we can't
+        // produce a meaningful diff for the gate, so SKIP rather than
+        // pretend either snapshot succeeded.
         skip(
           s.leakLabel,
-          `pre-snapshot of platform ledger failed; see error above`,
+          `pre-snapshot of platform ledger / orphan rows failed; see error above`,
         );
       } else if (r.outcome === "skip") {
         // If the sub-script never actually ran, there's nothing to
@@ -2280,26 +2358,49 @@ async function main(): Promise<void> {
       } else {
         try {
           const leakAfter = await snapshotPlatformLedger(platformUserIdForLeak);
-          const drift = diffPlatformLedger(leakBefore, leakAfter);
-          if (drift.length === 0) {
+          const orphanAfter = await snapshotPlatformOrphanCounts(
+            platformUserIdForLeak,
+          );
+          const ledgerDrift = diffPlatformLedger(leakBefore, leakAfter);
+          const orphanDrift = diffPlatformOrphanCounts(
+            orphanBefore,
+            orphanAfter,
+          );
+          if (ledgerDrift.length === 0 && orphanDrift.length === 0) {
             pass(
               s.leakLabel,
-              `platform user (id=${platformUserIdForLeak}) ledger unchanged`,
+              `platform user (id=${platformUserIdForLeak}) ledger + ` +
+                `transactions + accounts unchanged`,
             );
           } else {
+            // Task #198 — single FAIL line that names the script (via
+            // s.leakLabel) and EVERY offending source: per-currency
+            // ledger drift AND/OR per-table orphan-row drift. Keeping
+            // ledger and orphan drift in one FAIL message means an
+            // operator sees the full scope of contamination at once.
+            const parts: string[] = [];
+            if (ledgerDrift.length > 0) {
+              parts.push(`ledger ${ledgerDrift.join("; ")}`);
+            }
+            if (orphanDrift.length > 0) {
+              parts.push(`orphan rows ${orphanDrift.join("; ")}`);
+            }
             fail(
               s.leakLabel,
               `script leaked on platform user (id=${platformUserIdForLeak}): ` +
-                drift.join("; ") +
-                ` — wrap the test body in try/finally and call the per-user ` +
-                `cleanup at end-of-script (see Task #187 reference fix in ` +
-                `scripts/test-fee-insufficient-funds.ts)`,
+                parts.join(" | ") +
+                ` — wrap the test body in try/finally and clean up ` +
+                `every row created on the platform user at end-of-script ` +
+                `(see Task #187 reference fix in ` +
+                `scripts/test-fee-insufficient-funds.ts for ledger entries; ` +
+                `for transactions / accounts, DELETE by primary key, never ` +
+                `by user_id alone)`,
             );
           }
         } catch (err: any) {
           skip(
             s.leakLabel,
-            `post-snapshot of platform ledger failed: ${err?.message ?? err}`,
+            `post-snapshot of platform ledger / orphan rows failed: ${err?.message ?? err}`,
           );
         }
       }
