@@ -1,0 +1,24 @@
+My advice
+1. Fix the RED first (today, ~30 min) — small test-side patch, not a feature change.
+
+In scripts/pre-launch-safety.ts, the four new lifecycle scenarios from #185 (fx-exchange, wallets/transfer, investments — and withdraw to be safe) need to call refreshWalletCacheBalance for user 11 as well as the fixture user, immediately after the parallel POSTs. That's the same pattern Task #186 used for user 29. One call per scenario. The drift only appears during the recon window — it's not a production bug, it's a test-fixture omission. Fixing it at the source (#191) is the right long-term move, but #191 is a real production refactor (rewrite three routes to post via the ledger primitive) and shouldn't be rushed just to unblock the gate.
+
+So: ship the cleanup patch now, keep #191 as a real follow-up.
+
+2. Then consolidate the Drafts (15 min of bookkeeping).
+
+Of the 8 merge clusters I listed, only two are urgent enough to act on now:
+
+#18 + #19 + #47 + #48 → "Drift admin workflow" — this is the same admin reconciliation page work you're already going to need to triage real drift in production. Worth merging because splitting it across 4 PRs guarantees 4 conflicting refactors of the same React table.
+#86 + #87 + #88 → "Insufficient-funds workflow" — same surface, same user story.
+The other 6 clusters are quality-of-life polish. Leave them as separate Drafts; you'll likely defer most of them post-launch anyway, and merging now just creates bigger plan files that need re-reading later. Only merge if/when you're actually about to schedule them.
+
+3. Don't touch #190/#193/#194/#195.
+
+They look mergeable on paper (all kill-switch hardening), but they're explicitly staged on top of each other and all edit kill-switch.test.ts. Running them in parallel would create the exact merge conflict that Task #168's rebase already had to deal with. Leave them serial.
+
+4. After the test patch lands, re-run the strict gate and then scripts/post-merge-safety-recheck.ts to refresh the GREEN evidence file.
+
+TL;DR: Patch the four scenarios with a refreshWalletCacheBalance(11, …) call to get the gate back to GREEN, promote #191 to Active as the proper fix, merge clusters #18/#19/#47/#48 and #86/#87/#88, leave everything else alone.
+
+Want me to do step 1 (the test patch) now?
