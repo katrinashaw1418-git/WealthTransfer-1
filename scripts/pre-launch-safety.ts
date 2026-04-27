@@ -66,7 +66,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Express, Request } from "express";
-import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 
 import { db } from "../server/db";
@@ -106,6 +106,9 @@ import {
   snapshotPlatformPerCurrency as libSnapshotPlatformPerCurrency,
   type PlatformPerCurrency,
 } from "./lib/platform-leg-gate";
+import {
+  assertFixtureUsersHaveZeroTransactions as libAssertFixtureUsersHaveZeroTransactions,
+} from "./lib/fixture-zero-transactions-gate";
 
 // ---------------------------------------------------------------------------
 // Result reporter (canonical PASS/FAIL/SKIP block, mirrors the other scripts).
@@ -259,6 +262,17 @@ const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   // immediately surface as drift on the same harness that polices every
   // other test-*.ts script.
   "scripts/test-platform-leg-gate.ts",
+  // Task #213 — regression test for the end-of-Stage-2 fixture-user
+  // contract gate (Task #210). Exercises the gate's three outcomes
+  // (FAIL on a leftover transaction, SKIP when no fixture users
+  // exist, PASS-via-SKIP when the only matching user is the resolved
+  // platform user that must be excluded). Wired here, like Task #209
+  // above, so the same ci-ledger-leak-gate snapshot polices its
+  // cleanup — the script's try/finally + per-run RUN_SUFFIX wipe its
+  // `__pftest213*` rows so a leak would surface as drift on the same
+  // harness, instead of as a future contamination event slipping past
+  // the Stage-2 gate this script exists to defend.
+  "scripts/test-prelaunch-fixture-contract.ts",
 ];
 
 type ExistingScriptOutcome =
@@ -656,84 +670,23 @@ async function assertPlatformLegInvariantAndScrub(
 //             a free PASS so --strict treats it as unverified.
 // ---------------------------------------------------------------------------
 async function assertFixtureUsersHaveZeroTransactions(): Promise<void> {
-  const gateName = "lifecycle: end-of-Stage-2 fixture-user contract";
-  try {
-    const platformUserIdRaw = process.env.PLATFORM_USER_ID;
-    const platformUserId = platformUserIdRaw
-      ? parseInt(platformUserIdRaw, 10)
-      : NaN;
-
-    // Match every fixture user this script may have created, but exclude
-    // the platform user (it may itself be `__prelaunch_platform` when
-    // PLATFORM_USER_ID was unset at startup).
-    //
-    // The literal underscores in `__prelaunch_` are SQL LIKE single-char
-    // wildcards by default, so we escape them via `ESCAPE '\\'` (matches
-    // the precedent in scripts/test-wealth-planner-compliance.ts) — a
-    // bare `LIKE '__prelaunch_%'` would also match e.g. `xxprelaunch_foo`
-    // and produce false-positive failures from unrelated test fixtures.
-    const prelaunchPrefixMatch = sql`${users.username} LIKE '\_\_prelaunch\_%' ESCAPE '\\'`;
-    const whereClause =
-      Number.isInteger(platformUserId) && platformUserId > 0
-        ? and(prelaunchPrefixMatch, ne(users.id, platformUserId))
-        : prelaunchPrefixMatch;
-
-    const fixtureUsers = await db
-      .select({ id: users.id, username: users.username })
-      .from(users)
-      .where(whereClause);
-
-    if (fixtureUsers.length === 0) {
-      skip(
-        gateName,
-        `no __prelaunch_% fixture users exist (excluding the platform ` +
-          `user); nothing to verify — every Stage 2 lifecycle was likely ` +
-          `skipped before creating its fixture`,
-      );
-      return;
-    }
-
-    const fixtureUserIds = fixtureUsers.map((u) => u.id);
-    const txRows = await db
-      .select({ userId: transactions.userId, id: transactions.id })
-      .from(transactions)
-      .where(inArray(transactions.userId, fixtureUserIds));
-
-    if (txRows.length === 0) {
-      pass(
-        gateName,
-        `every __prelaunch_% fixture user (n=${fixtureUsers.length}, ` +
-          `excluding platform user id=${platformUserId}) owns zero ` +
-          `transactions at end of Stage 2 — the per-scenario scrub ` +
-          `contract holds`,
-      );
-      return;
-    }
-
-    const usernameById = new Map(fixtureUsers.map((u) => [u.id, u.username]));
-    const countsByUserId = new Map<number, number>();
-    for (const t of txRows) {
-      countsByUserId.set(t.userId, (countsByUserId.get(t.userId) ?? 0) + 1);
-    }
-    const offenders = Array.from(countsByUserId.entries())
-      .map(([uid, n]) => `${usernameById.get(uid) ?? `user#${uid}`}=${n}`)
-      .sort()
-      .join(", ");
-
-    fail(
-      gateName,
-      `${txRows.length} leftover transaction row(s) on ` +
-        `${countsByUserId.size} fixture user(s) at end of Stage 2: ` +
-        `${offenders}. Every Stage 2 lifecycle scenario MUST self-clean ` +
-        `via runScenarioWithPlatformLegAssert (which deletes the fixture ` +
-        `user's transactions, cascading to its platform-side legs). A ` +
-        `non-zero count here means a scenario was added that bypasses ` +
-        `that wrapper, or its fixture username does not match the ` +
-        `username the wrapper scrubs.`,
-    );
-  } catch (err: any) {
-    fail(gateName, `threw: ${err?.message ?? err}`);
-  }
+  // Task #213 — gate decision logic lives in
+  // scripts/lib/fixture-zero-transactions-gate.ts so the regression
+  // harness scripts/test-prelaunch-fixture-contract.ts can exercise
+  // the FAIL / SKIP / platform-exclusion paths without side-effect-
+  // running this whole pre-launch script. The reporter callbacks
+  // bridge the helper's outcome back into the local results map.
+  const platformUserIdRaw = process.env.PLATFORM_USER_ID;
+  const platformUserId = platformUserIdRaw
+    ? parseInt(platformUserIdRaw, 10)
+    : NaN;
+  await libAssertFixtureUsersHaveZeroTransactions({
+    gateName: "lifecycle: end-of-Stage-2 fixture-user contract",
+    usernamePrefix: "__prelaunch_",
+    platformUserId,
+    reporter: { pass, fail, skip },
+    db,
+  });
 }
 
 async function ensureWallet(userId: number, currency: string): Promise<void> {
