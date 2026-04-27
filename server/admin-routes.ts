@@ -91,7 +91,10 @@ import {
 // Task #204 — centralised "show as IF?" projection. Strips IF-only bookkeeping
 // columns from non-IF rows before they ship over the wire so settled-formerly-
 // IF rows can never leak stale notification metadata into the admin table.
-import { projectDeductionForApiContract } from "../shared/fee-deduction-status";
+import {
+  projectDeductionForApiContract,
+  projectFeeExceptionRow,
+} from "../shared/fee-deduction-status";
 import {
   getInProcessCounters,
   getLastSuccessfulHealthProbeAt,
@@ -4616,15 +4619,15 @@ export function registerAdminRoutes(app: Express): void {
         )
           kind = "stuck";
         else kind = "failed";
-        // Code-review fix — apply the centralised projection BEFORE the
-        // row leaves this report. `failed` and `stuck` rows are not in the
-        // insufficient_funds state, so they must not surface
-        // lastRecheckedAt / clientNotifiedAt / clientNotificationCount.
-        // `held` rows pass through unchanged because the projection
-        // preserves IF metadata when status === 'insufficient_funds'.
+        // Task #208 — push the kind-based gating into the response itself.
+        // `failed` / `stuck` rows are not in the insufficient_funds state,
+        // so they must not surface failureReason / lastRecheckedAt /
+        // clientNotifiedAt / clientNotificationCount. `held` rows pass
+        // through unchanged because the helper preserves IF metadata when
+        // kind === "held".
         return {
           kind,
-          deduction: projectDeductionForApiContract(d) as typeof d,
+          deduction: projectFeeExceptionRow(d, kind) as typeof d,
           ageDays,
         };
       });
@@ -4668,18 +4671,14 @@ export function registerAdminRoutes(app: Express): void {
           0,
           Math.floor((now - createdAtMs) / (24 * 60 * 60 * 1000)),
         );
-        // Code-review fix — corruption rows are settled or reversed by
-        // definition (the WHERE clause filters status IN settled/reversed),
-        // so they MUST be projected to strip IF-only bookkeeping columns.
-        // We project first and then layer the failureReason normalisation
-        // on top so the final shape matches the held/stuck/failed branch.
-        const projected = projectDeductionForApiContract(row.d);
+        // Task #208 — corruption rows are settled or reversed by definition
+        // (the WHERE clause filters status IN settled/reversed), so they
+        // MUST be projected to strip every IF-only bookkeeping column,
+        // including failureReason. The kind is never "held" here, so the
+        // helper clears all four IF-only fields uniformly.
         items.push({
           kind: "role_corruption",
-          deduction: {
-            ...(projected as typeof row.d),
-            failureReason: row.d.failureReason ?? null,
-          },
+          deduction: projectFeeExceptionRow(row.d, "role_corruption") as typeof row.d,
           ageDays,
         });
       }

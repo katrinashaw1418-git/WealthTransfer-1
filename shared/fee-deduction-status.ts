@@ -55,3 +55,48 @@ export function projectDeductionForApiContract<
     clientNotificationCount: 0,
   };
 }
+
+// =============================================================================
+// TASK #208 — /api/admin/fee-exceptions ROW PROJECTION
+// -----------------------------------------------------------------------------
+// The admin "Held / Stuck / Failed" exceptions report classifies each row
+// into one of four kinds (`held` / `stuck` / `failed` / `role_corruption`).
+// Only `held` rows are still in the insufficient_funds state, so only `held`
+// rows have meaningful values in the four IF-only bookkeeping columns:
+//   - failureReason
+//   - lastRecheckedAt
+//   - clientNotifiedAt
+//   - clientNotificationCount
+// The first three of those linger on the row by design (the cron uses the
+// debounce history), but they MUST NOT leak onto a non-held exception row —
+// e.g. a stuck `pending_approval` row that previously cycled through the IF
+// state should not surface "client pinged 3 times" text. This helper enforces
+// the contract server-side so any future admin surface that consumes the
+// endpoint can render the row without re-implementing the kind-based gate.
+// =============================================================================
+
+export type FeeExceptionKind =
+  | "held"
+  | "stuck"
+  | "failed"
+  | "role_corruption";
+
+export function projectFeeExceptionRow<
+  T extends {
+    status: string;
+    failureReason?: string | null;
+    lastRecheckedAt?: Date | string | null;
+    clientNotifiedAt?: Date | string | null;
+    clientNotificationCount?: number | null;
+  },
+>(row: T, kind: FeeExceptionKind): T {
+  const base = projectDeductionForApiContract(row);
+  if (kind === "held") return base;
+  return {
+    ...base,
+    failureReason: null,
+    lastRecheckedAt: null,
+    clientNotifiedAt: null,
+    clientNotificationCount: 0,
+  };
+}
