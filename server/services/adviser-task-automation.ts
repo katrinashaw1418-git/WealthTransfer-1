@@ -40,6 +40,7 @@ import {
   feeConsents,
 } from "@shared/schema";
 import { and, eq, gte, lte, inArray, sql } from "drizzle-orm";
+import { clientDisplayName } from "@shared/display-name";
 
 export interface TaskAutomationSummary {
   linksScanned: number;
@@ -62,8 +63,6 @@ const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Adapter around the shared display-name helper so server and UI agree.
-import { clientDisplayName } from "@shared/display-name";
-
 export function clientLabelForTask(input: {
   firstName?: string | null;
   lastName?: string | null;
