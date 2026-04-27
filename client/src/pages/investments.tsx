@@ -11,26 +11,15 @@ import { api } from "@/lib/api";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useWallets } from "@/hooks/use-portfolio";
-import { TrendingUp, Building, CreditCard, Rocket, Bitcoin, DollarSign, Clock, Shield, Filter, X, ChevronDown } from "lucide-react";
+import { TrendingUp, DollarSign, Clock, Shield, Filter, X, ChevronDown } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { InvestmentPerformanceChart } from "@/components/dashboard/investment-performance-chart";
 import { KillSwitchBanner } from "@/components/kill-switch-banner";
-
-const categoryIcons = {
-  real_estate: Building,
-  corporate_credit: CreditCard,
-  venture_capital: Rocket,
-  digital_assets: Bitcoin,
-  cash_deposit: DollarSign,
-};
-
-const categoryLabels = {
-  real_estate: "Real Estate",
-  corporate_credit: "Corporate Credit",
-  venture_capital: "Venture Capital",
-  digital_assets: "Digital Assets",
-  cash_deposit: "Cash & Fixed Income",
-};
+import {
+  isKnownProductCategory,
+  PRODUCT_CATEGORY_LABELS,
+  productCategoryIcon,
+} from "@shared/product-categories";
 
 const riskProfileColors = {
   low: "bg-green-100 text-green-800",
@@ -433,7 +422,11 @@ export default function Investments() {
       {/* Investment Products Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {products?.map((product: any) => {
-          const CategoryIcon = categoryIcons[product.category as keyof typeof categoryIcons] ?? Building;
+          const category: string | null | undefined = product.category;
+          const CategoryIcon = productCategoryIcon(category);
+          const categoryLabel = isKnownProductCategory(category)
+            ? PRODUCT_CATEGORY_LABELS[category]
+            : "Other";
           const minimumInvestment = parseFloat(product.minimumInvestment);
           
           return (
@@ -447,7 +440,7 @@ export default function Investments() {
                     <div>
                       <h3 className="font-semibold text-lg">{product.name}</h3>
                       <p className="text-sm text-muted-foreground">
-                        {categoryLabels[product.category as keyof typeof categoryLabels] ?? "Other"}
+                        {categoryLabel}
                       </p>
                     </div>
                   </div>
@@ -496,7 +489,7 @@ export default function Investments() {
                     <DialogHeader>
                       <DialogTitle>{product.name}</DialogTitle>
                       <DialogDescription>
-                        {categoryLabels[product.category as keyof typeof categoryLabels] ?? "Other"} Investment Product
+                        {categoryLabel} Investment Product
                       </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-4">
