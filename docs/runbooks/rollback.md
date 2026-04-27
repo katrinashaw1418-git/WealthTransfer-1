@@ -207,43 +207,42 @@ Stale thresholds (defaults):
 Operator-page firing means **the rollback safety net is degraded** — fix it
 before the next deploy.
 
-## Reference: production storage & offsite shipping (Task #170)
+## Reference: production storage & offsite shipping (Task #170, #259)
 
 The in-process backup cron only runs when `DB_BACKUP_DIR` is set on the
 production deployment. As of Task #170 these values are **set in the
-production environment** of the deployment secrets pane (NOT in `shared`,
-so dev environments still skip the cron):
+production environment** of `.replit` (`[userenv.production]`, NOT in
+`shared`, so dev environments still skip the cron):
 
 | Variable                            | Production value                            | Why |
 | ----------------------------------- | ------------------------------------------- | --- |
-| `DB_BACKUP_DIR`                     | `/var/backups/amax-db`                      | Where the daily `pg_dump` writes. Must be a persistent mount (see deployment-target prerequisite below). |
+| `DB_BACKUP_DIR`                     | `/var/backups/amax-db`                      | Where the daily `pg_dump` writes. Persists across restarts on the Reserved VM (see deployment-target note below). |
 | `DB_BACKUP_RETENTION`               | `14`                                        | 14 daily local dumps. Older dumps live offsite in S3 only. |
 | `DB_BACKUP_OFFSITE_BUCKET`          | `amax-db-backups-prod`                      | S3 bucket the offsite-sync cron pushes dumps to. |
 | `DB_BACKUP_OFFSITE_PREFIX`          | `dumps`                                     | Path inside the bucket. Final keys look like `s3://amax-db-backups-prod/dumps/amax-db-backup-…dump`. |
 | `DB_BACKUP_OFFSITE_REGION`          | _operator-set_ — region the bucket lives in | Passed to the aws CLI as `--region`. Set on the host that runs the offsite cron. |
 | `DB_BACKUP_OFFSITE_SSE`             | `AES256`                                    | Server-side encryption header on every uploaded object. |
 
-> **Deployment-target prerequisite.** The current `.replit` deployment
-> target is `autoscale`, which spins containers up and down on demand.
-> Local-disk paths and the in-process `setInterval` cron in
-> `server/index.ts` are not guaranteed to survive between scaling events
-> on autoscale. For the daily backup to actually fire and for
-> `/var/backups/amax-db` to retain dumps across restarts, production
-> must run as ONE of:
->   1. a **Reserved VM** deployment with a persistent volume mounted at
->      `/var/backups/amax-db`, OR
->   2. an external scheduler (Replit Scheduled Deployment, host cron,
->      AWS EventBridge) that invokes `npx tsx scripts/db-backup.ts`
->      against a host that mounts the persistent volume.
+> **Deployment-target note (Task #259).** Production runs on a
+> **Reserved VM** (`.replit` → `[deployment].deploymentTarget = "vm"`).
+> A Reserved VM is always running and keeps its local filesystem across
+> restarts, which is what makes the in-process `setInterval` crons in
+> `server/index.ts` (the daily `database-backup`, weekly
+> `database-restore-drill`, and daily `database-backup-watchdog`) and
+> the local `/var/backups/amax-db` directory reliable. Do not switch
+> the web tier back to `autoscale` without first moving the backup,
+> restore-drill, and watchdog jobs onto a separate scheduler — on
+> autoscale containers spin up and down on demand and neither the
+> in-process cron nor the local dump directory is guaranteed to
+> survive between scaling events.
 >
-> The env vars above are already set so that as soon as the
-> deployment-target migration lands, the daily backup, weekly restore
-> drill, and freshness watchdog all activate on the next deploy with no
-> further config change. Until then the in-process cron is best-effort
-> on autoscale (a container that happens to live > 7 minutes will
-> attempt the first backup); the watchdog will page if no successful
-> backup row appears within 48 hours, which is exactly the visibility
-> we want into the gap.
+> If a future migration ever does keep autoscale for the web tier, the
+> equivalent shape is a Replit Scheduled Deployment (or external cron)
+> that invokes `npx tsx scripts/db-backup.ts` daily against a host
+> that mounts the same persistent volume. In that world the gated
+> block in `server/index.ts` should be wired NOT to register the
+> in-process cron on the web tier, otherwise two schedulers race for
+> the same dump directory.
 
 ### Offsite-sync cron
 
