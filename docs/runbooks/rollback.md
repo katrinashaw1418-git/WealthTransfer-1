@@ -4,6 +4,38 @@
 > "we need to rollback" to "production is healthy on the previous version with
 > a verified database state".
 
+## Wall-clock pacing (from the Task #169 rehearsal, 2026-04-27)
+
+These are the times one operator measured walking through every step
+end-to-end against a real scratch DB. The "tech wall-clock" column is the
+raw command time; the "operator budget" column adds the human-judgment
+overhead (reading dashboards, picking SHAs, typing reasons into the
+admin UI). Use the budget column to know whether you are on or off pace
+in a real incident.
+
+| Step                                          | Tech wall-clock | Operator budget |
+| --------------------------------------------- | --------------- | --------------- |
+| 0. Decision tree                              | n/a             | ~1 min          |
+| 1. Engage kill switches (admin UI, 4 toggles) | <30 s           | ~90 s           |
+| 1*. Engage kill switches (env-var path)       | wait for redeploy | +3–6 min on autoscale |
+| 2. Identify the bad deploy                    | n/a             | ~2 min          |
+| 3. Path A — redeploy previous version         | wait for redeploy | ~3–6 min on autoscale |
+| 4a. Find the dump to restore                  | <10 s           | ~30 s           |
+| 4b. Redeploy previous code FIRST              | same as step 3  | ~3–6 min        |
+| 4c. Restore the dump (CLI, ~0.4 MiB dev DB)   | ~5 s            | ~1 min          |
+| 4c. Restore the dump (extrapolated, scale linearly with dump size) | ~10–15 s per 1 MiB | + dump-size-dependent |
+| 4d. Optional pre-flight drill                 | ~6 s            | ~30 s           |
+| 5. Re-run reconciliation (3 jobs)             | seconds each    | ~3 min          |
+| 6. Verify (3 spot-checks)                     | <1 s of SQL     | ~1 min          |
+| 7. Disengage kill switches                    | <30 s           | ~30 s           |
+| **Total Path A** (no DB restore)              |                 | **~10–14 min**  |
+| **Total Path B** (with restore)               |                 | **~14–20 min**  |
+
+Both totals fit inside the 30-minute budget with margin. If you blow
+through any single step's budget by more than 2x, that is the signal
+to ask the channel for a second pair of eyes — do NOT silently keep
+going.
+
 This runbook covers the two scenarios where Task #147's backup/restore
 infrastructure is the safety net:
 
@@ -34,45 +66,100 @@ tile is red, page the database owner before doing anything else.
 
 ---
 
-## 1. Engage the kill switches (30 seconds)
+## 1. Engage the kill switches (~90 seconds)
 
 Before anything else, halt new state changes so the rollback target is a
-moving averaged minimum, not a moving target.
+fixed point, not a moving target.
 
-  * Set `WALLET_DEPOSITS_ENABLED=false`, `WALLET_WITHDRAWALS_ENABLED=false`,
-    and `INVESTMENT_INSTRUCTIONS_ENABLED=false` (or the project's equivalent
-    deployment-time env vars). This is the standard halt-the-world configuration.
-  * Confirm in the application logs that the next inbound write returns
-    "feature disabled".
+There are TWO kill-switch surfaces; in an incident you almost always want
+the **admin UI path** because it does not require a redeploy:
+
+### 1a. Primary path — admin UI (preferred, no redeploy)
+
+  1. Open `/admin/kill-switches` (granular per-class switches).
+  2. Toggle ON, in this order, with a short reason like
+     `"Rollback in progress — Task #169 rehearsal"`:
+     - `transactions` (the master — covers FX, transfers, investment buys)
+     - `deposits`
+     - `withdrawals`
+     - `fee_deductions`
+  3. The dialog will not enable the confirm button until the reason is
+     filled in. This is by design — the audit log row needs the "why".
+  4. Optional global hammer: scroll to the **Write kill switch**
+     panel on `/admin/dashboard` (not its own route — it lives inside
+     the dashboard page) and flip it ON. That engages the server-side
+     `WriteKillSwitch` middleware, which 503s every non-GET request
+     from non-admins regardless of which class it would have hit. Use
+     this when even the granular switches feel too narrow (e.g.
+     unknown-shape data damage).
+
+### 1b. Emergency path — env vars (only if the admin UI is itself broken)
+
+If the database is too sick to load `/admin/kill-switches`, force the
+switches ON at boot by setting any combination of the following env vars
+in the production deployment secrets and triggering a redeploy. **Truthy
+values** are `1` / `true` / `yes` / `on` (case-insensitive); anything
+else (or unset) leaves the DB row in charge.
+
+| Switch          | Env var                  |
+| --------------- | ------------------------ |
+| transactions    | `DISABLE_TRANSACTIONS`   |
+| deposits        | `DISABLE_DEPOSITS`       |
+| withdrawals     | `DISABLE_WITHDRAWALS`    |
+| fee_deductions  | `DISABLE_FEE_DEDUCTIONS` |
+| Global writes   | `WRITE_KILL_SWITCH=on`   |
+
+> Env-forced switches **cannot be cleared from the admin UI** — the UI
+> renders them with a locked badge and disables the toggle. To clear an
+> env-forced switch you MUST remove the env var and redeploy. That is
+> exactly why the admin UI is the preferred path during an incident.
+
+### 1c. Confirm
+
+After flipping, confirm one of:
+
+  * Server logs show the granular `KillSwitchActiveError` (HTTP 503,
+    body `{ error: "operation_disabled", switch: <key> }`) on the next
+    inbound write to the disabled class, OR
+  * Server logs show `WriteKillSwitchError` (HTTP 503, body
+    `{ code: "WRITE_KILL_SWITCH_ENABLED", reason: "..." }`) for the
+    global path.
 
 Leave kill switches engaged until **after** Step 6's verification passes.
 
 ---
 
-## 2. Identify the bad deploy (2 minutes)
+## 2. Identify the bad deploy (~2 minutes)
 
-  * Open the deployment history. Note the SHA / version of the **last known
-    good** deploy AND the SHA of the deploy currently running.
+  * Open the deployment history in the Replit Deployments tab
+    (`https://replit.com/@<owner>/<repl>/deployments` or via the
+    workspace **Deploy** sidebar). Note the deploy ID / commit SHA of
+    the **last known good** deploy AND the deploy ID of the deploy
+    currently running.
   * Cross-reference with the operator-alerts log
-    (`/admin/operator-alerts/log`). The first alert that fired after the bad
+    (`/admin/operator-alerts`). The first alert that fired after the bad
     deploy is your "T0".
   * Cross-reference with the background-jobs page
     (`/admin/background-jobs`) — a divergence row from
     `wallet-ledger-reconciliation` or `posting-receipt-invariant` after T0
     is the strongest "Path B" signal.
 
-Record both SHAs in the incident channel before proceeding.
+Record both deploy IDs in the incident channel before proceeding.
 
 ---
 
-## 3. Path A — Redeploy the previous version
+## 3. Path A — Redeploy the previous version (~3–6 minutes)
 
 If the decision tree said Path A:
 
-  1. Trigger a redeploy of the last-known-good SHA via the platform
-     deployment UI.
+  1. In the Replit Deployments tab, locate the previous successful
+     deploy and click **Promote** / **Rollback** (depending on
+     deployment target). On `autoscale` this drains the current
+     containers and brings up new ones at the chosen version; expect
+     a 3–6 minute spin-up before health stabilises.
   2. Wait for the new deploy to come up healthy (`/api/health` 200 +
-     workflow logs settle).
+     workflow logs settle). The Deployments tab's status pill goes
+     from "Deploying" to "Ready".
   3. Skip to **Step 6 — Verify** below.
 
 ---
@@ -94,16 +181,17 @@ the most recent successful drill was against the 02:00 UTC dump, restore
 the 02:00 UTC dump. **Never restore a dump newer than the start of the
 incident** — it likely contains the bad data.
 
-### 4b. Redeploy the previous code FIRST
+### 4b. Redeploy the previous code FIRST (~3–6 minutes)
 
 This is intentional. Restore-then-redeploy can briefly expose the bad code
 to the rolled-back data and re-corrupt it. The order is:
 
-  1. Trigger a redeploy of the last-known-good SHA.
-  2. Wait for the new deploy to come up.
+  1. Trigger a redeploy of the last-known-good deploy ID via the
+     Replit Deployments tab (same procedure as Step 3.1).
+  2. Wait for the new deploy to come up healthy.
   3. Confirm kill switches are still engaged (Step 1).
 
-### 4c. Restore the dump
+### 4c. Restore the dump (~5 s of pg_restore per ~0.5 MiB; scales linearly)
 
 The restore script refuses to write to the live database unless you
 explicitly opt in. This is by design — the restore drill never accidentally
@@ -116,6 +204,18 @@ DATABASE_URL=postgres://... \
   --target=$DATABASE_URL \
   --i-know-what-im-doing
 ```
+
+If you OMIT `--i-know-what-im-doing` and `--target` parses to the same
+host:port/database as `DATABASE_URL`, the script exits with:
+
+```
+FAIL: Refusing to operate on the live database (host:port/dbname).
+Set --i-know-what-im-doing on the CLI to override, or point at a scratch URL.
+```
+
+(Verified end-to-end during the Task #169 rehearsal — the guard is
+structural, so `postgres://` vs `postgresql://`, presence/absence of
+`?sslmode=...`, and an explicit `:5432` all still trip it.)
 
 The script invokes `pg_restore --clean --if-exists --exit-on-error`. Existing
 rows in tables present in the dump are dropped before being recreated.
@@ -154,23 +254,77 @@ Each should produce one new row in the background-jobs table with status
 
 ---
 
-## 6. Verify (5 minutes)
+## 6. Verify (~1 minute)
 
-  * Spot-check 3 user accounts: wallet cache balance ==
-    `SUM(ledger_entries)` for that user/currency.
-  * Spot-check 1 recent transaction: ledger entries for that
-    `transactionId` SUM to zero (no torn journal).
-  * Spot-check the operator-alerts log for any new entries since the
-    rollback started; investigate each.
+The exact SQL queries below were exercised against the restored scratch
+DB during the Task #169 rehearsal — they ran in <100 ms total. Run them
+straight against `$DATABASE_URL` after the restore (or after the Path A
+redeploy):
+
+```sql
+-- Spot-check 1: 3 user wallet caches vs SUM(ledger_entries).
+-- For PRODUCTION, expect drift = 0.00000000 on every row. Any non-zero
+-- drift means the wallet-ledger reconciliation was wrong even before the
+-- rollback OR the restore did not include all relevant ledger rows.
+SELECT
+  w.user_id,
+  w.currency,
+  w.balance::numeric                          AS cache_balance,
+  COALESCE(SUM(le.amount), 0)::numeric        AS ledger_sum,
+  (w.balance::numeric - COALESCE(SUM(le.amount), 0)::numeric) AS drift
+FROM wallets w
+LEFT JOIN ledger_entries le
+  ON le.user_id = w.user_id
+ AND le.currency = w.currency
+GROUP BY w.user_id, w.currency, w.balance
+ORDER BY w.user_id
+LIMIT 3;
+
+-- Spot-check 2: torn-journal check on a recent transaction.
+-- Every transaction_id must SUM to zero across its ledger_entries rows.
+-- Any non-zero `net` is a torn journal and must be investigated before
+-- writes resume.
+SELECT
+  transaction_id,
+  COUNT(*)         AS entries,
+  SUM(amount)::numeric AS net
+FROM ledger_entries
+WHERE transaction_id IS NOT NULL
+GROUP BY transaction_id
+ORDER BY transaction_id DESC
+LIMIT 3;
+```
+
+  * Spot-check 3: open `/admin/operator-alerts` and visually scan for
+    any new entries since the rollback started; investigate each.
+
+> **Dev/staging caveat surfaced by the rehearsal.** Dev fixture data
+> seeds wallet rows with non-zero balances but does NOT seed the
+> matching `ledger_entries` rows, so spot-check 1 will return non-zero
+> `drift` against a dev or freshly-seeded staging DB. That is expected
+> and is NOT a restore failure. To distinguish "expected dev drift"
+> from "restore actually lost rows", run the same spot-check against
+> the PRE-rollback live DB; identical drift on both sides = the restore
+> faithfully preserved state. (Verified during Task #169 rehearsal.)
 
 Only when all three pass should you proceed to Step 7.
 
 ---
 
-## 7. Disengage kill switches
+## 7. Disengage kill switches (~30 seconds)
 
-  * Restore `WALLET_DEPOSITS_ENABLED`, `WALLET_WITHDRAWALS_ENABLED`,
-    `INVESTMENT_INSTRUCTIONS_ENABLED` to `true`.
+  * If you used the admin UI in Step 1a: open `/admin/kill-switches`,
+    toggle each of `transactions`, `deposits`, `withdrawals`,
+    `fee_deductions` back OFF (and the **Write kill switch** panel on
+    `/admin/dashboard` if you used the global hammer). Each toggle
+    requires a reason — use something like `"Rollback complete,
+    verified clean"`.
+  * If you used the env-var path in Step 1b: REMOVE the
+    `DISABLE_TRANSACTIONS` / `DISABLE_DEPOSITS` / `DISABLE_WITHDRAWALS` /
+    `DISABLE_FEE_DEDUCTIONS` / `WRITE_KILL_SWITCH` env vars from the
+    deployment secrets and trigger one more redeploy. (Reminder from
+    Step 1b: env-forced switches CANNOT be cleared from the admin UI;
+    the toggle is locked until the env var is gone.)
   * Watch the operator-alerts log and the background-jobs page for the next
     15 minutes. If anything fires, re-engage kill switches and re-open the
     incident.
@@ -185,6 +339,14 @@ Only when all three pass should you proceed to Step 7.
   * If a Path B restore happened, schedule a follow-up audit of any
     user-visible state changes that occurred between the dump's
     `startedAt` timestamp and T0 — those changes are gone.
+
+---
+
+## Rehearsal log
+
+| Date         | Operator notes |
+| ------------ | -------------- |
+| 2026-04-27   | Task #169 — full Path B walked end-to-end against a real scratch DB on the dev environment. `scripts/db-backup.ts` produced a 0.41 MiB dump in 477 ms; `scripts/db-restore-drill.ts` restored that dump into a fresh scratch DB and passed both integrity checks (`users_table_present`, `ledger_journals_balanced`) in 3.3 s. `scripts/db-restore.ts` against a real scratch URL completed pg_restore in ~5 s; the same script with `--target=$DATABASE_URL` and no `--i-know-what-im-doing` correctly refused with the structural-key error message documented in Step 4c. Step 6 spot-check 1 surfaced expected dev-fixture drift (wallet caches non-zero, ledger sums zero) — captured as the dev/staging caveat in Step 6. Step 6 spot-check 2 returned 0 rows on dev because there are no journaled transactions yet — in production this returns 3 rows. The runbook's pre-rehearsal Step 1 referenced env vars that do not exist in this codebase (`WALLET_DEPOSITS_ENABLED`, `WALLET_WITHDRAWALS_ENABLED`, `INVESTMENT_INSTRUCTIONS_ENABLED`); replaced with the real `DISABLE_*` env vars and the admin-UI primary path. Deploy step previously said "platform deployment UI" generically; replaced with the Replit Deployments tab specifics and the autoscale spin-up budget. |
 
 ---
 
