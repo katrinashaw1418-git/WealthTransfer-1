@@ -66,7 +66,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Express, Request } from "express";
-import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, like, ne, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 
 import { db } from "../server/db";
@@ -267,6 +267,50 @@ async function ensureUser(opts: {
     .returning();
   pushUnique(created.userIds, row.id);
   return row.id;
+}
+
+// Scrub the platform-side ledger residue introduced by Stage 2 lifecycle
+// scenarios BEFORE Stage 3 reconciliation runs.
+//
+// Background: the fx-exchange / wallets-transfer / investments / withdraw
+// routes (lifecycle 2b–2e) post a SUSPENSE leg against PLATFORM_USER_ID
+// via the ledger primitive while writing the client side of the wallet
+// directly. Each scenario refreshes its own fixture-user wallet cache
+// from the ledger sum so its (user, currency) pair reconciles cleanly,
+// but the platform-side legs accumulate and surface in the Stage 3
+// wallet-vs-ledger clean-room as a critical/alert mismatch on user 11
+// (the wallets table has a non-negative check constraint, so the
+// platform wallet cache cannot match the negative ledger sum the
+// suspense leg produces).
+//
+// Fix: reuse `resetScenarioState`, which deletes both legs of every
+// transaction owned by the listed fixture users (catching the platform
+// side via `ledger_entries.transaction_id IN (txs of fixtureUsers)`) and
+// zeroes the fixture-user wallet caches (which now match their empty
+// ledger). This is the same idiom subprocess tests use; doing it ONCE
+// here, after all lifecycle scenarios complete, also catches drift
+// introduced by any future lifecycle scenario added later.
+async function scrubLifecyclePlatformLegs(): Promise<void> {
+  // Dynamic selector: every fixture user this script provisions has a
+  // username prefixed with `__prelaunch_`. We exclude PLATFORM_USERNAME
+  // (`__prelaunch_platform`, the test-side suspense user — NOT user 11)
+  // because deleting its txns would also delete the matching client-side
+  // legs we just verified. Selecting by prefix (instead of a hardcoded
+  // list) genuinely catches drift introduced by any future lifecycle
+  // scenario, as long as the new scenario follows the naming convention.
+  const fixtureRows = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      and(
+        like(users.username, "__prelaunch_%"),
+        ne(users.username, PLATFORM_USERNAME),
+      ),
+    );
+  const fixtureUserIds = fixtureRows.map((r) => r.id);
+  if (fixtureUserIds.length > 0) {
+    await resetScenarioState(fixtureUserIds);
+  }
 }
 
 async function ensureWallet(userId: number, currency: string): Promise<void> {
@@ -1681,6 +1725,22 @@ async function main(): Promise<void> {
 
     console.log("\n--- pre-launch: lifecycle 3 (reversal symmetry) ---");
     await lifecycle3_reversalSymmetry();
+
+    // -------------------------------------------------------------------
+    // Stage 2.5: scrub the platform-side ledger residue introduced by
+    // the Stage 2 lifecycle scenarios BEFORE Stage 3 reconciliation
+    // runs. The fx-exchange / wallets-transfer / investments / withdraw
+    // routes (lifecycle 2b–2e, added in Task #185) post a SUSPENSE leg
+    // against PLATFORM_USER_ID via the ledger primitive. Each scenario
+    // refreshes its own fixture-user cache, but the wallets table has
+    // a non-negative check constraint, so the platform user's wallet
+    // cache cannot be made to match the negative suspense ledger sum.
+    // Removing the lifecycle transactions (both legs) is the only way
+    // to make the Stage 3 wallet-vs-ledger clean-room see a quiet
+    // platform user. Doing it in ONE place catches drift introduced
+    // by any future lifecycle scenario added later.
+    // -------------------------------------------------------------------
+    await scrubLifecyclePlatformLegs();
 
     // -------------------------------------------------------------------
     // Stage 3: operator-alert clean rooms (Task #142 — one gate per
