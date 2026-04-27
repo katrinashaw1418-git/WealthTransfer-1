@@ -109,6 +109,13 @@ import {
 import {
   assertFixtureUsersHaveZeroTransactions as libAssertFixtureUsersHaveZeroTransactions,
 } from "./lib/fixture-zero-transactions-gate";
+// Task #215 — single source of truth for the canonical PASS/FAIL/SKIP
+// gate name list, so that `scripts/test-recheck-gate-count.ts` can
+// compare it against `EXPECTED_PASS_COUNT` /
+// `EXPECTED_CANONICAL_GATE_NAMES` in `scripts/post-merge-safety-
+// recheck.ts` without dragging in this file's heavy db / express
+// imports just to read a string array.
+import { CANONICAL_ORDER } from "./lib/pre-launch-canonical-order";
 
 // ---------------------------------------------------------------------------
 // Result reporter (canonical PASS/FAIL/SKIP block, mirrors the other scripts).
@@ -119,71 +126,10 @@ import {
 type Outcome = "pass" | "fail" | "skip";
 type Result = { outcome: Outcome; details: string };
 const results = new Map<string, Result>();
-const CANONICAL_ORDER: string[] = [
-  "existing: test-transaction-safety",
-  // Task #193 — per-script ledger-leak gates. Each existing-script run is
-  // wrapped in a snapshot of the platform user's per-currency ledger SUM
-  // + COUNT before and after. A non-zero delta means the script regressed
-  // back to the leak pattern fixed by tasks #158 and #187 (e.g. forgot to
-  // wrap the test body in try/finally + cleanup at end-of-script).
-  "ledger-leak: test-transaction-safety",
-  "existing: test-fee-deduction-gate-b",
-  "ledger-leak: test-fee-deduction-gate-b",
-  "existing: test-wealth-planner-compliance",
-  "ledger-leak: test-wealth-planner-compliance",
-  "existing: test-task-35-suppression",
-  "ledger-leak: test-task-35-suppression",
-  "lifecycle: happy-path wallet matches ledger",
-  // Task #202 — platform-leg invariant. Runs IMMEDIATELY after each
-  // Stage 2 lifecycle scenario so a regression that contaminates the
-  // platform user (PLATFORM_USER_ID) is localized to the exact scenario
-  // that introduced it, instead of being unmasked much later in Stage 3
-  // reconciliation. Each gate snapshots the platform user's per-currency
-  // signed ledger sum BEFORE the scenario, runs the scenario, scrubs
-  // the fixture user's transactions (which cascades to delete the
-  // scenario's platform-side legs by tx_id), then asserts the AFTER sum
-  // equals the BEFORE sum (within an explicit epsilon) for every
-  // currency the scenario touched. A non-zero delta means the scenario
-  // posted platform-user ledger entries via a transaction NOT owned by
-  // the fixture user (or via a single-leg posting), which is the exact
-  // regression pattern this gate catches.
-  "platform-leg: lifecycle 1 (happy path)",
-  "lifecycle: idempotency under concurrency",
-  "platform-leg: lifecycle 2 (idempotency: deposit)",
-  // Task #185 — same idempotency-under-concurrency invariant for the
-  // OTHER money-movement routes. The deposit handler proved the pattern;
-  // these gates prove the catch-block fix has been applied symmetrically.
-  "lifecycle: idempotency under concurrency (withdraw)",
-  "platform-leg: lifecycle 2b (idempotency: withdraw)",
-  "lifecycle: idempotency under concurrency (fx-exchange)",
-  "platform-leg: lifecycle 2c (idempotency: fx-exchange)",
-  "lifecycle: idempotency under concurrency (wallets/transfer)",
-  "platform-leg: lifecycle 2d (idempotency: wallets/transfer)",
-  "lifecycle: idempotency under concurrency (investments)",
-  "platform-leg: lifecycle 2e (idempotency: investments)",
-  "lifecycle: reversal symmetry",
-  "platform-leg: lifecycle 3 (reversal symmetry)",
-  // Task #210 — end-of-Stage-2 contract gate. After every lifecycle
-  // scenario has run AND scrubbed its own fixture user (Task #202's
-  // per-scenario `runScenarioWithPlatformLegAssert` wrapper), assert
-  // that EVERY `__prelaunch_%` fixture user owns zero transactions.
-  // This locks in the self-clean contract: a future scenario added
-  // outside the wrapper (or with a mismatched fixture username) will
-  // FAIL this gate loudly with a per-user residue count, instead of
-  // its leftover ledger entries silently leaking into Stage 3
-  // reconciliation as a misleading critical wallet-vs-ledger alert.
-  "lifecycle: end-of-Stage-2 fixture-user contract",
-  "reconciliation: wallet-ledger clean-room",
-  "reconciliation: ledger-vs-custodian clean-room",
-  "reconciliation: posting-receipt invariant clean-room",
-  // Task #193 — same self-policing leak gate, but for the test scripts
-  // pre-launch does NOT run in Stage 1 (test-fee-insufficient-funds,
-  // test-no-synthetic-portfolio-data, test-planner). Runs as a single
-  // subprocess via scripts/ci-ledger-leak-gate.ts so the same harness
-  // covers EVERY scripts/test-*.ts in pre-launch — without re-running
-  // the four heavy Stage 1 scripts a second time.
-  "ledger-leak: ci-gate (other test-*.ts)",
-];
+// CANONICAL_ORDER is now imported from `./lib/pre-launch-canonical-order`
+// (above) so it is the single source of truth shared with the post-merge
+// drift gate (`scripts/test-recheck-gate-count.ts`). See that module's
+// header for the rule on editing the list.
 function pass(name: string, details: string): void {
   results.set(name, { outcome: "pass", details });
 }
@@ -289,6 +235,20 @@ const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   // harness, instead of as a future contamination event slipping past
   // the Stage-2 gate this script exists to defend.
   "scripts/test-prelaunch-fixture-contract.ts",
+  // Task #215 — drift gate that asserts the post-merge recheck's
+  // hand-maintained `EXPECTED_PASS_COUNT` /
+  // `EXPECTED_CANONICAL_GATE_NAMES` constants stay in lockstep with
+  // `CANONICAL_ORDER` (the canonical roll-up gate list this very file
+  // drives its reporter from). Wired here, like the Task #209 / #213
+  // tests above, so the same ci-ledger-leak-gate harness covers it. The
+  // script is purely static (imports the two constants and asserts
+  // set-equality + length match) so the surrounding leak gate trivially
+  // records zero drift for it. A future task that adds a gate to
+  // CANONICAL_ORDER without bumping the recheck constant FAILS this
+  // gate BEFORE the merge — instead of producing a bogus RED verdict
+  // on the next post-merge run, which is the regression pattern Tasks
+  // #188 / #193 / #202+#210 each tripped over.
+  "scripts/test-recheck-gate-count.ts",
 ];
 
 type ExistingScriptOutcome =

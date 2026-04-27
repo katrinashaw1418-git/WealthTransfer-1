@@ -54,6 +54,7 @@
 import { execSync, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const REPORT_DIR = path.resolve(process.cwd(), "docs", "golive");
 const CHECKLIST_PATH = path.resolve(
@@ -102,7 +103,13 @@ const STARTED_AT = new Date();
 // at the time of this fix (27 entries). If you add or remove a
 // canonical roll-up there, bump this constant in lockstep — that is
 // the entire point of this guard.
-const EXPECTED_PASS_COUNT = 27;
+// Task #215 — exported so the drift gate
+// (`scripts/test-recheck-gate-count.ts`) can assert
+// `EXPECTED_PASS_COUNT === CANONICAL_ORDER.length` and fail CI BEFORE
+// merge whenever a new gate is added to
+// `scripts/lib/pre-launch-canonical-order.ts` without bumping this
+// constant in lockstep.
+export const EXPECTED_PASS_COUNT = 27;
 
 // The canonical roll-up gate names emitted by pre-launch-safety.ts in
 // its final reporter block. The four spawned sub-scripts ALSO print their
@@ -111,7 +118,11 @@ const EXPECTED_PASS_COUNT = 27;
 // that must NOT be confused with the roll-up gates. We therefore restrict
 // gate parsing to the canonical names, which all start with one of three
 // well-known prefixes.
-const CANONICAL_GATE_NAME_PREFIXES = [
+// Task #215 — exported alongside `EXPECTED_PASS_COUNT` and
+// `EXPECTED_CANONICAL_GATE_NAMES` so the drift gate can also keep this
+// list in sync with any future gate-name prefix additions in
+// `scripts/lib/pre-launch-canonical-order.ts`.
+export const CANONICAL_GATE_NAME_PREFIXES = [
   "existing:",
   "lifecycle:",
   "reconciliation:",
@@ -127,7 +138,12 @@ const CANONICAL_GATE_NAME_PREFIXES = [
   // EXPECTED_PASS_COUNT mismatch will still force a manual review).
   "platform-leg:",
 ] as const;
-const EXPECTED_CANONICAL_GATE_NAMES = new Set<string>([
+// Task #215 — exported so the drift gate can assert this set is
+// element-wise equal to `CANONICAL_ORDER` from
+// `scripts/lib/pre-launch-canonical-order.ts`. A future task that adds
+// a gate to that list without adding the gate name here (or vice
+// versa) will fail CI BEFORE merge with an actionable diff.
+export const EXPECTED_CANONICAL_GATE_NAMES = new Set<string>([
   "existing: test-transaction-safety",
   "existing: test-fee-deduction-gate-b",
   "existing: test-wealth-planner-compliance",
@@ -606,7 +622,19 @@ async function main(): Promise<void> {
   process.exit(verdict === "GREEN" ? 0 : 1);
 }
 
-main().catch((err) => {
-  console.error("[post-merge-recheck] crashed:", err);
-  process.exit(1);
-});
+// Task #215 — entry-point guard. The drift gate
+// (`scripts/test-recheck-gate-count.ts`) imports
+// `EXPECTED_PASS_COUNT` / `EXPECTED_CANONICAL_GATE_NAMES` from this
+// module to assert they are in lockstep with `CANONICAL_ORDER`. Without
+// this guard, a plain `import` would re-run the whole post-merge
+// recheck (spawning pre-launch-safety, writing report files, etc.) as
+// a side-effect of the static check. The guard runs `main()` only when
+// this file is the process entry point.
+const __thisFile = fileURLToPath(import.meta.url);
+const __entryFile = process.argv[1] ? path.resolve(process.argv[1]) : "";
+if (__thisFile === __entryFile) {
+  main().catch((err) => {
+    console.error("[post-merge-recheck] crashed:", err);
+    process.exit(1);
+  });
+}
