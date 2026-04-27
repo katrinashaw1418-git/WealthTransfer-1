@@ -3640,6 +3640,80 @@ export function registerAdminRoutes(app: Express): void {
   );
 
   // ---------------------------------------------------------------------
+  // Task #294 — single-consent fetch for the admin "create fee rule" form.
+  // The form takes a feeConsentId as input; on blur it calls this endpoint
+  // to autofill the bound client/adviser and surface the supersede-preview
+  // (i.e. "creating a rule against this consent will supersede rule #N").
+  // Returns the same shape as a listing row PLUS the active-rule pointer.
+  // ---------------------------------------------------------------------
+  app.get(
+    "/api/admin/fee-consents/:id",
+    adminRoute(async (req) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        throw Object.assign(new Error("Invalid consent id"), { status: 400 });
+      }
+      const [row] = await db
+        .select({
+          id: feeConsents.id,
+          adviceRecordId: feeConsents.adviceRecordId,
+          clientId: feeConsents.clientId,
+          adviserId: feeConsents.adviserId,
+          feeType: feeConsents.feeType,
+          amountType: feeConsents.amountType,
+          amount: feeConsents.amount,
+          accountNumber: feeConsents.accountNumber,
+          accountName: feeConsents.accountName,
+          deductionFrequency: feeConsents.deductionFrequency,
+          referenceDay: feeConsents.referenceDay,
+          renewalWindowStart: feeConsents.renewalWindowStart,
+          renewalWindowEnd: feeConsents.renewalWindowEnd,
+          consentExpiryDate: feeConsents.consentExpiryDate,
+          renewalStatus: feeConsents.renewalStatus,
+          consentedAt: feeConsents.consentedAt,
+          withdrawnAt: feeConsents.withdrawnAt,
+          supersededByRequestId: feeConsents.supersededByRequestId,
+          supersededAt: feeConsents.supersededAt,
+          supersededReason: feeConsents.supersededReason,
+          adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.adviserId})`,
+          clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.clientId})`,
+        })
+        .from(feeConsents)
+        .where(eq(feeConsents.id, id))
+        .limit(1);
+      if (!row) {
+        throw Object.assign(new Error("Fee consent not found"), { status: 404 });
+      }
+      // Existing live rule on this consent (the one a new createFeeRule
+      // call would auto-supersede). At most one because of the partial
+      // unique index ux_fee_rule_active_per_consent.
+      const [activeRule] = await db
+        .select({
+          id: adviserFeeRules.id,
+          status: adviserFeeRules.status,
+          effectiveDate: adviserFeeRules.effectiveDate,
+        })
+        .from(adviserFeeRules)
+        .where(
+          and(
+            eq(adviserFeeRules.feeConsentId, id),
+            inArray(adviserFeeRules.status, ["active", "draft", "paused"]),
+          ),
+        )
+        .limit(1);
+      const now = Date.now();
+      let deductionsBlockedReason: string | null = null;
+      if (!row.adviceRecordId) deductionsBlockedReason = "no_advice_record";
+      else if (
+        row.renewalStatus === "expired" ||
+        (row.consentExpiryDate && row.consentExpiryDate.getTime() < now)
+      )
+        deductionsBlockedReason = "expired";
+      return { ...row, deductionsBlockedReason, activeRule: activeRule ?? null };
+    }),
+  );
+
+  // ---------------------------------------------------------------------
   // Task #293 — admin-only Revoke a pending fee-consent REQUEST.
   // Mirrors the adviser PATCH /withdraw shape but is admin-driven and
   // tags `revokedByAdmin: true` in the audit `extra` so a reviewer can
@@ -4313,111 +4387,96 @@ export function registerAdminRoutes(app: Express): void {
     "/api/admin/fee-rules",
     adminRoute(async (req, auth) => {
       const parsed = insertAdviserFeeRuleSchema.parse(req.body);
-      const created = await db.transaction(async (tx) => {
-        // We can't easily run createFeeRule (which uses `db.`) inside this tx,
-        // so re-validate the consent linkage here against the same tx.
-        const [consent] = await tx
-          .select()
-          .from(feeConsents)
-          .where(eq(feeConsents.id, parsed.feeConsentId))
-          .limit(1);
-        if (!consent) {
-          throw Object.assign(new Error("Fee consent not found"), { status: 404 });
+      // Optional caller-supplied effectiveDate for back-dating a rule. We
+      // accept either an ISO string or a numeric epoch — anything else is a
+      // 400 (don't silently fall back to "now" or the date would be a lie).
+      let effectiveDate: Date | undefined;
+      if (req.body?.effectiveDate !== undefined && req.body?.effectiveDate !== null && req.body?.effectiveDate !== "") {
+        const d = new Date(req.body.effectiveDate);
+        if (Number.isNaN(d.getTime())) {
+          throw Object.assign(new Error("Invalid effectiveDate"), { status: 400 });
         }
-        if (consent.clientId !== parsed.clientUserId) {
-          throw Object.assign(
-            new Error("Consent client does not match rule clientUserId"),
-            { status: 400 },
-          );
-        }
-        if (consent.adviserId !== null && consent.adviserId !== parsed.adviserUserId) {
-          throw Object.assign(
-            new Error("Consent adviser does not match rule adviserUserId"),
-            { status: 400 },
-          );
-        }
-        if (consent.withdrawnAt) {
-          throw Object.assign(
-            new Error("Cannot create rule on a withdrawn consent"),
-            { status: 400 },
-          );
-        }
-        if (parsed.amountType === "fixed") {
-          const v = Number(parsed.fixedAmount ?? 0);
-          if (!(v > 0)) {
-            throw Object.assign(
-              new Error("fixedAmount must be > 0 for amountType=fixed"),
-              { status: 400 },
-            );
-          }
-        } else if (parsed.amountType === "percentage") {
-          const v = Number(parsed.rateBps ?? 0);
-          if (!(v > 0 && v <= 10000)) {
-            throw Object.assign(
-              new Error("rateBps must be in (0, 10000] for amountType=percentage"),
-              { status: 400 },
-            );
-          }
-        } else {
-          throw Object.assign(
-            new Error(`Unsupported amountType '${parsed.amountType}'`),
-            { status: 400 },
-          );
-        }
+        effectiveDate = d;
+      }
+      const supersedeReason =
+        typeof req.body?.supersedeReason === "string" && req.body.supersedeReason.trim().length > 0
+          ? req.body.supersedeReason.trim().slice(0, 256)
+          : undefined;
 
-        let row;
-        try {
-          [row] = await tx
-            .insert(adviserFeeRules)
-            .values(parsed)
-            .returning();
-        } catch (err: any) {
-          // Map the DB-level CHECK violations (splits not summing to 10000,
-          // splits out of range) to a 400 with a useful message instead of a
-          // generic 500.
-          const msg = String(err?.message ?? "");
-          if (
-            err?.code === "23514" ||
-            /adviser_fee_rules_splits_total_chk/.test(msg) ||
-            /adviser_fee_rules_splits_range_chk/.test(msg)
-          ) {
-            throw Object.assign(
-              new Error(
-                "Splits must sum to 10000bps (100%) and each be in [0,10000]",
-              ),
-              { status: 400 },
-            );
-          }
-          throw err;
-        }
-        // Task #95 — fresh insert: no prior state, so `before` is null.
-        // `after` carries the durable state-machine fields auditors expect
-        // to see flip later (status, pausedAt). Per-rule economics live
-        // in `extra`.
-        await writeAuditLog({
-          executor: tx,
-          userId: auth.userId,
-          action: "fee_rule_created",
-          entityType: "adviser_fee_rule",
-          entityId: String(row.id),
-          before: null,
-          after: {
-            id: row.id,
-            status: row.status,
-            feeConsentId: row.feeConsentId,
-            clientUserId: row.clientUserId,
-            adviserUserId: row.adviserUserId,
-            pausedAt: row.pausedAt,
-          },
-          extra: {
-            feeType: parsed.feeType,
-            amountType: parsed.amountType,
-            adviserSplitBps: parsed.adviserSplitBps,
-            platformSplitBps: parsed.platformSplitBps,
-          },
-          ipAddress: req.ip ?? null,
+      let created;
+      try {
+        // Task #294 — delegate to createFeeRule so the supersede chain runs
+        // inside the SAME tx as the insert. Auto-superseded rule audit
+        // rows are written by the service.
+        const { createFeeRule } = await import("./services/fee-engine");
+        created = await createFeeRule(parsed, {
+          actorUserId: auth.userId,
+          effectiveDate,
+          supersedeReason,
         });
-        return row;
+      } catch (err: any) {
+        // Map the DB-level CHECK violations (splits not summing to 10000,
+        // splits out of range) to a 400 with a useful message instead of a
+        // generic 500.
+        const msg = String(err?.message ?? "");
+        if (
+          err?.code === "23514" ||
+          /adviser_fee_rules_splits_total_chk/.test(msg) ||
+          /adviser_fee_rules_splits_range_chk/.test(msg)
+        ) {
+          throw Object.assign(
+            new Error(
+              "Splits must sum to 10000bps (100%) and each be in [0,10000]",
+            ),
+            { status: 400 },
+          );
+        }
+        // Task #294 — partial unique index trip. Should be unreachable on
+        // the happy path (the service supersede pass takes the lock first)
+        // but a concurrent direct INSERT would fall through to here. Map
+        // 23505 to a clean 409 so the UI can render a useful message.
+        if (
+          err?.code === "23505" ||
+          /adviser_fee_rules_supersede_uniq/.test(msg)
+        ) {
+          throw Object.assign(
+            new Error(
+              "Another active fee rule already exists for this client + fee type + account; supersede chain conflict.",
+            ),
+            { status: 409 },
+          );
+        }
+        throw err;
+      }
+
+      // Task #95 — fresh insert: no prior state, so `before` is null.
+      // `after` carries the durable state-machine fields auditors expect
+      // to see flip later (status, pausedAt, supersededByRuleId). Per-rule
+      // economics live in `extra`. Audit row for any auto-superseded
+      // predecessor(s) is written by createFeeRule itself.
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_rule_created",
+        entityType: "adviser_fee_rule",
+        entityId: String(created.id),
+        before: null,
+        after: {
+          id: created.id,
+          status: created.status,
+          feeConsentId: created.feeConsentId,
+          clientUserId: created.clientUserId,
+          adviserUserId: created.adviserUserId,
+          accountNumber: created.accountNumber,
+          effectiveDate: created.effectiveDate,
+          pausedAt: created.pausedAt,
+        },
+        extra: {
+          feeType: parsed.feeType,
+          amountType: parsed.amountType,
+          adviserSplitBps: parsed.adviserSplitBps,
+          platformSplitBps: parsed.platformSplitBps,
+        },
+        ipAddress: req.ip ?? null,
       });
       return created;
     }),
@@ -4429,12 +4488,23 @@ export function registerAdminRoutes(app: Express): void {
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
       const page = Math.max(Number(req.query.page) || 1, 1);
       const offset = (page - 1) * limit;
-      const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+      // Task #294 — `?status` accepts a comma-separated list so the
+      // admin fees page can drive Active and History cards as two
+      // independent fetches. Empty / missing → all statuses.
+      const statusParam =
+        typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const statuses = statusParam
+        ? statusParam
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        : [];
       const adviserId = Number(req.query.adviserUserId);
       const clientId = Number(req.query.clientUserId);
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const filters: any[] = [];
-      if (status) filters.push(eq(adviserFeeRules.status, status));
+      if (statuses.length === 1) filters.push(eq(adviserFeeRules.status, statuses[0]));
+      else if (statuses.length > 1) filters.push(inArray(adviserFeeRules.status, statuses));
       if (Number.isInteger(adviserId) && adviserId > 0) filters.push(eq(adviserFeeRules.adviserUserId, adviserId));
       if (Number.isInteger(clientId) && clientId > 0) filters.push(eq(adviserFeeRules.clientUserId, clientId));
       if (q) {
@@ -4450,10 +4520,50 @@ export function registerAdminRoutes(app: Express): void {
         );
       }
       const where = filters.length ? and(...filters) : undefined;
+      // Task #294 — LEFT JOIN feeConsents so the rule surface carries the
+      // legal context (consent renewal status, expiry, account, frequency)
+      // without forcing the client to do a second round-trip per row.
+      // Only the columns the UI cards / pills actually render are projected
+      // so the payload doesn't drag the entire consents row into every
+      // response (PII minimisation).
+      const ruleSelect = {
+        id: adviserFeeRules.id,
+        feeConsentId: adviserFeeRules.feeConsentId,
+        clientUserId: adviserFeeRules.clientUserId,
+        adviserUserId: adviserFeeRules.adviserUserId,
+        feeType: adviserFeeRules.feeType,
+        amountType: adviserFeeRules.amountType,
+        rateBps: adviserFeeRules.rateBps,
+        fixedAmount: adviserFeeRules.fixedAmount,
+        currency: adviserFeeRules.currency,
+        adviserSplitBps: adviserFeeRules.adviserSplitBps,
+        platformSplitBps: adviserFeeRules.platformSplitBps,
+        status: adviserFeeRules.status,
+        accountNumber: adviserFeeRules.accountNumber,
+        effectiveDate: adviserFeeRules.effectiveDate,
+        pausedAt: adviserFeeRules.pausedAt,
+        pausedReason: adviserFeeRules.pausedReason,
+        supersededByRuleId: adviserFeeRules.supersededByRuleId,
+        supersededAt: adviserFeeRules.supersededAt,
+        supersededReason: adviserFeeRules.supersededReason,
+        createdAt: adviserFeeRules.createdAt,
+        updatedAt: adviserFeeRules.updatedAt,
+        consentRenewalStatus: feeConsents.renewalStatus,
+        consentExpiryDate: feeConsents.consentExpiryDate,
+        consentWithdrawnAt: feeConsents.withdrawnAt,
+        consentAccountNumber: feeConsents.accountNumber,
+        consentAccountName: feeConsents.accountName,
+        consentDeductionFrequency: feeConsents.deductionFrequency,
+      } as const;
+
       const [rows, totalRow] = await Promise.all([
         db
-          .select()
+          .select(ruleSelect)
           .from(adviserFeeRules)
+          .leftJoin(
+            feeConsents,
+            eq(feeConsents.id, adviserFeeRules.feeConsentId),
+          )
           .where(where as any)
           .orderBy(desc(adviserFeeRules.createdAt))
           .limit(limit)
@@ -4473,6 +4583,39 @@ export function registerAdminRoutes(app: Express): void {
         total: Number(totalRow[0]?.count ?? 0),
         users: usersMap,
       };
+    }),
+  );
+
+  // Task #294 — Operator-triggered reconciliation between adviser_fee_rules
+  // and the underlying feeConsents row. Same code path as the daily cron
+  // tick; the admin endpoint exists so an operator can force a reconcile
+  // immediately after a renewal flow without waiting for the next sweep.
+  // Returns the same summary the cron records on `background_job_runs`.
+  app.post(
+    "/api/admin/fee-rules/reconcile-consent-state",
+    adminRoute(async (req, auth) => {
+      const { reconcileRuleConsentState } = await import(
+        "./services/fee-engine"
+      );
+      const summary = await reconcileRuleConsentState({
+        actorUserId: auth.userId,
+      });
+      // Audit a single roll-up row so operators can see the manual trigger
+      // separately from the per-rule transition rows that the service writes.
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_rules_consent_reconciled",
+        entityType: "adviser_fee_rules",
+        entityId: null,
+        before: null,
+        after: null,
+        extra: {
+          trigger: "manual",
+          summary,
+        },
+        ipAddress: req.ip ?? null,
+      });
+      return summary;
     }),
   );
 

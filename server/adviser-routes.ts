@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { db } from "./db";
 import {
   auditLogs,
@@ -34,7 +34,7 @@ import {
 } from "@shared/schema";
 import { storage } from "./storage";
 import { requireAuth, requireRole } from "./auth";
-import { getUserNameMap } from "./services/user-name-map";
+import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 // Task #204 — centralised "show as IF?" projection. Strips IF-only bookkeeping
 // columns from non-IF rows so the adviser surface can never accidentally
 // render stale "still held" notification metadata for a settled-formerly-IF row.
@@ -1291,20 +1291,96 @@ export function registerAdviserRoutes(app: Express): void {
       const auth = requireAuth(req);
       requireRole(auth, "adviser");
       const clientIdQ = Number(req.query.clientUserId);
+      // Task #294 — `?status` accepts a comma-separated list so the
+      // Active and History cards on the adviser fees page can each pull
+      // ONLY the rows that belong to that card. Empty / missing → all
+      // statuses (back-compat for any existing caller).
+      const statusParam =
+        typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const statuses = statusParam
+        ? statusParam
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        : [];
+      // Task #294 — `?q` is a name/email search across the joined client.
+      // The adviser already has `?clientUserId` for an explicit drill-down;
+      // `?q` powers the per-card search box on the rules table.
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+
       const filters: any[] = [eq(adviserFeeRules.adviserUserId, auth.userId)];
       if (Number.isInteger(clientIdQ) && clientIdQ > 0) {
         await assertAdviserClientLink(auth.userId, clientIdQ);
         filters.push(eq(adviserFeeRules.clientUserId, clientIdQ));
       }
+      if (statuses.length === 1) filters.push(eq(adviserFeeRules.status, statuses[0]));
+      else if (statuses.length > 1) filters.push(inArray(adviserFeeRules.status, statuses));
+      if (q) {
+        // Reuse findUserIdsByQuery if available; otherwise inline the lookup.
+        const ids = await findUserIdsByQuery(q);
+        if (ids.length === 0) {
+          return res.json({ items: [], page, limit, total: 0, users: {} });
+        }
+        // The adviser only ever sees their own clients, so we filter the
+        // candidate id-set down to the linked client list before inArray.
+        filters.push(inArray(adviserFeeRules.clientUserId, ids));
+      }
+      // Task #294 — LEFT JOIN feeConsents so the adviser-side rule cards can
+      // surface the legal context (consent renewal status, expiry, account
+      // number, deduction frequency) without forcing a per-row round-trip.
       const rows = await db
-        .select()
+        .select({
+          id: adviserFeeRules.id,
+          feeConsentId: adviserFeeRules.feeConsentId,
+          clientUserId: adviserFeeRules.clientUserId,
+          adviserUserId: adviserFeeRules.adviserUserId,
+          feeType: adviserFeeRules.feeType,
+          amountType: adviserFeeRules.amountType,
+          rateBps: adviserFeeRules.rateBps,
+          fixedAmount: adviserFeeRules.fixedAmount,
+          currency: adviserFeeRules.currency,
+          adviserSplitBps: adviserFeeRules.adviserSplitBps,
+          platformSplitBps: adviserFeeRules.platformSplitBps,
+          status: adviserFeeRules.status,
+          accountNumber: adviserFeeRules.accountNumber,
+          effectiveDate: adviserFeeRules.effectiveDate,
+          pausedAt: adviserFeeRules.pausedAt,
+          pausedReason: adviserFeeRules.pausedReason,
+          supersededByRuleId: adviserFeeRules.supersededByRuleId,
+          supersededAt: adviserFeeRules.supersededAt,
+          supersededReason: adviserFeeRules.supersededReason,
+          createdAt: adviserFeeRules.createdAt,
+          updatedAt: adviserFeeRules.updatedAt,
+          consentRenewalStatus: feeConsents.renewalStatus,
+          consentExpiryDate: feeConsents.consentExpiryDate,
+          consentWithdrawnAt: feeConsents.withdrawnAt,
+          consentAccountNumber: feeConsents.accountNumber,
+          consentAccountName: feeConsents.accountName,
+          consentDeductionFrequency: feeConsents.deductionFrequency,
+        })
         .from(adviserFeeRules)
+        .leftJoin(feeConsents, eq(feeConsents.id, adviserFeeRules.feeConsentId))
         .where(and(...filters))
-        .orderBy(desc(adviserFeeRules.createdAt));
+        .orderBy(desc(adviserFeeRules.createdAt))
+        .limit(limit)
+        .offset(offset);
+      const [totalRow] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(adviserFeeRules)
+        .where(and(...filters));
       const usersMap = await getUserNameMap(
         rows.flatMap((r) => [r.clientUserId, r.adviserUserId]),
       );
-      res.json({ items: rows, users: usersMap });
+      res.json({
+        items: rows,
+        page,
+        limit,
+        total: Number(totalRow?.count ?? 0),
+        users: usersMap,
+      });
     } catch (error: any) {
       handleError(res, error, "Failed to list fee rules");
     }

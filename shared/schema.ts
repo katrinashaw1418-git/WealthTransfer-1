@@ -1825,11 +1825,44 @@ export const adviserFeeRules = pgTable(
     adviserSplitBps: integer("adviser_split_bps").notNull(),
     platformSplitBps: integer("platform_split_bps").notNull(),
 
+    // Task #294 — widened lifecycle vocabulary.
+    //   draft       — created but not yet legally activated.
+    //   active      — current source of truth for accruals.
+    //   paused      — operator-suspended; still emits zero accrual rows
+    //                 with rule_paused gateReason.
+    //   superseded  — an earlier version that has been auto-replaced by a
+    //                 newer rule for the same (clientUserId, feeType,
+    //                 accountNumber) tuple. Terminal — never re-activates;
+    //                 supersededByRuleId points at the replacement.
+    //   expired     — the underlying consent has lapsed; reconciliation
+    //                 sweeps will not bring this row back to active even
+    //                 if the consent is later renewed (a fresh rule must
+    //                 be created against the new consent).
     status: text("status").notNull().default("active"),
-    // active | paused
+
+    // Mirrors feeConsents.accountNumber so the supersede invariant can be
+    // enforced at the DB layer via a partial unique index. Nullable for
+    // historic rows that pre-date Task #294 — backfilled by
+    // scripts/backfill-fee-rule-consent-state.ts on first deploy.
+    accountNumber: text("account_number"),
+
+    // When the rule actually became "live" for accrual purposes. Defaults to
+    // createdAt for new rows but is recorded explicitly so a rule can be
+    // back-dated (legal effect predates the data entry) without rewriting
+    // the audit trail.
+    effectiveDate: timestamp("effective_date"),
 
     pausedAt: timestamp("paused_at"),
     pausedReason: text("paused_reason"),
+
+    // Self-referential supersede chain. Populated atomically inside the same
+    // tx that flips this row to status='superseded' so the chain is never
+    // observable in a half-applied state by readers.
+    supersededByRuleId: integer("superseded_by_rule_id").references(
+      (): any => adviserFeeRules.id,
+    ),
+    supersededAt: timestamp("superseded_at"),
+    supersededReason: text("superseded_reason"),
 
     createdAt: timestamp("created_at").defaultNow(),
     updatedAt: timestamp("updated_at").defaultNow(),
@@ -1844,6 +1877,14 @@ export const adviserFeeRules = pgTable(
       table.status,
     ),
     consentIdx: index("adviser_fee_rules_consent_idx").on(table.feeConsentId),
+    // Task #294 — at most ONE non-terminal rule may exist per
+    // (clientUserId, feeType, accountNumber). The createFeeRule service
+    // path supersedes any existing active row inside the same tx so the
+    // unique index never trips on the happy path; it exists as a hard
+    // backstop for any direct insert that bypasses the service.
+    supersedeUniqIdx: uniqueIndex("adviser_fee_rules_supersede_uniq")
+      .on(table.clientUserId, table.feeType, table.accountNumber)
+      .where(sql`status IN ('draft', 'active')`),
     // The 10C invariant: adviser + platform = 100% (10000 bps). Anything else
     // means the rule cannot be safely accrued; the DB rejects it outright.
     splitsTotalChk: check(
@@ -1854,6 +1895,12 @@ export const adviserFeeRules = pgTable(
     splitsRangeChk: check(
       "adviser_fee_rules_splits_range_chk",
       sql`adviser_split_bps BETWEEN 0 AND 10000 AND platform_split_bps BETWEEN 0 AND 10000`,
+    ),
+    // Task #294 — terminal lifecycle states must carry a supersede pointer
+    // when status='superseded' so a regulator can always walk the chain.
+    supersedeChainChk: check(
+      "adviser_fee_rules_supersede_chain_chk",
+      sql`status <> 'superseded' OR superseded_by_rule_id IS NOT NULL`,
     ),
   }),
 );
@@ -2030,8 +2077,18 @@ export const adviserFeeDeductions = pgTable(
 export const insertAdviserFeeRuleSchema = createInsertSchema(adviserFeeRules).omit({
   id: true,
   status: true,
+  // accountNumber + effectiveDate are populated by the createFeeRule service
+  // (copied from the underlying consent for accountNumber; defaulted to
+  // createdAt for effectiveDate when the caller doesn't pass one). Omitted
+  // from the public insert shape so the route layer can't accidentally let
+  // the caller override the consent's account.
+  accountNumber: true,
+  effectiveDate: true,
   pausedAt: true,
   pausedReason: true,
+  supersededByRuleId: true,
+  supersededAt: true,
+  supersededReason: true,
   createdAt: true,
   updatedAt: true,
 });

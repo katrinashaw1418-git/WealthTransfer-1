@@ -78,6 +78,8 @@ import {
   INSUFFICIENT_FUNDS_STATUS,
   isInsufficientFundsRow,
 } from "@/lib/insufficient-funds";
+// Task #294 — pure forecaster used by the "Next charge" column.
+import { formatNextChargeCell } from "@shared/fee-rule-helpers";
 
 const TOKEN_KEY = "amax_jwt";
 
@@ -154,9 +156,23 @@ interface FeeRuleRow {
   adviserSplitBps: number;
   platformSplitBps: number;
   status: string;
+  // Task #294 — supersede chain + reconciliation columns.
+  accountNumber: string | null;
+  effectiveDate: string | null;
   pausedAt: string | null;
   pausedReason: string | null;
+  supersededByRuleId: number | null;
+  supersededAt: string | null;
+  supersededReason: string | null;
   createdAt: string;
+  updatedAt: string;
+  // Task #294 — joined consent context (LEFT JOIN — null if missing).
+  consentRenewalStatus: string | null;
+  consentExpiryDate: string | null;
+  consentWithdrawnAt: string | null;
+  consentAccountNumber: string | null;
+  consentAccountName: string | null;
+  consentDeductionFrequency: string | null;
 }
 
 interface FeeAccrualRow {
@@ -520,11 +536,311 @@ function UserCell({
 }
 
 
+// Task #294 — admin-side rule status pill. Mirrors the adviser/client
+// surfaces but is colour-coded for triage:
+//   active     → outline (default)
+//   draft      → secondary
+//   paused     → destructive (a deduction-blocking event happened)
+//   superseded → secondary muted with arrow → replacement rule id
+//   expired    → secondary muted (terminal)
+function adminRuleStatusBadge(r: FeeRuleRow) {
+  if (r.status === "active") return <Badge variant="outline">active</Badge>;
+  if (r.status === "draft") return <Badge variant="secondary">draft</Badge>;
+  if (r.status === "paused") {
+    return (
+      <div className="flex flex-col gap-1">
+        <Badge variant="destructive" title={r.pausedReason ?? undefined} className="w-fit">
+          paused
+        </Badge>
+        {r.pausedReason && (
+          <span className="text-xs text-muted-foreground">{r.pausedReason}</span>
+        )}
+      </div>
+    );
+  }
+  if (r.status === "superseded") {
+    return (
+      <div className="flex flex-col gap-1">
+        <Badge
+          variant="secondary"
+          className="w-fit"
+          title={r.supersededReason ?? undefined}
+        >
+          superseded
+          {r.supersededByRuleId ? (
+            <>
+              {" → "}
+              <SupersedeLink targetId={r.supersededByRuleId} />
+            </>
+          ) : null}
+        </Badge>
+        {r.supersededAt && (
+          <span className="text-xs text-muted-foreground">
+            {r.supersededAt.slice(0, 10)}
+          </span>
+        )}
+      </div>
+    );
+  }
+  if (r.status === "expired") return <Badge variant="secondary">expired</Badge>;
+  return <Badge variant="outline">{r.status}</Badge>;
+}
+
+// Renders the admin-side consent context cell — renewal status pill +
+// expiry date + (rare) withdrawn marker. Mirrors the adviser cell but uses
+// admin-flavoured labels.
+function AdminConsentContextCell({ r }: { r: FeeRuleRow }) {
+  if (!r.consentRenewalStatus && !r.consentExpiryDate && !r.consentWithdrawnAt) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  return (
+    <div className="flex flex-col gap-1 text-xs">
+      {r.consentRenewalStatus && (
+        <Badge
+          variant={
+            // Task #294 review fix — withdrawn/expired are blocking states,
+            // shown destructive. Active and renewed both render as "Signed"
+            // (the compliance label the user-facing copy asked for).
+            r.consentWithdrawnAt
+              ? "destructive"
+              : r.consentRenewalStatus === "expired"
+                ? "destructive"
+                : "outline"
+          }
+          className="w-fit"
+        >
+          {r.consentWithdrawnAt
+            ? "Withdrawn"
+            : r.consentRenewalStatus === "expired"
+              ? "Expired"
+              : "Signed"}
+        </Badge>
+      )}
+      {r.consentExpiryDate && (
+        <span className="text-muted-foreground">
+          expires {r.consentExpiryDate.slice(0, 10)}
+        </span>
+      )}
+      {r.consentWithdrawnAt && (
+        <span className="text-destructive">
+          withdrawn {r.consentWithdrawnAt.slice(0, 10)}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Task #294 — paginator for the Active / History rule cards. Each card
+// owns its own page state and passes it in here; nothing about pagination
+// is shared between the two cards.
+function RulesPager({
+  page,
+  setPage,
+  total,
+  pageSize,
+  testIdPrefix,
+}: {
+  page: number;
+  setPage: (n: number) => void;
+  total: number;
+  pageSize: number;
+  testIdPrefix: string;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (totalPages <= 1) return null;
+  return (
+    <div className="mt-3 flex items-center justify-between text-sm">
+      <span
+        className="text-muted-foreground"
+        data-testid={`${testIdPrefix}-pager-status`}
+      >
+        Page {page} of {totalPages} · {total} total
+      </span>
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setPage(Math.max(1, page - 1))}
+          disabled={page <= 1}
+          data-testid={`${testIdPrefix}-pager-prev`}
+        >
+          Prev
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setPage(Math.min(totalPages, page + 1))}
+          disabled={page >= totalPages}
+          data-testid={`${testIdPrefix}-pager-next`}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// Task #294 — admin can jump straight to the consent detail page; on
+// adviser/client surfaces the consent ID is shown but not linked because
+// neither role has a dedicated consent admin route.
+function ConsentIdLink({ id }: { id: number | null | undefined }) {
+  if (!id) return <span>—</span>;
+  return (
+    <Link
+      href={`/admin/fee-consents?focus=${id}`}
+      className="text-primary underline-offset-2 hover:underline"
+      data-testid={`link-consent-${id}`}
+    >
+      #{id}
+    </Link>
+  );
+}
+
+// Task #294 — clickable in-page anchor pointing at the rule that
+// superseded this one. Falls back to a plain "#N" label when the target
+// row isn't on this page (because pagination split the chain across
+// pages — at least the user sees the destination ID).
+function SupersedeLink({ targetId }: { targetId: number | null | undefined }) {
+  if (!targetId) return null;
+  const onClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const el = document.querySelector(`[data-testid="row-rule-${targetId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("ring-2", "ring-primary");
+      setTimeout(() => el.classList.remove("ring-2", "ring-primary"), 1500);
+    }
+  };
+  return (
+    <a
+      href={`#row-rule-${targetId}`}
+      onClick={onClick}
+      className="text-primary underline-offset-2 hover:underline"
+      data-testid={`link-supersede-${targetId}`}
+    >
+      #{targetId}
+    </a>
+  );
+}
+
+// Shared admin rule table — used by both the Active and History cards so
+// the columns can never drift between them. Pause button only renders on
+// the Active card via the `showPauseButton` flag.
+function AdminRuleTable({
+  rows,
+  users,
+  onPause,
+  showPauseButton,
+}: {
+  rows: FeeRuleRow[];
+  users: Record<number, { id: number; firstName: string; lastName: string; email: string }> | undefined;
+  onPause: (id: number) => void;
+  showPauseButton: boolean;
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>ID</TableHead>
+          <TableHead>Consent</TableHead>
+          <TableHead>Client</TableHead>
+          <TableHead>Adviser</TableHead>
+          <TableHead>Type</TableHead>
+          <TableHead>Account</TableHead>
+          <TableHead>Amount</TableHead>
+          <TableHead>Splits</TableHead>
+          <TableHead>Effective</TableHead>
+          <TableHead>Next charge</TableHead>
+          <TableHead>Consent state</TableHead>
+          <TableHead>Status</TableHead>
+          {showPauseButton && <TableHead></TableHead>}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((r) => (
+          <TableRow
+            key={r.id}
+            id={`row-rule-${r.id}`}
+            data-testid={`row-rule-${r.id}`}
+          >
+            <TableCell>{r.id}</TableCell>
+            <TableCell>
+              <ConsentIdLink id={r.feeConsentId} />
+            </TableCell>
+            <TableCell>
+              <UserCell users={users} userId={r.clientUserId} />
+            </TableCell>
+            <TableCell>
+              <UserCell users={users} userId={r.adviserUserId} />
+            </TableCell>
+            <TableCell>{r.feeType}</TableCell>
+            <TableCell>
+              <div className="leading-tight">
+                <div className="text-sm">
+                  {r.accountNumber ?? r.consentAccountNumber ?? "—"}
+                </div>
+                {r.consentAccountName && (
+                  <div className="text-xs text-muted-foreground">
+                    {r.consentAccountName}
+                  </div>
+                )}
+              </div>
+            </TableCell>
+            <TableCell>
+              {r.amountType === "fixed"
+                ? `${r.fixedAmount} ${r.currency} / month`
+                : `${(Number(r.rateBps ?? 0) / 100).toFixed(2)}% p.a.`}
+            </TableCell>
+            <TableCell className="text-xs">
+              {/* Admin-facing split copy: "Adviser X% · Platform Y%". */}
+              Adviser {bpsLabel(r.adviserSplitBps)} · Platform{" "}
+              {bpsLabel(r.platformSplitBps)}
+            </TableCell>
+            <TableCell className="text-xs text-muted-foreground">
+              {r.effectiveDate ? r.effectiveDate.slice(0, 10) : "—"}
+            </TableCell>
+            <TableCell
+              className="text-xs text-muted-foreground"
+              data-testid={`cell-next-charge-${r.id}`}
+            >
+              {/* Task #294 — pure forecast from (effectiveDate, frequency).
+                  Live rules only — paused/superseded/expired show "—" */}
+              {r.status === "active" || r.status === "draft"
+                ? formatNextChargeCell(r.effectiveDate, r.consentDeductionFrequency)
+                : "—"}
+            </TableCell>
+            <TableCell>
+              <AdminConsentContextCell r={r} />
+            </TableCell>
+            <TableCell>{adminRuleStatusBadge(r)}</TableCell>
+            {showPauseButton && (
+              <TableCell>
+                {r.status === "active" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onPause(r.id)}
+                    data-testid={`button-pause-${r.id}`}
+                  >
+                    <Pause className="h-4 w-4 mr-1" /> Pause
+                  </Button>
+                )}
+              </TableCell>
+            )}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
 export default function AdminFeesPage() {
   const { toast } = useToast();
   const [tab, setTab] = useState("rules");
 
   // -------- Create rule form --------
+  // Task #294 — `effectiveDate` is now an explicit input so an admin can
+  // backdate or post-date a rule (the engine accrues from this date).
   const [form, setForm] = useState({
     feeConsentId: "",
     clientUserId: "",
@@ -536,7 +852,31 @@ export default function AdminFeesPage() {
     currency: "AUD",
     adviserSplitBps: "8000",
     platformSplitBps: "2000",
+    effectiveDate: "",
   });
+
+  // Task #294 — when the admin types a feeConsentId we fetch the consent
+  // detail so we can autofill clientUserId / adviserUserId, surface the
+  // bound account + frequency, and warn about supersede preview.
+  const consentIdNum = Number(form.feeConsentId);
+  const consentLookupQ = useQuery<any>({
+    queryKey: ["/api/admin/fee-consents", consentIdNum],
+    queryFn: () => fetchPaginated(`/api/admin/fee-consents/${consentIdNum}`),
+    enabled: Number.isInteger(consentIdNum) && consentIdNum > 0,
+    retry: false,
+  });
+  // Reflect the lookup back into the form (without clobbering an admin's
+  // explicit typed value — only autofill empty fields). useEffect runs once
+  // per successful lookup.
+  useEffect(() => {
+    const c = consentLookupQ.data;
+    if (!c) return;
+    setForm((prev) => ({
+      ...prev,
+      clientUserId: prev.clientUserId || (c.clientId != null ? String(c.clientId) : ""),
+      adviserUserId: prev.adviserUserId || (c.adviserId != null ? String(c.adviserId) : ""),
+    }));
+  }, [consentLookupQ.data]);
 
   async function submitCreateRule() {
     try {
@@ -552,6 +892,7 @@ export default function AdminFeesPage() {
       };
       if (form.amountType === "fixed") payload.fixedAmount = form.fixedAmount;
       if (form.amountType === "percentage") payload.rateBps = Number(form.rateBps);
+      if (form.effectiveDate) payload.effectiveDate = form.effectiveDate;
       await apiRequest("POST", "/api/admin/fee-rules", payload);
       toast({ title: "Fee rule created" });
       setForm({
@@ -561,6 +902,7 @@ export default function AdminFeesPage() {
         adviserUserId: "",
         fixedAmount: "",
         rateBps: "",
+        effectiveDate: "",
       });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-rules"] });
     } catch (err: any) {
@@ -614,6 +956,42 @@ export default function AdminFeesPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-rules"] });
     } catch (err: any) {
       toast({ title: "Pause failed", description: err?.message ?? String(err), variant: "destructive" });
+    }
+  }
+
+  // Task #294 — manual reconciliation trigger. Same code path as the daily
+  // cron tick; the button exists so the admin can force a reconcile after a
+  // renewal flow without waiting for the next sweep. Renders a toast with
+  // the summary so the admin can immediately see what changed.
+  const [reconcilePending, setReconcilePending] = useState(false);
+  async function triggerReconcileConsentState() {
+    try {
+      setReconcilePending(true);
+      const res = await apiRequest(
+        "POST",
+        "/api/admin/fee-rules/reconcile-consent-state",
+        {},
+      );
+      const summary = (await res.json()) as {
+        checked: number;
+        expired: number;
+        pausedForWithdrawal: number;
+        alreadyAligned: number;
+        consentMissing: number;
+      };
+      toast({
+        title: "Consent reconciliation complete",
+        description: `Checked ${summary.checked}, expired ${summary.expired}, paused ${summary.pausedForWithdrawal}, aligned ${summary.alreadyAligned}, consent missing ${summary.consentMissing}.`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-rules"] });
+    } catch (err: any) {
+      toast({
+        title: "Reconcile failed",
+        description: err?.message ?? String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setReconcilePending(false);
     }
   }
   async function approveDeduction(id: number) {
@@ -760,12 +1138,29 @@ export default function AdminFeesPage() {
   }
 
   // -------- Search state (one box per tab, debounced server-side filter) --------
-  const [rulesSearch, setRulesSearch] = useState("");
+  // Task #294 — the rules tab has TWO independent cards (Active and History),
+  // each with its own searchbox + paginator state. Sharing one query meant
+  // pagination on one card could hide rows on the other; splitting the
+  // queries makes each card a self-contained server-side fetch.
+  const [rulesActiveSearch, setRulesActiveSearch] = useState("");
+  const [rulesActivePage, setRulesActivePage] = useState(1);
+  const [rulesHistorySearch, setRulesHistorySearch] = useState("");
+  const [rulesHistoryPage, setRulesHistoryPage] = useState(1);
   const [accrualsSearch, setAccrualsSearch] = useState("");
   const [deductionsSearch, setDeductionsSearch] = useState("");
-  const debouncedRulesSearch = useDebounced(rulesSearch);
+  const debouncedRulesActiveSearch = useDebounced(rulesActiveSearch);
+  const debouncedRulesHistorySearch = useDebounced(rulesHistorySearch);
   const debouncedAccrualsSearch = useDebounced(accrualsSearch);
   const debouncedDeductionsSearch = useDebounced(deductionsSearch);
+  const RULES_PAGE_SIZE = 25;
+  // Reset to page 1 whenever the search text changes — otherwise an empty
+  // page-2 lingers when the result set shrinks.
+  useEffect(() => {
+    setRulesActivePage(1);
+  }, [debouncedRulesActiveSearch]);
+  useEffect(() => {
+    setRulesHistoryPage(1);
+  }, [debouncedRulesHistorySearch]);
 
   // -------- Deductions filter / sort state (Task #65) --------
   // Status filter is server-side; "all" (the sentinel) maps to omitting the
@@ -777,14 +1172,41 @@ export default function AdminFeesPage() {
   >("created_desc");
 
   // -------- Queries --------
-  const rulesQ = useQuery<Paginated<FeeRuleRow>>({
-    queryKey: ["/api/admin/fee-rules", { q: debouncedRulesSearch }],
+  // Task #294 — TWO independent rule queries: one for the Active card
+  // (status ∈ {active,draft}) and one for the History card
+  // (status ∈ {paused,superseded,expired}). Each carries its own search
+  // text and page index so the cards never fight over a single fetch.
+  const rulesActiveQ = useQuery<Paginated<FeeRuleRow>>({
+    queryKey: [
+      "/api/admin/fee-rules",
+      { group: "active", q: debouncedRulesActiveSearch, page: rulesActivePage },
+    ],
     queryFn: () => {
       const params = new URLSearchParams();
-      if (debouncedRulesSearch.trim()) params.set("q", debouncedRulesSearch.trim());
-      const qs = params.toString();
+      params.set("status", "active,draft");
+      params.set("page", String(rulesActivePage));
+      params.set("limit", String(RULES_PAGE_SIZE));
+      if (debouncedRulesActiveSearch.trim())
+        params.set("q", debouncedRulesActiveSearch.trim());
       return fetchPaginated<Paginated<FeeRuleRow>>(
-        `/api/admin/fee-rules${qs ? `?${qs}` : ""}`,
+        `/api/admin/fee-rules?${params.toString()}`,
+      );
+    },
+  });
+  const rulesHistoryQ = useQuery<Paginated<FeeRuleRow>>({
+    queryKey: [
+      "/api/admin/fee-rules",
+      { group: "history", q: debouncedRulesHistorySearch, page: rulesHistoryPage },
+    ],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set("status", "paused,superseded,expired");
+      params.set("page", String(rulesHistoryPage));
+      params.set("limit", String(RULES_PAGE_SIZE));
+      if (debouncedRulesHistorySearch.trim())
+        params.set("q", debouncedRulesHistorySearch.trim());
+      return fetchPaginated<Paginated<FeeRuleRow>>(
+        `/api/admin/fee-rules?${params.toString()}`,
       );
     },
   });
@@ -1241,13 +1663,18 @@ export default function AdminFeesPage() {
         <h1 className="text-2xl font-semibold">Adviser fee engine</h1>
       </div>
 
+      {/* Task #294 — canonical Gate-A copy. Same wording shipped on
+          adviser and client surfaces so the legal posture cannot drift
+          between the three viewers. */}
       <Alert variant="default" data-testid="alert-gate-a">
         <ShieldAlert className="h-4 w-4" />
-        <AlertTitle>Gate A — scaffold only</AlertTitle>
+        <AlertTitle>Deduction execution is currently disabled</AlertTitle>
         <AlertDescription>
-          Rules, accruals and deductions are visible and auditable, but{" "}
-          <strong>no money moves</strong>. Approving a deduction in this screen flips its
-          status and writes an audit row only.
+          Rules, accruals and deductions are visible and auditable. When
+          deduction execution is enabled, deductions in <strong>Settled</strong>{" "}
+          status will represent completed fund movements. Until then,
+          approving a deduction here flips its status and writes an audit
+          row only — <strong>no money moves</strong>.
         </AlertDescription>
       </Alert>
 
@@ -1288,6 +1715,50 @@ export default function AdminFeesPage() {
                   value={form.feeConsentId}
                   onChange={(e) => setForm({ ...form, feeConsentId: e.target.value })}
                 />
+                {/* Task #294 — autofill summary surfaces what the consent
+                    legally authorises so the admin can sanity-check before
+                    creating a rule that would otherwise auto-supersede the
+                    existing one. */}
+                {consentLookupQ.isError && form.feeConsentId && (
+                  <p
+                    className="text-xs text-destructive mt-1"
+                    data-testid="consent-lookup-error"
+                  >
+                    Consent #{form.feeConsentId} not found.
+                  </p>
+                )}
+                {consentLookupQ.data && (
+                  <div
+                    className="text-xs text-muted-foreground mt-1 space-y-0.5"
+                    data-testid="consent-lookup-summary"
+                  >
+                    <div>
+                      Account:{" "}
+                      <span className="font-mono">
+                        {consentLookupQ.data.accountNumber ?? "—"}
+                      </span>
+                      {consentLookupQ.data.accountName ? (
+                        <> · {consentLookupQ.data.accountName}</>
+                      ) : null}
+                    </div>
+                    <div>
+                      Frequency:{" "}
+                      {consentLookupQ.data.deductionFrequency ?? "—"} · Renewal:{" "}
+                      {consentLookupQ.data.renewalStatus ?? "—"}
+                    </div>
+                    {consentLookupQ.data.activeRule && (
+                      <div
+                        className="text-amber-600 dark:text-amber-400"
+                        data-testid="supersede-preview"
+                      >
+                        Heads-up: this consent already has an{" "}
+                        {consentLookupQ.data.activeRule.status} rule (#
+                        {consentLookupQ.data.activeRule.id}). Creating a new
+                        rule will auto-supersede it.
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div>
                 <Label>Client user ID</Label>
@@ -1366,6 +1837,22 @@ export default function AdminFeesPage() {
                   onChange={(e) => setForm({ ...form, platformSplitBps: e.target.value })}
                 />
               </div>
+              {/* Task #294 — explicit effective date so the rule can be
+                  back/post-dated. Empty → server defaults to today. */}
+              <div>
+                <Label>Effective date (optional)</Label>
+                <Input
+                  type="date"
+                  data-testid="input-effective-date"
+                  value={form.effectiveDate}
+                  onChange={(e) =>
+                    setForm({ ...form, effectiveDate: e.target.value })
+                  }
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Leave blank to default to today.
+                </p>
+              </div>
               <div className="sm:col-span-2 lg:col-span-3">
                 <Button
                   onClick={submitCreateRule}
@@ -1377,91 +1864,119 @@ export default function AdminFeesPage() {
             </CardContent>
           </Card>
 
-          <Card>
+          {/* Task #294 — Active rules card. Server-side filtered to
+              status ∈ {active,draft} via its own query so the card has a
+              dedicated paginator + searchbox; pagination on the History
+              card no longer hides Active rows (and vice versa). */}
+          <Card data-testid="card-rules-active">
             <CardHeader>
-              <CardTitle className="text-base">All rules</CardTitle>
+              <CardTitle className="text-base">Active rules</CardTitle>
               <CardDescription>
-                Active rules accrue daily. Paused rules still emit a zero-amount audit row
-                with reason <code>rule_paused</code>.
+                Active and draft rules accrue daily. Each rule is anchored on
+                a signed fee consent — when the consent expires or is
+                withdrawn, the daily reconcile job pauses or expires the
+                rule automatically.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="mb-4 flex items-end gap-3 flex-wrap">
+                <div className="flex-1 min-w-[260px]">
+                  <SearchBox
+                    value={rulesActiveSearch}
+                    onChange={setRulesActiveSearch}
+                    placeholder="Search active rules by client or adviser name / email"
+                    testId="input-search-rules-active"
+                  />
+                </div>
+                {/* Task #294 — manual reconcile-now button so an operator
+                    can force a sweep after a renewal flow without waiting
+                    for the next daily cron tick. */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={triggerReconcileConsentState}
+                  disabled={reconcilePending}
+                  data-testid="button-reconcile-consent-state"
+                >
+                  {reconcilePending ? "Reconciling…" : "Reconcile consent state"}
+                </Button>
+              </div>
+              {rulesActiveQ.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : (rulesActiveQ.data?.items.length ?? 0) > 0 ? (
+                <>
+                  <AdminRuleTable
+                    rows={rulesActiveQ.data!.items}
+                    users={rulesActiveQ.data?.users}
+                    onPause={pauseRule}
+                    showPauseButton
+                  />
+                  <RulesPager
+                    page={rulesActivePage}
+                    setPage={setRulesActivePage}
+                    total={rulesActiveQ.data?.total ?? 0}
+                    pageSize={RULES_PAGE_SIZE}
+                    testIdPrefix="rules-active"
+                  />
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground" data-testid="empty-rules-active">
+                  {debouncedRulesActiveSearch.trim()
+                    ? "No active fee rules match your search."
+                    : "No active fee rules yet."}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Task #294 — History card. Independent server-side query for
+              status ∈ {paused,superseded,expired} with its own paginator
+              and search box. Admin always sees this card (even when empty)
+              because admins triage these states. */}
+          <Card data-testid="card-rules-history">
+            <CardHeader>
+              <CardTitle className="text-base">Paused, superseded & expired</CardTitle>
+              <CardDescription>
+                These rules are not driving accruals. <strong>Paused</strong>{" "}
+                rows emit a zero-amount audit row with reason{" "}
+                <code>rule_paused</code> on each daily tick.{" "}
+                <strong>Superseded</strong> rows link to the rule that
+                replaced them. <strong>Expired</strong> is terminal and
+                requires a fresh consent to re-engage.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="mb-4">
                 <SearchBox
-                  value={rulesSearch}
-                  onChange={setRulesSearch}
-                  placeholder="Search by client or adviser name / email"
-                  testId="input-search-rules"
+                  value={rulesHistorySearch}
+                  onChange={setRulesHistorySearch}
+                  placeholder="Search history by client or adviser name / email"
+                  testId="input-search-rules-history"
                 />
               </div>
-              {rulesQ.isLoading ? (
+              {rulesHistoryQ.isLoading ? (
                 <Skeleton className="h-32 w-full" />
-              ) : rulesQ.data && rulesQ.data.items.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>ID</TableHead>
-                      <TableHead>Consent</TableHead>
-                      <TableHead>Client</TableHead>
-                      <TableHead>Adviser</TableHead>
-                      <TableHead>Type</TableHead>
-                      <TableHead>Amount</TableHead>
-                      <TableHead>Splits (adv/plat)</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rulesQ.data.items.map((r) => (
-                      <TableRow key={r.id} data-testid={`row-rule-${r.id}`}>
-                        <TableCell>{r.id}</TableCell>
-                        <TableCell>{r.feeConsentId}</TableCell>
-                        <TableCell>
-                          <UserCell users={rulesQ.data?.users} userId={r.clientUserId} />
-                        </TableCell>
-                        <TableCell>
-                          <UserCell users={rulesQ.data?.users} userId={r.adviserUserId} />
-                        </TableCell>
-                        <TableCell>{r.feeType}</TableCell>
-                        <TableCell>
-                          {r.amountType === "fixed"
-                            ? `${r.fixedAmount} ${r.currency} / month`
-                            : `${(Number(r.rateBps ?? 0) / 100).toFixed(2)}% p.a.`}
-                        </TableCell>
-                        <TableCell>
-                          {bpsLabel(r.adviserSplitBps)} / {bpsLabel(r.platformSplitBps)}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={r.status === "active" ? "outline" : "secondary"}>
-                            {r.status}
-                          </Badge>
-                          {r.pausedReason && (
-                            <span className="block text-xs text-muted-foreground mt-1">
-                              {r.pausedReason}
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          {r.status === "active" && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => pauseRule(r.id)}
-                              data-testid={`button-pause-${r.id}`}
-                            >
-                              <Pause className="h-4 w-4 mr-1" /> Pause
-                            </Button>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+              ) : (rulesHistoryQ.data?.items.length ?? 0) > 0 ? (
+                <>
+                  <AdminRuleTable
+                    rows={rulesHistoryQ.data!.items}
+                    users={rulesHistoryQ.data?.users}
+                    onPause={pauseRule}
+                    showPauseButton={false}
+                  />
+                  <RulesPager
+                    page={rulesHistoryPage}
+                    setPage={setRulesHistoryPage}
+                    total={rulesHistoryQ.data?.total ?? 0}
+                    pageSize={RULES_PAGE_SIZE}
+                    testIdPrefix="rules-history"
+                  />
+                </>
               ) : (
-                <p className="text-sm text-muted-foreground">
-                  {debouncedRulesSearch.trim()
-                    ? "No fee rules match your search."
-                    : "No fee rules yet."}
+                <p className="text-sm text-muted-foreground" data-testid="empty-rules-history">
+                  {debouncedRulesHistorySearch.trim()
+                    ? "No history rules match your search."
+                    : "No paused, superseded or expired rules."}
                 </p>
               )}
             </CardContent>

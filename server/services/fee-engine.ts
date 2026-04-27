@@ -27,7 +27,7 @@
 //     operators can see why the previous attempt failed before retrying.
 // =============================================================================
 
-import { and, desc, eq, gt, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   adviserClients,
@@ -51,6 +51,15 @@ import {
   refreshWalletCacheBalance,
 } from "./ledger";
 import { assertKillSwitchOff } from "./kill-switch";
+import { writeAuditLog } from "./audit";
+
+// Task #294 — terminal lifecycle states a rule can land in. Any rule already
+// in one of these states is invisible to createFeeRule (the supersede pass
+// only flips active rules) and to reconcileRuleConsentState (idempotent — a
+// terminal row is left alone). Kept as a Set so call sites can `.has()` in
+// O(1) instead of array `.includes()` traversal in hot loops.
+const TERMINAL_RULE_STATUSES = new Set(["superseded", "expired"]);
+export const NON_TERMINAL_RULE_STATUSES = ["draft", "active", "paused"] as const;
 
 // ---------------------------------------------------------------------------
 // Task #34 — Insufficient funds guard.
@@ -148,62 +157,365 @@ export function computeAccrualForRule(rule: AdviserFeeRule): {
 //    Verifies the underlying feeConsent exists, is for the same
 //    (adviser, client) pair, and is not withdrawn at create time.
 //    DB CHECK enforces splits_total = 10000.
+//
+// Task #294 — auto-supersede chain.
+//    A new rule for the same (clientUserId, feeType, accountNumber)
+//    atomically supersedes any existing draft/active rule for that tuple
+//    inside ONE DB transaction. The previous row's status flips to
+//    'superseded', supersededByRuleId points at the new row, and an audit
+//    line is written for the transition. The DB partial unique index
+//    (`adviser_fee_rules_supersede_uniq`) is the hard backstop — if the
+//    application path is ever bypassed, the index blocks the second insert
+//    rather than letting two concurrent active rules ever coexist.
 // ---------------------------------------------------------------------------
+export interface CreateFeeRuleOpts {
+  // Override the wall clock — used by tests so the supersededAt /
+  // effectiveDate stamps land on a deterministic instant. Defaults to "now".
+  now?: Date;
+  // The user performing the create — used as the actor on the audit row for
+  // any rule(s) auto-superseded by this insert. Pass `null` for system /
+  // backfill paths (the audit line will record `userId=null`).
+  actorUserId?: number | null;
+  // Optional explicit effectiveDate for back-dating a rule. Defaults to `now`.
+  effectiveDate?: Date | null;
+  // Optional reason recorded against any superseded rules. Defaults to
+  // `"replaced_by_new_rule"` so the audit trail explains the transition
+  // without forcing every caller to invent a string.
+  supersedeReason?: string;
+}
+
 export async function createFeeRule(
   input: InsertAdviserFeeRule,
+  opts: CreateFeeRuleOpts = {},
 ): Promise<AdviserFeeRule> {
-  const [consent] = await db
-    .select()
-    .from(feeConsents)
-    .where(eq(feeConsents.id, input.feeConsentId))
-    .limit(1);
-  if (!consent) {
-    throw Object.assign(new Error("Fee consent not found"), { status: 404 });
-  }
-  if (consent.clientId !== input.clientUserId) {
-    throw Object.assign(
-      new Error("Consent client does not match rule clientUserId"),
-      { status: 400 },
-    );
-  }
-  if (consent.adviserId !== null && consent.adviserId !== input.adviserUserId) {
-    throw Object.assign(
-      new Error("Consent adviser does not match rule adviserUserId"),
-      { status: 400 },
-    );
-  }
-  if (consent.withdrawnAt) {
-    throw Object.assign(
-      new Error("Cannot create rule on a withdrawn consent"),
-      { status: 400 },
-    );
-  }
-  // Sanity: amountType payload alignment.
-  if (input.amountType === "fixed") {
-    const v = Number(input.fixedAmount ?? 0);
-    if (!(v > 0)) {
-      throw Object.assign(
-        new Error("fixedAmount must be > 0 for amountType=fixed"),
-        { status: 400 },
-      );
-    }
-  } else if (input.amountType === "percentage") {
-    const v = Number(input.rateBps ?? 0);
-    if (!(v > 0 && v <= 10000)) {
-      throw Object.assign(
-        new Error("rateBps must be in (0, 10000] for amountType=percentage"),
-        { status: 400 },
-      );
-    }
-  } else {
-    throw Object.assign(
-      new Error(`Unsupported amountType '${input.amountType}'`),
-      { status: 400 },
-    );
-  }
+  const now = opts.now ?? new Date();
+  const actorUserId = opts.actorUserId ?? null;
+  const supersedeReason = opts.supersedeReason ?? "replaced_by_new_rule";
 
-  const [row] = await db.insert(adviserFeeRules).values(input).returning();
-  return row;
+  return await db.transaction(async (tx) => {
+    const [consent] = await tx
+      .select()
+      .from(feeConsents)
+      .where(eq(feeConsents.id, input.feeConsentId))
+      .limit(1);
+    if (!consent) {
+      throw Object.assign(new Error("Fee consent not found"), { status: 404 });
+    }
+    if (consent.clientId !== input.clientUserId) {
+      throw Object.assign(
+        new Error("Consent client does not match rule clientUserId"),
+        { status: 400 },
+      );
+    }
+    if (consent.adviserId !== null && consent.adviserId !== input.adviserUserId) {
+      throw Object.assign(
+        new Error("Consent adviser does not match rule adviserUserId"),
+        { status: 400 },
+      );
+    }
+    if (consent.withdrawnAt) {
+      throw Object.assign(
+        new Error("Cannot create rule on a withdrawn consent"),
+        { status: 400 },
+      );
+    }
+    // Sanity: amountType payload alignment.
+    if (input.amountType === "fixed") {
+      const v = Number(input.fixedAmount ?? 0);
+      if (!(v > 0)) {
+        throw Object.assign(
+          new Error("fixedAmount must be > 0 for amountType=fixed"),
+          { status: 400 },
+        );
+      }
+    } else if (input.amountType === "percentage") {
+      const v = Number(input.rateBps ?? 0);
+      if (!(v > 0 && v <= 10000)) {
+        throw Object.assign(
+          new Error("rateBps must be in (0, 10000] for amountType=percentage"),
+          { status: 400 },
+        );
+      }
+    } else {
+      throw Object.assign(
+        new Error(`Unsupported amountType '${input.amountType}'`),
+        { status: 400 },
+      );
+    }
+
+    // Account number always comes from the consent — never trusted from the
+    // client / route input. This is the field the partial unique index
+    // is keyed on, so taking it from the consent guarantees the supersede
+    // pass below catches the right historical row.
+    const accountNumber = consent.accountNumber;
+
+    // Find any existing non-terminal rule for the same (client, feeType,
+    // accountNumber). FOR UPDATE locks the row(s) so a concurrent createFeeRule
+    // cannot race past us between SELECT and UPDATE — without the lock two
+    // simultaneous creates could both see "no existing rule", both insert,
+    // and the second insert would only fail at the DB unique-index level
+    // with a confusing 23505. Locking turns the race into a serial wait.
+    const existing = await tx
+      .select()
+      .from(adviserFeeRules)
+      .where(
+        and(
+          eq(adviserFeeRules.clientUserId, input.clientUserId),
+          eq(adviserFeeRules.feeType, input.feeType),
+          eq(adviserFeeRules.accountNumber, accountNumber),
+          inArray(adviserFeeRules.status, ["draft", "active", "paused"]),
+        ),
+      )
+      .for("update");
+
+    // We must flip the predecessors out of the partial unique index's
+    // predicate (status IN ('draft','active')) BEFORE inserting the new row,
+    // otherwise the insert collides with the still-active predecessor at
+    // statement-end. Postgres partial unique indexes are not deferrable,
+    // so the only safe path is: (1) set the predecessor to 'superseded'
+    // with a temporary self-pointer for supersededByRuleId so the
+    // supersede_chain_chk (status='superseded' ⇒ supersededByRuleId IS NOT
+    // NULL) stays satisfied, (2) insert the new row, (3) re-point each
+    // predecessor's supersededByRuleId at the new row's id. All three
+    // happen inside the same tx so an outside reader never observes the
+    // self-pointer state.
+    for (const prev of existing) {
+      await tx
+        .update(adviserFeeRules)
+        .set({
+          status: "superseded",
+          supersededByRuleId: prev.id, // temp self-pointer; fixed in step 3
+          supersededAt: now,
+          supersededReason: supersedeReason,
+          updatedAt: now,
+        })
+        .where(eq(adviserFeeRules.id, prev.id));
+    }
+
+    const [inserted] = await tx
+      .insert(adviserFeeRules)
+      .values({
+        ...input,
+        accountNumber,
+        effectiveDate: opts.effectiveDate ?? now,
+        // status defaults to 'active' from the schema column default.
+      })
+      .returning();
+
+    // Step 3: re-point each predecessor at the new row and write the audit
+    // line. The audit's `before` reflects the state observed in step 0
+    // (the original `prev` row before any of our writes touched it) so the
+    // self-pointer transient never appears in the audit trail.
+    for (const prev of existing) {
+      const [updated] = await tx
+        .update(adviserFeeRules)
+        .set({ supersededByRuleId: inserted.id, updatedAt: now })
+        .where(eq(adviserFeeRules.id, prev.id))
+        .returning();
+
+      await writeAuditLog({
+        executor: tx,
+        userId: actorUserId,
+        action: "fee_rule_superseded",
+        entityType: "adviser_fee_rule",
+        entityId: String(prev.id),
+        before: {
+          status: prev.status,
+          supersededByRuleId: prev.supersededByRuleId,
+          supersededAt: prev.supersededAt,
+          supersededReason: prev.supersededReason,
+        },
+        after: {
+          status: updated.status,
+          supersededByRuleId: updated.supersededByRuleId,
+          supersededAt: updated.supersededAt,
+          supersededReason: updated.supersededReason,
+        },
+        extra: {
+          replacedByRuleId: inserted.id,
+          clientUserId: prev.clientUserId,
+          feeType: prev.feeType,
+          accountNumber: prev.accountNumber,
+        },
+      });
+    }
+
+    return inserted;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task #294 — reconcileRuleConsentState
+// ---------------------------------------------------------------------------
+// Walks every non-terminal fee rule and aligns its lifecycle state with the
+// underlying consent row:
+//
+//   * consent.withdrawnAt set, rule still non-paused →
+//       PAUSE the rule with pausedReason='consent_withdrawn'.
+//
+//   * consent.renewalStatus = 'expired' OR consentExpiryDate <= now →
+//       EXPIRE the rule (terminal). A future renewal will require a fresh
+//       consent + fresh createFeeRule call — we deliberately don't auto-
+//       resurrect, because expiry is a legal event, not a transient state.
+//
+// Idempotent — a rule already in the target state is left alone (no audit
+// row, no UPDATE). Each transition writes one audit line so a regulator can
+// trace the system action that touched the rule. Returns a summary so the
+// daily cron / admin button can surface "checked X, expired Y, paused Z".
+// ---------------------------------------------------------------------------
+export interface ReconcileRuleConsentStateOpts {
+  now?: Date;
+  // The user performing the reconcile — typically `null` for the daily cron
+  // (system-driven) or the admin's userId when triggered manually.
+  actorUserId?: number | null;
+}
+
+export interface ReconcileRuleConsentStateSummary {
+  checked: number;
+  expired: number;
+  pausedForWithdrawal: number;
+  alreadyAligned: number;
+  consentMissing: number;
+}
+
+export async function reconcileRuleConsentState(
+  opts: ReconcileRuleConsentStateOpts = {},
+): Promise<ReconcileRuleConsentStateSummary> {
+  const now = opts.now ?? new Date();
+  const actorUserId = opts.actorUserId ?? null;
+
+  return await db.transaction(async (tx) => {
+    // Walk EVERY non-terminal rule. The rule volume is small (one row per
+    // (client, feeType, account) tuple per renewal cycle) so a full scan
+    // each tick is cheaper than maintaining a separate worklist table.
+    const rules = await tx
+      .select()
+      .from(adviserFeeRules)
+      .where(inArray(adviserFeeRules.status, ["draft", "active", "paused"]));
+
+    let expired = 0;
+    let pausedForWithdrawal = 0;
+    let alreadyAligned = 0;
+    let consentMissing = 0;
+
+    for (const rule of rules) {
+      const [consent] = await tx
+        .select()
+        .from(feeConsents)
+        .where(eq(feeConsents.id, rule.feeConsentId))
+        .limit(1);
+
+      // A missing consent is a data-integrity bug — surface it in the
+      // summary but do not transition the rule. Any later daily accrual
+      // will gate the rule with consent_missing anyway, so the rule is
+      // effectively dormant; we leave reconciliation of the orphan to a
+      // human operator (could be a manual cleanup or a fix-forward script).
+      if (!consent) {
+        consentMissing += 1;
+        continue;
+      }
+
+      const isExpiredByDate =
+        consent.consentExpiryDate &&
+        new Date(consent.consentExpiryDate).getTime() <= now.getTime();
+      const isExpiredByStatus = consent.renewalStatus === "expired";
+      const shouldExpire = isExpiredByDate || isExpiredByStatus;
+      const shouldPauseForWithdrawal =
+        !shouldExpire && consent.withdrawnAt !== null;
+
+      // Expiry takes precedence over withdrawal — both are legitimate
+      // signals, but expired is the more permanent legal state and is
+      // terminal. A consent that is both withdrawn AND expired collapses
+      // to expired so the rule cannot be silently revived by an unpause.
+      if (shouldExpire) {
+        if (rule.status === "expired") {
+          alreadyAligned += 1;
+          continue;
+        }
+        const [updated] = await tx
+          .update(adviserFeeRules)
+          .set({
+            status: "expired",
+            updatedAt: now,
+          })
+          .where(eq(adviserFeeRules.id, rule.id))
+          .returning();
+        await writeAuditLog({
+          executor: tx,
+          userId: actorUserId,
+          action: "fee_rule_consent_reconciled",
+          entityType: "adviser_fee_rule",
+          entityId: String(rule.id),
+          before: { status: rule.status },
+          after: { status: updated.status },
+          extra: {
+            transition: "expired",
+            consentId: consent.id,
+            consentRenewalStatus: consent.renewalStatus,
+            consentExpiryDate: consent.consentExpiryDate,
+            consentWithdrawnAt: consent.withdrawnAt,
+            triggeredAt: now.toISOString(),
+          },
+        });
+        expired += 1;
+        continue;
+      }
+
+      if (shouldPauseForWithdrawal) {
+        if (rule.status === "paused" && rule.pausedReason === "consent_withdrawn") {
+          alreadyAligned += 1;
+          continue;
+        }
+        const [updated] = await tx
+          .update(adviserFeeRules)
+          .set({
+            status: "paused",
+            pausedAt: now,
+            pausedReason: "consent_withdrawn",
+            updatedAt: now,
+          })
+          .where(eq(adviserFeeRules.id, rule.id))
+          .returning();
+        await writeAuditLog({
+          executor: tx,
+          userId: actorUserId,
+          action: "fee_rule_consent_reconciled",
+          entityType: "adviser_fee_rule",
+          entityId: String(rule.id),
+          before: {
+            status: rule.status,
+            pausedAt: rule.pausedAt,
+            pausedReason: rule.pausedReason,
+          },
+          after: {
+            status: updated.status,
+            pausedAt: updated.pausedAt,
+            pausedReason: updated.pausedReason,
+          },
+          extra: {
+            transition: "paused_consent_withdrawn",
+            consentId: consent.id,
+            consentRenewalStatus: consent.renewalStatus,
+            consentExpiryDate: consent.consentExpiryDate,
+            consentWithdrawnAt: consent.withdrawnAt,
+            triggeredAt: now.toISOString(),
+          },
+        });
+        pausedForWithdrawal += 1;
+        continue;
+      }
+
+      alreadyAligned += 1;
+    }
+
+    return {
+      checked: rules.length,
+      expired,
+      pausedForWithdrawal,
+      alreadyAligned,
+      consentMissing,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

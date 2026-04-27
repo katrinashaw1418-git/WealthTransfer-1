@@ -18,7 +18,7 @@
 
 import type { Express, Request } from "express";
 import { z } from "zod";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { db } from "./db";
 import {
   auditLogs,
@@ -482,6 +482,32 @@ export function registerClientRoutes(app: Express): void {
       const auth = requireAuth(req);
       const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
+      // Task #294 — `?status` accepts a comma-separated list so the
+      // client fees page can pull Active rules and History rules into
+      // independent cards (each with its own paginator). Empty / missing
+      // → all statuses (back-compat with existing callers).
+      const statusParam =
+        typeof req.query.status === "string" ? req.query.status.trim() : "";
+      const statuses = statusParam
+        ? statusParam
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        : [];
+      const rulesLimit = Math.min(
+        Math.max(Number(req.query.rulesLimit) || 50, 1),
+        200,
+      );
+      const rulesPage = Math.max(Number(req.query.rulesPage) || 1, 1);
+      const rulesOffset = (rulesPage - 1) * rulesLimit;
+
+      const ruleFilters: any[] = [eq(adviserFeeRules.clientUserId, auth.userId)];
+      if (statuses.length === 1) {
+        ruleFilters.push(eq(adviserFeeRules.status, statuses[0]));
+      } else if (statuses.length > 1) {
+        ruleFilters.push(inArray(adviserFeeRules.status, statuses));
+      }
+
       // Task #61 — explicit projection for the deduction-shaped fields so
       // the API contract names every column (including the new reversal
       // pointers reversedAt / reversedReason / reversalTransactionId)
@@ -507,11 +533,47 @@ export function registerClientRoutes(app: Express): void {
       } as const;
 
       const [rules, recentAccruals, pendingDeductions, recentReversals] = await Promise.all([
+        // Task #294 — LEFT JOIN feeConsents so the client-side fees page can
+        // explain "this rule is active because consent X is in force, expires
+        // on Y, and authorises Z account" without a per-row round-trip. Only
+        // the columns the cards / pills render are projected so the response
+        // payload stays small.
         db
-          .select()
+          .select({
+            id: adviserFeeRules.id,
+            feeConsentId: adviserFeeRules.feeConsentId,
+            clientUserId: adviserFeeRules.clientUserId,
+            adviserUserId: adviserFeeRules.adviserUserId,
+            feeType: adviserFeeRules.feeType,
+            amountType: adviserFeeRules.amountType,
+            rateBps: adviserFeeRules.rateBps,
+            fixedAmount: adviserFeeRules.fixedAmount,
+            currency: adviserFeeRules.currency,
+            adviserSplitBps: adviserFeeRules.adviserSplitBps,
+            platformSplitBps: adviserFeeRules.platformSplitBps,
+            status: adviserFeeRules.status,
+            accountNumber: adviserFeeRules.accountNumber,
+            effectiveDate: adviserFeeRules.effectiveDate,
+            pausedAt: adviserFeeRules.pausedAt,
+            pausedReason: adviserFeeRules.pausedReason,
+            supersededByRuleId: adviserFeeRules.supersededByRuleId,
+            supersededAt: adviserFeeRules.supersededAt,
+            supersededReason: adviserFeeRules.supersededReason,
+            createdAt: adviserFeeRules.createdAt,
+            updatedAt: adviserFeeRules.updatedAt,
+            consentRenewalStatus: feeConsents.renewalStatus,
+            consentExpiryDate: feeConsents.consentExpiryDate,
+            consentWithdrawnAt: feeConsents.withdrawnAt,
+            consentAccountNumber: feeConsents.accountNumber,
+            consentAccountName: feeConsents.accountName,
+            consentDeductionFrequency: feeConsents.deductionFrequency,
+          })
           .from(adviserFeeRules)
-          .where(eq(adviserFeeRules.clientUserId, auth.userId))
-          .orderBy(desc(adviserFeeRules.createdAt)),
+          .leftJoin(feeConsents, eq(feeConsents.id, adviserFeeRules.feeConsentId))
+          .where(and(...ruleFilters))
+          .orderBy(desc(adviserFeeRules.createdAt))
+          .limit(rulesLimit)
+          .offset(rulesOffset),
         db
           .select()
           .from(adviserFeeAccruals)
@@ -558,8 +620,18 @@ export function registerClientRoutes(app: Express): void {
         ...recentReversals.map((d) => d.adviserUserId),
       ]);
 
+      // Task #294 — paired total so the client UI can show "Page 2 of 5"
+      // for the rules card under the same status filter the page used.
+      const [rulesTotalRow] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(adviserFeeRules)
+        .where(and(...ruleFilters));
+
       res.json({
         rules,
+        rulesPage,
+        rulesLimit,
+        rulesTotal: Number(rulesTotalRow?.count ?? 0),
         recentAccruals,
         pendingDeductions,
         recentReversals,

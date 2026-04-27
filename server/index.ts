@@ -407,6 +407,59 @@ app.use((req, res, next) => {
   }, 180 * 1000);
 
   // ---------------------------------------------------------------------------
+  // Task #294 — Daily fee-rule ↔ consent reconciliation
+  // ---------------------------------------------------------------------------
+  // Sweeps every non-terminal adviser_fee_rules row once a day and aligns its
+  // lifecycle state with the underlying feeConsents row:
+  //   * consent.withdrawnAt set → pause the rule with
+  //     pausedReason='consent_withdrawn'.
+  //   * consent.renewalStatus='expired' OR consentExpiryDate <= now →
+  //     EXPIRE the rule (terminal). A future renewal requires a fresh
+  //     consent + fresh createFeeRule call (no auto-resurrect — expiry is
+  //     a legal event, not a transient state).
+  //
+  // Idempotent — a rule already in the target state is left alone (no audit
+  // row, no UPDATE). Each transition writes one audit line so a regulator
+  // can trace the system action that touched the rule.
+  //
+  // Env-flag guarded so a deployment that needs to leave reconciliation
+  // off (e.g. running an out-of-band catch-up via the admin endpoint
+  // first) can do so without ripping the wiring out. Default is "on" so
+  // the cron auto-engages on a fresh deploy.
+  // ---------------------------------------------------------------------------
+  async function runFeeRulesConsentReconcileCron() {
+    try {
+      await withBackgroundJobRunRecord("fee-rules-consent-reconcile", async () => {
+        const flag = (process.env.FEE_RULES_CONSENT_RECONCILE_CRON_ENABLED ?? "true").toLowerCase();
+        if (flag === "false" || flag === "0" || flag === "off") {
+          return "skipped — FEE_RULES_CONSENT_RECONCILE_CRON_ENABLED=false";
+        }
+        const ks = await assertWritesAllowed("fee-rules-consent-reconcile");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
+        const { reconcileRuleConsentState } = await import(
+          "./services/fee-engine"
+        );
+        const summary = await reconcileRuleConsentState({ actorUserId: null });
+        return (
+          `checked=${summary.checked}, expired=${summary.expired}, ` +
+          `paused_for_withdrawal=${summary.pausedForWithdrawal}, ` +
+          `already_aligned=${summary.alreadyAligned}, ` +
+          `consent_missing=${summary.consentMissing}`
+        );
+      });
+    } catch (e) {
+      console.error("[fee-rules-consent-reconcile] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runFeeRulesConsentReconcileCron();
+    setInterval(runFeeRulesConsentReconcileCron, 24 * 60 * 60 * 1000);
+  }, 210 * 1000);
+
+  // ---------------------------------------------------------------------------
   // Task #44 — Daily operator-alert retention prune
   // ---------------------------------------------------------------------------
   // The `operator_alerts` table receives one row per dispatched alert (wallet

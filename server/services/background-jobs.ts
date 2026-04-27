@@ -85,6 +85,16 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
       "Daily fee-rule accrual sweep, with automatic backfill of UTC days missed during outages.",
   },
   {
+    // Task #294 — daily reconciliation between adviser_fee_rules and the
+    // underlying feeConsents row. Expires rules whose consent has lapsed
+    // and pauses rules whose consent has been withdrawn so the rule
+    // surface (admin/adviser/client) cannot drift from the legal state.
+    name: "fee-rules-consent-reconcile",
+    label: "Fee-rules ↔ consent reconciliation",
+    description:
+      "Daily sweep that flips active fee rules to expired when their consent has lapsed and pauses rules whose consent was withdrawn. Idempotent. Toggle with FEE_RULES_CONSENT_RECONCILE_CRON_ENABLED.",
+  },
+  {
     name: "operator-alerts-prune",
     label: "Operator-alert retention prune",
     description:
