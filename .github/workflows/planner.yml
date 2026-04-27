@@ -102,23 +102,17 @@ jobs:
           node-version: "20"
           cache: "npm"
       - run: npm ci
-      - name: Ledger-leak gate (Task #193)
-        # Iterates every scripts/test-*.ts file EXCEPT test-planner.ts.
-        # Exits non-zero if any sub-script either fails on its own
-        # merits OR leaks ledger entries on the platform user / on
-        # any __-prefixed deterministic test user.
-        #
-        # scripts/test-planner.ts is INTENTIONALLY EXCLUDED: it carries
-        # 3 known compliance-coverage assertion failures (Tasks #95 /
-        # #96 / #98) that pre-date the leak gate, but its body always
-        # completes cleanly with NO ledger leak (its final assertion
-        # `no ledger entries created by planner writes` PASSES). The
-        # planner job above already runs test-planner.ts as its own
-        # gate and surfaces those compliance-coverage failures with the
-        # right framing. Conflating them with "leaked ledger entries"
-        # would page the wrong owner. Re-include here once #95/#96/#98
-        # are fully adopted in the planner write paths.
-        run: |
-          npx tsx scripts/ci-ledger-leak-gate.ts \
-            --scripts \
-            scripts/test-transaction-safety.ts,scripts/test-fee-deduction-gate-b.ts,scripts/test-wealth-planner-compliance.ts,scripts/test-task-35-suppression.ts,scripts/test-fee-insufficient-funds.ts,scripts/test-no-synthetic-portfolio-data.ts
+      - name: Ledger-leak gate (Task #193, wired by Task #197)
+        # Single-command PR-runner entrypoint. The wrapper script owns
+        # the canonical --scripts list (so the workflow and a local
+        # invocation stay identical) and forwards to
+        # scripts/ci-ledger-leak-gate.ts. Iterates every
+        # scripts/test-*.ts file EXCEPT test-planner.ts; see the
+        # wrapper's header comment for why test-planner.ts is excluded
+        # (already gated by the dedicated `planner` job above; carries
+        # known compliance-coverage failures from Tasks #95/#96/#98
+        # that would mis-attribute as ledger leaks). Exits non-zero
+        # with the gate's per-currency diff output naming the leaking
+        # script if any sub-script fails OR leaks ledger entries on
+        # the platform user / on any __-prefixed test user.
+        run: bash scripts/ci-ledger-leak-gate.sh
