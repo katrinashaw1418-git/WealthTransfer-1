@@ -41,6 +41,31 @@
 #                           direct per-script failure attribution).
 #                           Needs Postgres via PLANNER_DATABASE_URL.
 #
+#   - pre-launch-safety-strict
+#                         — scripts/pre-launch-safety.ts --strict
+#                           (Task #230). Early-warning PR gate that
+#                           runs the same strict pre-launch safety
+#                           rollup that scripts/predeploy-build.sh
+#                           Stage 1 runs at Publish time (Task #151),
+#                           but against the shared CI test DB
+#                           (PLANNER_DATABASE_URL) instead of the
+#                           production DB. Most SKIP regressions — a
+#                           sub-script crashes at boot, a route
+#                           handler isn't registered, a reconciliation
+#                           service has no data to verify — surface
+#                           identically against either DB and would
+#                           otherwise only be caught at the moment an
+#                           operator clicks Publish. Strict mode
+#                           treats SKIP as a real failure, so a
+#                           non-zero exit here blocks the PR before
+#                           merge. This job COMPLEMENTS — does NOT
+#                           replace — the production-DB gate in
+#                           scripts/predeploy-build.sh: the deploy-
+#                           time gate remains the authoritative final
+#                           check against prod-shaped data; this job
+#                           just stops the obvious regressions from
+#                           ever reaching it.
+#
 # Gating: runs on every push and pull request. A non-zero exit from any
 # job blocks the build.
 name: Verification gate
@@ -152,3 +177,38 @@ jobs:
         # script if any sub-script fails OR leaks ledger entries on
         # the platform user / on any __-prefixed test user.
         run: bash scripts/ci-ledger-leak-gate.sh
+
+  pre-launch-safety-strict:
+    # Early-warning PR gate (Task #230) for the same strict pre-launch
+    # safety rollup that scripts/predeploy-build.sh Stage 1 runs at
+    # Publish time (Task #151). Runs against the shared CI test DB
+    # (PLANNER_DATABASE_URL) — NOT the production DB. The production-DB
+    # run in scripts/predeploy-build.sh remains the authoritative final
+    # gate against prod-shaped data; this job is a parallel, earlier
+    # check whose job is to stop the obvious regressions (a sub-script
+    # crashes at boot, a route handler isn't registered, a recon service
+    # has no data to verify) from ever reaching deploy time. Strict mode
+    # treats a SKIP as a real failure, so a non-zero exit here blocks
+    # the PR before merge.
+    runs-on: ubuntu-latest
+    env:
+      # CI-only safety-belt defaults; mirror the planner job above.
+      NODE_ENV: test
+      JWT_SECRET: ci-pre-launch-safety-strict-test-secret
+      # Same CI DB as the planner / leak-gate jobs. The script's own
+      # fixtures are scoped to the __prelaunch_ prefix and are cleaned
+      # up via PK-tracked deletes on every run, so the shared test DB
+      # is safe to point at.
+      DATABASE_URL: ${{ secrets.PLANNER_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Pre-launch safety (strict) — early-warning PR gate (Task #230)
+        # Same command scripts/predeploy-build.sh Stage 1 runs at
+        # Publish time, just pointed at the CI test DB. A non-zero
+        # exit (FAIL or SKIP under --strict) blocks the PR.
+        run: npx tsx scripts/pre-launch-safety.ts --strict

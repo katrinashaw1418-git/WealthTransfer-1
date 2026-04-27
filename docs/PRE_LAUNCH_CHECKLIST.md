@@ -110,6 +110,15 @@ Stage 1 fail-fast path and the Stage 1 PASS → Stage 2 GO/NO-GO/crash
 paths against stubbed `npx` / `npm` so a regression in the deploy
 wiring shows up on every PR.
 
+In addition, the `pre-launch-safety-strict` job in
+`.github/workflows/planner.yml` (Task #230) runs the same
+`npx tsx scripts/pre-launch-safety.ts --strict` command on every PR
+against the shared CI test DB (`PLANNER_DATABASE_URL`) — a parallel,
+earlier early-warning check that catches obvious SKIP regressions
+(sub-script crash at boot, unregistered route, recon service with no
+data) before they reach Publish time, complementing — not replacing —
+the production-DB gate above.
+
 ## Post-merge rechecks
 
 Each line below records one auto-run of `scripts/post-merge-safety-recheck.ts`
