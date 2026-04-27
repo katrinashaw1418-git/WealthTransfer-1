@@ -101,6 +101,11 @@ import {
   evaluateInvariantCleanRoomGate,
   evaluateReconCleanRoomGate,
 } from "./lib/clean-room-gate";
+import {
+  assertPlatformLegInvariantAndScrub as libAssertPlatformLegInvariantAndScrub,
+  snapshotPlatformPerCurrency as libSnapshotPlatformPerCurrency,
+  type PlatformPerCurrency,
+} from "./lib/platform-leg-gate";
 
 // ---------------------------------------------------------------------------
 // Result reporter (canonical PASS/FAIL/SKIP block, mirrors the other scripts).
@@ -243,6 +248,17 @@ const EXISTING_SCRIPTS: Array<{
 const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   "scripts/test-fee-insufficient-funds.ts",
   "scripts/test-no-synthetic-portfolio-data.ts",
+  // Task #209 — regression test for the per-scenario platform-leg
+  // invariant gate (Task #202). Injects a deliberate platform-only
+  // ledger entry under a transaction NOT owned by the gate's fixture
+  // user, runs `assertPlatformLegInvariantAndScrub`, and asserts the
+  // gate reports FAIL with the offending currency named. Wired here
+  // (rather than as its own EXISTING_SCRIPTS entry) so it inherits the
+  // ci-ledger-leak-gate's snapshot — the script's try/finally cleanup
+  // wipes its `__pgate209_*` rows on every run, so a leak here would
+  // immediately surface as drift on the same harness that polices every
+  // other test-*.ts script.
+  "scripts/test-platform-leg-gate.ts",
 ];
 
 type ExistingScriptOutcome =
@@ -444,20 +460,24 @@ async function ensureUser(opts: {
 // Postgres SUM over the `decimal` ledger amounts is exact, so a clean
 // scenario produces an exact zero delta; the epsilon is a defensive cushion
 // against any future column-type or rounding change, not a real tolerance.
+//
+// Task #209 — both the constant and the helpers below were extracted into
+// scripts/lib/platform-leg-gate.ts so scripts/test-platform-leg-gate.ts
+// can exercise the gate's failure path in isolation, without
+// side-effect-running this whole pre-launch suite via a top-level import.
+// The thin wrappers here bind the local reporter (pass/fail/skip) and DB
+// helpers so call sites in this file are unchanged.
 // ---------------------------------------------------------------------------
-const PLATFORM_LEG_EPSILON = new Decimal("0.00000001");
-
-type PlatformPerCurrency = Map<string, string>;
 
 async function snapshotPlatformPerCurrency(
   platformUserId: number,
   currencies: string[],
 ): Promise<PlatformPerCurrency> {
-  const out: PlatformPerCurrency = new Map();
-  for (const cur of currencies) {
-    out.set(cur, await getUserCurrencyBalance(platformUserId, cur));
-  }
-  return out;
+  return libSnapshotPlatformPerCurrency(
+    platformUserId,
+    currencies,
+    getUserCurrencyBalance,
+  );
 }
 
 // Wrap a Stage 2 scenario: snapshot platform per-currency BEFORE, run
@@ -563,87 +583,31 @@ async function assertPlatformLegInvariantAndScrub(
   baselineCaptured: boolean,
   baselineError: string | null,
 ): Promise<void> {
-  try {
-    if (platformUserId <= 0) {
-      skip(
-        gateName,
-        `PLATFORM_USER_ID not resolvable; cannot assert platform-leg invariant for "${scenarioName}"`,
-      );
-      return;
-    }
-    if (!baselineCaptured) {
-      skip(
-        gateName,
-        `pre-snapshot of platform ledger failed for "${scenarioName}": ` +
-          `${baselineError ?? "see error above"}`,
-      );
-      return;
-    }
-
-    const [fixtureRow] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.username, fixtureUsername));
-    if (!fixtureRow) {
-      // Scenario was skipped before creating the fixture user (e.g. a
-      // route handler wasn't registered, or a precondition like an FX
-      // rate seed failed). Nothing to scrub, nothing to assert.
-      skip(
-        gateName,
-        `fixture user "${fixtureUsername}" does not exist (scenario "${scenarioName}" likely skipped before creating it)`,
-      );
-      return;
-    }
-
-    // Per-scenario scrub: delete the fixture user's transactions, which
-    // cascades to delete the scenario's platform-side legs (they share
-    // the same transaction_id). This is the sole cleanup path for
-    // lifecycle scenarios; the previous bulk end-of-Stage-2 scrub was
-    // retired (Task #201) once every scenario adopted this wrapper.
-    // The end-of-Stage-2 contract gate (Task #210,
-    // `assertFixtureUsersHaveZeroTransactions`) verifies this scrub
-    // actually ran for every fixture user the run created.
-    await resetScenarioState([fixtureRow.id]);
-
-    const after = await snapshotPlatformPerCurrency(platformUserId, currencies);
-
-    const drifted: string[] = [];
-    for (const cur of currencies) {
-      const baselineVal = new Decimal(baseline.get(cur) ?? "0");
-      const afterVal = new Decimal(after.get(cur) ?? "0");
-      const delta = afterVal.minus(baselineVal);
-      if (delta.abs().gt(PLATFORM_LEG_EPSILON)) {
-        drifted.push(
-          `${cur}: ${baselineVal.toString()} -> ${afterVal.toString()} ` +
-            `(delta ${delta.gte(0) ? "+" : ""}${delta.toString()})`,
-        );
-      }
-    }
-
-    if (drifted.length === 0) {
-      pass(
-        gateName,
-        `scenario "${scenarioName}" produced no net drift vs pre-scenario ` +
-          `baseline on platform user (id=${platformUserId}) ` +
-          `(within ±${PLATFORM_LEG_EPSILON.toString()}) for ` +
-          `currencies [${currencies.join(", ")}]`,
-      );
-    } else {
-      fail(
-        gateName,
-        `scenario "${scenarioName}" contaminated platform user (id=${platformUserId}) ` +
-          `vs pre-scenario baseline: ` +
-          drifted.join("; ") +
-          ` — the per-fixture-user scrub did not neutralise these legs, ` +
-          `meaning the scenario posted platform-user ledger entries via a ` +
-          `transaction NOT owned by fixture user "${fixtureUsername}" (or via ` +
-          `a single-leg posting that bypassed the double-entry primitive). ` +
-          `Inspect the scenario's ledger writes for the offending currency.`,
-      );
-    }
-  } catch (err: any) {
-    fail(gateName, `threw: ${err?.message ?? err}`);
-  }
+  // Task #209 — gate logic lives in scripts/lib/platform-leg-gate.ts so the
+  // regression test (scripts/test-platform-leg-gate.ts) can exercise it
+  // in isolation. This wrapper binds the local reporter and DB helpers.
+  await libAssertPlatformLegInvariantAndScrub({
+    gateName,
+    scenarioName,
+    fixtureUsername,
+    currencies,
+    baseline,
+    platformUserId,
+    baselineCaptured,
+    baselineError,
+    reporter: { pass, fail, skip },
+    lookupFixtureUserId: async (username) => {
+      const [row] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.username, username));
+      return row?.id ?? null;
+    },
+    scrubFixture: async (fixtureUserId) => {
+      await resetScenarioState([fixtureUserId]);
+    },
+    getBalance: getUserCurrencyBalance,
+  });
 }
 
 // Note: Task #201 removed the bulk `scrubLifecyclePlatformLegs()` helper
