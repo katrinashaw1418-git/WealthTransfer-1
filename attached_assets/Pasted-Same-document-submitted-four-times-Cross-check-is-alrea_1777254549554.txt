@@ -1,0 +1,92 @@
+Same document submitted four times. Cross-check is already complete. The full patches for #92 and #94 were delivered two responses ago. No new information is in this document.
+
+**What I need from you to move forward:**
+
+One of three things is true right now. Tell me which one:
+
+**A — Patches applied, both tasks working.** #92 exits 0, #94 tables are in the database. Ready to proceed to audit log standardisation.
+
+**B — Patches applied, something broke.** Paste the exact error message and I will diagnose and fix it.
+
+**C — Patches not applied yet, need them again.** The previous response is still in this conversation — scroll up. But if you want them re-stated cleanly in a single message without the surrounding diagnosis text, say so and I will produce exactly that.
+
+---
+
+**If the answer is A, here is the next surgical step:**
+
+**Audit log standardisation** — the `writeAuditLog({ before, after })` shared helper. This must land before any of the remaining sprint tasks (planner UI, document storage, SOA hook) because those tasks add new write paths, and those write paths must use the standard from day one.
+
+Create `server/services/auditLogService.ts`:
+
+```ts
+import { db } from "../db";
+import { auditLogs } from "../../shared/schema";
+
+type AuditLogParams = {
+  userId: number;
+  action: string;
+  resourceType: string;
+  resourceId: string | number;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  ipAddress?: string;
+  metadata?: Record<string, unknown>;
+};
+
+// All advice and money writes must call this function.
+// Never construct audit log metadata inline at call sites.
+// This is the single standard — before + after state is required on every write.
+export async function writeAuditLog(
+  params: AuditLogParams,
+  tx?: typeof db
+): Promise<void> {
+  const client = tx ?? db;
+
+  await (client as typeof db).insert(auditLogs).values({
+    userId: params.userId,
+    action: params.action,
+    resourceType: params.resourceType,
+    resourceId: String(params.resourceId),
+    metadata: {
+      before: params.before,
+      after: params.after,
+      ipAddress: params.ipAddress ?? null,
+      ...params.metadata,
+    },
+  });
+}
+```
+
+Then retrofit every existing advice and money write to use it. The pattern at every call site is:
+
+```ts
+// Before the write — capture current state
+const before = await db.query.adviceRecords.findFirst({
+  where: eq(adviceRecords.id, id)
+});
+
+// Perform the write
+await db.update(adviceRecords).set(changes).where(eq(adviceRecords.id, id));
+
+// After the write — capture new state
+const after = await db.query.adviceRecords.findFirst({
+  where: eq(adviceRecords.id, id)
+});
+
+// Write audit log with before + after
+await writeAuditLog({
+  userId: actorUserId,
+  action: "advice_record_updated",
+  resourceType: "advice_record",
+  resourceId: id,
+  before,
+  after,
+  ipAddress: req.ip,
+});
+```
+
+For money writes, the same pattern applies — capture wallet/ledger state before and after every transaction, fee deduction, or reversal and write it through the helper.
+
+Once the helper exists and all current write paths are retrofitted, the planner UI, document storage, and SOA hook tasks can proceed — every new write path they add will use the standard automatically by convention.
+
+**Reply with A, B, or C and we proceed.**

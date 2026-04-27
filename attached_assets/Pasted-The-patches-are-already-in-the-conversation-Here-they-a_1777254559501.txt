@@ -1,0 +1,334 @@
+The patches are already in the conversation. Here they are restated cleanly in a single message, nothing else.
+
+---
+
+## #92 — Gate B JWT fix
+
+**`scripts/test-fee-deduction-gate-b.ts` — line 1, before everything else:**
+
+```ts
+import "dotenv/config";
+```
+
+If dotenv is not installed:
+
+```bash
+npm install dotenv
+```
+
+Run it:
+
+```bash
+npx tsx scripts/test-fee-deduction-gate-b.ts
+```
+
+Expected:
+
+```
+ALL GATE B FEE DEDUCTION TESTS PASSED ✅
+```
+
+---
+
+## #94 — schema additions
+
+**Add to `shared/schema.ts`:**
+
+```ts
+export const clientObjectives = pgTable("client_objectives", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id),
+  objectiveType: text("objective_type").notNull(),
+  // retirement | education | property | estate | income | liquidity | other
+  description: text("description").notNull(),
+  targetAmount: decimal("target_amount", { precision: 15, scale: 2 }),
+  targetDate: date("target_date"),
+  priority: text("priority").notNull().default("primary"),
+  // primary | secondary | aspirational
+  currency: text("currency").notNull().default("AUD"),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  supersededAt: timestamp("superseded_at"),
+  supersededBy: integer("superseded_by"),
+});
+
+export const clientDocuments = pgTable("client_documents", {
+  id: serial("id").primaryKey(),
+  clientUserId: integer("client_user_id")
+    .references(() => users.id).notNull(),
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id),
+  documentType: text("document_type").notNull(),
+  // fact_find | risk_questionnaire | statement_of_advice |
+  // correspondence | review_report | compliance_record | other
+  fileName: text("file_name").notNull(),
+  fileSizeBytes: integer("file_size_bytes"),
+  mimeType: text("mime_type"),
+  storageKey: text("storage_key").notNull(),
+  description: text("description"),
+  uploadedBy: integer("uploaded_by").references(() => users.id).notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+});
+
+export const adviserNotes = pgTable("adviser_notes", {
+  id: serial("id").primaryKey(),
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id).notNull(),
+  previousNoteId: integer("previous_note_id"),
+  // nullable — set when this note supersedes a prior note
+  noteText: text("note_text").notNull(),
+  noteType: text("note_type").notNull().default("general"),
+  // general | review | client_instruction | compliance | follow_up
+  visibility: text("visibility").notNull().default("adviser_only"),
+  // adviser_only | shared_with_client | admin_only
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  // NO updatedAt column — append-only by design. Do not add one.
+});
+
+export const adviceRecordVersions = pgTable("advice_record_versions", {
+  id: serial("id").primaryKey(),
+  adviceRecordId: integer("advice_record_id")
+    .references(() => adviceRecords.id).notNull(),
+  versionNumber: integer("version_number").notNull(),
+  snapshotJsonb: jsonb("snapshot_jsonb").notNull(),
+  changeReason: text("change_reason").notNull(),
+  createdBy: integer("created_by").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  uniqAdviceRecordVersion: uniqueIndex("advice_record_versions_record_ver_uidx")
+    .on(table.adviceRecordId, table.versionNumber),
+}));
+```
+
+Push schema:
+
+```bash
+npx drizzle-kit push
+```
+
+---
+
+## #94 — migration SQL
+
+```sql
+CREATE TABLE IF NOT EXISTS client_objectives (
+  id SERIAL PRIMARY KEY,
+  client_user_id INTEGER NOT NULL REFERENCES users(id),
+  advice_record_id INTEGER REFERENCES advice_records(id),
+  objective_type TEXT NOT NULL,
+  description TEXT NOT NULL,
+  target_amount DECIMAL(15,2),
+  target_date DATE,
+  priority TEXT NOT NULL DEFAULT 'primary',
+  currency TEXT NOT NULL DEFAULT 'AUD',
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  superseded_at TIMESTAMPTZ,
+  superseded_by INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS client_documents (
+  id SERIAL PRIMARY KEY,
+  client_user_id INTEGER NOT NULL REFERENCES users(id),
+  advice_record_id INTEGER REFERENCES advice_records(id),
+  document_type TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_size_bytes INTEGER,
+  mime_type TEXT,
+  storage_key TEXT NOT NULL,
+  description TEXT,
+  uploaded_by INTEGER NOT NULL REFERENCES users(id),
+  uploaded_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS adviser_notes (
+  id SERIAL PRIMARY KEY,
+  advice_record_id INTEGER NOT NULL REFERENCES advice_records(id),
+  previous_note_id INTEGER,
+  note_text TEXT NOT NULL,
+  note_type TEXT NOT NULL DEFAULT 'general',
+  visibility TEXT NOT NULL DEFAULT 'adviser_only',
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+  -- No updated_at column. Append-only. Do not add one.
+);
+
+CREATE TABLE IF NOT EXISTS advice_record_versions (
+  id SERIAL PRIMARY KEY,
+  advice_record_id INTEGER NOT NULL REFERENCES advice_records(id),
+  version_number INTEGER NOT NULL,
+  snapshot_jsonb JSONB NOT NULL,
+  change_reason TEXT NOT NULL,
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT advice_record_versions_record_ver_uidx
+    UNIQUE (advice_record_id, version_number)
+);
+
+REVOKE DELETE ON client_objectives FROM PUBLIC;
+REVOKE DELETE ON client_documents FROM PUBLIC;
+REVOKE DELETE ON adviser_notes FROM PUBLIC;
+REVOKE DELETE ON advice_record_versions FROM PUBLIC;
+```
+
+---
+
+## #94 — service wrapper
+
+**Create `server/services/adviceRecordService.ts`:**
+
+```ts
+import { db } from "../db";
+import { eq, desc } from "drizzle-orm";
+import { adviceRecords, adviceRecordVersions, auditLogs } from "../../shared/schema";
+
+export async function updateAdviceRecordStatus(
+  adviceRecordId: number,
+  newStatus: string,
+  changeReason: string,
+  actorUserId: number,
+  ipAddress?: string
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const record = await tx.query.adviceRecords.findFirst({
+      where: eq(adviceRecords.id, adviceRecordId),
+    });
+    if (!record) throw new Error(`advice_record_not_found:${adviceRecordId}`);
+
+    if (
+      record.status === "review_pending" &&
+      newStatus !== "active" &&
+      newStatus !== "closed"
+    ) {
+      throw new Error("advice_record_locked:review_pending");
+    }
+
+    const before = { ...record };
+
+    await tx.update(adviceRecords)
+      .set({ status: newStatus })
+      .where(eq(adviceRecords.id, adviceRecordId));
+
+    const latest = await tx.query.adviceRecordVersions.findFirst({
+      where: eq(adviceRecordVersions.adviceRecordId, adviceRecordId),
+      orderBy: desc(adviceRecordVersions.versionNumber),
+    });
+    const nextVersion = (latest?.versionNumber ?? 0) + 1;
+
+    await tx.insert(adviceRecordVersions).values({
+      adviceRecordId,
+      versionNumber: nextVersion,
+      snapshotJsonb: { ...record, status: newStatus },
+      changeReason,
+      createdBy: actorUserId,
+    });
+
+    await tx.insert(auditLogs).values({
+      userId: actorUserId,
+      action: `advice_record_status:${record.status}→${newStatus}`,
+      resourceType: "advice_record",
+      resourceId: String(adviceRecordId),
+      metadata: {
+        before,
+        after: { ...record, status: newStatus },
+        versionNumber: nextVersion,
+        changeReason,
+        ipAddress: ipAddress ?? null,
+      },
+    });
+  });
+}
+
+export async function assertNotUnderReview(adviceRecordId: number): Promise<void> {
+  const record = await db.query.adviceRecords.findFirst({
+    where: eq(adviceRecords.id, adviceRecordId),
+  });
+  if (!record) throw new Error(`advice_record_not_found:${adviceRecordId}`);
+  if (record.status === "review_pending") {
+    throw new Error("advice_record_locked:review_pending");
+  }
+}
+```
+
+---
+
+## #94 — route guard
+
+**Create `server/middleware/adviceRecordGuards.ts`:**
+
+```ts
+import { Request, Response, NextFunction } from "express";
+import { assertNotUnderReview } from "../services/adviceRecordService";
+
+export async function blockIfUnderReview(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  const id = parseInt(req.params.id ?? req.params.adviceRecordId);
+  if (isNaN(id)) return next();
+
+  try {
+    await assertNotUnderReview(id);
+    next();
+  } catch (err: any) {
+    if (err.message?.includes("review_pending")) {
+      return res.status(423).json({
+        code: "ADVICE_RECORD_LOCKED",
+        message: "This record is under compliance review. Writes are blocked.",
+      });
+    }
+    next(err);
+  }
+}
+```
+
+**Wire into routes:**
+
+```ts
+import { blockIfUnderReview } from "./middleware/adviceRecordGuards";
+
+// Apply to objectives and recommendations — NOT to notes
+router.post("/api/adviser/advice-records/:id/objectives",
+  requireAuth, blockIfUnderReview, objectivesHandler);
+
+router.post("/api/adviser/advice-records/:id/recommendations",
+  requireAuth, blockIfUnderReview, recommendationsHandler);
+
+// Notes exempt — no blockIfUnderReview here
+router.post("/api/adviser/advice-records/:id/notes",
+  requireAuth, notesHandler);
+```
+
+---
+
+## Completion checklist
+
+```
+#92
+[ ] Add import "dotenv/config" as line 1
+[ ] npm install dotenv if needed
+[ ] npx tsx scripts/test-fee-deduction-gate-b.ts exits 0
+[ ] Mark #92 done
+
+#94
+[ ] Add four tables to shared/schema.ts
+[ ] npx drizzle-kit push
+[ ] Run migration SQL against database
+[ ] Create server/services/adviceRecordService.ts
+[ ] Create server/middleware/adviceRecordGuards.ts
+[ ] Wire blockIfUnderReview to objectives + recommendations routes
+[ ] Mark #94 done
+
+Next
+[ ] Build audit log writeAuditLog({ before, after }) helper
+[ ] Retrofit existing write paths
+[ ] Then planner UI + document storage + SOA hook
+[ ] Run npm run test:planner — must exit 0
+```
+
+Paste any error that appears and it gets fixed immediately.
