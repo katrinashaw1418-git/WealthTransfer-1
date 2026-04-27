@@ -48,6 +48,21 @@ vi.mock("./kill-switch", () => ({
   isKillSwitchActive: vi.fn(async () => false),
 }));
 
+// Task #252 — the cron now also pages on a clip event; stub the dispatcher
+// here so this Task #29 suite stays focused on the per-row annotation
+// contract and does not depend on a live DB / webhook config.
+vi.mock("./operator-alerts", () => ({
+  notifyOperator: vi.fn(async () => ({
+    channelsAttempted: ["log"],
+    outcomes: [],
+    channels: ["log"],
+    alertId: 1,
+    deliveryStatus: "delivered",
+    occurrences: 1,
+    dedupeKey: "test-key",
+  })),
+}));
+
 import { runFeeAccrualsCronOnce } from "./cron-fee-deductions";
 import {
   getLatestAccrualDate,

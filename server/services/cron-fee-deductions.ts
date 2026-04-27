@@ -35,6 +35,7 @@ import {
   type InsufficientFundsSweepSummary,
   type RunInsufficientFundsSweepOpts,
 } from "./insufficient-funds-sweep";
+import { notifyOperator } from "./operator-alerts";
 
 // Stable strings — both are referenced by the kill-switch test suite to
 // assert that the cron actually emitted the skip line (and not, say, a
@@ -44,6 +45,13 @@ export const FEE_ACCRUALS_KILL_SWITCH_SKIP_NOTE =
   "skipped: kill switch fee_deductions is engaged — no accruals run";
 export const SWEEP_KILL_SWITCH_SKIP_NOTE =
   "skipped: kill switch fee_deductions is engaged — no settlements attempted";
+
+// Task #252 — operator alert source string for the "auto-backfill clipped
+// the oldest dates" page. Kept as an exported constant so the test suite
+// (and any future log-routing rule) can reference the same name without
+// risk of copy-paste drift.
+export const FEE_ACCRUAL_BACKFILL_CLIP_ALERT_SOURCE =
+  "fee-accrual-backfill-clip";
 
 const FEE_ACCRUAL_BACKFILL_MAX_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -135,6 +143,64 @@ export async function runFeeAccrualsCronOnce(
     );
     plannedDates = [today];
     droppedFromBackfill = null;
+  }
+
+  // Task #252 — page on-call when the auto-backfill window was clipped.
+  // The dropped-range banner on the admin Fees page (Task #29) is still in
+  // place; this just adds a push channel so a multi-day outage does not
+  // sit unnoticed over a long weekend. Wrapped in try/catch so a failing
+  // dispatcher (DB outage, webhook misconfig) cannot abort the actual
+  // accrual loop below — the per-date work matters more than the page.
+  //
+  // Dedupe identity: the dropped range itself. `subjectType=utc-date-range`
+  // and `subjectId=${start}..${end}` keep two ticks that produce the SAME
+  // dropped range collapsed onto a single operator_alerts row inside the
+  // configured dedupe window (default 15 minutes), so a manual replay of
+  // the same tick — or a boot-time tick that lands on top of the scheduled
+  // tick — does not double-page.
+  if (droppedFromBackfill) {
+    const plannedFirst = plannedDates[0].toISOString().slice(0, 10);
+    const plannedLast = plannedDates[plannedDates.length - 1]
+      .toISOString()
+      .slice(0, 10);
+    try {
+      await notifyOperator({
+        source: FEE_ACCRUAL_BACKFILL_CLIP_ALERT_SOURCE,
+        severity: "alert",
+        title:
+          `Daily fee accrual dropped ${droppedFromBackfill.count} day(s) ` +
+          `older than ${FEE_ACCRUAL_BACKFILL_MAX_DAYS}-day cap ` +
+          `(${droppedFromBackfill.start}..${droppedFromBackfill.end}) — ` +
+          `replay manually`,
+        details: {
+          droppedRangeStart: droppedFromBackfill.start,
+          droppedRangeEnd: droppedFromBackfill.end,
+          droppedCount: droppedFromBackfill.count,
+          backfillCapDays: FEE_ACCRUAL_BACKFILL_MAX_DAYS,
+          plannedRangeStart: plannedFirst,
+          plannedRangeEnd: plannedLast,
+          tickUtcDate: today.toISOString().slice(0, 10),
+          remediation:
+            "Run `POST /api/admin/fee-accruals/run` for each dropped UTC " +
+            "date (or batch via the admin Fees page) to fill the gap.",
+        },
+        // Explicit dedupe identity so two ticks producing the same dropped
+        // range collapse onto a single row inside the dedupe window — even
+        // if some other detail in the payload happened to drift.
+        kind: FEE_ACCRUAL_BACKFILL_CLIP_ALERT_SOURCE,
+        subjectType: "utc-date-range",
+        subjectId: `${droppedFromBackfill.start}..${droppedFromBackfill.end}`,
+      });
+    } catch (err) {
+      // notifyOperator already swallows its own channel failures; this
+      // catch is belt-and-braces so a hypothetical synchronous throw can
+      // never abort the accrual loop below. The dropped-range banner on
+      // the admin Fees page remains the durable signal in that case.
+      console.error(
+        "[fee-accruals] notifyOperator threw unexpectedly for backfill clip",
+        (err as Error)?.message ?? err,
+      );
+    }
   }
 
   let totalInserted = 0;
