@@ -1,0 +1,139 @@
+Same issues as the Business page plus some new ones specific to this table. Full breakdown.
+
+---
+
+**Critical — fix immediately**
+
+**1. Test fixtures are showing as real linked clients**
+
+```
+adviser-race-1777203777300@example.com
+adviser-ok-1777203778096@example.com
+okadv-1777203811341@example.com
+renamed-client@example.com
+```
+
+Four of six rows are automated test accounts. These must be filtered out before any real adviser sees this page. Filter any client where email matches `@example.com`, `adviser-race-`, `adviser-ok-`, `okadv-`, `renamed-client-`.
+
+This is not a display issue — these accounts should not be linked to a real adviser at all. The fix needs to happen at the adviserClients data level, not just the UI filter.
+
+**2. Portfolio shows $0.000 and $0.002 for all clients including Wise User**
+
+Wise User has a real portfolio of $4.8M. Showing $0.002 means the ledger query is returning near-zero instead of the actual balance. The AUD conversion or the ledger sum is broken for this view. Same root cause as the dashboard and business page — fix the query.
+
+**3. "Linked Client" is still a placeholder name**
+
+One client shows literally "Linked Client" as their display name. This is a fallback string leaking into production. The name resolution is failing for this user.
+
+---
+
+**Data problems**
+
+**4. KYC status for test fixtures is "pending"**
+
+Once test fixtures are removed, KYC coverage becomes 1 verified out of the real client count. Currently the table implies 5 of 6 clients have pending KYC which is misleading when 4 of those 5 are test accounts.
+
+**5. Active fee consents column is empty for all rows**
+
+The Business page shows 2 active fee consents exist. None of them are showing in this table. The column is rendering blank for every client. The query joining fee consents to the client list is not working.
+
+---
+
+**Design problems**
+
+**6. Table column order should be client-first and action-last**
+
+Current order: Client / Relationship / KYC / Tier / Portfolio / Fee consents / Action
+
+Better order:
+
+```
+Client name + email / KYC / Tier / Portfolio (AUD) / Fee consent / Last activity / View
+```
+
+Drop the Relationship column — every client shows "servicing" which adds no information. Use that space for Last activity instead, which tells the adviser when they last interacted with each client.
+
+**7. Portfolio value format is inconsistent**
+
+```
+$0.000    ← three decimal places, looks like an error
+$0.002    ← near-zero, also looks like an error
+```
+
+Display as whole AUD with comma separators:
+
+```
+AUD $4,849,850    ← for real values
+—                 ← for zero or unavailable, not $0.000
+```
+
+Three decimal places on a dollar figure looks like a bug regardless of the actual value.
+
+**8. KYC status needs colour coding**
+
+```
+pending    → amber dot + "Pending"
+verified   → green dot + "Verified"
+failed     → red dot + "Failed"
+```
+
+Scanning a list of KYC statuses as plain text is slow. Colour coding lets the adviser identify issues in one glance.
+
+**9. Fee consent column needs more than a blank**
+
+If no fee consent exists, show explicitly:
+
+```
+None
+```
+
+If one exists show:
+
+```
+Active · exp Aug 2026
+```
+
+If expiring within 30 days show:
+
+```
+⚠ Expiring 15 May
+```
+
+A blank cell is ambiguous — the adviser cannot tell if there is no consent, if the data failed to load, or if the consent status is unknown.
+
+**10. View button is the only action — rename it**
+
+"View" is generic. Rename to "Open client" or use a right-arrow icon. It should be clear this opens the full client record.
+
+**11. "6 of 6 linked clients" count is wrong**
+
+Once test fixtures are removed it will be 1 or 2 of the real linked client count. The count should reflect real clients only.
+
+**12. Missing: search and filter**
+
+An adviser with a large book cannot find clients by scanning a flat list. Add:
+
+```
+[Search by name or email]   [Filter: KYC status ▾]   [Filter: Fee consent ▾]
+```
+
+These filters exist elsewhere in the admin UI — apply the same pattern here.
+
+---
+
+**Priority order for fixes:**
+
+```
+1. Remove test fixture accounts from adviserClients data
+2. Fix portfolio AUD query — pull real ledger balance
+3. Fix client name resolution — no more "Linked Client" placeholder
+4. Fix fee consent column — show active/expiring/none per client
+5. Fix portfolio display format — no three decimal places
+6. Add KYC status colour coding
+7. Remove Relationship column, add Last activity
+8. Add search and filter controls
+9. Rename View button to Open client
+10. Fix the linked client count to reflect real clients only
+```
+
+Items 1 through 4 are correctness issues. The page is not usable for a real adviser until those four are fixed.
