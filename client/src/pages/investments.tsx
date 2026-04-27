@@ -433,7 +433,7 @@ export default function Investments() {
       {/* Investment Products Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {products?.map((product: any) => {
-          const CategoryIcon = categoryIcons[product.category as keyof typeof categoryIcons];
+          const CategoryIcon = categoryIcons[product.category as keyof typeof categoryIcons] ?? Building;
           const minimumInvestment = parseFloat(product.minimumInvestment);
           
           return (
@@ -447,7 +447,7 @@ export default function Investments() {
                     <div>
                       <h3 className="font-semibold text-lg">{product.name}</h3>
                       <p className="text-sm text-muted-foreground">
-                        {categoryLabels[product.category as keyof typeof categoryLabels]}
+                        {categoryLabels[product.category as keyof typeof categoryLabels] ?? "Other"}
                       </p>
                     </div>
                   </div>
@@ -496,7 +496,7 @@ export default function Investments() {
                     <DialogHeader>
                       <DialogTitle>{product.name}</DialogTitle>
                       <DialogDescription>
-                        {categoryLabels[product.category as keyof typeof categoryLabels]} Investment Product
+                        {categoryLabels[product.category as keyof typeof categoryLabels] ?? "Other"} Investment Product
                       </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-4">
