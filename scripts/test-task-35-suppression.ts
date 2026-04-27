@@ -19,12 +19,13 @@ import {
   users,
   wallets,
   ledgerEntries,
+  ledgerPostings,
   transactions,
   accounts,
   walletLedgerReconciliations,
   walletLedgerDriftAcknowledgements,
 } from "../shared/schema";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   runWalletLedgerReconciliation,
   acknowledgeWalletLedgerDrift,
@@ -70,6 +71,26 @@ async function setupUser(): Promise<number> {
     .delete(walletLedgerReconciliations)
     .where(eq(walletLedgerReconciliations.userId, u.id));
   await db.delete(ledgerEntries).where(eq(ledgerEntries.userId, u.id));
+  // Task #159 — clear ledger_postings receipts for any leftover transactions
+  // for this user before deleting the transactions themselves. The receipt
+  // table FKs `transaction_id → transactions.id` with no ON DELETE clause,
+  // so a stale receipt from a previous run would otherwise block the
+  // transactions delete in setWalletAndLedger() below and exit the test 1.
+  const leftoverTxIds = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.userId, u.id));
+  if (leftoverTxIds.length > 0) {
+    await db
+      .delete(ledgerPostings)
+      .where(
+        inArray(
+          ledgerPostings.transactionId,
+          leftoverTxIds.map((r) => r.id),
+        ),
+      );
+  }
+  await db.delete(transactions).where(eq(transactions.userId, u.id));
   await db.delete(wallets).where(eq(wallets.userId, u.id));
   return u.id;
 }
@@ -96,6 +117,25 @@ async function setWalletAndLedger(userId: number, walletBal: string, ledgerBal: 
   }
   // Replace ledger entries with a single credit equal to ledgerBal.
   await db.delete(ledgerEntries).where(eq(ledgerEntries.userId, userId));
+  // Task #159 — drop any ledger_postings receipts pointing at transactions
+  // for this user before deleting the transactions themselves; the receipt
+  // table FKs to transactions with no ON DELETE clause, so a leftover row
+  // (now that this seed always writes one — see below) would otherwise
+  // block the transactions delete and exit the test 1 on subsequent steps.
+  const existingTxIds = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.userId, userId));
+  if (existingTxIds.length > 0) {
+    await db
+      .delete(ledgerPostings)
+      .where(
+        inArray(
+          ledgerPostings.transactionId,
+          existingTxIds.map((r) => r.id),
+        ),
+      );
+  }
   await db.delete(transactions).where(eq(transactions.userId, userId));
   if (Number(ledgerBal) !== 0) {
     // Make sure the user has a client-account row in this currency.
@@ -136,6 +176,16 @@ async function setWalletAndLedger(userId: number, walletBal: string, ledgerBal: 
       counterAccount: "external:test",
       reasonCode: "test_seed",
     });
+    // Task #159 — write the matching ledger_postings receipt that
+    // postLedgerEntries() would have written atomically. Without this row
+    // the per-tx posting-receipt invariant in pre-launch-safety.ts (see
+    // server/services/posting-receipt-invariant.ts) fires a phantom
+    // "missing receipt" alert once per pre-launch run for this seed. We
+    // can't go through postLedgerEntries() here because this seed is
+    // intentionally a single unbalanced credit (the whole point of the
+    // test is to manufacture wallet-vs-ledger drift), so we mint the
+    // receipt directly and let the cleanup paths above tear it down.
+    await db.insert(ledgerPostings).values({ transactionId: tx.id });
   }
 }
 
