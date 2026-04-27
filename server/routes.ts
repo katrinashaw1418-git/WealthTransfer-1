@@ -679,6 +679,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
     await db.execute(sql.raw(`
       CREATE UNIQUE INDEX IF NOT EXISTS unique_wallet_user_currency ON wallets (user_id, currency);
     `));
+
+    // -------------------------------------------------------------------------
+    // Task #149 — audit_logs immutability at the DB level
+    // -------------------------------------------------------------------------
+    // The go-live checklist requires `audit_logs` to be truly append-only:
+    // no UPDATE, no DELETE, no TRUNCATE — ever. Until now this was enforced
+    // only by convention (no application code path mutates the table); a
+    // buggy migration or a future ORM call could silently break that. The
+    // installer below adds BEFORE triggers that raise an exception for any
+    // UPDATE, DELETE, or TRUNCATE attempt, regardless of who issues it (app
+    // role, psql session, drizzle-kit migration, etc). INSERTs unaffected.
+    //
+    // The DDL itself lives in `server/services/audit-immutability-migration.ts`
+    // so production startup and the automated test
+    // (`server/services/audit-immutability.test.ts`) cannot drift apart.
+    // The emergency-override procedure for DBAs is documented in that
+    // installer module.
+    // -------------------------------------------------------------------------
+    const { installAuditLogsImmutabilityTriggers } = await import(
+      "./services/audit-immutability-migration"
+    );
+    await installAuditLogsImmutabilityTriggers(db);
+
     // Hash the demo user's plaintext password on first startup
     const demoUser = await storage.getUser(1);
     if (demoUser && !demoUser.password.startsWith("$2")) {

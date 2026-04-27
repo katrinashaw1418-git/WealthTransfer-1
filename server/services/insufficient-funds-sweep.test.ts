@@ -132,18 +132,11 @@ async function cleanupForUser(userId: number): Promise<void> {
     // Table missing — safe to skip.
   }
   await db.delete(transactions).where(eq(transactions.userId, userId));
-  await db
-    .delete(auditLogs)
-    .where(
-      and(
-        eq(auditLogs.entityType, "adviser_fee_deduction"),
-        inArray(auditLogs.action, [
-          "fee_deduction.auto_resettled",
-          "fee_deduction.client_notified",
-          "fee_deduction.client_notification_failed",
-        ]),
-      ),
-    );
+  // Note (Task #149): audit_logs is now immutable at the DB level — every
+  // UPDATE/DELETE is rejected by a trigger. We deliberately leave the audit
+  // rows from prior test runs in place; the assertions below scope by the
+  // freshly-generated `deductionId` (which is unique per test run), so
+  // residual rows from earlier runs do not interfere with this test.
   await db.delete(wallets).where(eq(wallets.userId, userId));
   await db.delete(accounts).where(eq(accounts.userId, userId));
 }

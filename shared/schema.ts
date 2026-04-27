@@ -225,6 +225,22 @@ export const idempotencyKeys = pgTable(
   })
 );
 
+// ---------------------------------------------------------------------------
+// audit_logs — append-only at the DB level (Task #149).
+//
+// IMMUTABILITY GUARANTEE: this table is enforced as truly append-only by
+// BEFORE UPDATE / BEFORE DELETE / BEFORE TRUNCATE triggers installed in the
+// startup migrations block of `server/routes.ts`. Any mutation attempt
+// (regardless of caller — application code, ORM, ad-hoc psql session, or a
+// future migration script) raises a `restrict_violation` SQLSTATE with the
+// message "audit_logs is immutable: ... is not permitted on this table".
+// INSERTs continue to work normally; reads are unaffected.
+//
+// Emergency-override procedure (DBA-only, itself an audited operational
+// step): see the comment block above the trigger definitions in
+// server/routes.ts. Do NOT add UPDATE/DELETE callsites here — they will
+// throw at runtime regardless of how convincing the surrounding code looks.
+// ---------------------------------------------------------------------------
 export const auditLogs = pgTable("audit_logs", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").references(() => users.id),
