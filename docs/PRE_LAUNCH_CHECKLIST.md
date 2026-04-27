@@ -76,6 +76,40 @@ The script is idempotent across re-runs: every fixture row is
 prefixed `__prelaunch_` and the cleanup phase deletes only rows whose
 primary keys were captured during this run.
 
+## Deploy gate (Task #151)
+
+The deploy build (`scripts/predeploy-build.sh`, wired into Replit's
+`[deployment].build`) now runs this script as the **first hard gate**
+before anything else, in strict mode:
+
+```sh
+npx tsx scripts/pre-launch-safety.ts --strict
+```
+
+Strict mode treats a SKIP as a real failure (not just a FAIL), so the
+deploy is blocked even if a real-money safety gate quietly self-skipped
+— for example a sub-script crashed at boot, a route handler wasn't
+registered, or a reconciliation service had no data to actually verify.
+Without this, a launch could ship with one of the gates above silently
+not running.
+
+**What an operator sees on a blocked deploy:**
+
+The wrapper streams `pre-launch-safety.ts` output live, so the per-gate
+`PASS` / `FAIL` / `SKIP` lines are visible at the top of the deploy log
+(under the `[predeploy] [strict-gate]` banner). When the strict gate
+fails, the wrapper exits immediately with a clear NO-GO banner naming
+which stage failed (`Stage 1 (pre-launch-safety --strict) failed`),
+and Stage 2 (the broader `scripts/go-no-go.ts` orchestrator) never runs
+— search the deploy log for `FAIL` or `SKIP` to find the offending gate
+name, then reproduce locally with the same `--strict` command above.
+
+The new gate is smoke-tested by `scripts/test-predeploy-gate.sh` (run
+in CI by the `predeploy-gate-smoke` job), which exercises the wrapper's
+Stage 1 fail-fast path and the Stage 1 PASS → Stage 2 GO/NO-GO/crash
+paths against stubbed `npx` / `npm` so a regression in the deploy
+wiring shows up on every PR.
+
 ## Post-merge rechecks
 
 Each line below records one auto-run of `scripts/post-merge-safety-recheck.ts`

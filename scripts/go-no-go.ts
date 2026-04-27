@@ -29,6 +29,21 @@
 //                                 deploy instead of nine. A non-drill
 //                                 (real) alert is unaffected — it never
 //                                 went through this gate to begin with.
+//   * --skip-pre-launch-safety  — Task #151. Used by
+//   (or GO_NO_GO_SKIP_PRE_     —   scripts/predeploy-build.sh, which
+//    LAUNCH_SAFETY=1)              now invokes
+//                                 `pre-launch-safety.ts --strict`
+//                                 directly as the first hard deploy
+//                                 gate so SKIP/FAIL gate names are
+//                                 visible at the top of the deploy log.
+//                                 With this flag, the in-orchestrator
+//                                 pre-launch-safety section short-
+//                                 circuits to a single "delegated to
+//                                 upstream caller" PASS instead of
+//                                 spawning the multi-minute strict
+//                                 rollup a second time. Manual /
+//                                 interactive runs leave the flag off
+//                                 and keep the in-orchestrator gate.
 //
 // What this proves (in order):
 //   1. The existing pre-launch safety rollup still passes end-to-end
@@ -170,6 +185,27 @@ const DEPLOY_GATE_MODE =
     return v === "1" || v === "true" || v === "yes" || v === "on";
   })();
 
+// Skip the pre-launch-safety section (Task #151). Used by
+// scripts/predeploy-build.sh, which invokes
+// `npx tsx scripts/pre-launch-safety.ts --strict` directly as the first
+// hard deploy gate so SKIP/FAIL gate names are visible at the top of
+// the deploy log instead of buried inside this orchestrator's report.
+// When this flag is set, preLaunchSafetySection short-circuits to a
+// single PASS check ("delegated to upstream caller") so we don't run
+// the multi-minute strict rollup twice per deploy. The flag is a
+// Section skip — NOT a verdict skip; the upstream invoker is
+// responsible for blocking the deploy on a non-zero strict exit.
+//   * Pass --skip-pre-launch-safety on the command line.
+//   * Or set GO_NO_GO_SKIP_PRE_LAUNCH_SAFETY=1 in the environment.
+const SKIP_PRE_LAUNCH_SAFETY =
+  process.argv.includes("--skip-pre-launch-safety") ||
+  ((): boolean => {
+    const raw = process.env.GO_NO_GO_SKIP_PRE_LAUNCH_SAFETY;
+    if (!raw) return false;
+    const v = raw.trim().toLowerCase();
+    return v === "1" || v === "true" || v === "yes" || v === "on";
+  })();
+
 const sections: Section[] = [];
 
 function addSection(s: Section): void {
@@ -189,6 +225,36 @@ function check(
 // 1. Pre-launch safety rollup (delegates to existing script)
 // ---------------------------------------------------------------------------
 async function preLaunchSafetySection(): Promise<Section> {
+  // Task #151 — when the upstream caller (scripts/predeploy-build.sh)
+  // has already run `pre-launch-safety.ts --strict` directly as the
+  // first hard deploy gate, skip the duplicate in-orchestrator run and
+  // record a single PASS that points at the upstream invocation. The
+  // upstream caller is responsible for failing the deploy on a non-zero
+  // strict exit; this section is intentionally NOT used to gate the
+  // verdict in that mode.
+  if (SKIP_PRE_LAUNCH_SAFETY) {
+    return {
+      name: "Pre-launch safety rollup",
+      summary:
+        "Delegated to upstream caller. The deploy wrapper " +
+        "(scripts/predeploy-build.sh) ran " +
+        "`npx tsx scripts/pre-launch-safety.ts --strict` directly as " +
+        "the first hard deploy gate (Task #151) so SKIP/FAIL gate names " +
+        "are visible at the top of the deploy log instead of buried " +
+        "inside this report. See the preceding `[predeploy]` section in " +
+        "the deploy log.",
+      checks: [
+        check(
+          "pre-launch-safety.ts (strict)",
+          "pass",
+          "delegated to upstream caller (scripts/predeploy-build.sh) — " +
+            "see the preceding `[predeploy] [strict-gate]` section of " +
+            "the deploy log for the full PASS/FAIL/SKIP breakdown.",
+        ),
+      ],
+    };
+  }
+
   const startedAt = Date.now();
   const r = spawnSync(
     "npx",

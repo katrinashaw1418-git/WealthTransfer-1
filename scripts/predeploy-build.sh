@@ -3,19 +3,46 @@
 # Pre-deploy launch readiness gate + production build (Task #180).
 #
 # Wired into Replit's [deployment].build in `.replit`. Replaces the bare
-# `npm run build` so EVERY deploy is gated on `scripts/go-no-go.ts`
-# returning a GO verdict, against the same secrets the deploy itself
-# will boot under.
+# `npm run build` so EVERY deploy is gated on TWO hard checks against
+# the same secrets the deploy itself will boot under:
+#
+#   STAGE 1 (Task #151):
+#     `npx tsx scripts/pre-launch-safety.ts --strict`
+#     Strict mode treats a SKIP as a real failure — i.e. a launch is
+#     blocked even when a real-money safety gate quietly self-skipped
+#     (sub-script crashed at boot, route wasn't registered, recon
+#     service had no data to actually verify, etc). Output is streamed
+#     live so the per-gate PASS/FAIL/SKIP lines are visible at the TOP
+#     of the deploy log — operators can see exactly which gate(s) need
+#     remediation without having to scroll through the broader go-no-go
+#     report. A non-zero exit here exits this wrapper immediately and
+#     blocks the deploy.
+#
+#   STAGE 2 (Task #150 + #218):
+#     `npx tsx scripts/go-no-go.ts --deploy-gate --skip-pre-launch-safety`
+#     Broader launch readiness checks (infrastructure, monitoring,
+#     alerting drills, kill switches, rollback, security, compliance).
+#     `--skip-pre-launch-safety` short-circuits the orchestrator's
+#     own pre-launch-safety section to a single "delegated" PASS so
+#     the multi-minute strict rollup does not run a second time —
+#     Stage 1 already proved it green. A NO-GO verdict here also
+#     blocks the deploy.
 #
 # Exit semantics (drives Replit's "block the deploy" behaviour):
-#   * Gate exit 0 (GO)   → run the production build, copy the latest
-#                          go-no-go report into dist/ as part of the
-#                          deploy artefact, exit 0.
-#   * Gate exit non-zero → print the full report to stdout (so it lives
-#                          in the deploy log even when the dist/
-#                          artefact is never produced), then exit
-#                          non-zero. Replit's deploy build aborts and
-#                          the new revision is NOT promoted.
+#   * Stage 1 fail (non-zero) → wrapper exits non-zero immediately;
+#                               the strict-gate output (visible above)
+#                               is the operator's remediation surface.
+#                               Replit's deploy build aborts and the
+#                               new revision is NOT promoted.
+#   * Stage 2 fail (NO-GO)    → print the go-no-go report to stdout
+#                               (so it lives in the deploy log even
+#                               when the dist/ artefact is never
+#                               produced), then exit non-zero. Replit's
+#                               deploy build aborts and the new
+#                               revision is NOT promoted.
+#   * Both stages green       → run the production build, copy the
+#                               latest go-no-go report into dist/ as
+#                               part of the deploy artefact, exit 0.
 #
 # Pre-deploy env required (configure these as Replit deployment
 # secrets — dev fallbacks from scripts/_bootstrap-test-env.ts do NOT
@@ -38,10 +65,65 @@ REPORT_DIR="docs/golive"
 ARTEFACT_NAME="go-no-go-report.md"
 
 echo "[predeploy] ============================================================"
-echo "[predeploy] Launch readiness gate (scripts/go-no-go.ts)"
+echo "[predeploy] Launch readiness gates (Stages 1 + 2)"
 echo "[predeploy] Started:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "[predeploy] NODE_ENV: ${NODE_ENV:-(unset)}"
 echo "[predeploy] ============================================================"
+
+# ---------------------------------------------------------------------------
+# STAGE 1 — pre-launch safety (strict). Task #151.
+#
+# Stream output live (no -o pipefail capture, no buffering) so the per-
+# gate PASS/FAIL/SKIP lines from scripts/pre-launch-safety.ts are
+# visible at the top of the deploy log as they happen. Operators
+# triaging a blocked deploy should not have to scroll past the broader
+# go-no-go output to find the actual SKIP/FAIL gate name — that's the
+# whole point of running the strict gate as Stage 1.
+# ---------------------------------------------------------------------------
+echo ""
+echo "[predeploy] [strict-gate] ----------------------------------------------"
+echo "[predeploy] [strict-gate] STAGE 1: pre-launch-safety.ts --strict"
+echo "[predeploy] [strict-gate] (SKIP is treated as a real failure — Task #151)"
+echo "[predeploy] [strict-gate] ----------------------------------------------"
+
+set +e
+npx tsx scripts/pre-launch-safety.ts --strict
+STRICT_STATUS=$?
+set -e
+
+if [ "$STRICT_STATUS" -ne 0 ]; then
+  echo ""
+  echo "[predeploy] ============================================================"
+  echo "[predeploy] NO-GO — Stage 1 (pre-launch-safety --strict) failed"
+  echo "[predeploy]         exit=$STRICT_STATUS"
+  echo "[predeploy] ============================================================"
+  echo "[predeploy] One or more pre-launch safety gates either FAILED outright"
+  echo "[predeploy] or SKIPPED (which under --strict is also a real failure)."
+  echo "[predeploy] The per-gate PASS/FAIL/SKIP lines are above — search the"
+  echo "[predeploy] deploy log for 'FAIL' and 'SKIP' to find the gate name."
+  echo "[predeploy]"
+  echo "[predeploy] To reproduce locally against the same DB:"
+  echo "[predeploy]   npx tsx scripts/pre-launch-safety.ts --strict"
+  echo "[predeploy]"
+  echo "[predeploy] See docs/PRE_LAUNCH_CHECKLIST.md for what each gate proves."
+  echo "[predeploy] Deploy is BLOCKED. Fix the failing/skipped gate(s) and"
+  echo "[predeploy] re-publish."
+  exit "$STRICT_STATUS"
+fi
+
+echo ""
+echo "[predeploy] [strict-gate] STAGE 1 PASS — pre-launch-safety strict run"
+echo "[predeploy] [strict-gate] is green (zero FAIL, zero SKIP). Proceeding"
+echo "[predeploy] [strict-gate] to Stage 2 (broader go-no-go checks)."
+echo ""
+
+# ---------------------------------------------------------------------------
+# STAGE 2 — broader launch readiness orchestrator. Task #150 + #218.
+# ---------------------------------------------------------------------------
+echo "[predeploy] ------------------------------------------------------------"
+echo "[predeploy] STAGE 2: scripts/go-no-go.ts --deploy-gate"
+echo "[predeploy] (--skip-pre-launch-safety: Stage 1 already covered it)"
+echo "[predeploy] ------------------------------------------------------------"
 
 # Snapshot existing reports BEFORE the gate runs so we can isolate the
 # file produced by THIS invocation. Without this, a crashed orchestrator
@@ -60,7 +142,15 @@ set +e
 # the on-call channel nine times. Manual interactive runs of
 # `npx tsx scripts/go-no-go.ts` keep the per-source webhook behaviour
 # for debugging.
-npx tsx scripts/go-no-go.ts --deploy-gate
+#
+# --skip-pre-launch-safety (Task #151): Stage 1 above already ran the
+# multi-minute strict rollup as the first hard deploy gate, with its
+# per-gate PASS/FAIL/SKIP lines streamed live to the deploy log.
+# Without this flag the orchestrator's preLaunchSafetySection would
+# spawn the same script a second time, doubling deploy time. With the
+# flag the section short-circuits to a single "delegated" PASS that
+# points an operator back at the Stage 1 output above.
+npx tsx scripts/go-no-go.ts --deploy-gate --skip-pre-launch-safety
 GATE_STATUS=$?
 set -e
 
@@ -74,7 +164,8 @@ CURRENT_RUN_REPORT="$(comm -13 "$PRE_RUN_LIST" "$POST_RUN_LIST" | tail -n 1 || t
 if [ "$GATE_STATUS" -ne 0 ]; then
   echo ""
   echo "[predeploy] ============================================================"
-  echo "[predeploy] NO-GO — launch readiness gate failed (exit $GATE_STATUS)"
+  echo "[predeploy] NO-GO — Stage 2 (go-no-go orchestrator) failed"
+  echo "[predeploy]         exit=$GATE_STATUS"
   echo "[predeploy] ============================================================"
   if [ -n "$CURRENT_RUN_REPORT" ] && [ -f "$CURRENT_RUN_REPORT" ]; then
     echo "[predeploy] Report: $CURRENT_RUN_REPORT"
