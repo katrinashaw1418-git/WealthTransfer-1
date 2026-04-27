@@ -238,6 +238,11 @@ export default function AdviserFeeConsents() {
 
   const selectedClientId = form.watch("clientUserId");
   const selectedAmountType = form.watch("amountType");
+  // Task #293 — keep the Send button disabled until both a client and an
+  // advice record are picked. The server will reject either way (advice
+  // record is required) but failing fast on the form is friendlier and
+  // keeps adviser audit noise down.
+  const selectedAdviceRecordId = form.watch("adviceRecordId");
 
   // Pull advice records for the picked client so the adviser can attach the
   // consent to a specific piece of advice (required by the backend).
@@ -418,15 +423,26 @@ export default function AdviserFeeConsents() {
                               #{r.id} — {r.adviceType} ({r.status})
                             </SelectItem>
                           ))}
-                          {selectedClientId &&
-                            (clientDetail.data?.adviceRecords ?? []).length === 0 && (
-                              <div className="px-3 py-2 text-xs text-gray-500">
-                                This client has no advice records yet. Create one before
-                                requesting a fee consent.
-                              </div>
-                            )}
                         </SelectContent>
                       </Select>
+                      {/* Task #293 — promote the previously buried "no advice records"
+                         hint into a high-contrast inline alert so an adviser cannot
+                         miss it and try to send a request that the server will reject. */}
+                      {selectedClientId &&
+                        clientDetail.isSuccess &&
+                        (clientDetail.data?.adviceRecords ?? []).length === 0 && (
+                          <div
+                            className="mt-2 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900"
+                            data-testid="alert-no-advice-records"
+                          >
+                            <ShieldAlert className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                            <span>
+                              <strong>This client has no advice records.</strong> A fee
+                              consent request must attach to an advice record. Create one
+                              before sending.
+                            </span>
+                          </div>
+                        )}
                       <FormMessage />
                     </FormItem>
                   )}
@@ -638,7 +654,12 @@ export default function AdviserFeeConsents() {
                 <Button
                   type="submit"
                   className="w-full"
-                  disabled={createReq.isPending}
+                  disabled={
+                    createReq.isPending ||
+                    !selectedClientId ||
+                    !selectedAdviceRecordId ||
+                    selectedAdviceRecordId <= 0
+                  }
                   data-testid="button-submit-request"
                 >
                   {createReq.isPending ? "Sending..." : "Send to client"}

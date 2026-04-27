@@ -677,7 +677,14 @@ export function registerAdviserRoutes(app: Express): void {
       proposedRenewalWindowStart: z.coerce.date(),
       proposedRenewalWindowEnd: z.coerce.date(),
       proposedConsentExpiryDate: z.coerce.date(),
-      adviceRecordId: z.number().int().positive().optional().nullable(),
+      // Task #293 — DBFO consents are legally required to be tied to a
+      // specific advice record. The adviser UI now blocks Send until one
+      // is picked; the server enforces the same rule so any direct API
+      // caller (or stale build) is rejected with a clear validation error
+      // rather than silently storing an unsignable request.
+      adviceRecordId: z.number().int().positive(
+        "adviceRecordId is required — a fee consent must reference an advice record",
+      ),
       requestNote: z.string().max(4000).optional().nullable(),
     })
     .superRefine((val, ctx) => {
@@ -751,13 +758,61 @@ export function registerAdviserRoutes(app: Express): void {
         // Must be linked to this client (active link).
         await assertAdviserClientLink(auth.userId, parsed.data.clientUserId);
 
+        // Task #293 — pre-flight duplicate check. The DB partial unique
+        // indexes are the source of truth, but we look first so the API
+        // can return a friendly 409 carrying the offending row id (which
+        // the UI uses to deep-link the adviser to the existing request /
+        // consent instead of forcing them to hunt through the table).
+        const conflictingRequest = await db
+          .select({ id: feeConsentRequests.id })
+          .from(feeConsentRequests)
+          .where(
+            and(
+              eq(feeConsentRequests.clientUserId, parsed.data.clientUserId),
+              eq(feeConsentRequests.adviceRecordId, parsed.data.adviceRecordId),
+              eq(feeConsentRequests.feeType, parsed.data.feeType),
+              eq(feeConsentRequests.accountNumber, parsed.data.accountNumber),
+              eq(feeConsentRequests.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (conflictingRequest.length > 0) {
+          return res.status(409).json({
+            error:
+              "An active pending fee-consent request already exists for this client, advice record, fee type and account.",
+            existingRequestId: conflictingRequest[0].id,
+            kind: "duplicate_pending_request",
+          });
+        }
+        const conflictingConsent = await db
+          .select({ id: feeConsents.id })
+          .from(feeConsents)
+          .where(
+            and(
+              eq(feeConsents.clientId, parsed.data.clientUserId),
+              eq(feeConsents.adviceRecordId, parsed.data.adviceRecordId),
+              eq(feeConsents.feeType, parsed.data.feeType),
+              eq(feeConsents.accountNumber, parsed.data.accountNumber),
+              sql`${feeConsents.renewalStatus} IN ('active', 'renewal_due')`,
+            ),
+          )
+          .limit(1);
+        if (conflictingConsent.length > 0) {
+          return res.status(409).json({
+            error:
+              "A live fee consent already covers this client, advice record, fee type and account. Use Supersede on the admin page if you need to replace it.",
+            existingConsentId: conflictingConsent[0].id,
+            kind: "duplicate_active_consent",
+          });
+        }
+
         const created = await db.transaction(async (tx) => {
           const [row] = await tx
             .insert(feeConsentRequests)
             .values({
               adviserUserId: auth.userId,
               clientUserId: parsed.data.clientUserId,
-              adviceRecordId: parsed.data.adviceRecordId ?? null,
+              adviceRecordId: parsed.data.adviceRecordId,
               feeType: parsed.data.feeType,
               amountType: parsed.data.amountType,
               amount: parsed.data.amount ?? null,

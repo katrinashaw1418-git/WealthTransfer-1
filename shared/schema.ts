@@ -945,7 +945,7 @@ export const feeConsents = pgTable("fee_consents", {
   consentExpiryDate: timestamp("consent_expiry_date").notNull(),
 
   renewalStatus: text("renewal_status").notNull().default("active"),
-  // active | renewal_due | expired | withdrawn | renewed
+  // active | renewal_due | expired | withdrawn | renewed | superseded
 
   clientSignatureName: text("client_signature_name").notNull(),
 
@@ -953,12 +953,33 @@ export const feeConsents = pgTable("fee_consents", {
 
   withdrawnAt: timestamp("withdrawn_at"),
 
+  // Task #293 — supersede chain. When an admin (or, in future, an adviser)
+  // replaces a live consent with a fresh request, the old consent is
+  // atomically marked `renewalStatus='superseded'` and these three columns
+  // are populated so the admin UI can render a "Superseded by → #N" link
+  // back to the new request and an auditor can trace why the swap happened.
+  // The new request carries `supersedesRequestId` pointing to the old
+  // request for the reverse link.
+  supersededByRequestId: integer("superseded_by_request_id"),
+  supersededAt: timestamp("superseded_at"),
+  supersededReason: text("superseded_reason"),
+
   retentionUntil: timestamp("retention_until").defaultNow(),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  // Task #293 — at most one ACTIVE (or renewal_due) consent per
+  // client + advice record + fee type + account number. Older
+  // duplicates must be flagged as `superseded` first (one-off backfill
+  // script handles pre-existing rows). The partial WHERE clause means
+  // historically expired/withdrawn/superseded rows do not block a fresh
+  // sign-up for the same combination.
+  activeUnique: uniqueIndex("fee_consent_active_unique_idx")
+    .on(table.clientId, table.adviceRecordId, table.feeType, table.accountNumber)
+    .where(sql`renewal_status IN ('active', 'renewal_due')`),
+}));
 
 export const adviceAcknowledgements = pgTable("advice_acknowledgements", {
   id: serial("id").primaryKey(),
@@ -1049,6 +1070,10 @@ export const insertFeeConsentSchema = createInsertSchema(feeConsents).omit({
   deletionLocked: true,
   createdAt: true,
   updatedAt: true,
+  // Task #293 — supersede chain is admin-managed, never user-supplied.
+  supersededByRequestId: true,
+  supersededAt: true,
+  supersededReason: true,
 });
 export type FeeConsent = typeof feeConsents.$inferSelect;
 export type InsertFeeConsent = z.infer<typeof insertFeeConsentSchema>;
@@ -1127,6 +1152,11 @@ export const feeConsentRequests = pgTable(
       () => feeConsents.id,
     ),
 
+    // Task #293 — back-pointer to the prior request being superseded by
+    // this one (admin "supersede" action). Null for greenfield requests.
+    // Self-referential FK so the supersede chain is queryable in one join.
+    supersedesRequestId: integer("supersedes_request_id"),
+
     respondedAt: timestamp("responded_at"),
 
     createdAt: timestamp("created_at").defaultNow(),
@@ -1154,6 +1184,14 @@ export const feeConsentRequests = pgTable(
       sql`(status = 'consented' AND signed_fee_consent_id IS NOT NULL)
           OR (status <> 'consented' AND signed_fee_consent_id IS NULL)`,
     ),
+    // Task #293 — at most one ACTIVE pending request per
+    // client + advice record + fee type + account number. The advice-record
+    // arm of the WHERE clause means legacy rows that never got attached to
+    // an advice record (and which are blocked from signing anyway) cannot
+    // collide with new properly-attached requests.
+    activePendingUnique: uniqueIndex("fee_consent_request_active_pending_unique_idx")
+      .on(table.clientUserId, table.adviceRecordId, table.feeType, table.accountNumber)
+      .where(sql`status = 'pending' AND advice_record_id IS NOT NULL`),
   }),
 );
 
@@ -1167,6 +1205,9 @@ export const insertFeeConsentRequestSchema = createInsertSchema(
   respondedAt: true,
   createdAt: true,
   updatedAt: true,
+  // Task #293 — back-pointer is set only by the admin Supersede flow,
+  // never by the adviser POST.
+  supersedesRequestId: true,
 });
 export type FeeConsentRequest = typeof feeConsentRequests.$inferSelect;
 export type InsertFeeConsentRequest = z.infer<typeof insertFeeConsentRequestSchema>;

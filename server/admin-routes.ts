@@ -1630,6 +1630,9 @@ export function registerAdminRoutes(app: Express): void {
     adminRoute(async (req) => {
       const action = typeof req.query.action === "string" ? req.query.action.trim() : "";
       const entityType = typeof req.query.entityType === "string" ? req.query.entityType.trim() : "";
+      // Task #293 — added entityId filter so the admin fee-consents drawer
+      // can pull a focused audit timeline for one request or one consent.
+      const entityId = typeof req.query.entityId === "string" ? req.query.entityId.trim() : "";
       const userIdRaw = typeof req.query.userId === "string" ? Number(req.query.userId) : null;
       const userId = userIdRaw && Number.isInteger(userIdRaw) && userIdRaw > 0 ? userIdRaw : null;
 
@@ -1643,6 +1646,7 @@ export function registerAdminRoutes(app: Express): void {
       const conditions = [] as any[];
       if (action) conditions.push(ilike(auditLogs.action, `%${action}%`));
       if (entityType) conditions.push(eq(auditLogs.entityType, entityType));
+      if (entityId) conditions.push(eq(auditLogs.entityId, entityId));
       if (userId) conditions.push(eq(auditLogs.userId, userId));
       const where = conditions.length ? and(...conditions) : undefined;
 
@@ -3392,11 +3396,21 @@ export function registerAdminRoutes(app: Express): void {
             feeType: feeConsentRequests.feeType,
             amountType: feeConsentRequests.amountType,
             amount: feeConsentRequests.amount,
+            accountNumber: feeConsentRequests.accountNumber,
             deductionFrequency: feeConsentRequests.deductionFrequency,
+            // Task #293 — surface the reference day + the renewal window
+            // so the admin doesn't have to mentally back-derive them from
+            // the expiry alone (the previous "stale-looking expiry, no
+            // reference day" complaint).
+            proposedReferenceDay: feeConsentRequests.proposedReferenceDay,
+            proposedRenewalWindowStart: feeConsentRequests.proposedRenewalWindowStart,
+            proposedRenewalWindowEnd: feeConsentRequests.proposedRenewalWindowEnd,
             proposedConsentExpiryDate: feeConsentRequests.proposedConsentExpiryDate,
             status: feeConsentRequests.status,
             declineReason: feeConsentRequests.declineReason,
             signedFeeConsentId: feeConsentRequests.signedFeeConsentId,
+            // Task #293 — supersede chain back-pointer.
+            supersedesRequestId: feeConsentRequests.supersedesRequestId,
             respondedAt: feeConsentRequests.respondedAt,
             createdAt: feeConsentRequests.createdAt,
             adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsentRequests.adviserUserId})`,
@@ -3412,8 +3426,25 @@ export function registerAdminRoutes(app: Express): void {
           .from(feeConsentRequests)
           .where(where as any),
       ]);
+      // Task #293 — compute the deduction-block reason server-side so the
+      // UI never has to recreate the rule. Strings: "expired" | "pending"
+      // | "no_advice_record" | null. Money movement is gated separately;
+      // this is the user-facing reason a request would not be permitted
+      // to drive a deduction TODAY if the kill-switch were lifted.
+      const now = Date.now();
+      const items = rows.map((r) => {
+        let deductionsBlockedReason: string | null = null;
+        if (!r.adviceRecordId) deductionsBlockedReason = "no_advice_record";
+        else if (r.status === "pending") deductionsBlockedReason = "pending";
+        else if (
+          r.proposedConsentExpiryDate &&
+          r.proposedConsentExpiryDate.getTime() < now
+        )
+          deductionsBlockedReason = "expired";
+        return { ...r, deductionsBlockedReason };
+      });
       return {
-        items: rows,
+        items,
         page,
         limit,
         total: Number(totalRow[0]?.count ?? 0),
@@ -3441,12 +3472,45 @@ export function registerAdminRoutes(app: Express): void {
             amountType: feeConsents.amountType,
             amount: feeConsents.amount,
             accountNumber: feeConsents.accountNumber,
+            accountName: feeConsents.accountName,
             deductionFrequency: feeConsents.deductionFrequency,
             referenceDay: feeConsents.referenceDay,
+            // Task #293 — surface the renewal window and the client's
+            // signature name so the admin doesn't have to open the audit
+            // log to see who signed and when the renewal opens.
+            renewalWindowStart: feeConsents.renewalWindowStart,
+            renewalWindowEnd: feeConsents.renewalWindowEnd,
             consentExpiryDate: feeConsents.consentExpiryDate,
             renewalStatus: feeConsents.renewalStatus,
             consentedAt: feeConsents.consentedAt,
             withdrawnAt: feeConsents.withdrawnAt,
+            clientSignatureName: feeConsents.clientSignatureName,
+            // Task #293 — supersede chain links (both directions). The
+            // forward link `supersededByRequestId` is set when this
+            // consent was replaced; the reverse `supersedesRequestId` is
+            // looked up via the request that signed THIS consent.
+            supersededByRequestId: feeConsents.supersededByRequestId,
+            supersededAt: feeConsents.supersededAt,
+            supersededReason: feeConsents.supersededReason,
+            supersedesRequestId: sql<number | null>`(
+              SELECT supersedes_request_id
+              FROM ${feeConsentRequests} fcr
+              WHERE fcr.signed_fee_consent_id = ${feeConsents.id}
+              LIMIT 1
+            )`,
+            // Task #293 — pull the IP address recorded on the audit row
+            // for the actual sign-event. The audit writer uses
+            // entityType='fee_consent', entityId=String(consent.id) for
+            // the create row written inside the same tx as the sign.
+            signedIp: sql<string | null>`(
+              SELECT ip_address
+              FROM ${auditLogs} al
+              WHERE al.entity_type = 'fee_consent'
+                AND al.entity_id = ${feeConsents.id}::text
+                AND al.action = 'fee_consent_created'
+              ORDER BY al.created_at DESC
+              LIMIT 1
+            )`,
             adviserUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.adviserId})`,
             clientUsername: sql<string>`(SELECT username FROM ${users} u WHERE u.id = ${feeConsents.clientId})`,
           })
@@ -3460,12 +3524,585 @@ export function registerAdminRoutes(app: Express): void {
           .from(feeConsents)
           .where(where as any),
       ]);
+      // Task #293 — server-side computation of the deduction-block reason.
+      // Kept in lockstep with the requests endpoint above so the UI has a
+      // single shape to reason about.
+      const now = Date.now();
+      const items = rows.map((r) => {
+        let deductionsBlockedReason: string | null = null;
+        if (!r.adviceRecordId) deductionsBlockedReason = "no_advice_record";
+        else if (
+          r.renewalStatus === "expired" ||
+          (r.consentExpiryDate && r.consentExpiryDate.getTime() < now)
+        )
+          deductionsBlockedReason = "expired";
+        return { ...r, deductionsBlockedReason };
+      });
       return {
-        items: rows,
+        items,
         page,
         limit,
         total: Number(totalRow[0]?.count ?? 0),
       };
+    }),
+  );
+
+  // ---------------------------------------------------------------------
+  // Task #293 — admin-only Revoke a pending fee-consent REQUEST.
+  // Mirrors the adviser PATCH /withdraw shape but is admin-driven and
+  // tags `revokedByAdmin: true` in the audit `extra` so a reviewer can
+  // tell at a glance which control plane fired the action. Pending only.
+  // ---------------------------------------------------------------------
+  app.post(
+    "/api/admin/fee-consent-requests/:id/revoke",
+    adminRoute(async (req, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        throw Object.assign(new Error("Invalid request id"), { status: 400 });
+      }
+      const reasonSchema = z.object({
+        reason: z.string().max(2000).optional().nullable(),
+      });
+      const parsed = reasonSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        throw Object.assign(new Error("Invalid payload"), { status: 400 });
+      }
+      const updated = await db.transaction(async (tx) => {
+        const [existing] = await tx
+          .select()
+          .from(feeConsentRequests)
+          .where(eq(feeConsentRequests.id, id))
+          .for("update")
+          .limit(1);
+        if (!existing) {
+          throw Object.assign(new Error("Fee consent request not found"), {
+            status: 404,
+          });
+        }
+        if (existing.status !== "pending") {
+          throw Object.assign(
+            new Error(
+              `Cannot revoke request in status '${existing.status}' — only pending requests are revocable.`,
+            ),
+            { status: 400 },
+          );
+        }
+        // Task #293 — Revoke is the adviser-side "I shouldn't have asked
+        // for this" exit. Admin-generated supersede requests carry a
+        // non-null supersedesRequestId; the correct way to undo one of
+        // those is via the original consent's audit trail, not by
+        // revoking the replacement. Block here so the audit log stays
+        // unambiguous.
+        if (existing.supersedesRequestId !== null) {
+          throw Object.assign(
+            new Error(
+              "Cannot revoke an admin-generated supersede request — only adviser-issued pending requests are revocable.",
+            ),
+            { status: 400 },
+          );
+        }
+        const updatedRows = await tx
+          .update(feeConsentRequests)
+          .set({
+            status: "withdrawn_by_adviser",
+            declineReason: parsed.data.reason ?? "Revoked by admin",
+            respondedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(feeConsentRequests.id, id),
+              eq(feeConsentRequests.status, "pending"),
+            ),
+          )
+          .returning();
+        const row = updatedRows[0];
+        if (!row) {
+          throw Object.assign(
+            new Error("Fee consent request was already actioned"),
+            { status: 409 },
+          );
+        }
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_consent_request_revoked_by_admin",
+          entityType: "fee_consent_request",
+          entityId: String(id),
+          before: {
+            status: existing.status,
+            declineReason: existing.declineReason,
+            respondedAt: existing.respondedAt,
+          },
+          after: {
+            status: row.status,
+            declineReason: row.declineReason,
+            respondedAt: row.respondedAt,
+          },
+          extra: {
+            revokedByAdmin: true,
+            adviserUserId: existing.adviserUserId,
+            clientUserId: existing.clientUserId,
+            reason: parsed.data.reason ?? null,
+          },
+          ipAddress: req.ip || null,
+        });
+        return row;
+      });
+      return updated;
+    }),
+  );
+
+  // ---------------------------------------------------------------------
+  // Task #293 — admin-only Supersede a live consent.
+  // Atomically (a) marks the existing consent's renewalStatus='superseded'
+  // with a back-pointer to the new request, and (b) inserts a fresh
+  // pending request that mirrors the existing consent's terms. The
+  // adviser/client then drive the new request through the normal
+  // sign/decline flow. No money moves.
+  // ---------------------------------------------------------------------
+  app.post(
+    "/api/admin/fee-consents/:id/supersede",
+    adminRoute(async (req, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        throw Object.assign(new Error("Invalid consent id"), { status: 400 });
+      }
+      const supersedeSchema = z.object({
+        reason: z.string().min(3).max(2000),
+      });
+      const parsed = supersedeSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error(
+            "Invalid payload: " +
+              parsed.error.issues.map((i) => i.message).join("; "),
+          ),
+          { status: 400 },
+        );
+      }
+      const result = await db.transaction(async (tx) => {
+        const [consent] = await tx
+          .select()
+          .from(feeConsents)
+          .where(eq(feeConsents.id, id))
+          .for("update")
+          .limit(1);
+        if (!consent) {
+          throw Object.assign(new Error("Fee consent not found"), {
+            status: 404,
+          });
+        }
+        if (
+          consent.renewalStatus !== "active" &&
+          consent.renewalStatus !== "renewal_due"
+        ) {
+          throw Object.assign(
+            new Error(
+              `Cannot supersede a consent in renewal status '${consent.renewalStatus}'.`,
+            ),
+            { status: 400 },
+          );
+        }
+        // Look up the request that produced this consent so we can chain
+        // `supersedesRequestId` on the freshly inserted request.
+        const [originalRequest] = await tx
+          .select({ id: feeConsentRequests.id })
+          .from(feeConsentRequests)
+          .where(eq(feeConsentRequests.signedFeeConsentId, consent.id))
+          .limit(1);
+
+        // Mirror the renewal window from the consent to the new request
+        // (admin doesn't restate it — the supersede flow is "same terms,
+        // fresh signature"). Adviser can edit before sending if needed.
+        const [newRequest] = await tx
+          .insert(feeConsentRequests)
+          .values({
+            adviserUserId: consent.adviserId ?? auth.userId,
+            clientUserId: consent.clientId,
+            adviceRecordId: consent.adviceRecordId,
+            feeType: consent.feeType,
+            amountType: consent.amountType,
+            amount: consent.amount,
+            calculationMethod: consent.calculationMethod,
+            accountNumber: consent.accountNumber,
+            accountName: consent.accountName,
+            deductionFrequency: consent.deductionFrequency,
+            proposedReferenceDay: consent.referenceDay,
+            proposedRenewalWindowStart: consent.renewalWindowStart,
+            proposedRenewalWindowEnd: consent.renewalWindowEnd,
+            proposedConsentExpiryDate: consent.consentExpiryDate,
+            requestNote: `Supersedes consent #${consent.id}: ${parsed.data.reason}`,
+            status: "pending",
+            supersedesRequestId: originalRequest?.id ?? null,
+          })
+          .returning();
+
+        const consentBefore = {
+          renewalStatus: consent.renewalStatus,
+          supersededByRequestId: consent.supersededByRequestId,
+          supersededAt: consent.supersededAt,
+          supersededReason: consent.supersededReason,
+        };
+        const [supersededConsent] = await tx
+          .update(feeConsents)
+          .set({
+            renewalStatus: "superseded",
+            supersededByRequestId: newRequest.id,
+            supersededAt: new Date(),
+            supersededReason: parsed.data.reason,
+            updatedAt: new Date(),
+          })
+          .where(eq(feeConsents.id, consent.id))
+          .returning();
+
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_consent_superseded_by_admin",
+          entityType: "fee_consent",
+          entityId: String(consent.id),
+          before: consentBefore,
+          after: {
+            renewalStatus: supersededConsent.renewalStatus,
+            supersededByRequestId: supersededConsent.supersededByRequestId,
+            supersededAt: supersededConsent.supersededAt,
+            supersededReason: supersededConsent.supersededReason,
+          },
+          extra: {
+            newFeeConsentRequestId: newRequest.id,
+            originalRequestId: originalRequest?.id ?? null,
+            clientId: consent.clientId,
+            adviserId: consent.adviserId,
+            reason: parsed.data.reason,
+          },
+          ipAddress: req.ip || null,
+        });
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_consent_request_created_by_admin_supersede",
+          entityType: "fee_consent_request",
+          entityId: String(newRequest.id),
+          before: null,
+          after: {
+            status: newRequest.status,
+            clientUserId: newRequest.clientUserId,
+            adviserUserId: newRequest.adviserUserId,
+            adviceRecordId: newRequest.adviceRecordId,
+            supersedesRequestId: newRequest.supersedesRequestId,
+          },
+          extra: {
+            supersededFeeConsentId: consent.id,
+            reason: parsed.data.reason,
+          },
+          ipAddress: req.ip || null,
+        });
+        return {
+          supersededConsent,
+          newRequest,
+        };
+      });
+      return result;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #293 — on-demand PDF rendering for the Actions column.
+  // -----------------------------------------------------------------------------
+  // The two endpoints below stream a freshly generated PDF for an admin
+  // download. Nothing is persisted: each call builds the document from
+  // current row state so superseded fields, expiry, etc. always reflect
+  // the latest record. No money moves; this is a read-only export.
+  // -----------------------------------------------------------------------------
+  function renderConsentPdfText(opts: {
+    title: string;
+    headerLines: string[];
+    sections: { heading: string; rows: Array<[string, string]> }[];
+    footer: string;
+  }): Promise<Buffer> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const PDFDocument = (await import("pdfkit")).default;
+        const doc = new PDFDocument({ margin: 50, size: "A4" });
+        const chunks: Buffer[] = [];
+        doc.on("data", (c: Buffer) => chunks.push(c));
+        doc.on("end", () => resolve(Buffer.concat(chunks)));
+        doc.on("error", reject);
+        doc.fontSize(18).text(opts.title, { underline: true });
+        doc.moveDown(0.5);
+        doc.fontSize(10);
+        for (const line of opts.headerLines) doc.text(line);
+        doc.moveDown(0.5);
+        for (const section of opts.sections) {
+          doc.fontSize(12).text(section.heading, { underline: true });
+          doc.fontSize(10);
+          for (const [k, v] of section.rows) {
+            doc.text(`${k}: ${v}`);
+          }
+          doc.moveDown(0.5);
+        }
+        doc.moveDown(1);
+        doc.fontSize(8).fillColor("#555").text(opts.footer);
+        doc.end();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  function fmtDate(v: unknown): string {
+    if (v === null || v === undefined || v === "") return "—";
+    if (!(v instanceof Date) && typeof v !== "string" && typeof v !== "number") {
+      return "—";
+    }
+    try {
+      return new Date(v).toLocaleString("en-AU", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return String(v);
+    }
+  }
+
+  app.get(
+    "/api/admin/fee-consent-requests/:id/pdf",
+    adminStreamRoute(async (req, res, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        throw Object.assign(new Error("Invalid request id"), { status: 400 });
+      }
+      const [row] = await db
+        .select()
+        .from(feeConsentRequests)
+        .where(eq(feeConsentRequests.id, id))
+        .limit(1);
+      if (!row) {
+        throw Object.assign(new Error("Fee consent request not found"), {
+          status: 404,
+        });
+      }
+      const [adviser, client] = await Promise.all([
+        db
+          .select({ username: users.username })
+          .from(users)
+          .where(eq(users.id, row.adviserUserId))
+          .limit(1),
+        db
+          .select({ username: users.username })
+          .from(users)
+          .where(eq(users.id, row.clientUserId))
+          .limit(1),
+      ]);
+      const buf = await renderConsentPdfText({
+        title: `Fee Consent Request #${row.id}`,
+        headerLines: [
+          `Generated: ${new Date().toISOString()}`,
+          `Status: ${row.status}`,
+        ],
+        sections: [
+          {
+            heading: "Parties",
+            rows: [
+              ["Adviser", `${adviser[0]?.username ?? "?"} (#${row.adviserUserId})`],
+              ["Client", `${client[0]?.username ?? "?"} (#${row.clientUserId})`],
+              [
+                "Linked advice record",
+                row.adviceRecordId
+                  ? `#${row.adviceRecordId}`
+                  : "— (legacy, pre-Task#293)",
+              ],
+            ],
+          },
+          {
+            heading: "Fee terms",
+            rows: [
+              ["Fee type", row.feeType],
+              ["Amount type", row.amountType],
+              ["Amount", row.amount === null ? "—" : String(row.amount)],
+              ["Calculation method", row.calculationMethod ?? "—"],
+              ["Account", `${row.accountNumber} (${row.accountName ?? "—"})`],
+              ["Frequency", row.deductionFrequency],
+              ["Reference day", fmtDate(row.proposedReferenceDay)],
+              [
+                "Renewal window",
+                `${fmtDate(row.proposedRenewalWindowStart)}  →  ${fmtDate(
+                  row.proposedRenewalWindowEnd,
+                )}`,
+              ],
+              ["Expiry", fmtDate(row.proposedConsentExpiryDate)],
+            ],
+          },
+          {
+            heading: "Lifecycle",
+            rows: [
+              ["Created", fmtDate(row.createdAt)],
+              ["Responded", fmtDate(row.respondedAt)],
+              ["Decline reason", row.declineReason ?? "—"],
+              [
+                "Signed → consent",
+                row.signedFeeConsentId ? `#${row.signedFeeConsentId}` : "—",
+              ],
+              [
+                "Supersedes request",
+                row.supersedesRequestId ? `#${row.supersedesRequestId}` : "—",
+              ],
+            ],
+          },
+          {
+            heading: "Adviser note to client",
+            rows: [["Note", row.requestNote ?? "—"]],
+          },
+        ],
+        footer: `Exported by admin user #${auth.userId} on ${new Date().toISOString()}. ` +
+          `This document is informational only — no money will be moved by AMAX based on this consent.`,
+      });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="fee-consent-request-${row.id}.pdf"`,
+      );
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_consent_request_pdf_exported",
+        entityType: "fee_consent_request",
+        entityId: String(row.id),
+        before: null,
+        after: null,
+        extra: { source: "admin_ui" },
+        ipAddress: req.ip || null,
+      });
+      res.end(buf);
+      return;
+    }),
+  );
+
+  app.get(
+    "/api/admin/fee-consents/:id/pdf",
+    adminStreamRoute(async (req, res, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        throw Object.assign(new Error("Invalid consent id"), { status: 400 });
+      }
+      const [row] = await db
+        .select()
+        .from(feeConsents)
+        .where(eq(feeConsents.id, id))
+        .limit(1);
+      if (!row) {
+        throw Object.assign(new Error("Fee consent not found"), { status: 404 });
+      }
+      const [adviser, client] = await Promise.all([
+        row.adviserId
+          ? db
+              .select({ username: users.username })
+              .from(users)
+              .where(eq(users.id, row.adviserId))
+              .limit(1)
+          : Promise.resolve([]),
+        db
+          .select({ username: users.username })
+          .from(users)
+          .where(eq(users.id, row.clientId))
+          .limit(1),
+      ]);
+      // Pull the recorded sign IP from the audit row written at sign time.
+      const [ipRow] = await db
+        .select({ ipAddress: auditLogs.ipAddress })
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.entityType, "fee_consent"),
+            eq(auditLogs.entityId, String(row.id)),
+            eq(auditLogs.action, "fee_consent_created"),
+          ),
+        )
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(1);
+      const buf = await renderConsentPdfText({
+        title: `Fee Consent #${row.id}`,
+        headerLines: [
+          `Generated: ${new Date().toISOString()}`,
+          `Renewal status: ${row.renewalStatus}`,
+        ],
+        sections: [
+          {
+            heading: "Parties",
+            rows: [
+              [
+                "Adviser",
+                `${adviser[0]?.username ?? "?"} (#${row.adviserId ?? "—"})`,
+              ],
+              ["Client", `${client[0]?.username ?? "?"} (#${row.clientId})`],
+              ["Linked advice record", `#${row.adviceRecordId}`],
+            ],
+          },
+          {
+            heading: "Fee terms",
+            rows: [
+              ["Fee type", row.feeType],
+              ["Amount type", row.amountType],
+              ["Amount", row.amount === null ? "—" : String(row.amount)],
+              ["Calculation method", row.calculationMethod ?? "—"],
+              ["Account", `${row.accountNumber} (${row.accountName ?? "—"})`],
+              ["Frequency", row.deductionFrequency],
+              ["Reference day", fmtDate(row.referenceDay)],
+              [
+                "Renewal window",
+                `${fmtDate(row.renewalWindowStart)}  →  ${fmtDate(
+                  row.renewalWindowEnd,
+                )}`,
+              ],
+              ["Expiry", fmtDate(row.consentExpiryDate)],
+            ],
+          },
+          {
+            heading: "Signature",
+            rows: [
+              ["Signed by", row.clientSignatureName],
+              ["Signed at", fmtDate(row.consentedAt)],
+              ["Signed from IP", ipRow?.ipAddress ?? "—"],
+            ],
+          },
+          {
+            heading: "Lifecycle",
+            rows: [
+              ["Withdrawn at", fmtDate(row.withdrawnAt)],
+              [
+                "Superseded by request",
+                row.supersededByRequestId
+                  ? `#${row.supersededByRequestId}`
+                  : "—",
+              ],
+              ["Superseded at", fmtDate(row.supersededAt)],
+              ["Superseded reason", row.supersededReason ?? "—"],
+            ],
+          },
+        ],
+        footer: `Exported by admin user #${auth.userId} on ${new Date().toISOString()}. ` +
+          `This document is informational only — no money will be moved by AMAX based on this consent.`,
+      });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="fee-consent-${row.id}.pdf"`,
+      );
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_consent_pdf_exported",
+        entityType: "fee_consent",
+        entityId: String(row.id),
+        before: null,
+        after: null,
+        extra: { source: "admin_ui" },
+        ipAddress: req.ip || null,
+      });
+      res.end(buf);
+      return;
     }),
   );
 
