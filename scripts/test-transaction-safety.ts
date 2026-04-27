@@ -42,7 +42,7 @@
 // =============================================================================
 
 import { createHash } from "crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../server/db";
 import {
   users,
@@ -53,6 +53,7 @@ import {
   walletLedgerReconciliations,
   adviserFeeDeductions,
   adviserFeeAccruals,
+  accounts,
 } from "../shared/schema";
 import {
   getOrCreateClientAccount,
@@ -1222,6 +1223,35 @@ async function main() {
   await ensureFreshTestWallet(userId);
   await ensureFreshWalletFor(adviserUserId);
 
+  // Task #220 (mirrors #219 in scripts/test-fee-insufficient-funds.ts) —
+  // snapshot the set of `accounts` PKs already owned by the platform user
+  // BEFORE this script runs. The settlement / reversal code paths exercised
+  // by test3, test5, and test8 call getOrCreateSuspenseAccount /
+  // getOrCreateFeeAccount, both of which insert a fresh platform-side
+  // account row on a clean DB. cleanupTestUser walks ledger_entries +
+  // transactions by user_id but never touches platform-side accounts
+  // rows, so without this snapshot+diff the platform user accumulates one
+  // new accounts row per fresh-DB run and the orphan-row gate (Task #198)
+  // flags it. Diff against this snapshot in the finally block and
+  // PK-delete only the rows THIS script created — never delete by
+  // user_id alone, so concurrent test scripts that pin the same
+  // PLATFORM_USER_ID are unaffected.
+  const platformUserIdRaw = process.env.PLATFORM_USER_ID;
+  const platformUserId =
+    platformUserIdRaw && /^[1-9]\d*$/.test(platformUserIdRaw)
+      ? Number(platformUserIdRaw)
+      : null;
+  const preExistingPlatformAccountIds = new Set<number>(
+    platformUserId !== null
+      ? (
+          await db
+            .select({ id: accounts.id })
+            .from(accounts)
+            .where(eq(accounts.userId, platformUserId))
+        ).map((r) => r.id)
+      : [],
+  );
+
   let exitCode = 0;
   try {
     await test1_depositIdempotency(userId);
@@ -1270,6 +1300,30 @@ async function main() {
     try {
       await cleanupAdviserTestUser(adviserUserId);
       await cleanupTestUser(userId);
+
+      // Task #220 — diff platform-user accounts against the start-of-script
+      // snapshot and PK-delete only the rows THIS run created. The two
+      // cleanup calls above sweep ledger_entries by transaction_id, which
+      // dereferences the platform-side legs, but they do not touch
+      // accounts whose user_id is the platform user. PK delete (never
+      // user_id alone) protects concurrent test scripts pinned to the
+      // same platform user.
+      if (platformUserId !== null) {
+        const currentPlatformAccountIds = (
+          await db
+            .select({ id: accounts.id })
+            .from(accounts)
+            .where(eq(accounts.userId, platformUserId))
+        ).map((r) => r.id);
+        const newPlatformAccountIds = currentPlatformAccountIds.filter(
+          (id) => !preExistingPlatformAccountIds.has(id),
+        );
+        if (newPlatformAccountIds.length > 0) {
+          await db
+            .delete(accounts)
+            .where(inArray(accounts.id, newPlatformAccountIds));
+        }
+      }
     } catch (cleanupErr) {
       console.error("Post-run cleanup threw:", cleanupErr);
       if (exitCode === 0) exitCode = 1;
