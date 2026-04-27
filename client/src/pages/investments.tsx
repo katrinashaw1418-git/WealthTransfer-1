@@ -371,11 +371,11 @@ export default function Investments() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Categories</SelectItem>
-                  <SelectItem value="real_estate">Real Estate</SelectItem>
-                  <SelectItem value="corporate_credit">Corporate Credit</SelectItem>
-                  <SelectItem value="venture_capital">Venture Capital</SelectItem>
-                  <SelectItem value="digital_assets">Digital Assets</SelectItem>
-                  <SelectItem value="cash_deposit">Cash & Fixed Income</SelectItem>
+                  {Object.entries(PRODUCT_CATEGORY_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
