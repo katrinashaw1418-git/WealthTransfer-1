@@ -1,5 +1,19 @@
 # Wealth Management Platform
 
+## Recent Changes (April 2026) — Task #185: Stop withdrawals and other money routes from returning 500 on simultaneous retries
+
+Extended the Task #160 catch-block fix from `/api/deposit` to the four other money-movement routes that share the same SERIALIZABLE-race shape — `/api/withdraw`, `/api/fx-exchange`, `/api/wallets/transfer`, `/api/investments`. All five now hoist `idemKey` and `userIdForReplay` out of the try block and call `replayIdempotentOnSerializationFailure(error, userIdForReplay, "<route>", idemKey)` FIRST in the catch, returning 200 + `{ idempotent: true, ... }` when the winning request's stored response is found. This means a retried request that races another in-flight retry sharing the same Idempotency-Key now gets the winner's clean 200 instead of a 500 the client would naively retry (increasing duplicate-processing risk).
+
+For the withdrawal handler the new branch runs BEFORE `mapLedgerUnbalancedToHttpResponse` so a benign 40001 doesn't get mis-paged as an unbalanced-ledger operator alert; for fx-exchange / wallets/transfer / investments it runs before the generic 500 mapper.
+
+**New pre-launch lifecycle gates** (`scripts/pre-launch-safety.ts`): one new scenario per route, each mirroring `lifecycle2_idempotencyConcurrency` — fires two parallel POSTs sharing one Idempotency-Key, asserts `http=[200,200]`, exactly 1 NEW transaction row attributable to the parallel calls (snapshot/delta-counted via `snapshotTxIds()` so the seed-funding tx doesn't pollute the count), and exactly 1 idempotency_keys row. The withdraw scenario additionally asserts 1 ledger pair (2 entries, 1 receipt). The other three routes write wallet balances directly without ledger entries (a known pre-existing caveat noted in lifecycle1) so they only assert the tx row + idem row. Each scenario uses its own `__prelaunch_idem_<route>` fixture user so per-route resets and delta accounting stay isolated.
+
+After the fx-exchange / wallets/transfer / investments scenarios run, the test calls `refreshWalletCacheBalance` for the involved currencies to re-derive the wallet cache from the ledger — without this, the direct-write the route performs would leave wallet/ledger drift that the downstream wallet-vs-ledger reconciliation clean-room (Stage 3) would surface as a critical operator alert. The investments scenario also explicitly clears `user_investments` for its fixture user before running because `resetScenarioState` doesn't know about that table; without this the `invCount === 1` assertion would fail on re-runs.
+
+**Pre-launch-safety result**: all 5 idempotency-concurrency lifecycle gates PASS, plus all 3 reconciliation clean-rooms PASS. The only remaining failure (`existing: test-task-35-suppression`) is pre-existing and unrelated (FK violation in that script's own teardown).
+
+**Files**: `server/routes.ts` (4 catch-blocks updated symmetrically with the deposit pattern), `scripts/pre-launch-safety.ts` (4 new scenarios + helpers `snapshotTxIds`, `newTxIdsSince`, `ensureFxRateSeed`; CANONICAL_ORDER and main() wired).
+
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 

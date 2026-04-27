@@ -79,9 +79,12 @@ import {
   ledgerPostings,
   idempotencyKeys,
   operatorAlerts,
+  investmentProducts,
+  userInvestments,
 } from "../shared/schema";
 import { signToken } from "../server/auth";
 import { registerRoutes } from "../server/routes";
+import { storage } from "../server/storage";
 import {
   getOrCreateClientAccount,
   getOrCreateSuspenseAccount,
@@ -111,6 +114,13 @@ const CANONICAL_ORDER: string[] = [
   "existing: test-task-35-suppression",
   "lifecycle: happy-path wallet matches ledger",
   "lifecycle: idempotency under concurrency",
+  // Task #185 — same idempotency-under-concurrency invariant for the
+  // OTHER money-movement routes. The deposit handler proved the pattern;
+  // these gates prove the catch-block fix has been applied symmetrically.
+  "lifecycle: idempotency under concurrency (withdraw)",
+  "lifecycle: idempotency under concurrency (fx-exchange)",
+  "lifecycle: idempotency under concurrency (wallets/transfer)",
+  "lifecycle: idempotency under concurrency (investments)",
   "lifecycle: reversal symmetry",
   "reconciliation: wallet-ledger clean-room",
   "reconciliation: ledger-vs-custodian clean-room",
@@ -191,6 +201,12 @@ const PLATFORM_USERNAME = "__prelaunch_platform";
 const HAPPY_USERNAME = "__prelaunch_happy_path";
 const IDEM_USERNAME = "__prelaunch_idem_concurrency";
 const REVERSAL_USERNAME = "__prelaunch_reversal";
+// Task #185 — separate fixture user per route so the per-scenario
+// resetScenarioState() / NEW-tx delta accounting can't cross-contaminate.
+const IDEM_WITHDRAW_USERNAME = "__prelaunch_idem_withdraw";
+const IDEM_FXEX_USERNAME = "__prelaunch_idem_fxex";
+const IDEM_WTRANSFER_USERNAME = "__prelaunch_idem_wtransfer";
+const IDEM_INVEST_USERNAME = "__prelaunch_idem_invest";
 
 const HAPPY_AUD_DEPOSIT = "1000.00";
 const HAPPY_AUD_TRADE = "500.00";
@@ -795,6 +811,486 @@ async function lifecycle2_idempotencyConcurrency(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Task #185 — idempotency-under-concurrency for the OTHER money routes.
+// /api/deposit was wired by Task #160; /api/withdraw, /api/fx-exchange,
+// /api/wallets/transfer, and /api/investments now each call
+// `replayIdempotentOnSerializationFailure` first in their catch blocks. Each
+// scenario fires two parallel POSTs sharing one Idempotency-Key and asserts:
+//   - http=[200, 200] (no leaked SQLSTATE 40001 → 500)
+//   - exactly one new transaction row attributable to the parallel calls
+//   - exactly one `idempotency_keys` row for that route+key
+// Routes that post double-entry ledger pairs (only /api/withdraw in this
+// group) additionally assert one ledger pair (2 entries, 1 receipt). The
+// other three routes write wallet balances directly without ledger entries
+// (a known pre-existing caveat — see lifecycle1 commentary), so the new tx
+// row is the assertion.
+// ---------------------------------------------------------------------------
+
+// Snapshot the user's transactions BEFORE firing the parallel calls so we
+// can count NEW rows the calls produced, independent of any seed tx the
+// scenario created to fund the wallet.
+async function snapshotTxIds(userId: number): Promise<Set<number>> {
+  const rows = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.userId, userId));
+  return new Set(rows.map((r) => r.id));
+}
+
+async function newTxIdsSince(
+  userId: number,
+  before: Set<number>,
+): Promise<number[]> {
+  const rows = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.userId, userId));
+  return rows.map((r) => r.id).filter((id) => !before.has(id));
+}
+
+async function ensureFxRateSeed(
+  base: string,
+  target: string,
+  rate: string,
+): Promise<void> {
+  const existing = await storage.getFxRate(base, target);
+  if (existing) return;
+  await storage.createFxRate({
+    baseCurrency: base,
+    targetCurrency: target,
+    rate,
+    // `spread` is NOT NULL in the schema; the auto-FX-refresh job populates
+    // it for live pairs. For test pairs we just need any valid value.
+    spread: "0.0010",
+  });
+}
+
+async function lifecycle2b_idempotencyConcurrencyWithdraw(): Promise<void> {
+  const NAME = "lifecycle: idempotency under concurrency (withdraw)";
+  const missing = missingHandlerKeys("POST /api/withdraw");
+  if (missing.length > 0) {
+    skip(NAME, `route handler(s) not captured: ${missing.join(", ")}`);
+    return;
+  }
+  try {
+    const userId = await ensureUser({
+      username: IDEM_WITHDRAW_USERNAME,
+      email: "prelaunch-idem-withdraw@test.invalid",
+      role: "client",
+    });
+    await resetScenarioState([userId]);
+    await ensureWallet(userId, "AUD");
+
+    // Seed AUD funds via a balanced ledger pair so the withdrawal
+    // pre-check (`available.lt(totalDeduction)`) passes.
+    // Withdraw fee for AUD is 35.00 (matches WITHDRAWAL_FEES['AUD']).
+    await postSyntheticLeg({
+      userId,
+      currency: "AUD",
+      amount: "1000.00",
+      direction: "to_client",
+      description: "prelaunch idem-withdraw seed",
+    });
+
+    const txIdsBefore = await snapshotTxIds(userId);
+
+    const token = signToken({
+      userId,
+      username: IDEM_WITHDRAW_USERNAME,
+      email: "prelaunch-idem-withdraw@test.invalid",
+      role: "client",
+    });
+
+    const idemKey = `prelaunch-idem-withdraw-${randomUUID()}`;
+    const body = { currency: "AUD", amount: "100.00" };
+
+    const withdrawHandler = getHandler("POST /api/withdraw");
+    const callOne = (): Promise<MockResult> => {
+      const m = makeMockReqRes({
+        token,
+        headers: { "idempotency-key": idemKey },
+        body,
+      });
+      return Promise.resolve(withdrawHandler(m.req, m.res)).then(
+        () => m.result,
+      );
+    };
+
+    const [r1, r2] = await Promise.all([callOne(), callOne()]);
+
+    await captureNewTxIds(userId);
+    await captureNewIdemIds(userId);
+
+    const newTxIds = await newTxIdsSince(userId, txIdsBefore);
+    const [{ entryCount }] = await db
+      .select({ entryCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerEntries)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerEntries.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
+    const [{ receiptCount }] = await db
+      .select({ receiptCount: sql<number>`COUNT(*)::int` })
+      .from(ledgerPostings)
+      .where(
+        newTxIds.length > 0
+          ? inArray(ledgerPostings.transactionId, newTxIds)
+          : sql`FALSE`,
+      );
+    const [{ idemCount }] = await db
+      .select({ idemCount: sql<number>`COUNT(*)::int` })
+      .from(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.route, "/api/withdraw"),
+          eq(idempotencyKeys.key, idemKey),
+        ),
+      );
+
+    const ok =
+      newTxIds.length === 1 &&
+      Number(entryCount) === 2 &&
+      Number(receiptCount) === 1 &&
+      Number(idemCount) === 1 &&
+      r1.statusCode === 200 &&
+      r2.statusCode === 200;
+
+    const detail =
+      `parallel withdrawals: new tx=${newTxIds.length}, entries=${entryCount}, ` +
+      `receipts=${receiptCount}, idem rows=${idemCount}, ` +
+      `http=[${r1.statusCode},${r2.statusCode}]`;
+
+    if (ok) pass(NAME, detail);
+    else fail(NAME, detail);
+  } catch (err: any) {
+    fail(NAME, `threw: ${err?.message ?? err}`);
+  }
+}
+
+async function lifecycle2c_idempotencyConcurrencyFxExchange(): Promise<void> {
+  const NAME = "lifecycle: idempotency under concurrency (fx-exchange)";
+  const missing = missingHandlerKeys("POST /api/fx-exchange");
+  if (missing.length > 0) {
+    skip(NAME, `route handler(s) not captured: ${missing.join(", ")}`);
+    return;
+  }
+  try {
+    // Pre-check: an FX rate must exist for the pair we're going to trade.
+    // If not, SKIP cleanly rather than fail on a precondition the gate
+    // wasn't designed to verify.
+    await ensureFxRateSeed("AUD", "USD", "0.65");
+
+    const userId = await ensureUser({
+      username: IDEM_FXEX_USERNAME,
+      email: "prelaunch-idem-fxex@test.invalid",
+      role: "client",
+    });
+    await resetScenarioState([userId]);
+    await ensureWallet(userId, "AUD");
+    await ensureWallet(userId, "USD");
+
+    // Seed AUD funds via a balanced ledger pair, then refresh the wallet
+    // cache so `available.lt(amount)` in the FX handler passes.
+    await postSyntheticLeg({
+      userId,
+      currency: "AUD",
+      amount: "1000.00",
+      direction: "to_client",
+      description: "prelaunch idem-fxex seed",
+    });
+    // The FX handler reads `wallets.availableBalance` — the seed already
+    // refreshed it via `refreshWalletCacheBalance` inside postSyntheticLeg.
+
+    const txIdsBefore = await snapshotTxIds(userId);
+
+    const token = signToken({
+      userId,
+      username: IDEM_FXEX_USERNAME,
+      email: "prelaunch-idem-fxex@test.invalid",
+      role: "client",
+    });
+
+    const idemKey = `prelaunch-idem-fxex-${randomUUID()}`;
+    const body = { fromCurrency: "AUD", toCurrency: "USD", amount: "100.00" };
+
+    const fxHandler = getHandler("POST /api/fx-exchange");
+    const callOne = (): Promise<MockResult> => {
+      const m = makeMockReqRes({
+        token,
+        headers: { "idempotency-key": idemKey },
+        body,
+      });
+      return Promise.resolve(fxHandler(m.req, m.res)).then(() => m.result);
+    };
+
+    const [r1, r2] = await Promise.all([callOne(), callOne()]);
+
+    await captureNewTxIds(userId);
+    await captureNewIdemIds(userId);
+
+    const newTxIds = await newTxIdsSince(userId, txIdsBefore);
+    const [{ idemCount }] = await db
+      .select({ idemCount: sql<number>`COUNT(*)::int` })
+      .from(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.route, "/api/fx-exchange"),
+          eq(idempotencyKeys.key, idemKey),
+        ),
+      );
+
+    // /api/fx-exchange writes wallet balances directly (no ledger pair —
+    // pre-existing caveat noted in lifecycle1). So the assertion is: 1 new
+    // tx row, 1 idem row, 200/200.
+    const ok =
+      newTxIds.length === 1 &&
+      Number(idemCount) === 1 &&
+      r1.statusCode === 200 &&
+      r2.statusCode === 200;
+
+    const detail =
+      `parallel fx-exchange: new tx=${newTxIds.length}, idem rows=${idemCount}, ` +
+      `http=[${r1.statusCode},${r2.statusCode}]`;
+
+    // /api/fx-exchange writes wallet balances directly without a matching
+    // ledger pair (pre-existing caveat noted in lifecycle1). Re-derive the
+    // wallet caches from the ledger so the downstream wallet-vs-ledger
+    // reconciliation clean-room doesn't see drift introduced by THIS gate.
+    await refreshWalletCacheBalance(db, userId, "AUD");
+    await refreshWalletCacheBalance(db, userId, "USD");
+
+    if (ok) pass(NAME, detail);
+    else fail(NAME, detail);
+  } catch (err: any) {
+    fail(NAME, `threw: ${err?.message ?? err}`);
+  }
+}
+
+async function lifecycle2d_idempotencyConcurrencyWalletTransfer(): Promise<void> {
+  const NAME = "lifecycle: idempotency under concurrency (wallets/transfer)";
+  const missing = missingHandlerKeys("POST /api/wallets/transfer");
+  if (missing.length > 0) {
+    skip(NAME, `route handler(s) not captured: ${missing.join(", ")}`);
+    return;
+  }
+  try {
+    await ensureFxRateSeed("AUD", "USD", "0.65");
+
+    const userId = await ensureUser({
+      username: IDEM_WTRANSFER_USERNAME,
+      email: "prelaunch-idem-wtransfer@test.invalid",
+      role: "client",
+    });
+    await resetScenarioState([userId]);
+    await ensureWallet(userId, "AUD");
+    await ensureWallet(userId, "USD");
+
+    await postSyntheticLeg({
+      userId,
+      currency: "AUD",
+      amount: "1000.00",
+      direction: "to_client",
+      description: "prelaunch idem-wtransfer seed",
+    });
+
+    const txIdsBefore = await snapshotTxIds(userId);
+
+    const token = signToken({
+      userId,
+      username: IDEM_WTRANSFER_USERNAME,
+      email: "prelaunch-idem-wtransfer@test.invalid",
+      role: "client",
+    });
+
+    const idemKey = `prelaunch-idem-wtransfer-${randomUUID()}`;
+    const body = { fromCurrency: "AUD", toCurrency: "USD", amount: "100.00" };
+
+    const handler = getHandler("POST /api/wallets/transfer");
+    const callOne = (): Promise<MockResult> => {
+      const m = makeMockReqRes({
+        token,
+        headers: { "idempotency-key": idemKey },
+        body,
+      });
+      return Promise.resolve(handler(m.req, m.res)).then(() => m.result);
+    };
+
+    const [r1, r2] = await Promise.all([callOne(), callOne()]);
+
+    await captureNewTxIds(userId);
+    await captureNewIdemIds(userId);
+
+    const newTxIds = await newTxIdsSince(userId, txIdsBefore);
+    const [{ idemCount }] = await db
+      .select({ idemCount: sql<number>`COUNT(*)::int` })
+      .from(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.route, "/api/wallets/transfer"),
+          eq(idempotencyKeys.key, idemKey),
+        ),
+      );
+
+    // Same shape as fx-exchange: wallet writes only, no ledger pair.
+    const ok =
+      newTxIds.length === 1 &&
+      Number(idemCount) === 1 &&
+      r1.statusCode === 200 &&
+      r2.statusCode === 200;
+
+    const detail =
+      `parallel wallets/transfer: new tx=${newTxIds.length}, idem rows=${idemCount}, ` +
+      `http=[${r1.statusCode},${r2.statusCode}]`;
+
+    // Same caveat as fx-exchange — re-derive wallet caches from the ledger
+    // so the downstream wallet-vs-ledger reconciliation clean-room is not
+    // polluted by the direct-write the route performs.
+    await refreshWalletCacheBalance(db, userId, "AUD");
+    await refreshWalletCacheBalance(db, userId, "USD");
+
+    if (ok) pass(NAME, detail);
+    else fail(NAME, detail);
+  } catch (err: any) {
+    fail(NAME, `threw: ${err?.message ?? err}`);
+  }
+}
+
+async function lifecycle2e_idempotencyConcurrencyInvestments(): Promise<void> {
+  const NAME = "lifecycle: idempotency under concurrency (investments)";
+  const missing = missingHandlerKeys("POST /api/investments");
+  if (missing.length > 0) {
+    skip(NAME, `route handler(s) not captured: ${missing.join(", ")}`);
+    return;
+  }
+  try {
+    // Pick the cheapest active investment product so we can fund the
+    // source wallet without huge seeds. SKIP cleanly if no product exists
+    // (the gate is for the catch-block wiring, not for product seeding).
+    const productRows = await db
+      .select({
+        id: investmentProducts.id,
+        minimumInvestment: investmentProducts.minimumInvestment,
+      })
+      .from(investmentProducts)
+      .where(eq(investmentProducts.isActive, true))
+      .orderBy(investmentProducts.minimumInvestment)
+      .limit(1);
+    if (productRows.length === 0) {
+      skip(NAME, "no active investment_products row available to test against");
+      return;
+    }
+    const product = productRows[0];
+
+    const userId = await ensureUser({
+      username: IDEM_INVEST_USERNAME,
+      email: "prelaunch-idem-invest@test.invalid",
+      role: "client",
+    });
+    await resetScenarioState([userId]);
+    await ensureWallet(userId, "USD");
+    // resetScenarioState() does not know about user_investments — clear it
+    // explicitly so re-runs don't accumulate prior investment rows that
+    // would break the `invCount === 1` assertion.
+    await db
+      .delete(userInvestments)
+      .where(eq(userInvestments.userId, userId));
+
+    // Need to fund the USD wallet with at least the minimum investment.
+    // Floor everything at 100 so a product with `minimumInvestment = 0`
+    // (which would make the seed 0 and trip postLedgerEntries' positive-
+    // amount invariant) still produces a sensible scenario.
+    const minInvestRaw = new Decimal(product.minimumInvestment);
+    const investAmountDec = Decimal.max(minInvestRaw, new Decimal("100"));
+    const seedAmount = investAmountDec.mul(2).toFixed(2);
+    await postSyntheticLeg({
+      userId,
+      currency: "USD",
+      amount: seedAmount,
+      direction: "to_client",
+      description: "prelaunch idem-invest seed",
+    });
+
+    const txIdsBefore = await snapshotTxIds(userId);
+
+    const token = signToken({
+      userId,
+      username: IDEM_INVEST_USERNAME,
+      email: "prelaunch-idem-invest@test.invalid",
+      role: "client",
+    });
+
+    const idemKey = `prelaunch-idem-invest-${randomUUID()}`;
+    const investAmount = investAmountDec.toFixed(2);
+    const body = {
+      productId: product.id,
+      amount: investAmount,
+      sourceCurrency: "USD",
+    };
+
+    const handler = getHandler("POST /api/investments");
+    const callOne = (): Promise<MockResult> => {
+      const m = makeMockReqRes({
+        token,
+        headers: { "idempotency-key": idemKey },
+        body,
+      });
+      return Promise.resolve(handler(m.req, m.res)).then(() => m.result);
+    };
+
+    const [r1, r2] = await Promise.all([callOne(), callOne()]);
+
+    await captureNewTxIds(userId);
+    await captureNewIdemIds(userId);
+
+    const newTxIds = await newTxIdsSince(userId, txIdsBefore);
+    const [{ idemCount }] = await db
+      .select({ idemCount: sql<number>`COUNT(*)::int` })
+      .from(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.route, "/api/investments"),
+          eq(idempotencyKeys.key, idemKey),
+        ),
+      );
+    const [{ invCount }] = await db
+      .select({ invCount: sql<number>`COUNT(*)::int` })
+      .from(userInvestments)
+      .where(eq(userInvestments.userId, userId));
+
+    // /api/investments writes wallet directly + creates one user_investments
+    // row + one transactions row. After two parallel calls under the same
+    // idempotency key: 1 new tx, 1 user_investments row, 1 idem row, 200/200.
+    const ok =
+      newTxIds.length === 1 &&
+      Number(invCount) === 1 &&
+      Number(idemCount) === 1 &&
+      r1.statusCode === 200 &&
+      r2.statusCode === 200;
+
+    const detail =
+      `parallel investments: new tx=${newTxIds.length}, ` +
+      `user_investments=${invCount}, idem rows=${idemCount}, ` +
+      `http=[${r1.statusCode},${r2.statusCode}]`;
+
+    // /api/investments writes the source wallet directly without a matching
+    // ledger pair (pre-existing caveat). Re-derive the wallet cache from
+    // the ledger so the downstream wallet-vs-ledger reconciliation
+    // clean-room doesn't see drift introduced by THIS gate.
+    await refreshWalletCacheBalance(db, userId, "USD");
+
+    if (ok) pass(NAME, detail);
+    else fail(NAME, detail);
+  } catch (err: any) {
+    fail(NAME, `threw: ${err?.message ?? err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle scenario 3: reversal symmetry.
 // Post a forward transaction (debit suspense, credit client) and then a
 // REVERSAL transaction (debit client, credit suspense, equal magnitude).
@@ -1169,6 +1665,19 @@ async function main(): Promise<void> {
 
     console.log("\n--- pre-launch: lifecycle 2 (idempotency under concurrency) ---");
     await lifecycle2_idempotencyConcurrency();
+
+    // Task #185 — same gate, applied to the OTHER money-movement routes.
+    console.log("\n--- pre-launch: lifecycle 2b (idempotency: withdraw) ---");
+    await lifecycle2b_idempotencyConcurrencyWithdraw();
+
+    console.log("\n--- pre-launch: lifecycle 2c (idempotency: fx-exchange) ---");
+    await lifecycle2c_idempotencyConcurrencyFxExchange();
+
+    console.log("\n--- pre-launch: lifecycle 2d (idempotency: wallets/transfer) ---");
+    await lifecycle2d_idempotencyConcurrencyWalletTransfer();
+
+    console.log("\n--- pre-launch: lifecycle 2e (idempotency: investments) ---");
+    await lifecycle2e_idempotencyConcurrencyInvestments();
 
     console.log("\n--- pre-launch: lifecycle 3 (reversal symmetry) ---");
     await lifecycle3_reversalSymmetry();

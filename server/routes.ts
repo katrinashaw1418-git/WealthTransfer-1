@@ -3173,8 +3173,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // FX Exchange — atomic SERIALIZABLE transaction + Decimal + DB idempotency
   // ---------------------------------------------------------------------------
   app.post("/api/fx-exchange", moneyMovementLimiter, async (req, res) => {
+    // Task #185 — hoist `idemKey` and `userIdForReplay` so the catch handler
+    // can replay the winner's stored response when a parallel request loses
+    // the SERIALIZABLE race (Postgres SQLSTATE 40001). Mirrors the deposit
+    // handler pattern from Task #160.
+    const idemKey = req.headers["idempotency-key"] as string | undefined;
+    let userIdForReplay: number | null = null;
     try {
       const { userId } = requireAuth(req);
+      userIdForReplay = userId;
       await requireKyc(userId, storage);
       // Task #146 — kill switch. Master `transactions` switch covers
       // FX exchange (no narrower category exists for this op).
@@ -3188,7 +3195,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const amount = new Decimal(rawAmount);
 
       // DB-backed idempotency check
-      const idemKey = req.headers["idempotency-key"] as string | undefined;
       const payloadHash = hashPayload(req.body);
       if (idemKey) {
         const idem = await checkIdempotency(userId, "/api/fx-exchange", idemKey, payloadHash);
@@ -3255,6 +3261,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "fx_exchange", "transaction", String(txRecord?.id), { fromCurrency, toCurrency, amount: rawAmount }, req.ip || null);
       res.json(responseBody);
     } catch (error: any) {
+      // Task #185 — replay an idempotent response when a parallel request
+      // with the same Idempotency-Key lost the SERIALIZABLE race (SQLSTATE
+      // 40001). Runs FIRST so it pre-empts every other branch (including
+      // the generic 500 mapper, which a client would otherwise retry —
+      // increasing duplicate-processing risk).
+      if (userIdForReplay !== null && idemKey) {
+        const replay = await replayIdempotentOnSerializationFailure(
+          error, userIdForReplay, "/api/fx-exchange", idemKey,
+        );
+        if (replay) {
+          return res.status(200).json({ ...(replay as object), idempotent: true });
+        }
+      }
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to process FX exchange" });
@@ -3418,8 +3437,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Internal operation: write completed atomically; no pending pre-insert.
   // ---------------------------------------------------------------------------
   const handleWithdraw = async (req: Request, res: any) => {
+    // Task #185 — hoist `idemKey` and `userIdForReplay` so the catch handler
+    // can replay the winner's stored response when a parallel request loses
+    // the SERIALIZABLE race (Postgres SQLSTATE 40001). Mirrors deposit.
+    const idemKey = req.headers["idempotency-key"] as string | undefined;
+    let userIdForReplay: number | null = null;
     try {
       const { userId } = requireAuth(req);
+      userIdForReplay = userId;
       await requireKyc(userId, storage);
       // Task #146 — kill switch. Specific `withdrawals` first, master
       // `transactions` second.
@@ -3459,7 +3484,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const fee = new Decimal(feeAmount);
       const totalDeduction = amount.plus(fee);
 
-      const idemKey = req.headers["idempotency-key"] as string | undefined;
       const payloadHash = hashPayload(req.body);
       if (idemKey) {
         const idem = await checkIdempotency(userId, "/api/withdraw", idemKey, payloadHash);
@@ -3523,6 +3547,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "withdrawal", "transaction", String(txRecord?.id), { currency, amount: rawAmount }, req.ip || null);
       res.json(txRecord);
     } catch (error: any) {
+      // Task #185 — replay an idempotent response when a parallel withdrawal
+      // with the same Idempotency-Key lost the SERIALIZABLE race (SQLSTATE
+      // 40001). Runs FIRST so it pre-empts every other branch — including
+      // the unbalanced-ledger 422 mapper, which would otherwise page an
+      // operator about a benign concurrency conflict, and the generic 500
+      // mapper, which a client would naively retry.
+      if (userIdForReplay !== null && idemKey) {
+        const replay = await replayIdempotentOnSerializationFailure(
+          error, userIdForReplay, "/api/withdraw", idemKey,
+        );
+        if (replay) {
+          return res.status(200).json({ ...(replay as object), idempotent: true });
+        }
+      }
       // Task #54 — unbalanced ledger journal mapping (see deposit handler
       // above for rationale). The withdrawal path can produce a different
       // unbalanced shape (the fee leg is bundled into the same posting
@@ -3895,8 +3933,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Investments — atomic SERIALIZABLE transaction + Decimal + DB idempotency
   // ---------------------------------------------------------------------------
   app.post("/api/investments", moneyMovementLimiter, async (req, res) => {
+    // Task #185 — hoist `idemKey` and `userIdForReplay` so the catch handler
+    // can replay the winner's stored response when a parallel request loses
+    // the SERIALIZABLE race (Postgres SQLSTATE 40001). Mirrors deposit.
+    const idemKey = req.headers["idempotency-key"] as string | undefined;
+    let userIdForReplay: number | null = null;
     try {
       const { userId } = requireAuth(req);
+      userIdForReplay = userId;
       await requireKyc(userId, storage);
       // Task #146 — kill switch. Investments are an internal money-movement
       // and don't have their own switch — they fall under `transactions`.
@@ -3917,7 +3961,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: `Minimum investment is $${minimumInvestment.toFixed(2)}` });
       }
 
-      const idemKey = req.headers["idempotency-key"] as string | undefined;
       const payloadHash = hashPayload(req.body);
       if (idemKey) {
         const idem = await checkIdempotency(userId, "/api/investments", idemKey, payloadHash);
@@ -3973,6 +4016,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "investment_created", "investment", String(investRecord?.id), { productId, amount: rawAmount, currency }, req.ip || null);
       res.json(responseBody);
     } catch (error: any) {
+      // Task #185 — replay an idempotent response when a parallel request
+      // with the same Idempotency-Key lost the SERIALIZABLE race (SQLSTATE
+      // 40001). Runs FIRST so it pre-empts the generic 500 mapper, which a
+      // client would otherwise retry — risking duplicate investment rows.
+      if (userIdForReplay !== null && idemKey) {
+        const replay = await replayIdempotentOnSerializationFailure(
+          error, userIdForReplay, "/api/investments", idemKey,
+        );
+        if (replay) {
+          return res.status(200).json({ ...(replay as object), idempotent: true });
+        }
+      }
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to create investment" });
@@ -3984,8 +4039,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // (previously had no validation, no atomicity, no decimal math)
   // ---------------------------------------------------------------------------
   app.post("/api/wallets/transfer", moneyMovementLimiter, async (req, res) => {
+    // Task #185 — hoist `idemKey` and `userIdForReplay` so the catch handler
+    // can replay the winner's stored response when a parallel request loses
+    // the SERIALIZABLE race (Postgres SQLSTATE 40001). Mirrors deposit.
+    const idemKey = req.headers["idempotency-key"] as string | undefined;
+    let userIdForReplay: number | null = null;
     try {
       const { userId } = requireAuth(req);
+      userIdForReplay = userId;
       await requireKyc(userId, storage);
       // Task #146 — kill switch. Wallet conversion is internal money-movement
       // and falls under the master `transactions` switch.
@@ -3995,7 +4056,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { fromCurrency, toCurrency, amount: rawAmount } = parsedTransfer.data;
       const amount = new Decimal(rawAmount);
 
-      const idemKey = req.headers["idempotency-key"] as string | undefined;
       const payloadHash = hashPayload(req.body);
       if (idemKey) {
         const idem = await checkIdempotency(userId, "/api/wallets/transfer", idemKey, payloadHash);
@@ -4061,6 +4121,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "wallet_transfer", "transaction", String(txRecord?.id), { fromCurrency, toCurrency, amount: rawAmount }, req.ip || null);
       res.json(responseBody);
     } catch (error: any) {
+      // Task #185 — replay an idempotent response when a parallel request
+      // with the same Idempotency-Key lost the SERIALIZABLE race (SQLSTATE
+      // 40001). Runs FIRST so it pre-empts the generic 500 mapper, which a
+      // client would otherwise retry — risking duplicate transfers.
+      if (userIdForReplay !== null && idemKey) {
+        const replay = await replayIdempotentOnSerializationFailure(
+          error, userIdForReplay, "/api/wallets/transfer", idemKey,
+        );
+        if (replay) {
+          return res.status(200).json({ ...(replay as object), idempotent: true });
+        }
+      }
       if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to process transfer" });
