@@ -38,6 +38,22 @@ Wired three pre-launch operator alerts (audit-log write failures, stuck pending 
 
 **Files**: `shared/schema.ts` (new table), `server/services/operator-alerts.ts` (helper), `server/services/audit.ts` (wrap + emitter), `server/routes.ts` (legacy writer + import), `server/services/stuck-pending-transactions.ts` (new), `server/services/db-health-watcher.ts` (new), `server/services/background-jobs.ts` (new known job), `server/index.ts` (cron wiring), `server/admin-routes.ts` (3 endpoints), `client/src/pages/admin/operator-alerts.tsx` (legend + acks UI + acknowledge button).
 
+## Recent Changes (April 2026) — Task #147: Automated DB backups, restore drills, and rollback runbook
+
+Closed the rollback safety net by adding (a) a daily pg_dump pipeline with retention pruning, (b) a weekly automated restore drill that verifies the dump can actually be restored and that core invariants survive, (c) a daily watchdog that pages an operator if either falls outside its freshness window, (d) admin-dashboard surfacing of the "last successful backup / drill" timestamps, and (e) a step-by-step rollback runbook the on-call operator can execute end-to-end.
+
+**Schema** (`shared/schema.ts`): two new audit tables next to the generic `background_job_runs` table — `database_backup_runs` (dump path, size, retention, prune count, duration, error) and `database_restore_drill_runs` (dump path, scratch DB name, JSONB integrity-check result, duration, error). Both follow the same shape as `operator_alert_prune_runs` (Task #59) so the watchdog and admin UI lift the existing patterns.
+
+**Service** (`server/services/database-backups.ts`): `runDatabaseBackup()` invokes `pg_dump --format=custom --no-owner --no-privileges` against `DATABASE_URL`, writes to `DB_BACKUP_DIR`, prunes older dumps beyond `DB_BACKUP_RETENTION` (default 14), records one row in `database_backup_runs`. `runDatabaseRestoreDrill()` picks the latest dump, creates a scratch DB next to the live one (`<DATABASE_URL>` with the path swapped), `pg_restore`s into it, runs two integrity checks via `psql` (`users_table_present`, `ledger_journals_balanced` — every transactionId in `ledger_entries` must SUM to zero), drops the scratch DB. `assertNotLiveTarget()` compares structural `host:port/db` keys to refuse any restore path that points at the live DB. `checkBackupFreshness()` is a read-only watchdog that pages via `notifyOperator()` if the most recent successful backup is >48h old or the most recent successful drill is >14d old, with the same warming-up suppression as the operator-alerts-prune watchdog.
+
+**Cron registration** (`server/index.ts`): three crons gated on `isBackupsEnabled()` (i.e. `DB_BACKUP_DIR` set) — `database-backup` (420s + daily), `database-restore-drill` (480s + weekly), `database-backup-watchdog` (540s + daily). All three are also registered in `KNOWN_BACKGROUND_JOBS` so they appear on `/admin/background-jobs` alongside the other 8 jobs. When `DB_BACKUP_DIR` is unset (e.g. dev), the registration logs a one-line skip message rather than silently doing nothing.
+
+**Admin UI**: `/api/admin/dashboard` now embeds a `backups` payload (also exposed standalone at `/api/admin/backups/status`); the dashboard renders a "Backup health" card with two tiles (Last successful backup, Last successful restore drill) coloured green / amber / red against the watchdog thresholds, with a "Not configured" fallback when `DB_BACKUP_DIR` is unset.
+
+**CLI** (`scripts/`): `db-backup.ts` (cron-equivalent), `db-restore-drill.ts` (cron-equivalent, supports `--keep-scratch` and `--dump=`), `db-restore.ts` (live-rollback path; refuses to write to the live DB unless `--i-know-what-im-doing` is passed). All three exit non-zero on failure so a wrapping shell script can detect.
+
+**Runbook** (`docs/runbooks/rollback.md`): kill-switches → identify bad deploy → Path A (code-only) or Path B (code + DB restore via `scripts/db-restore.ts`) → re-run reconciliation jobs → spot-check verify → disengage kill switches. Includes the integrity-check reference and the cron schedule table.
+
 ## Recent Changes (April 2026) — Task #132: Remove synthetic portfolio data from production code paths
 
 Closed three synthetic-data surfaces a regulator or client could mistake for real portfolio numbers, and added a CI tripwire so they cannot reappear.

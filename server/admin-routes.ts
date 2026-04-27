@@ -350,6 +350,19 @@ export function registerAdminRoutes(app: Express): void {
         appCounts[row.status] = Number(row.count);
       }
 
+      // Task #147 — surface "last successful backup / drill" timestamps on
+      // the landing page so the admin sees whether the rollback safety net
+      // is healthy without having to navigate away. Wrapped in a try/catch
+      // so a failing backup-status query never breaks the whole dashboard.
+      const { getBackupStatus } = await import("./services/database-backups");
+      type BackupStatusPayload = Awaited<ReturnType<typeof getBackupStatus>>;
+      let backups: BackupStatusPayload | null = null;
+      try {
+        backups = await getBackupStatus();
+      } catch (err) {
+        console.error("[admin/dashboard] failed to load backup status", err);
+      }
+
       return {
         applications: {
           ...appCounts,
@@ -363,6 +376,7 @@ export function registerAdminRoutes(app: Express): void {
           active: Number(linksCount[0]?.active ?? 0),
         },
         recentAudit,
+        backups,
       };
     }),
   );
@@ -467,6 +481,50 @@ export function registerAdminRoutes(app: Express): void {
       };
     }),
   );
+
+  // -------------------------------------------------------------------------
+  // Task #147 — Backup health endpoint. Standalone version of the same
+  // payload embedded in /api/admin/dashboard so the dashboard can re-fetch
+  // (or a future "Backups" page can fetch only this) without re-running the
+  // expensive aggregate queries.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/backups/status",
+    adminRoute(async () => {
+      const { getBackupStatus } = await import("./services/database-backups");
+      return await getBackupStatus();
+    }),
+  );
+
+  // Task #147 — serve the rollback runbook as the admin help-area link.
+  // Returned as text/markdown so an operator clicking through from the
+  // dashboard can read it inline in a new tab without needing repo access.
+  // Slug-restricted to known runbooks so this route cannot be coaxed into
+  // serving arbitrary repo files.
+  app.get("/api/admin/runbooks/:slug", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      requireRole(auth, "admin");
+      const slug = String(req.params.slug ?? "");
+      const KNOWN_RUNBOOKS: Record<string, string> = {
+        rollback: "docs/runbooks/rollback.md",
+      };
+      const relPath = KNOWN_RUNBOOKS[slug];
+      if (!relPath) {
+        res.status(404).json({ error: "Unknown runbook" });
+        return;
+      }
+      const fs = await import("node:fs/promises");
+      const path = await import("node:path");
+      const abs = path.resolve(process.cwd(), relPath);
+      const body = await fs.readFile(abs, "utf8");
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.send(body);
+    } catch (error: any) {
+      handleError(res, error, "Failed to load runbook");
+    }
+  });
 
   // -------------------------------------------------------------------------
   // Applications

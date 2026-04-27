@@ -11,6 +11,7 @@ import {
   Siren,
   Activity,
   Info,
+  Database,
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -35,7 +36,43 @@ interface DashboardData {
     entityId: string | null;
     createdAt: string | null;
   }>;
+  backups: BackupHealthPayload | null;
 }
+
+// Task #147 — payload from /api/admin/backups/status, mirrored as the
+// `backups` field on /api/admin/dashboard. Kept inline rather than imported
+// from @shared so the dashboard query type stays self-describing.
+interface BackupHealthPayload {
+  enabled: boolean;
+  backupDir: string | null;
+  retentionCount: number;
+  latestBackup: {
+    startedAt: string;
+    finishedAt: string | null;
+    dumpPath: string | null;
+    dumpSizeBytes: number | null;
+    durationMs: number | null;
+    ageMs: number;
+  } | null;
+  latestDrill: {
+    startedAt: string;
+    finishedAt: string | null;
+    dumpPath: string | null;
+    integrity: {
+      ok: boolean;
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    } | null;
+    durationMs: number | null;
+    ageMs: number;
+  } | null;
+}
+
+// Same defaults as DEFAULT_BACKUP_STALE_THRESHOLD_MS / DRILL_STALE_THRESHOLD_MS
+// in server/services/database-backups.ts. Duplicated here so the UI can
+// colour the tile without an extra round-trip; if those server defaults
+// change, update this constant too.
+const BACKUP_STALE_HOURS = 48;
+const DRILL_STALE_HOURS = 14 * 24;
 
 type Severity = "info" | "warning" | "alert" | "critical";
 
@@ -340,6 +377,8 @@ export default function AdminDashboard() {
           )}
         </CardContent>
       </Card>
+      {/* Backup health (Task #147) */}
+      <BackupHealthCard isLoading={isLoading} backups={data?.backups ?? null} />
 
       {/* Recent audit */}
       <Card>
@@ -547,4 +586,190 @@ function PipelineCell({ label, value }: { label: string; value: number }) {
       <div className="text-xl font-semibold text-slate-900">{value}</div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Backup health card (Task #147)
+// ---------------------------------------------------------------------------
+// Surfaces the most recent successful pg_dump and the most recent successful
+// restore drill so the operator can see — without leaving the landing page
+// — whether the rollback safety net is healthy. The colour banding mirrors
+// the watchdog thresholds in server/services/database-backups.ts:
+//   * green   — within freshness window
+//   * amber   — known but >50% of the way to staleness
+//   * red     — past the staleness window or never run
+// When backups are not enabled (DB_BACKUP_DIR unset), we render a
+// neutral "Not configured" tile so the absence is visible rather than
+// silently hidden.
+// ---------------------------------------------------------------------------
+function BackupHealthCard({
+  isLoading,
+  backups,
+}: {
+  isLoading: boolean;
+  backups: BackupHealthPayload | null;
+}) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Database className="h-4 w-4 text-violet-600" />
+          Backup health
+        </CardTitle>
+        <div className="flex items-center gap-3 text-xs">
+          <a
+            href="/api/admin/runbooks/rollback"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-violet-700 hover:underline"
+            data-testid="link-rollback-runbook"
+          >
+            Rollback runbook ↗
+          </a>
+          <Link href="/admin/background-jobs">
+            <a className="text-violet-700 hover:underline">
+              View background jobs →
+            </a>
+          </Link>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : !backups ? (
+          <p className="text-sm text-slate-500" data-testid="text-backup-status-error">
+            Backup status unavailable.
+          </p>
+        ) : !backups.enabled ? (
+          <div
+            className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600"
+            data-testid="banner-backups-disabled"
+          >
+            Backups are not configured (DB_BACKUP_DIR unset). See the{" "}
+            <a
+              href="/api/admin/runbooks/rollback"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-violet-700 underline"
+            >
+              rollback runbook
+            </a>
+            .
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <BackupHealthTile
+              label="Last successful backup"
+              entry={backups.latestBackup}
+              staleAfterMs={BACKUP_STALE_HOURS * 60 * 60 * 1000}
+              testId="tile-last-backup"
+              extraDetail={
+                backups.latestBackup
+                  ? `${formatBytes(backups.latestBackup.dumpSizeBytes)} · retention=${backups.retentionCount}`
+                  : `retention=${backups.retentionCount}`
+              }
+            />
+            <BackupHealthTile
+              label="Last successful restore drill"
+              entry={
+                backups.latestDrill
+                  ? {
+                      startedAt: backups.latestDrill.startedAt,
+                      ageMs: backups.latestDrill.ageMs,
+                    }
+                  : null
+              }
+              staleAfterMs={DRILL_STALE_HOURS * 60 * 60 * 1000}
+              testId="tile-last-drill"
+              extraDetail={
+                backups.latestDrill?.integrity
+                  ? `${backups.latestDrill.integrity.checks.length} integrity check(s) — ${backups.latestDrill.integrity.ok ? "all passed" : "FAILED"}`
+                  : undefined
+              }
+            />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BackupHealthTile({
+  label,
+  entry,
+  staleAfterMs,
+  testId,
+  extraDetail,
+}: {
+  label: string;
+  entry: { startedAt: string; ageMs: number } | null;
+  staleAfterMs: number;
+  testId: string;
+  extraDetail?: string;
+}) {
+  let toneClass = "border-slate-200 bg-slate-50";
+  let badgeText = "Never run";
+  let badgeClass = "bg-red-100 text-red-700 border-red-200";
+
+  if (entry) {
+    const ratio = entry.ageMs / staleAfterMs;
+    if (ratio > 1) {
+      toneClass = "border-red-200 bg-red-50";
+      badgeText = "Stale";
+      badgeClass = "bg-red-100 text-red-700 border-red-200";
+    } else if (ratio > 0.5) {
+      toneClass = "border-amber-200 bg-amber-50";
+      badgeText = "Aging";
+      badgeClass = "bg-amber-100 text-amber-800 border-amber-200";
+    } else {
+      toneClass = "border-emerald-200 bg-emerald-50";
+      badgeText = "Fresh";
+      badgeClass = "bg-emerald-100 text-emerald-700 border-emerald-200";
+    }
+  } else {
+    toneClass = "border-red-200 bg-red-50";
+  }
+
+  return (
+    <div
+      className={`border rounded-md p-3 ${toneClass}`}
+      data-testid={testId}
+    >
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-slate-500 uppercase tracking-wide">
+          {label}
+        </div>
+        <Badge variant="outline" className={`text-xs ${badgeClass}`}>
+          {badgeText}
+        </Badge>
+      </div>
+      <div className="mt-1 text-sm font-medium text-slate-900">
+        {entry ? fmt(entry.startedAt) : "—"}
+      </div>
+      <div className="text-xs text-slate-500 mt-0.5">
+        {entry ? `${formatAge(entry.ageMs)} ago` : "no successful run on record"}
+      </div>
+      {extraDetail && (
+        <div className="text-xs text-slate-400 mt-1">{extraDetail}</div>
+      )}
+    </div>
+  );
+}
+
+function formatAge(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes)) return "size n/a";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
 }

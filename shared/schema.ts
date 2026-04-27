@@ -2521,3 +2521,99 @@ export const insertKillSwitchSchema = createInsertSchema(killSwitches).omit({
 });
 export type KillSwitch = typeof killSwitches.$inferSelect;
 export type InsertKillSwitch = z.infer<typeof insertKillSwitchSchema>;
+
+// ---------------------------------------------------------------------------
+// Task #147 — Database backup + restore-drill run history
+// ---------------------------------------------------------------------------
+// Two small audit tables that record every attempt at the new daily Postgres
+// backup (`databaseBackupRuns`) and the weekly restore drill
+// (`databaseRestoreDrillRuns`). The generic `background_job_runs` table also
+// gets a row per attempt — these tables carry the *job-specific* detail
+// (dump path, dump size, integrity-check result) that the operator needs in
+// order to actually rely on the backups for rollback.
+//
+// Both follow the same shape as `operator_alert_prune_runs` (Task #59) so
+// the freshness watchdog and admin UI can lift the existing patterns.
+// ---------------------------------------------------------------------------
+export const databaseBackupRuns = pgTable(
+  "database_backup_runs",
+  {
+    id: serial("id").primaryKey(),
+    // When the backup attempt began. Defaulted server-side so callers cannot
+    // accidentally backdate a row and fool the freshness watchdog.
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    // Null when the run threw before completing (errorMessage will be set).
+    finishedAt: timestamp("finished_at"),
+    // 'success' | 'error'. Watchdog filters on status='success'.
+    status: text("status").notNull(),
+    // Absolute path the dump was written to. Null on failure paths that
+    // threw before pg_dump could produce a file.
+    dumpPath: text("dump_path"),
+    // pg_dump file size in bytes, captured via fs.stat after pg_dump returns
+    // 0. Null when the run failed before producing a file.
+    dumpSizeBytes: integer("dump_size_bytes"),
+    // Configured retention count for this run, captured for forensics.
+    retentionCount: integer("retention_count"),
+    // Number of older dumps deleted by the retention prune step.
+    prunedCount: integer("pruned_count"),
+    // Wall-clock duration of the entire backup attempt (pg_dump + prune).
+    durationMs: integer("duration_ms"),
+    // Truncated error message for failed runs; null on success.
+    errorMessage: text("error_message"),
+  },
+  (table) => ({
+    startedAtIdx: index("database_backup_runs_started_at_idx").on(table.startedAt),
+  }),
+);
+
+export const insertDatabaseBackupRunSchema = createInsertSchema(databaseBackupRuns).omit({
+  id: true,
+  startedAt: true,
+});
+export type DatabaseBackupRun = typeof databaseBackupRuns.$inferSelect;
+export type InsertDatabaseBackupRun = z.infer<typeof insertDatabaseBackupRunSchema>;
+
+// ---------------------------------------------------------------------------
+// Restore-drill run history. The drill restores the latest dump into a
+// throwaway scratch DB, runs an integrity check, drops the scratch DB, and
+// records one row here. The integrity check result is stored as JSON so the
+// admin UI / runbook reviewer can inspect what was verified without
+// re-reading the application logs.
+// ---------------------------------------------------------------------------
+export const databaseRestoreDrillRuns = pgTable(
+  "database_restore_drill_runs",
+  {
+    id: serial("id").primaryKey(),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    finishedAt: timestamp("finished_at"),
+    // 'success' | 'error'.
+    status: text("status").notNull(),
+    // Path of the dump that was restored.
+    dumpPath: text("dump_path"),
+    // Name of the scratch database that was created/restored/dropped.
+    scratchDbName: text("scratch_db_name"),
+    // Structured integrity-check payload. Shape:
+    //   {
+    //     ok: boolean,
+    //     checks: Array<{ name: string, ok: boolean, detail?: string }>
+    //   }
+    // Null when the drill failed before the check could run.
+    integrity: jsonb("integrity").$type<{
+      ok: boolean;
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    }>(),
+    durationMs: integer("duration_ms"),
+    errorMessage: text("error_message"),
+  },
+  (table) => ({
+    startedAtIdx: index("database_restore_drill_runs_started_at_idx").on(table.startedAt),
+  }),
+);
+
+export const insertDatabaseRestoreDrillRunSchema = createInsertSchema(
+  databaseRestoreDrillRuns,
+).omit({ id: true, startedAt: true });
+export type DatabaseRestoreDrillRun = typeof databaseRestoreDrillRuns.$inferSelect;
+export type InsertDatabaseRestoreDrillRun = z.infer<
+  typeof insertDatabaseRestoreDrillRunSchema
+>;

@@ -749,6 +749,103 @@ app.use((req, res, next) => {
   const { startDbHealthWatcher } = await import("./services/db-health-watcher");
   startDbHealthWatcher();
 
+  // -------------------------------------------------------------------------
+  // Task #147 — Database backup, restore drill, and watchdog crons.
+  //
+  // All three are gated on `isBackupsEnabled()` (i.e. DB_BACKUP_DIR set) so
+  // a dev environment with no backup directory does not spam an
+  // operator-paged watchdog every day. The schedules are staggered after the
+  // existing crons (30..360s) so process startup never tries to run more
+  // than one heavy job at once:
+  //
+  //   * 420s + daily   — pg_dump backup with retention prune.
+  //   * 480s + weekly  — restore-drill into a scratch DB.
+  //   * 540s + daily   — freshness watchdog (read-only; pages an operator
+  //                      if either of the two above has gone stale).
+  //
+  // Each cron wrapper records a generic `background_job_runs` row through
+  // `withBackgroundJobRunRecord`; the service layer ALSO records a typed
+  // row in `database_backup_runs` / `database_restore_drill_runs`. The two
+  // tables intentionally double up — the generic table powers the
+  // background-jobs admin page (uniform across all jobs), the typed tables
+  // power the dashboard "Backup health" tile and surface domain-specific
+  // detail like dump path and per-check integrity-result.
+  // -------------------------------------------------------------------------
+  const {
+    runDatabaseBackup,
+    runDatabaseRestoreDrill,
+    checkBackupFreshness,
+    isBackupsEnabled,
+  } = await import("./services/database-backups");
+
+  if (isBackupsEnabled()) {
+    // const-arrow-function form (not function-declaration) so TypeScript's
+    // strict-mode rule that bans block-scoped function declarations under
+    // an ES5 target stays happy.
+    const runDatabaseBackupCron = async () => {
+      try {
+        await withBackgroundJobRunRecord("database-backup", async () => {
+          const r = await runDatabaseBackup();
+          const sizeMb = (r.dumpSizeBytes / (1024 * 1024)).toFixed(2);
+          return `dump=${r.dumpPath} size=${sizeMb}MiB pruned=${r.prunedCount} duration=${r.durationMs}ms`;
+        });
+      } catch (e) {
+        console.error("[database-backup] cron error", e);
+      }
+    };
+
+    const runDatabaseRestoreDrillCron = async () => {
+      try {
+        await withBackgroundJobRunRecord("database-restore-drill", async () => {
+          const r = await runDatabaseRestoreDrill();
+          const failed = r.integrity.checks.filter((c) => !c.ok).length;
+          return `dump=${r.dumpPath} scratch=${r.scratchDbName} checks=${r.integrity.checks.length} failed=${failed} duration=${r.durationMs}ms`;
+        });
+      } catch (e) {
+        console.error("[database-restore-drill] cron error", e);
+      }
+    };
+
+    const runDatabaseBackupWatchdog = async () => {
+      try {
+        await withBackgroundJobRunRecord("database-backup-watchdog", async () => {
+          const r = await checkBackupFreshness();
+          if (r.fired) {
+            console.warn(
+              `[database-backup-watchdog] alerted: reasons=${r.reasons.join(",")}` +
+                `, alertId=${r.alertId ?? "<n/a>"}`,
+            );
+            return `STALE: ${r.reasons.join(",")}`;
+          }
+          return `fresh: ${r.reasons.join(",")}`;
+        });
+      } catch (e) {
+        console.error("[database-backup-watchdog] watchdog error", e);
+      }
+    };
+
+    setTimeout(() => {
+      void runDatabaseBackupCron();
+      setInterval(runDatabaseBackupCron, 24 * 60 * 60 * 1000);
+    }, 420 * 1000);
+
+    setTimeout(() => {
+      void runDatabaseRestoreDrillCron();
+      setInterval(runDatabaseRestoreDrillCron, 7 * 24 * 60 * 60 * 1000);
+    }, 480 * 1000);
+
+    setTimeout(() => {
+      void runDatabaseBackupWatchdog();
+      setInterval(runDatabaseBackupWatchdog, 24 * 60 * 60 * 1000);
+    }, 540 * 1000);
+  } else {
+    // Make the skip visible at boot — silent skipping makes "why are there no
+    // backups happening?" investigations much harder.
+    console.log(
+      "[database-backup] DB_BACKUP_DIR is not set; daily backup, weekly restore drill, and watchdog crons are NOT registered.",
+    );
+  }
+
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.

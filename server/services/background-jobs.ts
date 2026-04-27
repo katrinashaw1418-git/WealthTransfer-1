@@ -114,6 +114,24 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
     description:
       "Hourly check that no transaction has been in 'pending' or 'processing' for longer than the configured threshold (default 60 minutes).",
   },
+  {
+    name: "database-backup",
+    label: "Database backup (pg_dump)",
+    description:
+      "Daily pg_dump of DATABASE_URL into DB_BACKUP_DIR with retention pruning. See docs/runbooks/rollback.md.",
+  },
+  {
+    name: "database-restore-drill",
+    label: "Database restore drill",
+    description:
+      "Weekly automated restore of the latest dump into a scratch DB followed by an integrity check.",
+  },
+  {
+    name: "database-backup-watchdog",
+    label: "Database backup watchdog",
+    description:
+      "Daily check that both the daily backup and the weekly restore drill have run successfully within their freshness windows.",
+  },
 ] as const;
 
 const KNOWN_JOB_NAMES = new Set(KNOWN_BACKGROUND_JOBS.map((j) => j.name));
