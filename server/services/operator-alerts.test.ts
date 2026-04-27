@@ -28,22 +28,29 @@ import { operatorAlerts } from "@shared/schema";
 import {
   notifyOperator,
   deriveDedupeKey,
+  getDedupeWindowMs,
   type OperatorAlertChannelOutcome,
 } from "./operator-alerts";
 
 const insertedIds: number[] = [];
 let originalWebhookEnv: string | undefined;
 let originalDedupeWindowEnv: string | undefined;
+let originalDedupeOverridesEnv: string | undefined;
 
 beforeEach(() => {
   originalWebhookEnv = process.env.OPERATOR_ALERT_WEBHOOK_URL;
   originalDedupeWindowEnv = process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN;
+  originalDedupeOverridesEnv =
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES;
   // Default to no webhook; tests opt in.
   delete process.env.OPERATOR_ALERT_WEBHOOK_URL;
   // Default to dedupe disabled so the original Task #36 tests, which fire
   // multiple alerts with overlapping shape, are not silently coalesced into
   // each other. Tests that exercise dedupe explicitly re-enable it.
   process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "0";
+  // Per-source overrides (Task #176) start clean for every test. Tests that
+  // exercise overrides set this explicitly.
+  delete process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES;
 });
 
 afterEach(async () => {
@@ -56,6 +63,12 @@ afterEach(async () => {
     delete process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN;
   } else {
     process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = originalDedupeWindowEnv;
+  }
+  if (originalDedupeOverridesEnv === undefined) {
+    delete process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES;
+  } else {
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES =
+      originalDedupeOverridesEnv;
   }
   if (insertedIds.length > 0) {
     await db.delete(operatorAlerts).where(inArray(operatorAlerts.id, insertedIds));
@@ -408,5 +421,167 @@ describe("notifyOperator persistence (Task #36)", () => {
     // Other tests/jobs may also write 'critical' rows, so just assert ours
     // is in there.
     expect(rowsCritical.some((r) => r.id === r2.alertId)).toBe(true);
+  });
+
+  // ===========================================================================
+  // Task #176 — per-source dedupe window overrides
+  // ---------------------------------------------------------------------------
+  // OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES is a JSON object mapping
+  // `source` → window in MINUTES. The override wins over the global default
+  // (and over OPERATOR_ALERT_DEDUPE_WINDOW_MIN) on every dispatch — read at
+  // call time so .env edits are picked up without a restart. Three behaviour
+  // contracts must be locked in:
+  //   * a longer per-source window coalesces firings the global default
+  //     would have let through,
+  //   * a shorter per-source window is honoured (verified at the function
+  //     level so we don't have to manipulate the clock), and
+  //   * a window of 0 for a critical source NEVER coalesces, even when the
+  //     global default would have suppressed the duplicate.
+  // ===========================================================================
+
+  it("getDedupeWindowMs honours a LONGER per-source override than the global default", () => {
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "5";
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = JSON.stringify({
+      "chatty-recon-job": 60,
+    });
+    expect(getDedupeWindowMs("chatty-recon-job")).toBe(60 * 60_000);
+    // Sources without an override fall back to the global default.
+    expect(getDedupeWindowMs("other-source")).toBe(5 * 60_000);
+    // Calling without a source also falls back to the global default.
+    expect(getDedupeWindowMs()).toBe(5 * 60_000);
+  });
+
+  it("getDedupeWindowMs honours a SHORTER per-source override than the global default", () => {
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "60";
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = JSON.stringify({
+      "near-realtime-source": 1,
+    });
+    expect(getDedupeWindowMs("near-realtime-source")).toBe(1 * 60_000);
+    expect(getDedupeWindowMs("other-source")).toBe(60 * 60_000);
+  });
+
+  it("getDedupeWindowMs honours a per-source override of 0 (never coalesce)", () => {
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "60";
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = JSON.stringify({
+      "money-movement": 0,
+    });
+    expect(getDedupeWindowMs("money-movement")).toBe(0);
+    expect(getDedupeWindowMs("other-source")).toBe(60 * 60_000);
+  });
+
+  it("ignores a malformed OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES env var (typo must not silently disable dedupe)", () => {
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "15";
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = "{not valid json";
+    expect(getDedupeWindowMs("any-source")).toBe(15 * 60_000);
+
+    // Negative / non-numeric values inside an otherwise-valid JSON object
+    // are dropped silently — the source falls back to the global default.
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = JSON.stringify({
+      "good-source": 30,
+      "bad-source": -1,
+      "garbage-source": "nope",
+    });
+    expect(getDedupeWindowMs("good-source")).toBe(30 * 60_000);
+    expect(getDedupeWindowMs("bad-source")).toBe(15 * 60_000);
+    expect(getDedupeWindowMs("garbage-source")).toBe(15 * 60_000);
+  });
+
+  it("coalesces a duplicate when the per-source override is LONGER than the global default", async () => {
+    // Global default disabled, but the noisy reconciliation job overrides
+    // to 15 minutes. Two identical alerts from that source must collapse
+    // onto one row.
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "0";
+    const source = uniqueSource("override-long");
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = JSON.stringify({
+      [source]: 15,
+    });
+
+    const alert = {
+      source,
+      severity: "warning" as const,
+      title: "noisy reconciliation",
+      details: { run: "abc" },
+      kind: "wallet-drift",
+      subjectType: "user" as const,
+      subjectId: "9",
+    };
+
+    const first = await notifyOperator(alert);
+    expect(first.alertId).not.toBeNull();
+    expect(first.deliveryStatus).toBe("delivered");
+    expect(first.occurrences).toBe(1);
+    insertedIds.push(first.alertId!);
+
+    const second = await notifyOperator(alert);
+    // Same row reused — the per-source override coalesced even though the
+    // global default would have let it through.
+    expect(second.alertId).toBe(first.alertId);
+    expect(second.deliveryStatus).toBe("suppressed_duplicate");
+    expect(second.occurrences).toBe(2);
+  });
+
+  it("does NOT coalesce when the per-source override is 0, even with a generous global default", async () => {
+    // The opposite case: a chatty global window of 60m would normally
+    // collapse two identical firings, but a critical source overrides to
+    // 0 so the operator gets every page.
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "60";
+    const source = uniqueSource("override-critical");
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = JSON.stringify({
+      [source]: 0,
+    });
+
+    const alert = {
+      source,
+      severity: "critical" as const,
+      title: "money-movement failure",
+      details: { txId: 123 },
+      kind: "money-movement",
+      subjectType: "transaction" as const,
+      subjectId: "123",
+    };
+
+    const first = await notifyOperator(alert);
+    const second = await notifyOperator(alert);
+    insertedIds.push(first.alertId!, second.alertId!);
+
+    // Two distinct rows — no coalescing for this critical source.
+    expect(first.alertId).not.toBeNull();
+    expect(second.alertId).not.toBeNull();
+    expect(second.alertId).not.toBe(first.alertId);
+    expect(first.deliveryStatus).toBe("delivered");
+    expect(second.deliveryStatus).toBe("delivered");
+    expect(second.occurrences).toBe(1);
+  });
+
+  it("uses the per-source override on every dispatch (no restart needed when env changes)", async () => {
+    // Mid-flight env change: first firing uses the global default (0,
+    // never coalesce); then we install an override that should suppress
+    // the second firing.
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN = "0";
+    const source = uniqueSource("override-hot-reload");
+
+    const alert = {
+      source,
+      severity: "warning" as const,
+      title: "hot-reload",
+      details: { v: 1 },
+      kind: "wallet-drift",
+      subjectType: "user" as const,
+      subjectId: "11",
+    };
+
+    const first = await notifyOperator(alert);
+    insertedIds.push(first.alertId!);
+    expect(first.deliveryStatus).toBe("delivered");
+
+    // No restart — flip the override and dispatch again.
+    process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES = JSON.stringify({
+      [source]: 15,
+    });
+
+    const second = await notifyOperator(alert);
+    expect(second.alertId).toBe(first.alertId);
+    expect(second.deliveryStatus).toBe("suppressed_duplicate");
+    expect(second.occurrences).toBe(2);
   });
 });

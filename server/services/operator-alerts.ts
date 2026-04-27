@@ -1,5 +1,6 @@
 // =============================================================================
-// OPERATOR ALERTS — Session 27 (Task #25), extended Task #36, Task #156
+// OPERATOR ALERTS — Session 27 (Task #25), extended Task #36, Task #156,
+//                   Task #176 (per-source dedupe overrides)
 // =============================================================================
 //
 // README — what this module does, in one screen
@@ -42,6 +43,19 @@
 //   * OPERATOR_ALERT_WEBHOOK_URL          — destination for the webhook channel.
 //   * OPERATOR_ALERT_DEDUPE_WINDOW_MIN    — sliding window in minutes; default 15.
 //                                           Set to 0 to disable coalescing.
+//   * OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES
+//                                         — JSON object mapping `source` → window
+//                                           in minutes, e.g.
+//                                           `{"money-movement":0,"wallet-ledger-reconciliation":60}`.
+//                                           Overrides the global default for
+//                                           that source on every dispatch
+//                                           (Task #176). Set a source to 0 to
+//                                           never coalesce its alerts; set a
+//                                           larger value to coalesce a chatty
+//                                           job more aggressively. Invalid /
+//                                           non-numeric / negative entries are
+//                                           ignored so a typo cannot silently
+//                                           disable the dispatcher.
 //   * OPERATOR_ALERT_WEBHOOK_TIMEOUT_MS   — per-attempt deadline; default 5000.
 //
 // Boot-time visibility: server/index.ts calls `logOperatorAlertsStartup()`
@@ -215,12 +229,63 @@ function getWebhookTimeoutMs(): number {
 }
 
 /**
+ * Per-source dedupe window overrides (Task #176). Parsed fresh on every call
+ * so .env edits / config-map updates are picked up without a restart, mirror-
+ * ing the contract of the other env-driven knobs in this module. Returns an
+ * empty Map when the env var is unset, blank, malformed, or contains no
+ * usable entries — a typo must never silently disable the dispatcher.
+ *
+ * Each value is a window in MINUTES. 0 means "never coalesce for this
+ * source" (every firing inserts a fresh row and re-posts the webhook).
+ * Negative / non-numeric / NaN entries are dropped silently so a single bad
+ * entry does not poison the whole map.
+ */
+function getDedupeWindowOverrides(): Map<string, number> {
+  const raw = process.env.OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES;
+  if (!raw) return new Map();
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return new Map();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    console.warn(
+      `[operator-alerts] OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES is not valid JSON — ignoring (${(err as Error)?.message ?? err})`,
+    );
+    return new Map();
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return new Map();
+  }
+  const out = new Map<string, number>();
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof k !== "string" || k.length === 0) continue;
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n) || n < 0) continue;
+    out.set(k, Math.floor(n));
+  }
+  return out;
+}
+
+/**
  * Sliding window in milliseconds. 0 disables coalescing entirely (every
  * firing inserts a fresh row and re-posts the webhook). Negative / NaN env
  * values fall back to the default rather than throwing — a typo must never
  * silently disable the dispatcher.
+ *
+ * When `source` is provided AND has an entry in
+ * `OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES`, that per-source value wins over
+ * the global default. This lets us coalesce a chatty job (long window) while
+ * leaving genuinely critical paths un-deduped (window=0) (Task #176).
  */
-export function getDedupeWindowMs(): number {
+export function getDedupeWindowMs(source?: string): number {
+  if (source) {
+    const overrides = getDedupeWindowOverrides();
+    const override = overrides.get(source);
+    if (override !== undefined) {
+      return override * 60_000;
+    }
+  }
   const raw = process.env.OPERATOR_ALERT_DEDUPE_WINDOW_MIN;
   if (raw === undefined || raw === null || raw === "") {
     return DEFAULT_DEDUPE_WINDOW_MIN * 60_000;
@@ -241,6 +306,13 @@ export function logOperatorAlertsStartup(): void {
   const url = getWebhookUrl();
   const windowMs = getDedupeWindowMs();
   const windowDesc = windowMs === 0 ? "disabled" : `${Math.round(windowMs / 60_000)}m`;
+  const overrides = getDedupeWindowOverrides();
+  const overrideDesc =
+    overrides.size === 0
+      ? ""
+      : `, dedupe-overrides=${Array.from(overrides.entries())
+          .map(([s, m]) => `${s}=${m === 0 ? "off" : `${m}m`}`)
+          .join(",")}`;
   if (url) {
     // Don't log the URL itself — webhook URLs are credentials.
     let host = "";
@@ -250,12 +322,12 @@ export function logOperatorAlertsStartup(): void {
       host = "(unparseable URL)";
     }
     console.log(
-      `[operator-alerts] webhook configured (host=${host}, dedupe=${windowDesc}, timeout=${getWebhookTimeoutMs()}ms)`,
+      `[operator-alerts] webhook configured (host=${host}, dedupe=${windowDesc}${overrideDesc}, timeout=${getWebhookTimeoutMs()}ms)`,
     );
   } else {
     console.warn(
       `[operator-alerts] webhook NOT configured — alerts will write to the log channel only. ` +
-        `Set OPERATOR_ALERT_WEBHOOK_URL to enable webhook delivery (dedupe=${windowDesc}).`,
+        `Set OPERATOR_ALERT_WEBHOOK_URL to enable webhook delivery (dedupe=${windowDesc}${overrideDesc}).`,
     );
   }
 }
@@ -593,7 +665,7 @@ function rollUpDeliveryStatus(
  */
 export async function notifyOperator(alert: OperatorAlert): Promise<OperatorAlertResult> {
   const dedupeKey = deriveDedupeKey(alert);
-  const windowMs = getDedupeWindowMs();
+  const windowMs = getDedupeWindowMs(alert.source);
 
   // --- Coalescing path (Task #156) --------------------------------------
   const existing = await findRecentDuplicate(dedupeKey, windowMs);
