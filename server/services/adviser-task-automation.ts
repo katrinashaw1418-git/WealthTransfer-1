@@ -240,7 +240,10 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
             clientUserId: link.clientUserId,
             taskType: "kyc_followup",
             title: `Follow up KYC for ${clientLabel}`,
-            notes: `Client KYC status is "${link.kycStatus ?? "unknown"}". Verify outstanding documentation and chase the client to complete identity verification.`,
+            // Notes carry the same client label as the title so the body
+            // is readable on its own (e.g. when surfaced in a digest or
+            // copied into an email). Task #283.
+            notes: `Client: ${clientLabel}. KYC status is "${link.kycStatus ?? "unknown"}". Verify outstanding documentation and chase the client to complete identity verification.`,
             priority: "high",
             dueAt: new Date(now.getTime() + SEVEN_DAYS_MS),
           });
@@ -264,7 +267,8 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
           clientUserId: link.clientUserId,
           taskType: "fee_consent_renewal",
           title: `Renew fee consent for ${clientLabel}`,
-          notes: `Fee consent #${consent.id} expires in ${daysToExpiry} day(s). Initiate the renewal conversation and re-sign before the expiry to avoid a fee-collection gap.`,
+          // See KYC trigger above for why notes echo the label. Task #283.
+          notes: `Client: ${clientLabel}. Fee consent #${consent.id} expires in ${daysToExpiry} day(s). Initiate the renewal conversation and re-sign before the expiry to avoid a fee-collection gap.`,
           priority: daysToExpiry <= 7 ? "urgent" : "high",
           dueAt: consent.consentExpiryDate,
         });
@@ -281,7 +285,8 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
           clientUserId: link.clientUserId,
           taskType: "portfolio_review",
           title: `Quarterly portfolio review for ${clientLabel}`,
-          notes: `It has been at least 90 days since the last portfolio review for this client. Schedule a review meeting and document the discussion.`,
+          // See KYC trigger above for why notes echo the label. Task #283.
+          notes: `Client: ${clientLabel}. It has been at least 90 days since the last portfolio review. Schedule a review meeting and document the discussion.`,
           priority: "normal",
           dueAt: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000),
         });
