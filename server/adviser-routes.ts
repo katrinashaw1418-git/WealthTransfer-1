@@ -191,6 +191,13 @@ const updateTaskSchema = z.object({
   status: z.enum(TASK_STATUSES).optional(),
   priority: z.enum(TASK_PRIORITIES).optional(),
   dueAt: z.coerce.date().optional().nullable(),
+  // Task #285 — completion notes are required when closing a portfolio
+  // review or a kyc_followup with non-verified KYC; the service-layer gate
+  // enforces the requirement, this schema just admits the field.
+  completionNotes: z.string().max(5000).optional().nullable(),
+  // Required when closing a portfolio_review (must be a future date); the
+  // service-layer gate enforces it.
+  nextReviewAt: z.coerce.date().optional().nullable(),
 });
 
 const createReportSchema = insertReportRequestSchema

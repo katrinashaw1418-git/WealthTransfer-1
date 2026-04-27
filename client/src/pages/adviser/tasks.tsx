@@ -14,6 +14,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -54,7 +56,46 @@ interface AdviserTask {
   priority: string;
   dueAt: string | null;
   completedAt: string | null;
+  completionNotes: string | null;
+  nextReviewAt: string | null;
   createdAt: string | null;
+  // Task #285 — live join fields used to drive the per-row completion gate
+  // for KYC follow-ups (only force the notes dialog when the client's KYC
+  // is not yet verified).
+  clientFirstName: string | null;
+  clientLastName: string | null;
+  clientEmail: string | null;
+  clientKycStatus: string | null;
+}
+
+// Task #285 — same compliance gate as the workflow page lives here so the
+// legacy /adviser/tasks listing can't bypass the server-side rule.
+const kycCompletionSchema = z.object({
+  completionNotes: z.string().trim().min(1, "Please describe what action you took"),
+});
+
+const portfolioReviewCompletionSchema = z.object({
+  completionNotes: z.string().trim().min(1, "Outcome notes are required"),
+  nextReviewAt: z
+    .string()
+    .min(1, "Next review date is required")
+    .refine((v) => {
+      const parsed = new Date(v);
+      if (Number.isNaN(parsed.getTime())) return false;
+      const tomorrow = new Date();
+      tomorrow.setHours(0, 0, 0, 0);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      return parsed.getTime() >= tomorrow.getTime();
+    }, "Next review date must be in the future"),
+});
+
+type KycCompletionForm = z.infer<typeof kycCompletionSchema>;
+type ReviewCompletionForm = z.infer<typeof portfolioReviewCompletionSchema>;
+
+function defaultNextReviewIso(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 90);
+  return d.toISOString().slice(0, 10);
 }
 
 interface ClientLite {
@@ -151,20 +192,72 @@ export default function AdviserTasks() {
     },
   });
 
+  // Task #285 — same dialog-driven completion flow as the workflow page.
+  // The Done button routes through a per-type gate (KYC notes for
+  // unverified-KYC follow-ups; outcome notes + future next-review date
+  // for portfolio reviews) before mutating, so the legacy listing can't
+  // hit the new server-side 400 from a one-click Done.
+  const [activeDialog, setActiveDialog] = useState<
+    | { kind: "kyc"; task: AdviserTask }
+    | { kind: "review"; task: AdviserTask }
+    | null
+  >(null);
+
+  const kycForm = useForm<KycCompletionForm>({
+    resolver: zodResolver(kycCompletionSchema),
+    defaultValues: { completionNotes: "" },
+  });
+  const reviewForm = useForm<ReviewCompletionForm>({
+    resolver: zodResolver(portfolioReviewCompletionSchema),
+    defaultValues: { completionNotes: "", nextReviewAt: defaultNextReviewIso() },
+  });
+
   const completeTask = useMutation({
-    mutationFn: async (id: number) => {
-      const res = await apiRequest("PATCH", `/api/adviser/tasks/${id}`, { status: "done" });
+    mutationFn: async (input: {
+      id: number;
+      completionNotes?: string;
+      nextReviewAt?: string;
+    }) => {
+      const body: Record<string, unknown> = { status: "done" };
+      if (input.completionNotes) body.completionNotes = input.completionNotes;
+      if (input.nextReviewAt) {
+        body.nextReviewAt = new Date(input.nextReviewAt).toISOString();
+      }
+      const res = await apiRequest("PATCH", `/api/adviser/tasks/${input.id}`, body);
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/adviser/tasks"] });
       queryClient.invalidateQueries({ queryKey: ["/api/adviser/dashboard"] });
       toast({ title: "Task marked done" });
+      setActiveDialog(null);
+      kycForm.reset({ completionNotes: "" });
+      reviewForm.reset({ completionNotes: "", nextReviewAt: defaultNextReviewIso() });
     },
     onError: (err: Error) => {
       toast({ title: "Failed to update", description: err.message, variant: "destructive" });
     },
   });
+
+  const handleDoneClick = (task: AdviserTask) => {
+    if (task.taskType === "portfolio_review") {
+      reviewForm.reset({
+        completionNotes: "",
+        nextReviewAt: defaultNextReviewIso(),
+      });
+      setActiveDialog({ kind: "review", task });
+      return;
+    }
+    if (task.taskType === "kyc_followup") {
+      const verified = task.clientKycStatus === "verified";
+      if (!verified) {
+        kycForm.reset({ completionNotes: "" });
+        setActiveDialog({ kind: "kyc", task });
+        return;
+      }
+    }
+    completeTask.mutate({ id: task.id });
+  };
 
   return (
     <div className="p-6 space-y-6" data-testid="page-adviser-tasks">
@@ -348,8 +441,11 @@ export default function AdviserTasks() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => completeTask.mutate(t.id)}
-                          disabled={completeTask.isPending}
+                          onClick={() => handleDoneClick(t)}
+                          disabled={
+                            completeTask.isPending &&
+                            completeTask.variables?.id === t.id
+                          }
                           data-testid={`button-complete-${t.id}`}
                         >
                           <Check className="h-4 w-4 mr-1" /> Done
@@ -363,6 +459,156 @@ export default function AdviserTasks() {
           )}
         </CardContent>
       </Card>
+
+      {/* KYC follow-up completion dialog (Task #285) */}
+      <Dialog
+        open={activeDialog?.kind === "kyc"}
+        onOpenChange={(o) => {
+          if (!o) setActiveDialog(null);
+        }}
+      >
+        <DialogContent data-testid="dialog-kyc-completion">
+          <DialogHeader>
+            <DialogTitle>Close KYC follow-up</DialogTitle>
+            <DialogDescription>
+              The client's KYC is not yet verified. Please record what action you
+              took before closing this task.
+            </DialogDescription>
+          </DialogHeader>
+          <Form {...kycForm}>
+            <form
+              onSubmit={kycForm.handleSubmit((values) => {
+                if (activeDialog?.kind !== "kyc") return;
+                completeTask.mutate({
+                  id: activeDialog.task.id,
+                  completionNotes: values.completionNotes,
+                });
+              })}
+              className="space-y-4"
+            >
+              <FormField
+                control={kycForm.control}
+                name="completionNotes"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>What action did you take?</FormLabel>
+                    <FormControl>
+                      <Textarea
+                        rows={4}
+                        placeholder="e.g. Sent reminder email and uploaded passport copy."
+                        {...field}
+                        data-testid="input-kyc-notes"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setActiveDialog(null)}
+                  data-testid="button-kyc-cancel"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={completeTask.isPending}
+                  data-testid="button-kyc-submit"
+                >
+                  {completeTask.isPending ? "Saving…" : "Save and complete"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Portfolio review completion dialog (Task #285) */}
+      <Dialog
+        open={activeDialog?.kind === "review"}
+        onOpenChange={(o) => {
+          if (!o) setActiveDialog(null);
+        }}
+      >
+        <DialogContent data-testid="dialog-portfolio-review-completion">
+          <DialogHeader>
+            <DialogTitle>Close portfolio review</DialogTitle>
+            <DialogDescription>
+              Record the outcome of this review and the next scheduled review
+              date. Both fields are required.
+            </DialogDescription>
+          </DialogHeader>
+          <Form {...reviewForm}>
+            <form
+              onSubmit={reviewForm.handleSubmit((values) => {
+                if (activeDialog?.kind !== "review") return;
+                completeTask.mutate({
+                  id: activeDialog.task.id,
+                  completionNotes: values.completionNotes,
+                  nextReviewAt: values.nextReviewAt,
+                });
+              })}
+              className="space-y-4"
+            >
+              <FormField
+                control={reviewForm.control}
+                name="completionNotes"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Review outcome notes</FormLabel>
+                    <FormControl>
+                      <Textarea
+                        rows={4}
+                        placeholder="Summary of the review discussion, agreed actions, etc."
+                        {...field}
+                        data-testid="input-review-notes"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={reviewForm.control}
+                name="nextReviewAt"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Next review date</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="date"
+                        {...field}
+                        data-testid="input-next-review-date"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setActiveDialog(null)}
+                  data-testid="button-review-cancel"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={completeTask.isPending}
+                  data-testid="button-review-submit"
+                >
+                  {completeTask.isPending ? "Saving…" : "Save and complete"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -185,6 +185,7 @@ export class MemStorage implements IStorage {
       emailOtp: null,
       isDemo: true,
       createdAt: new Date(),
+      kycUpdatedAt: new Date(),
     };
     this.users.set(1, demoUser);
 
@@ -3042,6 +3043,9 @@ export class MemStorage implements IStorage {
       // an account on insert. Defaults to false to match the DB column.
       isDemo: insertUser.isDemo ?? false,
       createdAt: new Date(),
+      // Task #285 — seed kycUpdatedAt on insert so the cron has a non-null
+      // anchor to compute KYC follow-up due dates.
+      kycUpdatedAt: new Date(),
     };
     this.users.set(id, user);
     return user;
@@ -3050,8 +3054,18 @@ export class MemStorage implements IStorage {
   async updateUser(id: number, updateUser: Partial<InsertUser>): Promise<User | undefined> {
     const user = this.users.get(id);
     if (!user) return undefined;
-    
-    const updatedUser = { ...user, ...updateUser };
+
+    // Task #285 — auto-stamp kycUpdatedAt whenever kycStatus is part of the
+    // patch so the cron can anchor follow-up due dates to the moment the
+    // status actually changed.
+    const patch: Record<string, unknown> = { ...updateUser };
+    if (
+      Object.prototype.hasOwnProperty.call(updateUser, "kycStatus") &&
+      updateUser.kycStatus !== user.kycStatus
+    ) {
+      patch.kycUpdatedAt = new Date();
+    }
+    const updatedUser = { ...user, ...patch } as User;
     this.users.set(id, updatedUser);
     return updatedUser;
   }
@@ -3486,7 +3500,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateUser(id: number, updateUser: Partial<InsertUser>): Promise<User | undefined> {
-    const [user] = await db.update(users).set(updateUser).where(eq(users.id, id)).returning();
+    // Task #285 — when the patch carries a kycStatus that differs from the
+    // current row, also write kycUpdatedAt so the cron can anchor follow-up
+    // due dates on a per-client signal. Single round trip in the no-op
+    // case (no kycStatus in patch).
+    const patch: Record<string, unknown> = { ...updateUser };
+    if (Object.prototype.hasOwnProperty.call(updateUser, "kycStatus")) {
+      const [existing] = await db
+        .select({ kycStatus: users.kycStatus })
+        .from(users)
+        .where(eq(users.id, id))
+        .limit(1);
+      if (existing && existing.kycStatus !== updateUser.kycStatus) {
+        patch.kycUpdatedAt = new Date();
+      }
+    }
+    const [user] = await db.update(users).set(patch).where(eq(users.id, id)).returning();
     return user || undefined;
   }
 

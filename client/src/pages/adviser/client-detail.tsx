@@ -25,6 +25,7 @@ import {
   Target,
   AlertTriangle,
   ShieldAlert,
+  ListChecks,
 } from "lucide-react";
 import {
   WealthPlannerPanel,
@@ -359,6 +360,10 @@ export default function AdviserClientDetail() {
               </Badge>
             )}
           </TabsTrigger>
+          <TabsTrigger value="tasks" data-testid="tab-tasks">
+            <ListChecks className="h-4 w-4 mr-1" />
+            Tasks
+          </TabsTrigger>
           <TabsTrigger value="planner" data-testid="tab-planner">
             <Target className="h-4 w-4 mr-1" />
             Wealth planner
@@ -526,6 +531,14 @@ export default function AdviserClientDetail() {
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* TASKS TAB — adviser-side task list scoped to this client.
+            Pulled in for Task #285 so completion notes and next-review
+            dates recorded on the workflow page are visible in the client
+            record (which is the audit-of-record location). */}
+        <TabsContent value="tasks" className="space-y-4">
+          <ClientTasksCard clientUserId={client.id} />
         </TabsContent>
 
         {/* WEALTH PLANNER TAB */}
@@ -790,5 +803,111 @@ function FeeConsentStatusPill({
       <span className="h-2 w-2 rounded-full bg-red-500" />
       Fee Consent: Expired
     </div>
+  );
+}
+
+// ===========================================================================
+// CLIENT TASKS CARD (Task #285)
+// ---------------------------------------------------------------------------
+// Lists adviser-side tasks scoped to a single client. The /api/adviser/tasks
+// endpoint accepts a `clientUserId` filter so the same listing query that
+// powers the workflow page can be re-used here without a new endpoint.
+// Both open and completed tasks are shown so completion notes and the next
+// scheduled review remain visible after closure.
+// ===========================================================================
+
+interface ClientTaskRow {
+  id: number;
+  taskType: string;
+  title: string;
+  notes: string | null;
+  status: string;
+  priority: string;
+  dueAt: string | null;
+  completedAt: string | null;
+  completionNotes: string | null;
+  nextReviewAt: string | null;
+  createdAt: string | null;
+}
+
+function ClientTasksCard({ clientUserId }: { clientUserId: number }) {
+  const tasks = useQuery<ClientTaskRow[]>({
+    queryKey: ["/api/adviser/tasks", { clientUserId }],
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <ListChecks className="h-4 w-4 text-slate-500" />
+          Tasks for this client
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {tasks.isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : tasks.isError ? (
+          <p className="text-sm text-red-600">Unable to load tasks.</p>
+        ) : !tasks.data || tasks.data.length === 0 ? (
+          <p className="text-sm text-gray-500" data-testid="text-no-client-tasks">
+            No tasks have been raised for this client.
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Task</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Due</TableHead>
+                <TableHead>Completed</TableHead>
+                <TableHead>Next review</TableHead>
+                <TableHead>Notes</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {tasks.data.map((t) => (
+                <TableRow key={t.id} data-testid={`row-client-task-${t.id}`}>
+                  <TableCell className="text-sm font-medium text-gray-900">
+                    {t.title}
+                  </TableCell>
+                  <TableCell className="text-sm capitalize text-gray-600">
+                    {t.taskType.replace(/_/g, " ")}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={t.status === "done" ? "secondary" : "outline"}
+                      className="capitalize"
+                    >
+                      {t.status.replace(/_/g, " ")}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-sm text-gray-600">
+                    {t.dueAt ? formatDate(t.dueAt) : "—"}
+                  </TableCell>
+                  <TableCell className="text-sm text-gray-600">
+                    {t.completedAt ? formatDate(t.completedAt) : "—"}
+                  </TableCell>
+                  <TableCell
+                    className="text-sm text-gray-600"
+                    data-testid={`cell-task-next-review-${t.id}`}
+                  >
+                    {t.nextReviewAt ? formatDate(t.nextReviewAt) : "—"}
+                  </TableCell>
+                  <TableCell
+                    className="text-xs text-gray-600 max-w-[280px] whitespace-pre-wrap"
+                    data-testid={`cell-task-completion-notes-${t.id}`}
+                  >
+                    {t.completionNotes || (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }

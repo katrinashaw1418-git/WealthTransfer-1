@@ -1205,10 +1205,24 @@ export async function rejectClientInstruction(
 // -----------------------------------------------------------------------------
 // Adviser tasks — adviser-owned writes; client linkage validated on insert.
 // -----------------------------------------------------------------------------
+
+// Task #285 — task list rows now carry the live client name + email so the
+// workflow page can render the *current* client identity in a Client column,
+// independent of whatever string was baked into `title` when the cron
+// generated the row. Old rows whose stored title still says "Follow up KYC
+// for Client #22" therefore still display the correct current name to the
+// adviser without a destructive backfill.
+export interface AdviserTaskWithClient extends AdviserTask {
+  clientFirstName: string | null;
+  clientLastName: string | null;
+  clientEmail: string | null;
+  clientKycStatus: string | null;
+}
+
 export async function listAdviserTasks(
   adviserUserId: number,
   filters?: { status?: string; clientUserId?: number },
-): Promise<AdviserTask[]> {
+): Promise<AdviserTaskWithClient[]> {
   const conditions = [eq(adviserTasks.adviserUserId, adviserUserId)];
   if (filters?.status) conditions.push(eq(adviserTasks.status, filters.status));
   if (filters?.clientUserId)
@@ -1225,11 +1239,35 @@ export async function listAdviserTasks(
     );
   }
 
-  return db
-    .select()
+  // Live join on users so the adviser sees the *current* client name even
+  // when the snapshot baked into adviserTasks.title has gone stale.
+  const rows = await db
+    .select({
+      id: adviserTasks.id,
+      adviserUserId: adviserTasks.adviserUserId,
+      clientUserId: adviserTasks.clientUserId,
+      taskType: adviserTasks.taskType,
+      title: adviserTasks.title,
+      notes: adviserTasks.notes,
+      status: adviserTasks.status,
+      priority: adviserTasks.priority,
+      dueAt: adviserTasks.dueAt,
+      completedAt: adviserTasks.completedAt,
+      completionNotes: adviserTasks.completionNotes,
+      nextReviewAt: adviserTasks.nextReviewAt,
+      createdAt: adviserTasks.createdAt,
+      updatedAt: adviserTasks.updatedAt,
+      clientFirstName: users.firstName,
+      clientLastName: users.lastName,
+      clientEmail: users.email,
+      clientKycStatus: users.kycStatus,
+    })
     .from(adviserTasks)
+    .leftJoin(users, eq(users.id, adviserTasks.clientUserId))
     .where(and(...conditions))
     .orderBy(desc(adviserTasks.createdAt));
+
+  return rows;
 }
 
 export async function createAdviserTask(
@@ -1248,7 +1286,19 @@ export async function createAdviserTask(
 export async function updateAdviserTask(
   adviserUserId: number,
   taskId: number,
-  patch: Partial<Pick<AdviserTask, "title" | "notes" | "status" | "priority" | "dueAt" | "completedAt">>,
+  patch: Partial<
+    Pick<
+      AdviserTask,
+      | "title"
+      | "notes"
+      | "status"
+      | "priority"
+      | "dueAt"
+      | "completedAt"
+      | "completionNotes"
+      | "nextReviewAt"
+    >
+  >,
 ): Promise<AdviserTask | null> {
   // Adviser may only update their OWN tasks.
   const [existing] = await db
@@ -1264,9 +1314,89 @@ export async function updateAdviserTask(
   if (!existing) return null;
 
   const update: Record<string, unknown> = { ...patch, updatedAt: new Date() };
-  // Auto-stamp completedAt when transitioning to "done".
-  if (patch.status === "done" && !existing.completedAt) {
-    update.completedAt = new Date();
+
+  // -------------------------------------------------------------------------
+  // Task #285 — compliance gating when transitioning a task to "done".
+  //
+  //   * kyc_followup: when the linked client's current kycStatus is not
+  //     "verified", the adviser MUST supply a non-empty completionNotes
+  //     entry explaining what action was taken. Verified-KYC tasks can be
+  //     closed without a note (the status itself is the evidence).
+  //
+  //   * portfolio_review: ALWAYS requires non-empty completionNotes AND a
+  //     future nextReviewAt date when closing. There is no "verified"
+  //     escape hatch — every quarterly review must record an outcome.
+  //
+  // The route layer also surfaces the appropriate completion dialog; this
+  // gate is the source of truth so the contract holds even for callers
+  // that bypass the UI.
+  // -------------------------------------------------------------------------
+  const closing = patch.status === "done" && existing.status !== "done";
+  if (closing) {
+    if (!existing.completedAt) {
+      update.completedAt = new Date();
+    }
+
+    const noteFromPatch =
+      typeof patch.completionNotes === "string" ? patch.completionNotes.trim() : "";
+    const existingNote =
+      typeof existing.completionNotes === "string" ? existing.completionNotes.trim() : "";
+    const effectiveNote = noteFromPatch || existingNote;
+
+    if (existing.taskType === "kyc_followup") {
+      const [client] = await db
+        .select({ kycStatus: users.kycStatus })
+        .from(users)
+        .where(eq(users.id, existing.clientUserId))
+        .limit(1);
+      const kycVerified = (client?.kycStatus ?? "") === "verified";
+      if (!kycVerified && !effectiveNote) {
+        throw Object.assign(
+          new Error(
+            "Completion note is required to close a KYC follow-up while the client's KYC is not verified.",
+          ),
+          { status: 400, reason: "kyc_completion_note_required" },
+        );
+      }
+      if (noteFromPatch) update.completionNotes = noteFromPatch;
+    } else if (existing.taskType === "portfolio_review") {
+      const nextReviewFromPatch =
+        patch.nextReviewAt instanceof Date ? patch.nextReviewAt : null;
+      const effectiveNextReview = nextReviewFromPatch ?? existing.nextReviewAt ?? null;
+
+      if (!effectiveNote) {
+        throw Object.assign(
+          new Error(
+            "Outcome notes are required to close a portfolio review.",
+          ),
+          { status: 400, reason: "portfolio_review_notes_required" },
+        );
+      }
+      if (!effectiveNextReview || effectiveNextReview.getTime() <= Date.now()) {
+        throw Object.assign(
+          new Error(
+            "A future next-review date is required to close a portfolio review.",
+          ),
+          { status: 400, reason: "portfolio_review_next_date_required" },
+        );
+      }
+      if (noteFromPatch) update.completionNotes = noteFromPatch;
+      if (nextReviewFromPatch) update.nextReviewAt = nextReviewFromPatch;
+    } else {
+      // Other task types: persist any caller-supplied note as-is.
+      if (noteFromPatch) update.completionNotes = noteFromPatch;
+    }
+  } else {
+    // Not closing — pass through optional fields as-is.
+    if (patch.completionNotes !== undefined) {
+      update.completionNotes =
+        typeof patch.completionNotes === "string"
+          ? patch.completionNotes.trim() || null
+          : patch.completionNotes;
+    }
+    if (patch.nextReviewAt !== undefined) {
+      update.nextReviewAt = patch.nextReviewAt;
+    }
   }
 
   const [row] = await db

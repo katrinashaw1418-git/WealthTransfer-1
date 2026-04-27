@@ -44,6 +44,12 @@ export const users = pgTable(
     // generate misleading drift alerts on the admin reconciliation page or
     // the operator alert feed. Real users always have isDemo=false.
     isDemo: boolean("is_demo").notNull().default(false),
+    // Task #285 — last time `kycStatus` changed. Used by the adviser task
+    // automation cron to anchor KYC follow-up due dates to a per-client
+    // signal (kycUpdatedAt + 30d) instead of the cron-run timestamp.
+    // Backfilled to created_at for existing rows; storage.updateUser writes
+    // a new value whenever `kycStatus` is part of the update patch.
+    kycUpdatedAt: timestamp("kyc_updated_at").defaultNow(),
     createdAt: timestamp("created_at").defaultNow(),
   },
   (table) => ({
@@ -1636,6 +1642,17 @@ export const adviserTasks = pgTable("adviser_tasks", {
   priority: text("priority").notNull().default("normal"),
   dueAt: timestamp("due_at"),
   completedAt: timestamp("completed_at"),
+  // Task #285 — adviser-supplied note explaining what was done when the
+  // task was closed. Required when closing a portfolio_review or when
+  // closing a kyc_followup whose linked client is not yet KYC-verified.
+  // Optional otherwise. Surfaced in the audit log and on the client-detail
+  // task history.
+  completionNotes: text("completion_notes"),
+  // Task #285 — required outcome of a portfolio_review: when the next
+  // review is scheduled. Persisted on the task and used by the cron to
+  // anchor the next portfolio_review due date (instead of cron-run +
+  // 14 days). Null for non-review task types.
+  nextReviewAt: timestamp("next_review_at"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
@@ -1650,6 +1667,8 @@ export const insertAdviserTaskSchema = createInsertSchema(adviserTasks).omit({
   createdAt: true,
   updatedAt: true,
   completedAt: true,
+  completionNotes: true,
+  nextReviewAt: true,
 });
 export type AdviserTask = typeof adviserTasks.$inferSelect;
 export type InsertAdviserTask = z.infer<typeof insertAdviserTaskSchema>;

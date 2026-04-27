@@ -39,7 +39,7 @@ import {
   adviserTasks,
   feeConsents,
 } from "@shared/schema";
-import { and, eq, gte, lte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lte, inArray, sql } from "drizzle-orm";
 import { clientDisplayName } from "@shared/display-name";
 
 export interface TaskAutomationSummary {
@@ -172,15 +172,21 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
   // 1. Pull every active adviser-client link with the client's kycStatus.
   //    A single join keeps the query count constant regardless of how many
   //    links exist.
+  // Task #285 — also pull `kycUpdatedAt` (per-client signal used to anchor
+  // KYC follow-up due dates instead of cron-run + N days) and the link
+  // `linkedAt` (used as the portfolio-review fallback when the client has
+  // never had a completed review on file).
   const links = await db
     .select({
       adviserUserId: adviserClients.adviserUserId,
       clientUserId: adviserClients.clientUserId,
       kycStatus: users.kycStatus,
+      kycUpdatedAt: users.kycUpdatedAt,
       firstName: users.firstName,
       lastName: users.lastName,
       // Email is part of the label fallback chain (see clientLabelForTask).
       email: users.email,
+      linkedAt: adviserClients.linkedAt,
     })
     .from(adviserClients)
     .innerJoin(users, eq(users.id, adviserClients.clientUserId))
@@ -224,6 +230,16 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
         if (await hasOpenTask(link.adviserUserId, link.clientUserId, "kyc_followup")) {
           summary.idempotencySkips += 1;
         } else {
+          // Task #285 — anchor the due date on the per-client signal
+          // (kycUpdatedAt + 30d) instead of cron-run + 7d, so a daily
+          // batch can no longer produce a column of identical due dates
+          // for a backlog of unverified clients. Fall back to
+          // cron-run + 7d when the client has no kycUpdatedAt at all
+          // (very old rows pre-Task #285).
+          const kycAnchor = link.kycUpdatedAt ?? null;
+          const dueAt = kycAnchor
+            ? new Date(kycAnchor.getTime() + THIRTY_DAYS_MS)
+            : new Date(now.getTime() + SEVEN_DAYS_MS);
           await createTask({
             adviserUserId: link.adviserUserId,
             clientUserId: link.clientUserId,
@@ -231,7 +247,7 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
             title: `Follow up KYC for ${clientLabel}`,
             notes: `Client: ${clientLabel}. KYC status is "${link.kycStatus ?? "unknown"}". Verify outstanding documentation and chase the client to complete identity verification.`,
             priority: "high",
-            dueAt: new Date(now.getTime() + SEVEN_DAYS_MS),
+            dueAt,
           });
           summary.kycFollowupsCreated += 1;
         }
@@ -265,6 +281,29 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
       if (await hasRecentPortfolioReview(link.adviserUserId, link.clientUserId, ninetyDaysAgo)) {
         summary.cadenceSkips += 1;
       } else {
+        // Task #285 — anchor the due date on the per-client signal:
+        // most-recent COMPLETED portfolio_review's `completedAt + 90d`
+        // (i.e. quarterly cadence from the last actual review). Falls
+        // back to the link `linkedAt + 90d` when no completed review
+        // exists yet, then to cron-run + 14d as a final safety net.
+        const [lastCompleted] = await db
+          .select({ completedAt: adviserTasks.completedAt })
+          .from(adviserTasks)
+          .where(
+            and(
+              eq(adviserTasks.adviserUserId, link.adviserUserId),
+              eq(adviserTasks.clientUserId, link.clientUserId),
+              eq(adviserTasks.taskType, "portfolio_review"),
+              eq(adviserTasks.status, "done"),
+            ),
+          )
+          .orderBy(desc(adviserTasks.completedAt))
+          .limit(1);
+        const reviewAnchor =
+          lastCompleted?.completedAt ?? link.linkedAt ?? null;
+        const dueAt = reviewAnchor
+          ? new Date(reviewAnchor.getTime() + NINETY_DAYS_MS)
+          : new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
         await createTask({
           adviserUserId: link.adviserUserId,
           clientUserId: link.clientUserId,
@@ -272,7 +311,7 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
           title: `Quarterly portfolio review for ${clientLabel}`,
           notes: `Client: ${clientLabel}. It has been at least 90 days since the last portfolio review. Schedule a review meeting and document the discussion.`,
           priority: "normal",
-          dueAt: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000),
+          dueAt,
         });
         summary.portfolioReviewsCreated += 1;
       }
