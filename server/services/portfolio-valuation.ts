@@ -288,3 +288,59 @@ export async function calculatePortfolioTotalsAtDate(
     unpricedCurrencies,
   };
 }
+
+// ---- Per-wallet valuation --------------------------------------------------
+//
+// Task #279 — the adviser client detail page needs a per-wallet
+// USD-equivalent (rendered as AUD per the existing portal labelling
+// convention) so the wallet table can show "Currency / Balance / AUD
+// Equivalent / % of Portfolio". This helper mirrors the same pricing logic
+// used in calculatePortfolioTotalsAtDate so the bucket totals and the
+// per-row values are guaranteed to come from the same source — divergence
+// between the two would be an auditability bug for advisers.
+//
+// `audValue` is null for any wallet whose currency has no FX rate available;
+// the caller can render the "unpriced" note from these.
+
+export interface WalletValuation {
+  currency: string;
+  walletType: string;
+  balance: number;
+  audValue: number | null;
+}
+
+export async function calculateWalletValuationsAtDate(
+  userId: number,
+  asOfDate: Date = new Date(),
+): Promise<WalletValuation[]> {
+  const now = new Date();
+  const isToday = Math.abs(asOfDate.getTime() - now.getTime()) < 12 * 60 * 60 * 1000;
+
+  const walletData = isToday
+    ? (await storage.getWallets(userId)).map((w: any) => ({
+        currency: w.currency,
+        balance: parseFloat(w.balance),
+        walletType: w.walletType,
+      }))
+    : await reconstructWalletBalancesAsOf(userId, asOfDate);
+
+  const out: WalletValuation[] = [];
+  for (const wallet of walletData) {
+    let audValue: number | null;
+    if (wallet.walletType === "fiat") {
+      audValue = await convertToUsd(wallet.currency, wallet.balance);
+    } else if (wallet.currency === "USDT" || wallet.currency === "USDC") {
+      audValue = wallet.balance;
+    } else {
+      const rate = await storage.getFxRate(wallet.currency, "USD");
+      audValue = rate ? wallet.balance * parseFloat(rate.rate) : null;
+    }
+    out.push({
+      currency: wallet.currency,
+      walletType: wallet.walletType,
+      balance: wallet.balance,
+      audValue,
+    });
+  }
+  return out;
+}

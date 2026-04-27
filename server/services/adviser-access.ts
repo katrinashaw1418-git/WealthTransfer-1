@@ -24,6 +24,7 @@ import {
   reportRequests,
   feeConsents,
   adviceRecords,
+  adviceAcknowledgements,
   portfolios,
   wallets,
   investmentProducts,
@@ -40,7 +41,10 @@ import {
   type InvestmentInstruction,
 } from "@shared/schema";
 import { and, eq, desc, lte, gte, sql, inArray, notInArray } from "drizzle-orm";
-import { calculatePortfolioTotalsAtDate } from "./portfolio-valuation";
+import {
+  calculatePortfolioTotalsAtDate,
+  calculateWalletValuationsAtDate,
+} from "./portfolio-valuation";
 import { clientDisplayName } from "@shared/display-name";
 import {
   isTestFixtureEmail,
@@ -390,7 +394,28 @@ export async function getAdviserClientPortfolio(
     .from(wallets)
     .where(eq(wallets.userId, clientUserId));
 
-  const live = await calculatePortfolioTotalsAtDate(clientUserId, new Date());
+  const asOfDate = new Date();
+  const live = await calculatePortfolioTotalsAtDate(clientUserId, asOfDate);
+
+  // Task #279 — per-wallet AUD-equivalent values (USD-converted under the
+  // existing portal labelling convention). Computed from the same valuation
+  // engine that builds the bucket totals, then merged onto the wallet rows
+  // by currency so downstream consumers (e.g. the adviser client detail
+  // page) can render the auditable wallet table without re-deriving FX.
+  const walletValuations = await calculateWalletValuationsAtDate(
+    clientUserId,
+    asOfDate,
+  );
+  const audByCurrency = new Map(
+    walletValuations.map((v) => [v.currency, v.audValue] as const),
+  );
+  const enrichedWallets = walletRows.map((w) => {
+    const aud = audByCurrency.get(w.currency);
+    return {
+      ...w,
+      audValue: aud == null ? null : aud.toFixed(2),
+    };
+  });
 
   // Build the live portfolio object. Reuse snapshot identifiers (id, userId,
   // updatedAt) when present so existing test fixtures and clients that key
@@ -411,7 +436,11 @@ export async function getAdviserClientPortfolio(
     unpricedCurrencies: live.unpricedCurrencies,
   };
 
-  return { portfolio, wallets: walletRows };
+  return {
+    portfolio,
+    wallets: enrichedWallets,
+    asOfDate: asOfDate.toISOString(),
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -431,18 +460,34 @@ export async function getAdviserClientFeeConsents(
 
 // -----------------------------------------------------------------------------
 // Client advice records — read-only metadata only (no payload mutation).
+//
+// Task #279 — each row also carries `clientAcknowledged`, derived from the
+// existence of an `adviceAcknowledgements` row for (clientId, recordId).
+// This matches the wealth-planner viewing-gate rule
+// (`requireAcknowledgedAdvice`) — a record counts as acknowledged once the
+// client has signed at least one ack row, because the eleven required
+// confirm_* booleans are enforced at insert time. Surfacing this on the
+// adviser detail response lets the client detail page show the "disclaimer
+// required" indicator on the Wealth planner tab and the amber gating banner
+// without re-deriving the rule on the frontend.
 // -----------------------------------------------------------------------------
 export async function getAdviserClientAdviceRecords(
   adviserUserId: number,
   clientUserId: number,
 ) {
   await assertAdviserClientLink(adviserUserId, clientUserId);
+  const ackedRecordExpr = sql<boolean>`EXISTS (
+    SELECT 1 FROM ${adviceAcknowledgements}
+    WHERE ${adviceAcknowledgements.adviceRecordId} = ${adviceRecords.id}
+      AND ${adviceAcknowledgements.clientId} = ${adviceRecords.clientId}
+  )`;
   return db
     .select({
       id: adviceRecords.id,
       adviceType: adviceRecords.adviceType,
       status: adviceRecords.status,
       createdAt: adviceRecords.createdAt,
+      clientAcknowledged: ackedRecordExpr,
     })
     .from(adviceRecords)
     .where(eq(adviceRecords.clientId, clientUserId))
