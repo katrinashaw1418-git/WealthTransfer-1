@@ -1110,6 +1110,355 @@ describe("entry-point coverage walk (Task #183)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 7. HTTP entry-point coverage walk (Task #189)
+// ---------------------------------------------------------------------------
+// Section 6 above catches a new MONEY-MOVEMENT FUNCTION landing in
+// `server/services/` without a guard. This block catches the symmetric
+// failure mode at the HTTP layer: a new `app.post|put|patch|delete(...)`
+// in `server/routes.ts` whose path or handler name matches the
+// money-movement verb pattern (deposit/withdraw/transfer/settle/post/
+// credit/debit) but whose handler body forgets `assertKillSwitchOff`.
+//
+// Concrete failure mode this catches:
+//   * A future webhook handler — e.g. `POST /api/webhooks/<provider>/
+//     credit-wallet` — silently bypasses the kill switch because the
+//     author copy-pasted from a non-money-movement template that never
+//     called `assertKillSwitchOff`. Section 1 above only exercises the
+//     seven hand-enumerated routes in `MONEY_MOVEMENT_ROUTES`, so it
+//     would not notice the new endpoint.
+//
+// Like Section 6, the check is a static walk of `server/routes.ts`. We
+// don't try to spin up the new endpoint at runtime — the kill-switch
+// guard would (correctly) block its execution path, leaving us nothing
+// to assert against. A grep-style scan over the source file gives us the
+// strong "fail when a guard is missing" signal while keeping the test
+// cheap and DB-free.
+//
+// MATCHING POLICY
+//   For every `app.post|put|patch|delete("PATH", ...)` registration we
+//   discover in `server/routes.ts`:
+//     * Verb-matching = the route PATH or the named handler symbol
+//       (e.g. `handleDeposit`) contains one of the canonical
+//       money-movement verbs (case-insensitive).
+//     * Body = either (a) the inline arrow body that follows the
+//       registration, or (b) the body of the named handler (e.g.
+//       `const handleDeposit = async (req, ...) => { ... };`) referenced
+//       at the registration site.
+//
+//   Each verb-matching route MUST be classified in
+//   KILL_SWITCH_HTTP_ROUTE_REGISTRY below as one of:
+//
+//     guarded                       — handler body calls assertKillSwitchOff(...)
+//     allowlisted_not_money_movement — path/handler name happens to
+//                                      contain a verb but the endpoint
+//                                      does not move money. Read-only
+//                                      reporting endpoints live here.
+//
+//   The registry ALSO lists guarded routes whose path does NOT match the
+//   verb pattern (e.g. `/api/fx-exchange`, `/api/investments`) — they
+//   are still money-movement and we want them enumerated in one place
+//   so reviewers can see the full guarded set at a glance ("the seven
+//   currently-guarded routes are enumerated in one place" — Task #189
+//   acceptance criterion).
+//
+// FAILURE MODES THE TEST CATCHES
+//   * A new verb-matching `app.<method>("PATH", ...)` lands without an
+//     `assertKillSwitchOff` guard AND is not in the registry → fail
+//     with a message telling the author exactly what to do (add the
+//     guard, or register as not-money-movement with a documented
+//     reason).
+//   * A registry entry classified `guarded` whose handler body no
+//     longer contains `assertKillSwitchOff(` → fail (a refactor
+//     silently dropped the guard).
+//   * A registry entry classified `allowlisted_not_money_movement`
+//     whose body now does call `assertKillSwitchOff(` → fail
+//     (re-classify as `guarded`).
+//   * A registry entry that no longer corresponds to a real
+//     `app.<method>("PATH", ...)` registration → fail (the route was
+//     renamed/removed; clean up the registry so the doc-of-record stays
+//     accurate).
+//
+// HOW TO EXTEND
+//   When you add a new money-movement HTTP route:
+//     1. Call `await assertKillSwitchOff(<specific>, "transactions")`
+//        at the top of the handler body, BEFORE any DB write.
+//     2. Add it to KILL_SWITCH_HTTP_ROUTE_REGISTRY below as
+//        `{ classification: "guarded", reason: "<one-line summary>" }`.
+//     3. Add it to MONEY_MOVEMENT_ROUTES (Section 1) so HTTP engagement
+//        actually surfaces as 503 with the canonical envelope.
+// ---------------------------------------------------------------------------
+
+const ROUTES_FILE = path.resolve(SERVICES_DIR, "..", "routes.ts");
+
+type HttpRouteClassification = "guarded" | "allowlisted_not_money_movement";
+
+// Single source of truth for the seven currently-guarded money-movement
+// HTTP routes. Reviewers can read this map top-to-bottom to see exactly
+// which routes are in scope. Mirror of KILL_SWITCH_ENTRY_POINT_REGISTRY
+// for the HTTP layer.
+const KILL_SWITCH_HTTP_ROUTE_REGISTRY: Record<
+  string,
+  { classification: HttpRouteClassification; reason: string }
+> = {
+  "POST /api/fx-exchange": {
+    classification: "guarded",
+    reason:
+      "FX exchange endpoint. Calls assertKillSwitchOff('transactions') (no narrower category exists for this op).",
+  },
+  "POST /api/deposit": {
+    classification: "guarded",
+    reason:
+      "Canonical deposit endpoint, mounted with shared handleDeposit. handleDeposit calls assertKillSwitchOff('deposits', 'transactions') before opening its DB tx.",
+  },
+  "POST /api/wallets/deposit": {
+    classification: "guarded",
+    reason:
+      "Legacy deposit endpoint, mounted with shared handleDeposit. Same guard as POST /api/deposit.",
+  },
+  "POST /api/withdraw": {
+    classification: "guarded",
+    reason:
+      "Canonical withdrawal endpoint, mounted with shared handleWithdraw. handleWithdraw calls assertKillSwitchOff('withdrawals', 'transactions') before opening its DB tx.",
+  },
+  "POST /api/wallets/withdraw": {
+    classification: "guarded",
+    reason:
+      "Legacy withdrawal endpoint, mounted with shared handleWithdraw. Same guard as POST /api/withdraw.",
+  },
+  "POST /api/investments": {
+    classification: "guarded",
+    reason:
+      "Investment buy endpoint. Calls assertKillSwitchOff('transactions') — investments fall under the master switch (no narrower category).",
+  },
+  "POST /api/wallets/transfer": {
+    classification: "guarded",
+    reason:
+      "Wallet currency conversion endpoint. Calls assertKillSwitchOff('transactions') — internal money-movement under the master switch.",
+  },
+};
+
+type DiscoveredHttpRoute = {
+  id: string; // "<METHOD> <path>"
+  method: string;
+  routePath: string;
+  handlerName: string | null;
+  body: string;
+};
+
+// Discovery is intentionally a syntactic walk rather than a TypeScript AST
+// parse, to keep the test cheap and dependency-free. That choice rests on
+// these conventions in `server/routes.ts` — if a future refactor changes
+// any of them, the corresponding regex below needs to be updated or the
+// new shape will silently slip past the guard check:
+//   * Route paths are double-quoted string literals: `app.post("/api/...")`.
+//     Single quotes, template strings, or variables for the path will not
+//     be discovered.
+//   * Named handler references are the LAST positional argument on the
+//     SAME line as the registration: `app.post("/path", limiter, handleX);`.
+//     A multi-line registration that puts the handler name on its own line
+//     would fall through to the inline-body branch and miss the named
+//     handler's body.
+//   * Named handlers are declared as `const handleX = async (req...) => { ... };`
+//     at 2-space indentation inside `registerRoutes(app)`. Other shapes
+//     (function declarations, default exports) are not indexed.
+//   * Inline arrow handlers live at 2-space indentation, so the body
+//     slice terminates at the next sibling `app.<method>(` or
+//     `const ...` at that exact indentation level.
+async function discoverHttpRoutes(): Promise<DiscoveredHttpRoute[]> {
+  const text = await fs.readFile(ROUTES_FILE, "utf8");
+  const lines = text.split("\n");
+
+  // Pass 1: index every named handler definition of the form
+  //   `  const handleX = async (req: Request, res: any) => {`
+  // The body extends until the matching `};` at the same indentation. We
+  // need this so that a route registered as
+  //   `app.post("/api/deposit", moneyMovementLimiter, handleDeposit);`
+  // resolves to handleDeposit's body when we look for `assertKillSwitchOff`.
+  const handlerBodies = new Map<string, string>();
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*async\s*\(/.exec(
+      lines[i],
+    );
+    if (!m) continue;
+    const indent = m[1];
+    const name = m[2];
+    let endIdx = lines.length;
+    for (let j = i + 1; j < lines.length; j++) {
+      // Same-indentation `};` is the canonical close for an arrow assigned
+      // to a `const`. The handler defs in routes.ts all follow this shape.
+      if (lines[j] === `${indent}};`) {
+        endIdx = j + 1;
+        break;
+      }
+    }
+    handlerBodies.set(name, lines.slice(i, endIdx).join("\n"));
+  }
+
+  // Pass 2: every `app.<method>("PATH", ...)` call.
+  const found: DiscoveredHttpRoute[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /\bapp\.(post|put|patch|delete)\s*\(\s*"([^"]+)"/.exec(lines[i]);
+    if (!m) continue;
+    const method = m[1].toUpperCase();
+    const routePath = m[2];
+    const id = `${method} ${routePath}`;
+
+    // Single-line registration referencing a named handler:
+    //   `app.post("/api/deposit", moneyMovementLimiter, handleDeposit);`
+    // The trailing `, identifier);` lets us look up the handler body.
+    const namedM = /,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*;?\s*$/.exec(lines[i]);
+    let handlerName: string | null = null;
+    let body: string;
+    if (namedM && handlerBodies.has(namedM[1])) {
+      handlerName = namedM[1];
+      body = handlerBodies.get(handlerName)!;
+    } else {
+      // Inline arrow handler. Take from this line until the next sibling
+      // declaration at the SAME indentation level (i.e. the next route
+      // registration or the next named `const handle...` declaration
+      // inside the registerRoutes(app) function). All route registrations
+      // and handler defs in routes.ts live at 2-space indentation; the
+      // `const idemKey = ...`, `const parsed = ...` declarations inside
+      // a handler body are indented 4+ spaces, so anchoring on the exact
+      // 2-space prefix avoids cutting off the body at the very first
+      // inner `const` (which would falsely "lose" the guard call further
+      // down). The 2-space anchor is also why `handleDeposit` /
+      // `handleWithdraw` (defined between route registrations) cannot
+      // smuggle a false-positive guard match into the FX route's body —
+      // the slice stops at their `const handle... =` line.
+      const indentMatch = /^(\s*)/.exec(lines[i]);
+      const baseIndent = indentMatch ? indentMatch[1] : "";
+      const siblingRouteRe = new RegExp(
+        `^${baseIndent}app\\.(post|put|patch|delete|get|use)\\s*\\(`,
+      );
+      const siblingConstRe = new RegExp(
+        `^${baseIndent}const\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=`,
+      );
+      let endIdx = lines.length;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (siblingRouteRe.test(lines[j]) || siblingConstRe.test(lines[j])) {
+          endIdx = j;
+          break;
+        }
+      }
+      body = lines.slice(i, endIdx).join("\n");
+    }
+
+    found.push({ id, method, routePath, handlerName, body });
+  }
+  return found;
+}
+
+describe("HTTP entry-point coverage walk (Task #189)", () => {
+  it("every money-movement-named HTTP route in server/routes.ts is either guarded or registered with a reason", async () => {
+    const discovered = await discoverHttpRoutes();
+
+    // Sanity: if discovery returned nothing, the file walk silently broke
+    // and every check below would falsely "pass". Anchor on the routes we
+    // already KNOW exist so a "discovery returns []" regression is loud.
+    expect(discovered.length).toBeGreaterThanOrEqual(
+      Object.keys(KILL_SWITCH_HTTP_ROUTE_REGISTRY).length,
+    );
+
+    const issues: string[] = [];
+    const seenIds = new Set<string>();
+
+    for (const route of discovered) {
+      const verbMatch =
+        MONEY_MOVEMENT_VERB_RE.test(route.routePath) ||
+        (route.handlerName !== null &&
+          MONEY_MOVEMENT_VERB_RE.test(route.handlerName));
+      const registered = KILL_SWITCH_HTTP_ROUTE_REGISTRY[route.id];
+      if (registered) seenIds.add(route.id);
+
+      const guardsItself = /\bassertKillSwitchOff\s*\(/.test(route.body);
+
+      if (!registered) {
+        if (!verbMatch) continue; // Out of scope — not a money-movement-named route.
+        if (guardsItself) {
+          issues.push(
+            `${route.id} calls assertKillSwitchOff() but is missing from KILL_SWITCH_HTTP_ROUTE_REGISTRY. Add it as { classification: "guarded", reason: "<summary>" } so the in-scope set stays auditable.`,
+          );
+        } else {
+          issues.push(
+            `${route.id} matches the money-movement verb pattern (deposit/withdraw/transfer/settle/post/credit/debit) but neither calls assertKillSwitchOff() nor appears in KILL_SWITCH_HTTP_ROUTE_REGISTRY. Either: (a) add \`await assertKillSwitchOff(<specific>, "transactions")\` at the top of the handler body and register it as "guarded"; or (b) if the path/handler name is misleading and the endpoint does not move money, register it as "allowlisted_not_money_movement" with a one-line reason.`,
+          );
+        }
+        continue;
+      }
+
+      switch (registered.classification) {
+        case "guarded":
+          if (!guardsItself) {
+            issues.push(
+              `${route.id} is registered as "guarded" but its handler body no longer calls assertKillSwitchOff(). Either restore the guard at the top of the handler or move the registry entry to "allowlisted_not_money_movement" with a reason describing why the endpoint no longer needs the guard.`,
+            );
+          }
+          break;
+        case "allowlisted_not_money_movement":
+          if (guardsItself) {
+            issues.push(
+              `${route.id} is registered as "allowlisted_not_money_movement" but its handler body now calls assertKillSwitchOff(). If the endpoint does in fact move money, re-classify it as "guarded".`,
+            );
+          }
+          break;
+      }
+    }
+
+    for (const id of Object.keys(KILL_SWITCH_HTTP_ROUTE_REGISTRY)) {
+      if (!seenIds.has(id)) {
+        issues.push(
+          `KILL_SWITCH_HTTP_ROUTE_REGISTRY entry "${id}" no longer matches any \`app.<method>("PATH", ...)\` registration in server/routes.ts. Remove the stale registry entry so the doc-of-record stays accurate.`,
+        );
+      }
+    }
+
+    if (issues.length > 0) {
+      throw new Error(
+        `Kill-switch HTTP route coverage check failed:\n  - ${issues.join(
+          "\n  - ",
+        )}`,
+      );
+    }
+  });
+
+  it("registry covers the seven currently-guarded routes (anchor)", () => {
+    // Belt-and-braces: independent of the discovery walk, assert the
+    // seven guarded routes the rest of this suite exercises are still
+    // listed in the registry. If someone deletes a registry entry AND
+    // the underlying route in the same change, the "stale entry" check
+    // above goes silent — this anchor keeps the headline guarded set
+    // explicit.
+    const expected = [
+      "POST /api/fx-exchange",
+      "POST /api/deposit",
+      "POST /api/wallets/deposit",
+      "POST /api/withdraw",
+      "POST /api/wallets/withdraw",
+      "POST /api/investments",
+      "POST /api/wallets/transfer",
+    ];
+    for (const id of expected) {
+      expect(KILL_SWITCH_HTTP_ROUTE_REGISTRY).toHaveProperty(id);
+      expect(KILL_SWITCH_HTTP_ROUTE_REGISTRY[id].classification).toBe(
+        "guarded",
+      );
+    }
+    // And the headline anchor: the seven routes from MONEY_MOVEMENT_ROUTES
+    // (Section 1) line up 1:1 with the guarded entries in the registry, so
+    // a future addition to one MUST be mirrored to the other.
+    const registryGuarded = Object.entries(KILL_SWITCH_HTTP_ROUTE_REGISTRY)
+      .filter(([, v]) => v.classification === "guarded")
+      .map(([k]) => k)
+      .sort();
+    const sectionOnePosts = MONEY_MOVEMENT_ROUTES.map(
+      (r) => `POST ${r.path}`,
+    ).sort();
+    expect(registryGuarded).toEqual(sectionOnePosts);
+  });
+});
+
 // Suppress unused-import lints in environments that don't strip them
 // automatically; these helpers are referenced via vitest patterns above.
 void drizzleSql;
