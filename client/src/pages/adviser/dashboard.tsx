@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
+import { clientDisplayName } from "@shared/display-name";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -342,7 +343,9 @@ export default function AdviserDashboard() {
                     >
                       <Link href={`/adviser/clients/${c.userId}`}>
                         <a className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate">
-                          {c.firstName} {c.lastName}
+                          {/* Task #283 — never render a blank label when
+                              firstName/lastName are empty placeholders. */}
+                          {clientDisplayName(c, c.userId)}
                         </a>
                       </Link>
                       <span className="text-sm text-slate-700 tabular-nums">

@@ -63,19 +63,21 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Display label for a client used in adviser task titles / notes.
-// Fallback chain: full name -> email -> Client #<id>.
-// Mirrors the resolution used in adviser-access.ts so the adviser portal is
-// consistent across notifications, lists, and tasks. Exported so a vitest
-// case can pin the contract without spinning up a full DB fixture.
+// Thin adapter around `@shared/display-name` so the cron, the
+// adviser-access notifications, and the adviser UI all resolve names the
+// same way. Kept as a re-export so existing imports keep working and so
+// the test file `adviser-task-automation-label.test.ts` still has a
+// stable target.
 // ---------------------------------------------------------------------------
+import { clientDisplayName } from "@shared/display-name";
+
 export function clientLabelForTask(input: {
   firstName?: string | null;
   lastName?: string | null;
   email?: string | null;
   clientUserId: number;
 }): string {
-  const fullName = `${input.firstName ?? ""} ${input.lastName ?? ""}`.trim();
-  return fullName || input.email || `Client #${input.clientUserId}`;
+  return clientDisplayName(input, input.clientUserId);
 }
 
 // ---------------------------------------------------------------------------

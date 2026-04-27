@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useRoute, Link } from "wouter";
+import { clientDisplayName } from "@shared/display-name";
 import { apiFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -184,7 +185,8 @@ export default function AdviserClientDetail() {
             </Button>
           </Link>
           <h1 className="text-2xl font-bold text-gray-900">
-            {client.firstName} {client.lastName}
+            {/* Task #283 — name -> email -> Client #<id> */}
+            {clientDisplayName(client, client.id)}
           </h1>
           <p className="text-sm text-gray-500">{client.email}</p>
         </div>

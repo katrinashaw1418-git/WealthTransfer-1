@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
+import { clientDisplayName } from "@shared/display-name";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -270,7 +271,8 @@ export default function AdviserBusiness() {
                       <TableCell>
                         <Link href={`/adviser/clients/${c.userId}`}>
                           <a className="font-medium text-slate-900 hover:text-sky-600">
-                            {c.firstName} {c.lastName}
+                            {/* Task #283 — name -> email -> Client #<id> */}
+                            {clientDisplayName(c, c.userId)}
                           </a>
                         </Link>
                         <div className="text-[11px] text-slate-500">{c.email}</div>

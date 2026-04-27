@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearch } from "wouter";
+import { clientDisplayName } from "@shared/display-name";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -127,7 +128,8 @@ export default function AdviserClients() {
                   <TableRow key={row.userId} data-testid={`row-client-${row.userId}`}>
                     <TableCell>
                       <div className="font-medium text-gray-900">
-                        {row.firstName} {row.lastName}
+                        {/* Task #283 — name -> email -> Client #<id> */}
+                        {clientDisplayName(row, row.userId)}
                       </div>
                       <div className="text-xs text-gray-500">{row.email}</div>
                     </TableCell>

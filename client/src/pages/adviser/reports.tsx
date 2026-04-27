@@ -3,6 +3,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { clientDisplayName } from "@shared/display-name";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -223,7 +224,8 @@ export default function AdviserReports() {
                         <SelectContent>
                           {clients.data?.map((c) => (
                             <SelectItem key={c.userId} value={String(c.userId)}>
-                              {c.firstName} {c.lastName}
+                              {/* Task #283 — name -> email -> Client #<id> */}
+                              {clientDisplayName(c, c.userId)}
                             </SelectItem>
                           ))}
                         </SelectContent>

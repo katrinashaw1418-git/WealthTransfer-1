@@ -1,0 +1,222 @@
+This is very close — but if you’re aiming for **ASIC-defensible + production-grade**, there are still a few things you should tighten. I’ll be direct and prioritise what actually matters.
+
+---
+
+# 🔴 Critical fixes (do before go-live)
+
+### 1. **Consent linkage is still not visible (big gap)**
+
+You say:
+
+> “Each rule is anchored on a signed fee consent”
+
+But you don’t show:
+
+* Consent ID
+* Consent expiry
+* Consent status
+
+👉 This is the **core legal basis** for charging fees.
+
+**Fix (must add columns):**
+
+* Consent ID (clickable)
+* Consent expiry date
+* Consent status (Signed / Expired / Pending)
+
+---
+
+### 2. **Duplicate rule problem still exists**
+
+You still have:
+
+* Rule #1 → active
+* Rule #2 → paused
+* Same client + same fee
+
+👉 This is fine historically, but only if:
+
+* #2 is explicitly **superseded** (not just paused)
+
+**Fix**
+
+* Replace “paused” with:
+
+  * **Superseded** (preferred)
+* Add:
+
+  * `superseded_by_rule_id`
+* Enforce:
+
+  * **Only ONE active rule per client + fee type + account**
+
+---
+
+### 3. **“Settlement is now live” = misleading (high risk wording)**
+
+You wrote:
+
+> “Deductions in Settled status have moved real funds”
+
+But earlier:
+
+> deductions are **disabled**
+
+👉 That contradiction will hurt you in:
+
+* audits
+* complaints
+* regulator review
+
+**Fix wording (clean + safe):**
+
+> “When enabled, deductions in Settled status represent completed fund movements. Deduction execution is currently disabled.”
+
+---
+
+# 🟡 Important upgrades (next layer)
+
+### 4. **Split “Active rules” vs everything else**
+
+Right now:
+
+* You show “Active rules”
+* But include **paused**
+
+👉 Operational confusion
+
+**Fix UI sections:**
+
+* Active rules
+* Inactive (Paused / Superseded / Expired)
+
+---
+
+### 5. **Missing time logic (very important)**
+
+You only show:
+
+* `$150 / month`
+
+But NOT:
+
+* Start date
+* Next charge date
+
+👉 Without this:
+
+* reconciliation breaks
+* disputes become messy
+
+**Add columns:**
+
+* Effective date
+* Next charge date
+
+---
+
+### 6. **No account / wallet reference**
+
+You previously captured:
+
+* AMAX-0001 (Cash hub)
+
+But not shown here.
+
+👉 This is dangerous:
+
+* which account is being charged?
+
+**Add column:**
+
+* Account / Wallet
+
+---
+
+### 7. **Adviser split lacks clarity**
+
+You show:
+
+> 80%
+
+But:
+
+* 80% of what?
+
+**Fix:**
+
+* “Adviser: 80% | Licensee: 20%”
+
+---
+
+### 8. **Missing automatic compliance guardrail**
+
+System must enforce:
+
+If:
+
+* consent expires
+  → rule automatically:
+* pauses
+* blocks deductions
+
+👉 This should NOT be manual
+
+---
+
+# 🟢 Nice to have (but strong)
+
+### 9. Add rule lifecycle states
+
+Instead of just active/paused:
+
+* Draft
+* Active
+* Superseded
+* Expired (auto)
+
+---
+
+### 10. Add actions column
+
+Right now missing.
+
+Add:
+
+* View rule
+* View consent
+* Pause / Resume
+* Supersede
+* Audit log
+
+---
+
+# 🧠 What you’ve done well (keep)
+
+* Separation:
+
+  * Rules / Accruals / Deductions → **very strong design**
+* Clear statement:
+
+  * Pending ≠ money moved → ✔ regulator-safe
+* Licensee-controlled rules → ✔ aligns with AFSL model
+
+---
+
+# 🧾 Clean “next task” for your agent
+
+Use this exactly:
+
+> Enforce single active fee rule per client/fee/account. Replace “paused” with “superseded” for prior rules and track supersession. Add consent linkage to each rule (consent_id, expiry, status). Split Active vs Inactive rules in UI. Add effective date, next charge date, and account reference. Automatically pause rules when consent expires. Update settlement messaging to reflect deductions are currently disabled.
+
+---
+
+# Bottom line
+
+You’re **very close to institutional-grade**, but:
+
+* No consent visibility = **compliance exposure**
+* Duplicate rule handling = **operational ambiguity**
+* Messaging inconsistency = **regulatory risk**
+
+Fix those, and this becomes **audit-ready + scalable**.
