@@ -685,6 +685,24 @@ app.use((req, res, next) => {
   const { startDbHealthWatcher } = await import("./services/db-health-watcher");
   startDbHealthWatcher();
 
+  // ---------------------------------------------------------------------------
+  // TASK #164 — In-process /health watchdog
+  // ---------------------------------------------------------------------------
+  // Runs `buildHealthReport()` itself on a short cadence (default 60s) and
+  // dispatches an operator alert when the report has been "degraded" for
+  // longer than HEALTH_WATCHDOG_THRESHOLD_MINUTES (default 10). Recovery
+  // dispatches a follow-up info row so operators can see the outage closed.
+  //
+  // Independent setInterval (NOT wrapped in withBackgroundJobRunRecord) for
+  // the same reason as db-health-watcher: that recorder writes to the DB,
+  // which is exactly the thing /health may be reporting on. Repeated alerts
+  // are debounced via in-memory state so a 24h outage produces ONE alert,
+  // not 1440 (the operator-alerts dispatcher's 15m dedupe window is too
+  // short to absorb a long outage at the watchdog's tick cadence).
+  // ---------------------------------------------------------------------------
+  const { startHealthWatchdog } = await import("./services/health-watchdog");
+  startHealthWatchdog();
+
   // -------------------------------------------------------------------------
   // Task #147 — Database backup, restore drill, and watchdog crons.
   //
