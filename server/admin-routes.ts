@@ -2633,7 +2633,14 @@ export function registerAdminRoutes(app: Express): void {
   app.post(
     "/api/admin/operator-alerts/test",
     adminRoute(async (req, auth) => {
-      const { notifyOperator } = await import("./services/operator-alerts");
+      const {
+        notifyOperator,
+        getEnvPrimaryWebhookUrl,
+        getEnvBackupWebhookUrl,
+      } = await import("./services/operator-alerts");
+      const { isOperatorAlertFailoverActive } = await import(
+        "./services/operator-alert-failover"
+      );
       const triggeredAt = new Date();
       const result = await notifyOperator({
         source: "admin-test",
@@ -2652,6 +2659,23 @@ export function registerAdminRoutes(app: Express): void {
         // visible result rather than the second one being suppressed.
         subjectId: `admin:${auth.userId}:${triggeredAt.getTime()}`,
       });
+
+      // Task #174 — surface BOTH host names (never the URL) in the test
+      // response so the admin UI can render which receiver the dispatcher
+      // actually targeted on each channel. Hosts are derived locally so
+      // we never log/transmit the credential portion of the URL.
+      const envPrimaryUrl = getEnvPrimaryWebhookUrl();
+      const envBackupUrl = getEnvBackupWebhookUrl();
+      const hostOf = (u: string | null): string | null => {
+        if (!u) return null;
+        try {
+          return new URL(u).host;
+        } catch {
+          return "(unparseable URL)";
+        }
+      };
+      const failoverActive = await isOperatorAlertFailoverActive();
+
       await writeAuditLog({
         userId: auth.userId,
         action: "admin_operator_alert_test",
@@ -2664,7 +2688,9 @@ export function registerAdminRoutes(app: Express): void {
           alertId: result.alertId,
         },
         extra: {
-          webhookConfigured: Boolean(process.env.OPERATOR_ALERT_WEBHOOK_URL),
+          webhookConfigured: Boolean(envPrimaryUrl),
+          backupWebhookConfigured: Boolean(envBackupUrl),
+          failoverActive,
         },
         ipAddress: req.ip ?? null,
       });
@@ -2674,7 +2700,187 @@ export function registerAdminRoutes(app: Express): void {
         channelsAttempted: result.channelsAttempted,
         outcomes: result.outcomes,
         occurrences: result.occurrences,
-        webhookConfigured: Boolean(process.env.OPERATOR_ALERT_WEBHOOK_URL),
+        webhookConfigured: Boolean(envPrimaryUrl),
+        backupWebhookConfigured: Boolean(envBackupUrl),
+        failoverActive,
+        // Hosts are reported as they map to the dispatch channels AFTER
+        // applying the failover swap, matching what the dispatcher just
+        // did. The "env" hosts below let the UI also show the underlying
+        // env-var configuration unaffected by the toggle.
+        webhookHosts: {
+          primaryChannelHost: hostOf(
+            failoverActive ? envBackupUrl : envPrimaryUrl,
+          ),
+          backupChannelHost: hostOf(
+            failoverActive ? envPrimaryUrl : envBackupUrl,
+          ),
+          envPrimaryHost: hostOf(envPrimaryUrl),
+          envBackupHost: hostOf(envBackupUrl),
+        },
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #174 — Operator alert webhook failover toggle
+  //
+  // GET  /api/admin/operator-alerts/failover   — current toggle state plus
+  //                                              env webhook hosts so the
+  //                                              admin page can render the
+  //                                              card without two round
+  //                                              trips.
+  // POST /api/admin/operator-alerts/failover   — engage / disengage the
+  //                                              toggle. Writes one
+  //                                              audit_logs row per call.
+  //
+  // Engaging failover swaps which env URL the dispatcher uses for the
+  // historical "webhook" channel (primary slot) without restart. The
+  // backup URL is then promoted to primary; the original primary moves
+  // into the backup slot so the parallel-dispatch path still pages it
+  // (in case an ops mistake left the toggle on after recovery).
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/operator-alerts/failover",
+    adminRoute(async () => {
+      const {
+        getOperatorAlertFailoverState,
+      } = await import("./services/operator-alert-failover");
+      const {
+        getEnvPrimaryWebhookUrl,
+        getEnvBackupWebhookUrl,
+      } = await import("./services/operator-alerts");
+      const state = await getOperatorAlertFailoverState();
+      const envPrimaryUrl = getEnvPrimaryWebhookUrl();
+      const envBackupUrl = getEnvBackupWebhookUrl();
+      const hostOf = (u: string | null): string | null => {
+        if (!u) return null;
+        try {
+          return new URL(u).host;
+        } catch {
+          return "(unparseable URL)";
+        }
+      };
+      return {
+        failover: {
+          active: state.active,
+          reason: state.reason,
+          engagedByUserId: state.engagedByUserId,
+          engagedAt: state.engagedAt,
+        },
+        webhookHosts: {
+          envPrimaryHost: hostOf(envPrimaryUrl),
+          envBackupHost: hostOf(envBackupUrl),
+          // Effective hosts after applying the toggle, so the UI doesn't
+          // have to recompute the swap rule on the client.
+          primaryChannelHost: hostOf(
+            state.active ? envBackupUrl : envPrimaryUrl,
+          ),
+          backupChannelHost: hostOf(
+            state.active ? envPrimaryUrl : envBackupUrl,
+          ),
+        },
+        // Surface to the UI whether failover is even meaningful. With no
+        // backup URL configured, the toggle is rendered disabled with a
+        // hint to set OPERATOR_ALERT_WEBHOOK_URL_BACKUP.
+        backupConfigured: Boolean(envBackupUrl),
+        primaryConfigured: Boolean(envPrimaryUrl),
+      };
+    }),
+  );
+
+  const operatorAlertFailoverToggleSchema = z.object({
+    active: z.boolean(),
+    // Reason required when engaging (audit usefulness); ignored on disengage.
+    reason: z.string().max(500).optional().nullable(),
+  });
+
+  app.post(
+    "/api/admin/operator-alerts/failover",
+    adminRoute(async (req, auth) => {
+      const parsed = operatorAlertFailoverToggleSchema.safeParse(
+        req.body ?? {},
+      );
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error(parsed.error.errors[0]?.message ?? "Invalid payload"),
+          { status: 400 },
+        );
+      }
+      const { active, reason } = parsed.data;
+      if (active && (!reason || reason.trim().length === 0)) {
+        throw Object.assign(
+          new Error(
+            "A reason is required when engaging operator-alert webhook failover.",
+          ),
+          { status: 400 },
+        );
+      }
+
+      const {
+        setOperatorAlertFailover,
+      } = await import("./services/operator-alert-failover");
+      const {
+        getEnvPrimaryWebhookUrl,
+        getEnvBackupWebhookUrl,
+      } = await import("./services/operator-alerts");
+
+      // Guard: refuse to engage if no backup URL is configured. With no
+      // backup the swap would point the primary slot at null and leave
+      // the dispatcher with the log channel only — almost certainly the
+      // opposite of what the admin intended.
+      if (active && !getEnvBackupWebhookUrl()) {
+        throw Object.assign(
+          new Error(
+            "Cannot engage failover: OPERATOR_ALERT_WEBHOOK_URL_BACKUP is not configured.",
+          ),
+          { status: 400 },
+        );
+      }
+
+      const result = await setOperatorAlertFailover({
+        active,
+        reason: reason ?? null,
+        actorUserId: auth.userId,
+      });
+
+      try {
+        await writeAuditLog({
+          userId: auth.userId,
+          action: "operator_alert_failover.toggled",
+          entityType: "system_settings",
+          entityId: "1",
+          before: {
+            active: result.before.active,
+            reason: result.before.reason,
+          },
+          after: {
+            active: result.after.active,
+            reason: result.after.reason,
+          },
+          extra: {
+            requestedActive: active,
+            changed: result.changed,
+            primaryConfigured: Boolean(getEnvPrimaryWebhookUrl()),
+            backupConfigured: Boolean(getEnvBackupWebhookUrl()),
+          },
+          ipAddress: (req.ip ?? null) as string | null,
+        });
+      } catch (e) {
+        console.error(
+          "[operator-alert-failover] audit log insert failed",
+          e,
+        );
+      }
+
+      return {
+        ok: true,
+        changed: result.changed,
+        failover: {
+          active: result.after.active,
+          reason: result.after.reason,
+          engagedByUserId: result.after.engagedByUserId,
+          engagedAt: result.after.engagedAt,
+        },
       };
     }),
   );

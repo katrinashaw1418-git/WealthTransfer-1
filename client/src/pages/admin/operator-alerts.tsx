@@ -41,7 +41,10 @@ import {
   BookOpen,
   Send,
   Repeat,
+  ArrowLeftRight,
+  AlertTriangle,
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 
@@ -72,6 +75,13 @@ interface OperatorAlertRow {
   lastSeenAt?: string | null;
 }
 
+interface WebhookHosts {
+  primaryChannelHost: string | null;
+  backupChannelHost: string | null;
+  envPrimaryHost: string | null;
+  envBackupHost: string | null;
+}
+
 interface TestAlertResponse {
   alertId: number | null;
   deliveryStatus: string;
@@ -79,6 +89,24 @@ interface TestAlertResponse {
   outcomes: ChannelOutcome[];
   occurrences: number;
   webhookConfigured: boolean;
+  // Task #174 — present on responses from servers running this task or later.
+  // Older deployments may omit these; the renderer treats them as optional.
+  backupWebhookConfigured?: boolean;
+  failoverActive?: boolean;
+  webhookHosts?: WebhookHosts;
+}
+
+// Task #174 — payload of GET /api/admin/operator-alerts/failover.
+interface OperatorAlertFailoverStatus {
+  failover: {
+    active: boolean;
+    reason: string | null;
+    engagedByUserId: number | null;
+    engagedAt: string | null;
+  };
+  webhookHosts: WebhookHosts;
+  primaryConfigured: boolean;
+  backupConfigured: boolean;
 }
 
 interface OperatorAlertsPage {
@@ -435,6 +463,9 @@ export default function AdminOperatorAlerts() {
   const [page, setPage] = useState(1);
   const [selectedAlert, setSelectedAlert] = useState<OperatorAlertRow | null>(null);
   const [ackNote, setAckNote] = useState("");
+  // Task #174 — failover toggle form. Reason is required when engaging,
+  // ignored when disengaging; mirrors the write-kill-switch UX.
+  const [failoverReasonInput, setFailoverReasonInput] = useState("");
   const limit = 50;
 
   const queryKey = [
@@ -689,6 +720,57 @@ export default function AdminOperatorAlerts() {
     },
   });
 
+  // Task #174 — webhook failover state + toggle. The query also returns the
+  // primary/backup hosts so the card can render which receiver is currently
+  // in the dispatcher's primary slot without a second round trip.
+  const {
+    data: failoverData,
+    isLoading: failoverLoading,
+  } = useQuery<OperatorAlertFailoverStatus>({
+    queryKey: ["/api/admin/operator-alerts/failover"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/operator-alerts/failover", {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      return res.json();
+    },
+  });
+
+  const failoverMutation = useMutation({
+    mutationFn: async (vars: { active: boolean; reason: string | null }) => {
+      const res = await apiRequest(
+        "POST",
+        "/api/admin/operator-alerts/failover",
+        vars,
+      );
+      return res.json();
+    },
+    onSuccess: (_data, vars) => {
+      toast({
+        title: vars.active
+          ? "Failover engaged"
+          : "Failover disengaged",
+        description: vars.active
+          ? "Backup webhook promoted to the primary slot. Alerts will now page the backup receiver first."
+          : "Primary webhook restored. Alerts will resume normal dispatch.",
+        duration: 4000,
+      });
+      setFailoverReasonInput("");
+      void queryClient.invalidateQueries({
+        queryKey: ["/api/admin/operator-alerts/failover"],
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Failover toggle failed",
+        description: err?.message ?? "Unknown error",
+        variant: "destructive",
+        duration: 6000,
+      });
+    },
+  });
+
   async function handleCopy(text: string, label: string) {
     const ok = await copyToClipboard(text);
     if (ok) {
@@ -707,6 +789,23 @@ export default function AdminOperatorAlerts() {
     }
   }
 
+  // Task #174 — derived fields used by the Failover card. Pulled out of
+  // the JSX so the early-return / empty-state branches stay readable.
+  const failover = failoverData?.failover;
+  const failoverHosts = failoverData?.webhookHosts;
+  const backupConfigured = failoverData?.backupConfigured ?? false;
+  const primaryConfigured = failoverData?.primaryConfigured ?? false;
+  const failoverActive = failover?.active ?? false;
+  // Engaging requires a backup URL AND a non-empty reason. Disengaging
+  // requires neither — but the button is still gated on "currently active"
+  // so the no-op click sends a clear signal rather than a silent 200.
+  const canEngageFailover =
+    !failoverActive &&
+    backupConfigured &&
+    failoverReasonInput.trim().length > 0 &&
+    !failoverMutation.isPending;
+  const canDisengageFailover = failoverActive && !failoverMutation.isPending;
+
   return (
     <div className="space-y-4 max-w-7xl">
       <div>
@@ -715,6 +814,220 @@ export default function AdminOperatorAlerts() {
           History of alerts dispatched by background jobs and reconciliation tasks. Read-only.
         </p>
       </div>
+
+      {/* Task #174 — webhook failover card. Promotes the env-configured
+          backup webhook into the dispatcher's primary slot without a
+          restart. Reason is required on engage; both before/after states
+          are captured in the audit log. */}
+      <Card data-testid="card-operator-alert-failover">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <ArrowLeftRight className="h-4 w-4 text-violet-600" />
+            Webhook failover
+            {failoverActive && (
+              <Badge
+                variant="outline"
+                className="bg-amber-100 text-amber-800 border-amber-300"
+                data-testid="badge-failover-active"
+              >
+                ENGAGED
+              </Badge>
+            )}
+          </CardTitle>
+          <p className="text-xs text-slate-500 mt-1">
+            Promote{" "}
+            <code className="text-[11px] bg-slate-100 px-1 py-0.5 rounded">
+              OPERATOR_ALERT_WEBHOOK_URL_BACKUP
+            </code>{" "}
+            into the primary webhook slot when the configured primary is in
+            outage. Both URLs are dispatched in parallel as separate channel
+            outcomes regardless of this toggle; the toggle only swaps which
+            URL fills the historical{" "}
+            <code className="text-[11px] bg-slate-100 px-1 py-0.5 rounded">
+              webhook
+            </code>{" "}
+            channel slot in persisted rows.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {failoverLoading ? (
+            <Skeleton className="h-32 w-full" />
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="border rounded p-3 bg-slate-50">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">
+                    Primary slot (channel="webhook")
+                  </div>
+                  <div
+                    className="text-sm font-mono text-slate-800 mt-1 break-all"
+                    data-testid="text-failover-primary-host"
+                  >
+                    {failoverHosts?.primaryChannelHost ?? (
+                      <span className="text-slate-400">(unset)</span>
+                    )}
+                  </div>
+                  {failoverActive && (
+                    <div className="text-[11px] text-amber-700 mt-1">
+                      Backup URL — promoted by failover toggle
+                    </div>
+                  )}
+                </div>
+                <div className="border rounded p-3 bg-slate-50">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">
+                    Backup slot (channel="webhook_backup")
+                  </div>
+                  <div
+                    className="text-sm font-mono text-slate-800 mt-1 break-all"
+                    data-testid="text-failover-backup-host"
+                  >
+                    {failoverHosts?.backupChannelHost ?? (
+                      <span className="text-slate-400">(unset)</span>
+                    )}
+                  </div>
+                  {failoverActive && (
+                    <div className="text-[11px] text-amber-700 mt-1">
+                      Original primary — demoted while failover is engaged
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {!primaryConfigured && (
+                <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 flex items-start gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    <code className="text-[11px]">OPERATOR_ALERT_WEBHOOK_URL</code>{" "}
+                    is not configured — operator alerts will only be written
+                    to the log channel.
+                  </span>
+                </div>
+              )}
+              {!backupConfigured && (
+                <div className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded p-2 flex items-start gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    <code className="text-[11px]">
+                      OPERATOR_ALERT_WEBHOOK_URL_BACKUP
+                    </code>{" "}
+                    is not configured. Set it on the deployment to enable
+                    parallel backup dispatch and runtime failover.
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between border-t pt-3">
+                <div className="flex items-center gap-3">
+                  <Switch
+                    checked={failoverActive}
+                    disabled={
+                      failoverMutation.isPending ||
+                      (!failoverActive && !backupConfigured)
+                    }
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        // Engage: requires reason — defer to button below
+                        // (Switch alone has no reason field). Still flash a
+                        // toast so the operator understands they need to
+                        // complete the form rather than silently no-op.
+                        if (failoverReasonInput.trim().length === 0) {
+                          toast({
+                            title: "Reason required",
+                            description:
+                              "Add a short reason below, then click Engage failover.",
+                            duration: 3500,
+                          });
+                          return;
+                        }
+                        failoverMutation.mutate({
+                          active: true,
+                          reason: failoverReasonInput.trim(),
+                        });
+                      } else {
+                        failoverMutation.mutate({ active: false, reason: null });
+                      }
+                    }}
+                    data-testid="switch-failover-toggle"
+                  />
+                  <div className="text-sm">
+                    <div className="font-medium text-slate-900">
+                      {failoverActive ? "Failover engaged" : "Failover disengaged"}
+                    </div>
+                    {failoverActive && failover?.engagedAt && (
+                      <div className="text-xs text-slate-500">
+                        Engaged {fmt(failover.engagedAt)}
+                        {failover.engagedByUserId !== null
+                          ? ` by user #${failover.engagedByUserId}`
+                          : ""}
+                      </div>
+                    )}
+                    {failoverActive && failover?.reason && (
+                      <div
+                        className="text-xs text-slate-700 mt-0.5"
+                        data-testid="text-failover-reason"
+                      >
+                        Reason: {failover.reason}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {!failoverActive && (
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-slate-700">
+                    Reason (required to engage)
+                  </label>
+                  <Textarea
+                    rows={2}
+                    value={failoverReasonInput}
+                    onChange={(e) => setFailoverReasonInput(e.target.value)}
+                    placeholder="e.g. Slack workspace migration locking out the primary webhook secret"
+                    maxLength={500}
+                    disabled={!backupConfigured || failoverMutation.isPending}
+                    data-testid="textarea-failover-reason"
+                  />
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        failoverMutation.mutate({
+                          active: true,
+                          reason: failoverReasonInput.trim(),
+                        })
+                      }
+                      disabled={!canEngageFailover}
+                      data-testid="button-engage-failover"
+                      className="gap-1"
+                    >
+                      <ArrowLeftRight className="h-4 w-4" />
+                      {failoverMutation.isPending ? "Engaging…" : "Engage failover"}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {failoverActive && (
+                <div className="flex justify-end">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      failoverMutation.mutate({ active: false, reason: null })
+                    }
+                    disabled={!canDisengageFailover}
+                    data-testid="button-disengage-failover"
+                  >
+                    {failoverMutation.isPending
+                      ? "Disengaging…"
+                      : "Disengage failover"}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

@@ -167,6 +167,15 @@ app.use((req, res, next) => {
   // that already created it.
   await ensureSystemSettingsTable();
 
+  // Task #174 — backfill the four operator-alert webhook failover columns
+  // on top of the table created above. Idempotent ALTER TABLE IF NOT
+  // EXISTS so dev DBs that predate Task #174 (and prod DBs awaiting the
+  // next `db:push`) don't crash the dispatcher when it reads the toggle.
+  const { ensureOperatorAlertFailoverColumns } = await import(
+    "./services/operator-alert-failover"
+  );
+  await ensureOperatorAlertFailoverColumns();
+
   const server = await registerRoutes(app);
 
   // ---------------------------------------------------------------------------

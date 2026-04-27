@@ -1,6 +1,7 @@
 // =============================================================================
 // OPERATOR ALERTS — Session 27 (Task #25), extended Task #36, Task #156,
-//                   Task #176 (per-source dedupe overrides)
+//                   Task #176 (per-source dedupe overrides),
+//                   Task #174 (backup webhook + admin failover toggle)
 // =============================================================================
 //
 // README — what this module does, in one screen
@@ -40,7 +41,20 @@
 //
 // Configuration (all optional, all read at call time so .env edits are picked
 // up by the next dispatch without a restart):
-//   * OPERATOR_ALERT_WEBHOOK_URL          — destination for the webhook channel.
+//   * OPERATOR_ALERT_WEBHOOK_URL          — destination for the primary webhook
+//                                           channel (channel="webhook").
+//   * OPERATOR_ALERT_WEBHOOK_URL_BACKUP   — destination for the backup webhook
+//                                           channel (channel="webhook_backup").
+//                                           When set, dispatched IN PARALLEL
+//                                           with the primary so a primary
+//                                           outage doesn't drop alerts on the
+//                                           floor (Task #174). Receivers can
+//                                           legitimately differ (different
+//                                           Slack workspace, PagerDuty service,
+//                                           etc.) — both outcomes are
+//                                           persisted as separate channel
+//                                           rows so the admin UI can show one
+//                                           lit red and the other green.
 //   * OPERATOR_ALERT_DEDUPE_WINDOW_MIN    — sliding window in minutes; default 15.
 //                                           Set to 0 to disable coalescing.
 //   * OPERATOR_ALERT_DEDUPE_WINDOW_OVERRIDES
@@ -91,7 +105,13 @@ import {
 
 export type OperatorAlertSeverity = "info" | "warning" | "alert" | "critical";
 
-export type OperatorAlertChannel = "log" | "webhook";
+// Task #174 — `webhook_backup` joins the union as the second webhook
+// channel. The historical `webhook` name is kept for the PRIMARY slot so
+// existing dashboards / search filters / persisted rows continue to work
+// unchanged. Failover (`isOperatorAlertFailoverActive()`) only swaps WHICH
+// env URL is dispatched on which channel; the channel names themselves
+// are stable.
+export type OperatorAlertChannel = "log" | "webhook" | "webhook_backup";
 
 /**
  * Discrete outcome categories for a single channel attempt.
@@ -209,15 +229,72 @@ function truncateError(err: unknown): string {
 }
 
 /**
- * Resolve the configured webhook URL at call time so test harnesses /
- * deployments that set the env var after import still see it. Returns null
- * when unset so we know to skip the webhook channel quietly.
+ * Resolve a single env var into a URL or null. Centralised so the env-
+ * configured primary and backup URLs share trim/normalise logic.
  */
-function getWebhookUrl(): string | null {
-  const raw = process.env.OPERATOR_ALERT_WEBHOOK_URL;
+function readEnvUrl(name: string): string | null {
+  const raw = process.env[name];
   if (!raw) return null;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Env-configured PRIMARY webhook URL. Read at call time so .env edits
+ * are picked up by the next dispatch without a restart. Visible to tests
+ * via the named export so a test can assert the dispatcher honours an
+ * env-only deployment without a DB read.
+ */
+export function getEnvPrimaryWebhookUrl(): string | null {
+  return readEnvUrl("OPERATOR_ALERT_WEBHOOK_URL");
+}
+
+/**
+ * Env-configured BACKUP webhook URL (Task #174). Optional — when unset
+ * the dispatcher only attempts the primary slot. When BOTH env vars are
+ * set, both URLs are dispatched in parallel as separate channel
+ * outcomes (channel="webhook" + channel="webhook_backup").
+ */
+export function getEnvBackupWebhookUrl(): string | null {
+  return readEnvUrl("OPERATOR_ALERT_WEBHOOK_URL_BACKUP");
+}
+
+/**
+ * Resolve the URL the dispatcher should send on the named channel,
+ * accounting for the runtime failover toggle (Task #174).
+ *
+ * Without failover:
+ *   webhook        → OPERATOR_ALERT_WEBHOOK_URL          (env primary)
+ *   webhook_backup → OPERATOR_ALERT_WEBHOOK_URL_BACKUP   (env backup)
+ *
+ * With failover engaged (admin promoted backup → primary):
+ *   webhook        → OPERATOR_ALERT_WEBHOOK_URL_BACKUP   (env backup)
+ *   webhook_backup → OPERATOR_ALERT_WEBHOOK_URL          (env primary)
+ *
+ * Either side can be null. `notifyOperator` only attempts a channel when
+ * its resolved URL is non-null; this keeps existing single-URL
+ * deployments working unchanged.
+ */
+export function resolveWebhookUrlForChannel(
+  channel: "webhook" | "webhook_backup",
+  failoverActive: boolean,
+): string | null {
+  const envPrimary = getEnvPrimaryWebhookUrl();
+  const envBackup = getEnvBackupWebhookUrl();
+  if (!failoverActive) {
+    return channel === "webhook" ? envPrimary : envBackup;
+  }
+  return channel === "webhook" ? envBackup : envPrimary;
+}
+
+/**
+ * Backwards-compatible alias. Returns the URL the dispatcher will send
+ * on the historical "webhook" channel given the current failover state.
+ * Mirrors the original Session-27 helper signature so any out-of-tree
+ * caller that imported it sees the same behaviour after Task #174.
+ */
+function getWebhookUrl(failoverActive: boolean): string | null {
+  return resolveWebhookUrlForChannel("webhook", failoverActive);
 }
 
 function getWebhookTimeoutMs(): number {
@@ -298,12 +375,35 @@ export function getDedupeWindowMs(source?: string): number {
 }
 
 /**
+ * Resolve a URL to its host for log lines. Webhook URLs are credentials
+ * (signed-secret query strings, in-path tokens) so we deliberately never
+ * log the full URL — only the host. Unparseable URLs return a marker so
+ * the operator can spot a misconfiguration without leaking the bad value.
+ */
+function urlHost(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).host;
+  } catch {
+    return "(unparseable URL)";
+  }
+}
+
+/**
  * Boot-time line so operators can see whether the webhook is wired without
  * waiting for the first real alert to fire. Called once from server/index.ts
  * during startup. Safe to call multiple times.
+ *
+ * Task #174 — also reports the BACKUP webhook host (still host-only — never
+ * the URL) so a misconfigured backup is visible at boot the same way the
+ * primary already is. The failover toggle's persisted state is NOT read
+ * here because (a) the toggle is read on every dispatch already and (b)
+ * this banner runs before the DB-bootstrap path that the failover service
+ * relies on.
  */
 export function logOperatorAlertsStartup(): void {
-  const url = getWebhookUrl();
+  const primaryHost = urlHost(getEnvPrimaryWebhookUrl());
+  const backupHost = urlHost(getEnvBackupWebhookUrl());
   const windowMs = getDedupeWindowMs();
   const windowDesc = windowMs === 0 ? "disabled" : `${Math.round(windowMs / 60_000)}m`;
   const overrides = getDedupeWindowOverrides();
@@ -313,21 +413,28 @@ export function logOperatorAlertsStartup(): void {
       : `, dedupe-overrides=${Array.from(overrides.entries())
           .map(([s, m]) => `${s}=${m === 0 ? "off" : `${m}m`}`)
           .join(",")}`;
-  if (url) {
-    // Don't log the URL itself — webhook URLs are credentials.
-    let host = "";
-    try {
-      host = new URL(url).host;
-    } catch {
-      host = "(unparseable URL)";
+  if (primaryHost || backupHost) {
+    const parts: string[] = [];
+    parts.push(`primary=${primaryHost ?? "(unset)"}`);
+    parts.push(`backup=${backupHost ?? "(unset)"}`);
+    parts.push(`dedupe=${windowDesc}${overrideDesc}`);
+    parts.push(`timeout=${getWebhookTimeoutMs()}ms`);
+    console.log(`[operator-alerts] webhooks configured (${parts.join(", ")})`);
+    if (!backupHost) {
+      // Soft warning: the primary alone is supported (this is the pre-Task
+      // -174 default), but operators have no failover capability without
+      // a backup URL. Logged once at boot so the gap is visible without a
+      // dashboard scan.
+      console.warn(
+        `[operator-alerts] no backup webhook configured — set OPERATOR_ALERT_WEBHOOK_URL_BACKUP ` +
+          `to enable runtime failover when the primary receiver is down (Task #174).`,
+      );
     }
-    console.log(
-      `[operator-alerts] webhook configured (host=${host}, dedupe=${windowDesc}${overrideDesc}, timeout=${getWebhookTimeoutMs()}ms)`,
-    );
   } else {
     console.warn(
       `[operator-alerts] webhook NOT configured — alerts will write to the log channel only. ` +
-        `Set OPERATOR_ALERT_WEBHOOK_URL to enable webhook delivery (dedupe=${windowDesc}${overrideDesc}).`,
+        `Set OPERATOR_ALERT_WEBHOOK_URL (and optionally OPERATOR_ALERT_WEBHOOK_URL_BACKUP) ` +
+        `to enable webhook delivery (dedupe=${windowDesc}${overrideDesc}).`,
     );
   }
 }
@@ -364,6 +471,7 @@ async function postWebhookOnce(
   url: string,
   alert: OperatorAlert,
   attempt: number,
+  channel: "webhook" | "webhook_backup",
 ): Promise<OperatorAlertChannelOutcome> {
   const startedAt = Date.now();
   // Slack-compatible incoming-webhook shape: a top-level `text` field is
@@ -410,10 +518,10 @@ async function postWebhookOnce(
     });
     if (!res.ok) {
       console.error(
-        `[operator-alerts] webhook responded ${res.status} ${res.statusText} for source=${alert.source} (attempt ${attempt})`,
+        `[operator-alerts] ${channel} responded ${res.status} ${res.statusText} for source=${alert.source} (attempt ${attempt})`,
       );
       return {
-        channel: "webhook",
+        channel,
         status: "http_error",
         httpStatus: res.status,
         error: `${res.status} ${res.statusText}`.trim(),
@@ -422,7 +530,7 @@ async function postWebhookOnce(
       };
     }
     return {
-      channel: "webhook",
+      channel,
       status: "success",
       httpStatus: res.status,
       durationMs: Date.now() - startedAt,
@@ -434,11 +542,11 @@ async function postWebhookOnce(
       (err as { name?: string })?.name === "AbortError" ||
       (err as Error)?.message?.toLowerCase?.().includes("aborted");
     console.error(
-      `[operator-alerts] webhook dispatch failed for source=${alert.source} (attempt ${attempt})`,
+      `[operator-alerts] ${channel} dispatch failed for source=${alert.source} (attempt ${attempt})`,
       (err as Error)?.message ?? err,
     );
     return {
-      channel: "webhook",
+      channel,
       status: isAbort ? "timeout" : "error",
       error: truncateError(err),
       durationMs: Date.now() - startedAt,
@@ -460,9 +568,10 @@ async function postWebhookOnce(
 async function postWebhookWithRetry(
   url: string,
   alert: OperatorAlert,
+  channel: "webhook" | "webhook_backup",
 ): Promise<OperatorAlertChannelOutcome[]> {
   const outcomes: OperatorAlertChannelOutcome[] = [];
-  const first = await postWebhookOnce(url, alert, 1);
+  const first = await postWebhookOnce(url, alert, 1, channel);
   outcomes.push(first);
   const shouldRetry =
     first.status === "timeout" ||
@@ -473,7 +582,7 @@ async function postWebhookWithRetry(
   if (!shouldRetry) return outcomes;
 
   await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
-  const second = await postWebhookOnce(url, alert, 2);
+  const second = await postWebhookOnce(url, alert, 2, channel);
   outcomes.push(second);
   return outcomes;
 }
@@ -702,22 +811,83 @@ export async function notifyOperator(alert: OperatorAlert): Promise<OperatorAler
   channelsAttempted.push("log");
   outcomes.push(logAlert(alert));
 
-  // Webhook channel (when configured)
-  const webhookUrl = getWebhookUrl();
-  if (webhookUrl) {
+  // Task #174 — read the failover toggle once per dispatch. A DB outage
+  // here returns false (no failover), so a sick DB cannot silently flip
+  // which receiver gets paged. Wrapped in its own try/catch because the
+  // failover service performs a SELECT and we don't want a transient
+  // settings-table error to cancel the actual dispatch.
+  let failoverActive = false;
+  try {
+    const { isOperatorAlertFailoverActive } = await import(
+      "./operator-alert-failover"
+    );
+    failoverActive = await isOperatorAlertFailoverActive();
+  } catch (err) {
+    console.error(
+      "[operator-alerts] failover state lookup failed — defaulting to inactive",
+      (err as Error)?.message ?? err,
+    );
+    failoverActive = false;
+  }
+
+  // Webhook channels — primary AND backup, dispatched in parallel when
+  // both URLs resolve to non-null. Each retains its own retry budget and
+  // its own sequence of outcomes in the persisted row, so the admin UI
+  // can light one channel green and the other red on a partial outage.
+  const primaryUrl = resolveWebhookUrlForChannel("webhook", failoverActive);
+  const backupUrl = resolveWebhookUrlForChannel("webhook_backup", failoverActive);
+
+  const webhookJobs: Promise<{
+    channel: "webhook" | "webhook_backup";
+    outcomes: OperatorAlertChannelOutcome[];
+  }>[] = [];
+
+  if (primaryUrl) {
     channelsAttempted.push("webhook");
-    try {
-      const webhookOutcomes = await postWebhookWithRetry(webhookUrl, alert);
-      outcomes.push(...webhookOutcomes);
-    } catch (err) {
-      // Defensive — postWebhookOnce already captures its own throws.
-      outcomes.push({
-        channel: "webhook",
-        status: "error",
-        error: truncateError(err),
-        durationMs: 0,
-        attempt: 1,
-      });
+    webhookJobs.push(
+      postWebhookWithRetry(primaryUrl, alert, "webhook")
+        .then((o) => ({ channel: "webhook" as const, outcomes: o }))
+        .catch((err) => ({
+          channel: "webhook" as const,
+          outcomes: [
+            {
+              channel: "webhook" as OperatorAlertChannel,
+              status: "error" as OperatorAlertChannelStatus,
+              error: truncateError(err),
+              durationMs: 0,
+              attempt: 1,
+            },
+          ],
+        })),
+    );
+  }
+  if (backupUrl) {
+    channelsAttempted.push("webhook_backup");
+    webhookJobs.push(
+      postWebhookWithRetry(backupUrl, alert, "webhook_backup")
+        .then((o) => ({ channel: "webhook_backup" as const, outcomes: o }))
+        .catch((err) => ({
+          channel: "webhook_backup" as const,
+          outcomes: [
+            {
+              channel: "webhook_backup" as OperatorAlertChannel,
+              status: "error" as OperatorAlertChannelStatus,
+              error: truncateError(err),
+              durationMs: 0,
+              attempt: 1,
+            },
+          ],
+        })),
+    );
+  }
+
+  if (webhookJobs.length > 0) {
+    const settled = await Promise.all(webhookJobs);
+    // Preserve dispatch order in the persisted row: primary attempts
+    // (in retry order) first, then backup attempts. Makes the admin
+    // sheet read top-down even though the actual dispatch was parallel.
+    for (const job of settled) {
+      outcomes.push(...job.outcomes);
     }
   }
 

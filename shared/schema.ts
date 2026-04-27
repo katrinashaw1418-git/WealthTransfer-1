@@ -2709,6 +2709,28 @@ export const systemSettings = pgTable("system_settings", {
   writeKillSwitchEnabledBy: integer("write_kill_switch_enabled_by").references(() => users.id),
   writeKillSwitchEnabledAt: timestamp("write_kill_switch_enabled_at"),
 
+  // ---------------------------------------------------------------------------
+  // TASK #174 — Operator-alerts webhook failover toggle
+  // ---------------------------------------------------------------------------
+  // Runtime override that swaps the role of the configured primary
+  // (OPERATOR_ALERT_WEBHOOK_URL) and backup (OPERATOR_ALERT_WEBHOOK_URL_BACKUP)
+  // webhooks WITHOUT a server restart. When the switch is engaged, the
+  // dispatcher promotes the env-configured backup URL into the "primary"
+  // channel slot (channel="webhook") and demotes the env-configured
+  // primary URL into the "backup" channel slot (channel="webhook_backup").
+  // Both URLs are still dispatched in parallel — failover only changes
+  // which one carries the historical "webhook" channel name (so existing
+  // alerting rules / dashboards keyed on that channel continue to surface
+  // the URL the operator currently considers primary).
+  //
+  // Audit fields mirror the kill-switch shape so the same admin pattern
+  // (toggle + reason + actor + timestamp) is reused.
+  // ---------------------------------------------------------------------------
+  operatorAlertWebhookFailoverActive: boolean("operator_alert_webhook_failover_active").notNull().default(false),
+  operatorAlertWebhookFailoverReason: text("operator_alert_webhook_failover_reason"),
+  operatorAlertWebhookFailoverEngagedBy: integer("operator_alert_webhook_failover_engaged_by").references(() => users.id),
+  operatorAlertWebhookFailoverEngagedAt: timestamp("operator_alert_webhook_failover_engaged_at"),
+
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
   singleton: check("system_settings_singleton_id", sql`${table.id} = 1`),
