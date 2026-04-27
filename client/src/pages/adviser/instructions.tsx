@@ -139,7 +139,15 @@ export default function AdviserInstructions() {
   const [, setLocation] = useLocation();
 
   const instructions = useQuery<InstructionRow[]>({ queryKey: ["/api/adviser/instructions"] });
-  const clients = useQuery<ClientLite[]>({ queryKey: ["/api/adviser/clients"] });
+  // /api/adviser/clients now returns { asOfDate, clients } (Task #287). Adapt
+  // to the rows-only shape this page uses everywhere downstream.
+  const clientsResponse = useQuery<{ asOfDate: string; clients: ClientLite[] }>({
+    queryKey: ["/api/adviser/clients"],
+  });
+  const clients = {
+    data: clientsResponse.data?.clients,
+    isLoading: clientsResponse.isLoading,
+  };
   const products = useQuery<ProductLite[]>({ queryKey: ["/api/adviser/products"] });
 
   const form = useForm<CreateInstructionForm>({

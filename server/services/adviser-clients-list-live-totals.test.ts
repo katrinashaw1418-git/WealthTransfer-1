@@ -100,9 +100,18 @@ describe("listAdviserClients — live portfolio totals", () => {
     stage([]); // adviserNotes max-by-client
   };
 
+  // Task #287 added a third fee-consents query (max(consentExpiryDate) over
+  // expired consents grouped by client) used to amber-flag recently-lapsed
+  // relationships on the Business snapshot. Stages it as the "no expired
+  // rows" case alongside the active-count + active-expiry stages.
+  const stageNoExpired = () => {
+    stage([]); // expired fee consents grouped by client
+  };
+
   it("returns live per-client totals (ignoring the stale snapshot column)", async () => {
     stage([linkRow(20), linkRow(21)]); // adviser_clients ⨝ users
     stage([{ clientId: 20, count: 2 }]); // active fee consents grouped by client
+    stageNoExpired();
     stage([
       { clientId: 20, expiringAt: new Date("2026-09-01T00:00:00.000Z") },
     ]); // soonest active expiry grouped by client
@@ -114,7 +123,7 @@ describe("listAdviserClients — live portfolio totals", () => {
       throw new Error(`unexpected clientId ${clientId}`);
     });
 
-    const rows = await listAdviserClients(ADVISER);
+    const { clients: rows, asOfDate } = await listAdviserClients(ADVISER);
 
     expect(valuation).toHaveBeenCalledTimes(2);
     const byUser = new Map(rows.map((r) => [r.userId, r]));
@@ -126,11 +135,18 @@ describe("listAdviserClients — live portfolio totals", () => {
     expect(byUser.get(21)!.portfolioValueAud).toBe("250000.50");
     expect(byUser.get(21)!.activeFeeConsents).toBe(0);
     expect(byUser.get(21)!.feeConsentExpiringAt).toBeNull();
+    // Snapshot timestamp is a server-derived Date — same instant the live
+    // valuation engine was called with — so the UI can render a "Snapshot
+    // as at <ts>" line that can never disagree with the figures it qualifies.
+    expect(asOfDate).toBeInstanceOf(Date);
+    expect(valuation).toHaveBeenCalledWith(20, asOfDate);
+    expect(valuation).toHaveBeenCalledWith(21, asOfDate);
   });
 
   it("falls back to '0' for a client whose valuation throws, without breaking the rest", async () => {
     stage([linkRow(20), linkRow(21)]);
-    stage([]); // no fee consent rows
+    stage([]); // no active fee consent rows
+    stageNoExpired();
     stage([]); // no fee expiry rows
     stageNoActivity();
 
@@ -140,7 +156,7 @@ describe("listAdviserClients — live portfolio totals", () => {
     });
 
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const rows = await listAdviserClients(ADVISER);
+    const { clients: rows } = await listAdviserClients(ADVISER);
     errSpy.mockRestore();
 
     const byUser = new Map(rows.map((r) => [r.userId, r]));
@@ -157,6 +173,7 @@ describe("listAdviserClients — live portfolio totals", () => {
   it("surfaces the partial total when the live valuation reports unpriced wallets", async () => {
     stage([linkRow(20), linkRow(21)]);
     stage([]);
+    stageNoExpired();
     stage([]); // no fee expiry rows
     stageNoActivity();
 
@@ -174,7 +191,7 @@ describe("listAdviserClients — live portfolio totals", () => {
     });
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const rows = await listAdviserClients(ADVISER);
+    const { clients: rows } = await listAdviserClients(ADVISER);
     const warnings = warnSpy.mock.calls.map((c) => String(c[0]));
     warnSpy.mockRestore();
 
@@ -195,6 +212,7 @@ describe("listAdviserClients — live portfolio totals", () => {
       linkRow(51, { linkedAt: new Date("2025-06-01T00:00:00.000Z") }),
     ]);
     stage([]); // fee counts
+    stageNoExpired();
     stage([]); // fee expiry
     // Client 50: latest is from adviceRecords (2025-08-01)
     stage([{ clientId: 50, lastAt: new Date("2025-03-15T00:00:00.000Z") }]); // instructions
@@ -204,7 +222,7 @@ describe("listAdviserClients — live portfolio totals", () => {
 
     valuation.mockImplementation(async () => ok(0));
 
-    const rows = await listAdviserClients(ADVISER);
+    const { clients: rows } = await listAdviserClients(ADVISER);
     const byUser = new Map(rows.map((r) => [r.userId, r]));
     // Client 50: adviceRecords' 2025-08-01 wins over linkedAt and the others.
     expect(byUser.get(50)!.lastActivityAt?.toISOString()).toBe(
@@ -219,10 +237,14 @@ describe("listAdviserClients — live portfolio totals", () => {
   it("returns an empty list (and never values anything) when adviser has no linked clients", async () => {
     stage([]); // no linkRows
 
-    const rows = await listAdviserClients(ADVISER);
+    const result = await listAdviserClients(ADVISER);
 
-    expect(rows).toEqual([]);
+    expect(result.clients).toEqual([]);
     expect(valuation).not.toHaveBeenCalled();
+    // Even when the book is empty, the response MUST carry a server-derived
+    // asOfDate so the UI can still render "Snapshot as at <ts>" without
+    // having to fall back to the client's clock (which can drift).
+    expect(result.asOfDate).toBeInstanceOf(Date);
   });
 
   // ---------------------------------------------------------------------------
@@ -242,7 +264,8 @@ describe("listAdviserClients — live portfolio totals", () => {
     // email to confirm it isn't itself a fixture before dropping. Stage a
     // real adviser email next.
     stage([{ email: "real.adviser@advisers.test" }]);
-    stage([{ clientId: 30, count: 1 }]); // fee consents grouped by client
+    stage([{ clientId: 30, count: 1 }]); // active fee consents grouped by client
+    stageNoExpired();
     stage([]); // fee expiry rows
     stageNoActivity();
 
@@ -252,7 +275,7 @@ describe("listAdviserClients — live portfolio totals", () => {
     });
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const rows = await listAdviserClients(ADVISER);
+    const { clients: rows } = await listAdviserClients(ADVISER);
 
     // Only the real client survives, and pricing was only called for it.
     expect(rows.map((r) => r.userId)).toEqual([30]);
@@ -280,14 +303,15 @@ describe("listAdviserClients — live portfolio totals", () => {
     ]);
     // Adviser email lookup → also a fixture pattern.
     stage([{ email: "__feegate_b_adviser@example.com" }]);
-    stage([]); // no fee consents
+    stage([]); // no active fee consents
+    stageNoExpired();
     stage([]); // no fee expiry
     stageNoActivity();
 
     valuation.mockImplementation(async (clientId: number) => ok(1_000));
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const rows = await listAdviserClients(ADVISER);
+    const { clients: rows } = await listAdviserClients(ADVISER);
     warnSpy.mockRestore();
 
     expect(rows.map((r) => r.userId).sort()).toEqual([40, 41]);

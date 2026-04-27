@@ -213,9 +213,15 @@ function kycStateFor(row: AdviserClientRow): KycFilter {
 
 // ---- Page ------------------------------------------------------------------
 export default function AdviserClients() {
-  const { data, isLoading } = useQuery<AdviserClientRow[]>({
+  // Endpoint now returns { asOfDate, clients } (Task #287). This page only
+  // cares about the rows; unwrap so the rest of the file stays unchanged.
+  const { data: response, isLoading } = useQuery<{
+    asOfDate: string;
+    clients: AdviserClientRow[];
+  }>({
     queryKey: ["/api/adviser/clients"],
   });
+  const data = response?.clients;
   // useSearch subscribes to the live querystring; useLocation only tracks
   // pathname, which would miss ?q= updates when only the query changes.
   const searchString = useSearch();

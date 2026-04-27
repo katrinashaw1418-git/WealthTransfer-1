@@ -113,7 +113,15 @@ export default function AdviserTasks() {
   const [open, setOpen] = useState(false);
 
   const tasks = useQuery<AdviserTask[]>({ queryKey: ["/api/adviser/tasks"] });
-  const clients = useQuery<ClientLite[]>({ queryKey: ["/api/adviser/clients"] });
+  // /api/adviser/clients now returns { asOfDate, clients } (Task #287). Adapt
+  // to the rows-only shape this page uses everywhere downstream.
+  const clientsResponse = useQuery<{ asOfDate: string; clients: ClientLite[] }>({
+    queryKey: ["/api/adviser/clients"],
+  });
+  const clients = {
+    data: clientsResponse.data?.clients,
+    isLoading: clientsResponse.isLoading,
+  };
 
   const form = useForm<CreateTaskForm>({
     resolver: zodResolver(createTaskFormSchema),

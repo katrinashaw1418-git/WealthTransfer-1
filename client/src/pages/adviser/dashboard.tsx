@@ -183,7 +183,17 @@ function formatExpiryDate(value: string): string {
 
 export default function AdviserDashboard() {
   const summary = useQuery<DashboardSummary>({ queryKey: ["/api/adviser/dashboard"] });
-  const clients = useQuery<AdviserClientRow[]>({ queryKey: ["/api/adviser/clients"] });
+  // /api/adviser/clients now returns { asOfDate, clients } (Task #287) so the
+  // Business page can render a server-derived snapshot timestamp. The
+  // dashboard only needs the rows; pull them through a tiny adapter so the
+  // rest of this file keeps working untouched.
+  const clientsResponse = useQuery<{ asOfDate: string; clients: AdviserClientRow[] }>({
+    queryKey: ["/api/adviser/clients"],
+  });
+  const clients = {
+    data: clientsResponse.data?.clients,
+    isLoading: clientsResponse.isLoading,
+  };
   const tasks = useQuery<AdviserTask[]>({ queryKey: ["/api/adviser/tasks"] });
   const instructions = useQuery<InstructionRow[]>({ queryKey: ["/api/adviser/instructions"] });
 

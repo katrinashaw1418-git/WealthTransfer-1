@@ -250,11 +250,39 @@ export interface AdviserClientSummary {
   // investment instruction, latest advice record, latest adviser task, or
   // latest adviser note. Null if none exist (no link timestamp recorded).
   lastActivityAt: Date | null;
+  // Most recent expiry date for an already-expired fee consent — populated
+  // only when there is no active consent, so the Business snapshot can
+  // amber-flag a recently-lapsed relationship.
+  mostRecentExpiredConsentDate: Date | null;
+}
+
+/**
+ * Wrapper response for `/api/adviser/clients` and `listAdviserClients`.
+ *
+ * `asOfDate` is the wall-clock instant the live AUM totals were computed at,
+ * server-side. Surfacing it as a sibling field (rather than per-row or via
+ * the client's fetch clock) means:
+ *   - the snapshot timestamp the Business page renders comes from the SAME
+ *     moment as the figures it qualifies (compliance: timestamp can never
+ *     drift from data),
+ *   - empty books still get a real, server-derived snapshot timestamp,
+ *   - the per-row payload stays denormalised-free.
+ */
+export interface ListAdviserClientsResult {
+  asOfDate: Date;
+  clients: AdviserClientSummary[];
 }
 
 export async function listAdviserClients(
   adviserUserId: number,
-): Promise<AdviserClientSummary[]> {
+): Promise<ListAdviserClientsResult> {
+  // Anchor the snapshot timestamp at the top of the function so it's the
+  // same instant we hand to `calculatePortfolioTotalsAtDate` below AND the
+  // value the UI renders as "Snapshot as at <ts>" — guaranteeing the
+  // figures and the timestamp can never disagree, even when the book is
+  // empty (in which case asOfDate is the only thing the response carries).
+  const asOfDate = new Date();
+
   // Pull links + user records in one query.
   const rawLinkRows = await db
     .select({
@@ -276,13 +304,13 @@ export async function listAdviserClients(
       ),
     );
 
-  if (rawLinkRows.length === 0) return [];
+  if (rawLinkRows.length === 0) return { asOfDate, clients: [] };
 
   // Drop fixture-pattern client rows before any downstream aggregation, so
   // the post-filter set drives every count, total and "top N" the UI uses
   // (KYC denominator, AUM, tier mix, fee-consent counts). See Task #286.
   const linkRows = await filterFixtureClientRows(adviserUserId, rawLinkRows);
-  if (linkRows.length === 0) return [];
+  if (linkRows.length === 0) return { asOfDate, clients: [] };
 
   const clientIds = linkRows.map((r) => r.userId);
 
@@ -303,6 +331,27 @@ export async function listAdviserClients(
     )
     .groupBy(feeConsents.clientId);
   const feeByClient = new Map(feeRows.map((r) => [r.clientId, r.count]));
+
+  // Most recent expired fee consent per client. Only consulted when the
+  // client has zero active consents — otherwise the UI shows the active
+  // expiry instead. One query for the whole list keeps the round trips
+  // bounded regardless of how many clients an adviser has.
+  const expiredRows = await db
+    .select({
+      clientId: feeConsents.clientId,
+      lastExpiry: sql<Date | null>`max(${feeConsents.consentExpiryDate})`,
+    })
+    .from(feeConsents)
+    .where(
+      and(
+        inArray(feeConsents.clientId, clientIds),
+        eq(feeConsents.renewalStatus, "expired"),
+      ),
+    )
+    .groupBy(feeConsents.clientId);
+  const expiredByClient = new Map(
+    expiredRows.map((r) => [r.clientId, r.lastExpiry]),
+  );
 
   // Soonest active fee-consent expiry per client — feeds the "Active · exp
   // <Mon YYYY>" / "⚠ Expiring <DD MMM>" cell on /adviser/clients without a
@@ -420,11 +469,14 @@ export async function listAdviserClients(
   // the list now does the same so both views agree, and a real client's
   // book never shows up as "$0" because of one stray unpriced wallet. The
   // engine still flags `hasUnpricedWallets` for diagnosis (logged below).
-  const now = new Date();
+  //
+  // `asOfDate` (set at the top of this function) is what the valuation
+  // engine and the response wrapper both anchor to, so the figures and
+  // the "Snapshot as at <ts>" UI line can never disagree.
   const valuationResults = await Promise.all(
     clientIds.map(async (clientId) => {
       try {
-        const totals = await calculatePortfolioTotalsAtDate(clientId, now);
+        const totals = await calculatePortfolioTotalsAtDate(clientId, asOfDate);
         if (totals.hasUnpricedWallets) {
           console.warn(
             `[adviser-access] live portfolio valuation has unpriced wallets for client ${clientId} (adviser ${adviserUserId}); surfacing partial total ${totals.totalValue.toFixed(2)}. unpricedCurrencies=${JSON.stringify(totals.unpricedCurrencies)}`,
@@ -444,7 +496,7 @@ export async function listAdviserClients(
     valuationResults.map((r) => [r.clientId, r.value]),
   );
 
-  return linkRows.map((r) => {
+  const clients = linkRows.map((r) => {
     const linkedAt = r.linkedAt ? new Date(r.linkedAt) : null;
     const fromTouches = lastActivityByClient.get(r.userId) ?? null;
     let lastActivityAt: Date | null = null;
@@ -454,14 +506,23 @@ export async function listAdviserClients(
     } else {
       lastActivityAt = fromTouches ?? linkedAt;
     }
+    const activeCount = feeByClient.get(r.userId) ?? 0;
+    // Only surface the most-recent expired date when there is no active
+    // consent — once any active consent exists, the active expiry is the
+    // value the UI should be flagging.
+    const mostRecentExpiredConsentDate =
+      activeCount > 0 ? null : expiredByClient.get(r.userId) ?? null;
     return {
       ...r,
-      activeFeeConsents: feeByClient.get(r.userId) ?? 0,
+      activeFeeConsents: activeCount,
       feeConsentExpiringAt: feeExpiryByClient.get(r.userId) ?? null,
       portfolioValueAud: portfolioByClient.get(r.userId) ?? "0",
       lastActivityAt,
+      mostRecentExpiredConsentDate,
     };
   });
+
+  return { asOfDate, clients };
 }
 
 // -----------------------------------------------------------------------------
