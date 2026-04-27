@@ -20,8 +20,12 @@ import {
   PRODUCT_CATEGORY_LABELS,
   productCategoryIcon,
 } from "@shared/product-categories";
+import {
+  RISK_PROFILE_LABELS,
+  type KnownRiskProfile,
+} from "@shared/risk-profiles";
 
-const riskProfileColors = {
+const riskProfileColors: Record<KnownRiskProfile, string> = {
   low: "bg-green-100 text-green-800",
   conservative: "bg-green-100 text-green-800",
   moderate: "bg-yellow-100 text-yellow-800",
@@ -389,11 +393,11 @@ export default function Investments() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Risk Levels</SelectItem>
-                  <SelectItem value="low">Low</SelectItem>
-                  <SelectItem value="conservative">Conservative</SelectItem>
-                  <SelectItem value="moderate">Moderate</SelectItem>
-                  <SelectItem value="high">High</SelectItem>
-                  <SelectItem value="very_high">Very High</SelectItem>
+                  {Object.entries(RISK_PROFILE_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
