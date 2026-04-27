@@ -54,7 +54,13 @@ trap 'rm -f "$PRE_RUN_LIST" "$POST_RUN_LIST"' EXIT
 ls -1 "$REPORT_DIR"/go-no-go-*.md 2>/dev/null | sort > "$PRE_RUN_LIST" || true
 
 set +e
-npx tsx scripts/go-no-go.ts
+# --deploy-gate (Task #218): per-source drill alerts skip the webhook
+# channel and a single rolled-up "drill complete: N/N sources OK" alert
+# is dispatched at the end. Without this flag every Publish would page
+# the on-call channel nine times. Manual interactive runs of
+# `npx tsx scripts/go-no-go.ts` keep the per-source webhook behaviour
+# for debugging.
+npx tsx scripts/go-no-go.ts --deploy-gate
 GATE_STATUS=$?
 set -e
 

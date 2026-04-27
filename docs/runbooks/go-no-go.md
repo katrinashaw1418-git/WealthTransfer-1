@@ -38,8 +38,9 @@ The gate runs automatically as a pre-deploy step on every `Publish`. It
 is wired into `.replit` `[deployment].build` via
 `scripts/predeploy-build.sh`, which:
 
-1. Runs `npx tsx scripts/go-no-go.ts` against the production-equivalent
-   environment (the same secrets the deploy will boot under).
+1. Runs `npx tsx scripts/go-no-go.ts --deploy-gate` against the
+   production-equivalent environment (the same secrets the deploy will
+   boot under).
 2. **A NO-GO verdict (non-zero exit) blocks the deploy.** Replit's
    build aborts and the new revision is never promoted. The full
    report is pasted into the deploy log so you can see which check
@@ -48,6 +49,30 @@ is wired into `.replit` `[deployment].build` via
    `dist/go-no-go-report.md` — it ships as part of the deploy
    artefact and is inspectable post-deploy at the same path inside
    the running container.
+
+#### `--deploy-gate` mode (Task #218)
+
+The deploy wrapper passes `--deploy-gate` (equivalent to setting
+`GO_NO_GO_DEPLOY_GATE=1`) so the on-call channel sees **one** drill
+alert per Publish instead of one per known alert source:
+
+* Per-source drills (`wallet-ledger-reconciliation`,
+  `posting-receipt-invariant`, `database-restore-drill`,
+  `database-backup-watchdog`, `kill-switch`,
+  `stuck-pending-transactions`, `audit-log-write-failure`,
+  `db-connection-failure`, `operator-alerts-prune-watchdog`) are
+  dispatched to the **log channel and `operator_alerts` table only** —
+  the webhook is suppressed for them. Their `details.scheduledBy`
+  reads `scripts/go-no-go.ts (--deploy-gate)` so they are recognisable.
+* A single rolled-up alert with `source: "launch-readiness-gate"` and
+  `details.rolledUp: true` is dispatched through the full pipeline
+  after the loop. This is the only alert that reaches the on-call
+  webhook; its title is `Pre-launch alerting drill complete — N/N
+  sources OK`.
+
+A real (non-drill) alert is unaffected — it is dispatched directly by
+the originating job through `notifyOperator()` and goes straight to the
+on-call webhook with its real severity, exactly as before.
 
 See `docs/DEPLOYMENT_RUNBOOK.md` for the full deploy procedure and the
 list of deployment secrets the gate needs.
@@ -98,8 +123,12 @@ missing real production secret cannot be masked by the bootstrap.
 
 ### Optional flags / env
 
-None today. Future toggles (e.g. a per-section `--only=alerting`) will
-land here when the checklist grows.
+* `--deploy-gate` (or `GO_NO_GO_DEPLOY_GATE=1`) — switches the alerting
+  section into rollup mode. Per-source drills go log+DB only and a
+  single rolled-up "drill complete" alert is dispatched through the
+  webhook. Used by `scripts/predeploy-build.sh` so every Publish pages
+  the on-call channel exactly once. Leave it OFF when running the script
+  by hand to debug a specific source's webhook reachability.
 
 ---
 
@@ -181,7 +210,7 @@ gates that must pass on their own track before launch.
 | `__golive_drill_admin` user | `users` | Used to mint admin JWTs for the metrics + admin-route checks. Reused across re-runs. |
 | `[drill <runId>] …` audit rows | `audit_logs` | Kill-switch ON/OFF/restore transitions. Tagged with the runId so they're recognisable. Audit_logs is append-only by design — you cannot delete them. |
 | `go-no-go-immutability-probe-<runId>` audit row | `audit_logs` | One row per run from the immutability check. Same append-only constraint. |
-| `operator_alerts` rows tagged `drill: true` | `operator_alerts` | One per known alert source per run. Recognisable by `details.drill = true`. |
+| `operator_alerts` rows tagged `drill: true` | `operator_alerts` | One per known alert source per run, plus (in `--deploy-gate` mode) one rolled-up `source: "launch-readiness-gate"` row tagged `details.rolledUp = true`. Recognisable by `details.drill = true`. |
 | Drill kill-switch transitions | `kill_switches` | The state itself is restored to its starting value. Only the row's `lastToggledAt` / `reason` reflect the most recent drill. |
 
 ---

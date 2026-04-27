@@ -9,6 +9,27 @@
 // Run with:
 //   npx tsx scripts/go-no-go.ts
 //
+// Modes (Task #218 — stop paging on-call 9 times per deploy):
+//   * default / interactive     — every per-source drill alert is
+//                                 dispatched through the full operator-
+//                                 alerts pipeline (log + webhook + DB).
+//                                 Use this for debugging "is the receiver
+//                                 reachable from this machine, for THIS
+//                                 source key?". The on-call channel sees
+//                                 one alert per known source.
+//   * --deploy-gate             — used by scripts/predeploy-build.sh on
+//   (or GO_NO_GO_DEPLOY_GATE=1)   every Publish. Per-source drills are
+//                                 still verified end-to-end (log channel
+//                                 + DB row), but the WEBHOOK channel is
+//                                 suppressed for them. After the loop the
+//                                 orchestrator dispatches ONE rolled-up
+//                                 "drill complete: N/N sources OK" alert
+//                                 through the full pipeline so the on-call
+//                                 channel sees exactly one drill per
+//                                 deploy instead of nine. A non-drill
+//                                 (real) alert is unaffected — it never
+//                                 went through this gate to begin with.
+//
 // What this proves (in order):
 //   1. The existing pre-launch safety rollup still passes end-to-end
 //      (delegates to scripts/pre-launch-safety.ts in --strict mode).
@@ -131,6 +152,22 @@ interface Section {
 const RUN_ID = `gng-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
 const STARTED_AT = new Date();
 const REPORT_DIR = path.resolve(process.cwd(), "docs", "golive");
+
+// Deploy-gate mode (Task #218). Either:
+//   * Pass --deploy-gate on the command line (predeploy-build.sh does this).
+//   * Or set GO_NO_GO_DEPLOY_GATE=1 in the environment.
+// In this mode, per-source drill alerts skip the webhook channel and a
+// single rolled-up alert is dispatched through the full pipeline at the
+// end of the alerting section. Manual / interactive runs leave the mode
+// off and keep the existing per-source webhook behaviour for debugging.
+const DEPLOY_GATE_MODE =
+  process.argv.includes("--deploy-gate") ||
+  ((): boolean => {
+    const raw = process.env.GO_NO_GO_DEPLOY_GATE;
+    if (!raw) return false;
+    const v = raw.trim().toLowerCase();
+    return v === "1" || v === "true" || v === "yes" || v === "on";
+  })();
 
 const sections: Section[] = [];
 
@@ -510,16 +547,22 @@ async function alertingSection(): Promise<Section> {
   const checks: Check[] = [];
   const webhookConfigured = Boolean(process.env.OPERATOR_ALERT_WEBHOOK_URL?.trim());
 
+  // In deploy-gate mode the per-source dispatches go log+DB only — we
+  // suppress the webhook channel for them and replace the nine
+  // per-source webhook posts with one rolled-up "drill complete" alert
+  // dispatched at the end of this section. See the file-header "Modes"
+  // block (Task #218).
+  const expectWebhookPerSource = webhookConfigured && !DEPLOY_GATE_MODE;
+
   // Top-level info on which channels are configured. NO-GO if no
   // off-stdout channel is wired — running production behind log-only
   // alerting means an outage at 02:00 reaches nobody.
   if (webhookConfigured) {
+    const detail = DEPLOY_GATE_MODE
+      ? "OPERATOR_ALERT_WEBHOOK_URL is set — per-source drills go log+DB only; one rolled-up alert is dispatched to the webhook (--deploy-gate)."
+      : "OPERATOR_ALERT_WEBHOOK_URL is set — alerts dispatch to log + webhook.";
     checks.push(
-      check(
-        "Off-host alert channel configured",
-        "pass",
-        "OPERATOR_ALERT_WEBHOOK_URL is set — alerts dispatch to log + webhook.",
-      ),
+      check("Off-host alert channel configured", "pass", detail),
     );
   } else {
     checks.push(
@@ -534,87 +577,211 @@ async function alertingSection(): Promise<Section> {
 
   // Per-source drill alerts. Every dispatch persists one row to
   // operator_alerts; details payload is tagged so operators can grep them.
-  for (const spec of KNOWN_ALERT_SOURCES) {
-    const alert: OperatorAlert = {
-      source: spec.source,
-      severity: spec.severity,
-      title: `${spec.title} — ${spec.source}`,
+  //
+  // In deploy-gate mode we transiently clear OPERATOR_ALERT_WEBHOOK_URL
+  // around the loop so notifyOperator() (which reads the env var at call
+  // time) skips the webhook channel for the per-source firings. The
+  // single-process script is single-threaded, so there is no race window
+  // visible to other callers; we restore the env var in `finally` before
+  // dispatching the rollup. This is intentionally a script-local trick
+  // to avoid widening notifyOperator()'s public API for one caller.
+  let perSourcePass = 0;
+  let perSourceFail = 0;
+  const savedWebhookUrl = process.env.OPERATOR_ALERT_WEBHOOK_URL;
+  if (DEPLOY_GATE_MODE && webhookConfigured) {
+    delete process.env.OPERATOR_ALERT_WEBHOOK_URL;
+  }
+  try {
+    for (const spec of KNOWN_ALERT_SOURCES) {
+      const alert: OperatorAlert = {
+        source: spec.source,
+        severity: spec.severity,
+        title: `${spec.title} — ${spec.source}`,
+        details: {
+          drill: true,
+          runId: RUN_ID,
+          message: DEPLOY_GATE_MODE
+            ? "Pre-launch go/no-go drill (deploy-gate). NOT a real incident. Webhook suppressed for per-source firings; see the rolled-up summary alert for confirmation."
+            : "Pre-launch go/no-go drill. NOT a real incident. Confirm receipt in the configured channel.",
+          scheduledBy: DEPLOY_GATE_MODE
+            ? "scripts/go-no-go.ts (--deploy-gate)"
+            : "scripts/go-no-go.ts",
+        },
+      };
+      try {
+        const result = await notifyOperator(alert);
+        const logOk = result.outcomes.find(
+          (o) => o.channel === "log" && o.status === "success",
+        );
+        const webhookAttempted = result.outcomes.find((o) => o.channel === "webhook");
+        const webhookOk =
+          webhookAttempted && webhookAttempted.status === "success";
+        // Whether THIS source counts as a clean pass for the rollup tally.
+        // Rolled up at the bottom of the try/catch block so we have one
+        // place that flips it to false on any failure mode (channel
+        // failure OR DB persistence failure). Incrementing earlier and
+        // hoping every later check `continue`s on failure is what caused
+        // the "9/9 OK" mis-report when the DB insert returned null.
+        let sourceClean = true;
+
+        if (!logOk) {
+          sourceClean = false;
+          checks.push(
+            check(
+              `Test alert: ${spec.source}`,
+              "fail",
+              `log channel did not succeed: ${JSON.stringify(result.outcomes)}`,
+              "Check stdout is connected and writable; the log channel must always succeed.",
+            ),
+          );
+          // Don't `continue` — we still want the audit-row check to
+          // surface a separate FAIL for the missing DB row, since that
+          // is its own ops signal.
+        } else if (expectWebhookPerSource) {
+          if (webhookOk) {
+            checks.push(
+              check(
+                `Test alert: ${spec.source}`,
+                "pass",
+                `dispatched (alertId=${result.alertId}, log+webhook ok, status=${webhookAttempted?.httpStatus ?? "n/a"}).`,
+              ),
+            );
+          } else {
+            sourceClean = false;
+            checks.push(
+              check(
+                `Test alert: ${spec.source}`,
+                "fail",
+                `webhook channel failed: status=${webhookAttempted?.status} httpStatus=${webhookAttempted?.httpStatus ?? "n/a"} error=${webhookAttempted?.error ?? "n/a"}`,
+                "Verify OPERATOR_ALERT_WEBHOOK_URL — the receiver must accept POST application/json and return 2xx.",
+              ),
+            );
+          }
+        } else if (DEPLOY_GATE_MODE && webhookConfigured) {
+          // Webhook is configured but suppressed for this dispatch by
+          // deploy-gate mode. The pass criteria are log success + DB row
+          // written; the rolled-up alert below proves the webhook itself
+          // is reachable.
+          checks.push(
+            check(
+              `Test alert: ${spec.source}`,
+              "pass",
+              `dispatched (alertId=${result.alertId}, log+DB ok; webhook suppressed in --deploy-gate mode — see rolled-up alert).`,
+            ),
+          );
+        } else {
+          // Without a webhook, the per-source check still passes if the
+          // log channel + DB persistence both worked — but the top-level
+          // "Off-host alert channel configured" check above is already
+          // a NO-GO, so the verdict is correct.
+          checks.push(
+            check(
+              `Test alert: ${spec.source}`,
+              "pass",
+              `dispatched (alertId=${result.alertId}, log only — webhook not configured).`,
+            ),
+          );
+        }
+
+        if (result.alertId === null) {
+          // DB persistence failed — flip sourceClean so this source is
+          // counted as a failure in the rollup tally. Without this, a
+          // section-level FAIL still shipped while the rollup title
+          // claimed "N/N sources OK".
+          sourceClean = false;
+          checks.push(
+            check(
+              `Audit row persisted: ${spec.source}`,
+              "fail",
+              "operator_alerts insert returned null — the durable record was not written.",
+              "Check the operator_alerts table for permission errors or constraint violations.",
+            ),
+          );
+        }
+
+        if (sourceClean) {
+          perSourcePass++;
+        } else {
+          perSourceFail++;
+        }
+      } catch (err) {
+        perSourceFail++;
+        checks.push(
+          check(
+            `Test alert: ${spec.source}`,
+            "fail",
+            `notifyOperator() threw: ${(err as Error).message}`,
+            "Inspect server/services/operator-alerts.ts dispatch; the dispatcher should never throw on a single-source failure.",
+          ),
+        );
+      }
+    }
+  } finally {
+    if (DEPLOY_GATE_MODE && webhookConfigured && savedWebhookUrl !== undefined) {
+      process.env.OPERATOR_ALERT_WEBHOOK_URL = savedWebhookUrl;
+    }
+  }
+
+  // Rolled-up "drill complete" webhook (Task #218). Fired only in
+  // deploy-gate mode, so on-call sees exactly ONE drill per Publish
+  // instead of one per known source. The rollup is itself dispatched
+  // through notifyOperator() so it benefits from the same retry / dedupe
+  // / persistence machinery as a real alert. The runId in `details`
+  // makes the dedupe key unique per run, so back-to-back deploys are
+  // not silently coalesced.
+  if (DEPLOY_GATE_MODE && webhookConfigured) {
+    const total = KNOWN_ALERT_SOURCES.length;
+    const rollup: OperatorAlert = {
+      source: "launch-readiness-gate",
+      severity: "info",
+      title: `Pre-launch alerting drill complete — ${perSourcePass}/${total} sources OK`,
       details: {
         drill: true,
+        rolledUp: true,
         runId: RUN_ID,
+        sourcesChecked: total,
+        sourcesPassed: perSourcePass,
+        sourcesFailed: perSourceFail,
+        sources: KNOWN_ALERT_SOURCES.map((s) => s.source).join(", "),
         message:
-          "Pre-launch go/no-go drill. NOT a real incident. Confirm receipt in the configured channel.",
-        scheduledBy: "scripts/go-no-go.ts",
+          "Deploy-time launch-readiness gate. NOT a real incident. " +
+          "Per-source drills were dispatched to log + DB only; this single " +
+          "alert proves the on-call webhook is reachable. To re-verify a " +
+          "specific source end-to-end, run `npx tsx scripts/go-no-go.ts` " +
+          "without --deploy-gate.",
+        scheduledBy: "scripts/go-no-go.ts (--deploy-gate)",
       },
     };
     try {
-      const result = await notifyOperator(alert);
+      const result = await notifyOperator(rollup);
       const logOk = result.outcomes.find(
         (o) => o.channel === "log" && o.status === "success",
       );
       const webhookAttempted = result.outcomes.find((o) => o.channel === "webhook");
       const webhookOk =
         webhookAttempted && webhookAttempted.status === "success";
-
-      if (!logOk) {
+      if (logOk && webhookOk) {
         checks.push(
           check(
-            `Test alert: ${spec.source}`,
-            "fail",
-            `log channel did not succeed: ${JSON.stringify(result.outcomes)}`,
-            "Check stdout is connected and writable; the log channel must always succeed.",
-          ),
-        );
-        continue;
-      }
-
-      if (webhookConfigured) {
-        if (webhookOk) {
-          checks.push(
-            check(
-              `Test alert: ${spec.source}`,
-              "pass",
-              `dispatched (alertId=${result.alertId}, log+webhook ok, status=${webhookAttempted?.httpStatus ?? "n/a"}).`,
-            ),
-          );
-        } else {
-          checks.push(
-            check(
-              `Test alert: ${spec.source}`,
-              "fail",
-              `webhook channel failed: status=${webhookAttempted?.status} httpStatus=${webhookAttempted?.httpStatus ?? "n/a"} error=${webhookAttempted?.error ?? "n/a"}`,
-              "Verify OPERATOR_ALERT_WEBHOOK_URL — the receiver must accept POST application/json and return 2xx.",
-            ),
-          );
-        }
-      } else {
-        // Without a webhook, the per-source check still passes if the log
-        // channel + DB persistence both worked — but the top-level
-        // "Off-host alert channel configured" check above is already
-        // a NO-GO, so the verdict is correct.
-        checks.push(
-          check(
-            `Test alert: ${spec.source}`,
+            "Rolled-up drill alert reaches on-call webhook (--deploy-gate)",
             "pass",
-            `dispatched (alertId=${result.alertId}, log only — webhook not configured).`,
+            `dispatched (alertId=${result.alertId}, ${perSourcePass}/${total} sources OK, status=${webhookAttempted?.httpStatus ?? "n/a"}).`,
           ),
         );
-      }
-
-      if (result.alertId === null) {
+      } else {
         checks.push(
           check(
-            `Audit row persisted: ${spec.source}`,
+            "Rolled-up drill alert reaches on-call webhook (--deploy-gate)",
             "fail",
-            "operator_alerts insert returned null — the durable record was not written.",
-            "Check the operator_alerts table for permission errors or constraint violations.",
+            `log_ok=${Boolean(logOk)} webhook_status=${webhookAttempted?.status ?? "absent"} httpStatus=${webhookAttempted?.httpStatus ?? "n/a"} error=${webhookAttempted?.error ?? "n/a"}`,
+            "Verify OPERATOR_ALERT_WEBHOOK_URL — the receiver must accept POST application/json and return 2xx. The deploy gate cannot prove the on-call channel is reachable without this.",
           ),
         );
       }
     } catch (err) {
       checks.push(
         check(
-          `Test alert: ${spec.source}`,
+          "Rolled-up drill alert reaches on-call webhook (--deploy-gate)",
           "fail",
           `notifyOperator() threw: ${(err as Error).message}`,
           "Inspect server/services/operator-alerts.ts dispatch; the dispatcher should never throw on a single-source failure.",
@@ -625,10 +792,14 @@ async function alertingSection(): Promise<Section> {
 
   return {
     name: "Alerting",
-    summary:
-      "For every known alert source the dispatcher writes one drill alert (tagged " +
-      "`drill: true`, `runId`) and persists a row in operator_alerts. A configured " +
-      "off-host channel (OPERATOR_ALERT_WEBHOOK_URL) is required for launch.",
+    summary: DEPLOY_GATE_MODE
+      ? "Per-source drills are dispatched log+DB only (webhook suppressed) and a " +
+        "single rolled-up alert is dispatched through the webhook so the on-call " +
+        "channel sees one drill per deploy instead of one per source. A configured " +
+        "off-host channel (OPERATOR_ALERT_WEBHOOK_URL) is required for launch."
+      : "For every known alert source the dispatcher writes one drill alert (tagged " +
+        "`drill: true`, `runId`) and persists a row in operator_alerts. A configured " +
+        "off-host channel (OPERATOR_ALERT_WEBHOOK_URL) is required for launch.",
     checks,
   };
 }
