@@ -221,6 +221,13 @@ const ALERT_TYPES: AlertTypeDef[] = [
     ackable: true,
     deriveSuppressionKey: () => "db-connection-failure",
   },
+  {
+    source: "nightly-go-no-go",
+    label: "Nightly launch readiness gate",
+    description:
+      "Daily unattended run of scripts/go-no-go.ts. Info-level rows carry the latest GO report; alert-level rows mean a NO-GO verdict was paged to on-call. The full markdown report lives under details.report; the runner-side path under details.reportPath.",
+    ackable: false,
+  },
 ];
 
 const ALERT_TYPE_BY_SOURCE = new Map<string, AlertTypeDef>(

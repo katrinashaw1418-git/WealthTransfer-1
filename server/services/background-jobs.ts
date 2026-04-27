@@ -132,6 +132,12 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
     description:
       "Daily check that both the daily backup and the weekly restore drill have run successfully within their freshness windows.",
   },
+  {
+    name: "nightly-go-no-go",
+    label: "Nightly launch readiness gate",
+    description:
+      "Daily full run of scripts/go-no-go.ts against the production-equivalent environment. Pages on-call on NO-GO and persists the markdown report into operator_alerts so the dashboard always carries the latest verdict.",
+  },
 ] as const;
 
 const KNOWN_JOB_NAMES = new Set(KNOWN_BACKGROUND_JOBS.map((j) => j.name));

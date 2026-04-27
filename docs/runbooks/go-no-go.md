@@ -77,6 +77,67 @@ on-call webhook with its real severity, exactly as before.
 See `docs/DEPLOYMENT_RUNBOOK.md` for the full deploy procedure and the
 list of deployment secrets the gate needs.
 
+### Scheduled (nightly — Task #217)
+
+The gate ALSO runs unattended once per day from inside the running
+server. Several of its checks (latest backup freshness, restore-drill
+freshness, audit-log triggers) decay quietly between deploys; if a week
+passes with no `Publish`, the first time you'd notice a broken backup
+cron is in the deploy log on hotfix day — exactly when you don't want
+to be debugging it. The nightly run surfaces that drift the morning
+after it happens.
+
+How it's wired:
+
+* `server/services/nightly-go-no-go.ts` spawns
+  `npx tsx scripts/go-no-go.ts --deploy-gate` as a child process. The
+  `--deploy-gate` flag is the same one `scripts/predeploy-build.sh`
+  passes — it keeps the gate's per-source drill alerts log+DB only and
+  collapses them into a single info-severity rollup, so the on-call
+  webhook is hit at most once per night for routine "drill complete"
+  confirmation, and only fired with `severity="alert"` when the verdict
+  itself is NO-GO. Spawning as a child also keeps the gate's
+  kill-switch toggles and route registration from conflicting with the
+  live server.
+* The cron is registered in `server/index.ts` and runs ~10 minutes after
+  process boot, then every 24h. Each tick is wrapped in
+  `withBackgroundJobRunRecord("nightly-go-no-go", …)` so the admin
+  Background Jobs page shows when it last ran (and whether it is overdue).
+* **NO-GO verdict** → `notifyOperator(severity="alert")` fires. The
+  on-call channel is paged via `OPERATOR_ALERT_WEBHOOK_URL` with a
+  `nightly-go-no-go` source tag. The alert `details` payload carries
+  the full markdown report under `details.report` (truncated at 200KB
+  if absurdly long) plus `details.reportPath` for the on-disk copy.
+* **GO verdict** → an info-level row is inserted directly into
+  `operator_alerts` WITHOUT firing the webhook (a daily "all good" page
+  would train operators to ignore the channel and defeat the point of
+  paging on real NO-GO). The dashboard still carries today's report so
+  the latest verdict is always retrievable from a durable store.
+
+How to inspect the latest nightly run:
+
+* **Background Jobs page** (admin) — shows the most recent
+  `nightly-go-no-go` run, its summary line, and `isOverdue` if the
+  scheduler hasn't ticked in > 36 hours.
+* **Operator Alerts page** (admin) — filter on
+  source = `nightly-go-no-go` to see every recorded run. The full
+  markdown report is in `details.report` on each row; copy-paste it
+  into a viewer to read it like the deploy-time report.
+* **Runner filesystem** — every run also writes a fresh
+  `docs/golive/go-no-go-<timestamp>.md` file. This is the same path
+  used by the manual + auto-deploy runs and is the source of truth that
+  feeds `details.report` above.
+
+To disable the nightly cron in dev shells, set
+`NIGHTLY_GO_NO_GO_DISABLED=1` in the environment before booting the
+server. The override is intentionally explicit — production deploys
+should never set it.
+
+The script is idempotent (kill switches restored, drill alerts tagged
+`drill: true`, audit-log probe rows tagged `runId`), so a daily
+schedule does not pollute the system. See section 5 for the full list
+of artefacts each run leaves behind.
+
 ### Manual (interactive)
 
 ```sh

@@ -769,6 +769,53 @@ app.use((req, res, next) => {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // TASK #217 — Nightly launch readiness gate
+  // -------------------------------------------------------------------------
+  // Same script the deploy wiring uses (`scripts/go-no-go.ts`), executed
+  // unattended once per day so backup / restore-drill / audit-log decay is
+  // surfaced the morning after it happens — not the next time someone tries
+  // to publish a hotfix.
+  //
+  // Behaviour:
+  //   * Spawns the gate as a child process so its kill-switch toggles and
+  //     route registration don't conflict with the live server.
+  //   * On NO-GO: pages on-call via `notifyOperator` (severity="alert"), so
+  //     the OPERATOR_ALERT_WEBHOOK_URL receiver gets the report.
+  //   * On GO: writes an info-level row directly to `operator_alerts`
+  //     WITHOUT firing the webhook, so the dashboard always has the latest
+  //     report but operators are not paged every quiet night.
+  //
+  // Schedule: 600s after boot (staggered after the database-backup crons),
+  // then every 24h. Disable by setting NIGHTLY_GO_NO_GO_DISABLED=1; useful
+  // for dev shells where you don't want the heavy script running.
+  // -------------------------------------------------------------------------
+  if (
+    process.env.NIGHTLY_GO_NO_GO_DISABLED &&
+    /^(1|true|yes|on)$/i.test(process.env.NIGHTLY_GO_NO_GO_DISABLED)
+  ) {
+    console.log(
+      "[nightly-go-no-go] NIGHTLY_GO_NO_GO_DISABLED is set; the daily launch readiness gate cron is NOT registered.",
+    );
+  } else {
+    const { runNightlyGoNoGo } = await import("./services/nightly-go-no-go");
+    const runNightlyGoNoGoCron = async () => {
+      try {
+        await withBackgroundJobRunRecord("nightly-go-no-go", async () => {
+          const r = await runNightlyGoNoGo();
+          return r.summary;
+        });
+      } catch (e) {
+        console.error("[nightly-go-no-go] cron error", e);
+      }
+    };
+
+    setTimeout(() => {
+      void runNightlyGoNoGoCron();
+      setInterval(runNightlyGoNoGoCron, 24 * 60 * 60 * 1000);
+    }, 600 * 1000);
+  }
+
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.
