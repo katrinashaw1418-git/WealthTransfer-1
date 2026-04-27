@@ -1,20 +1,31 @@
-# Wealth-planner compliance gate (Task #105).
+# Project verification gate.
 #
-# Runs scripts/test-planner.ts. Any non-zero exit (i.e. any failed
-# assertion or missing canonical PASS line) blocks the build.
+# Runs the small set of self-contained scripts/test-*.ts checks that
+# guard production-path invariants. Any non-zero exit from any job in
+# this workflow blocks the build.
 #
-# Gating: runs on every push and pull request. A non-zero exit blocks
-# the build. Per the task spec, the planner write surfaces (#95, #96,
-# #98) MUST close the gaps that this script's hard FAILs surface
-# before the gate goes green. Until they do, the gate stays red and
-# regressions to other planner invariants are caught immediately
-# alongside the known-open gaps.
+# Jobs:
+#   - planner             — scripts/test-planner.ts. Wealth-planner
+#                           compliance gate (Task #105). Needs Postgres
+#                           via the PLANNER_DATABASE_URL secret; the
+#                           script manages its own deterministic test
+#                           fixtures and cleans them up via PK-tracked
+#                           deletes, so the job needs only Node + npm
+#                           install + the test:planner npm script.
 #
-# The script is self-contained — it boots dotenv, hard-fails on unset
-# JWT_SECRET, manages its own deterministic test fixtures and cleans
-# them up via PK-tracked deletes — so the job needs only Node + npm
-# install + the test:planner npm script.
-name: Planner verification
+#   - no-synthetic-data   — scripts/test-no-synthetic-portfolio-data.ts.
+#                           Static tripwire for Task #132 — greps three
+#                           production-path files and exits non-zero if
+#                           a hardcoded numeric array of length >= 4 or
+#                           the magic 0.25/0.25/0.25/0.25 equal-weight
+#                           quartet is re-introduced into server/routes.ts.
+#                           Pure source-grep — no DB, no secrets, no
+#                           runtime — so it runs as its own fast,
+#                           parallel job.
+#
+# Gating: runs on every push and pull request. A non-zero exit from any
+# job blocks the build.
+name: Verification gate
 
 on:
   push:
@@ -40,3 +51,17 @@ jobs:
       - run: npm ci
       - name: Planner verification
         run: npm run test:planner
+
+  no-synthetic-data:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: No-synthetic-data tripwire (Task #132)
+        run: npx tsx scripts/test-no-synthetic-portfolio-data.ts
