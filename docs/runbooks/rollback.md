@@ -207,6 +207,105 @@ Stale thresholds (defaults):
 Operator-page firing means **the rollback safety net is degraded** — fix it
 before the next deploy.
 
+## Reference: production storage & offsite shipping (Task #170)
+
+The in-process backup cron only runs when `DB_BACKUP_DIR` is set on the
+production deployment. As of Task #170 these values are **set in the
+production environment** of the deployment secrets pane (NOT in `shared`,
+so dev environments still skip the cron):
+
+| Variable                            | Production value                            | Why |
+| ----------------------------------- | ------------------------------------------- | --- |
+| `DB_BACKUP_DIR`                     | `/var/backups/amax-db`                      | Where the daily `pg_dump` writes. Must be a persistent mount (see deployment-target prerequisite below). |
+| `DB_BACKUP_RETENTION`               | `14`                                        | 14 daily local dumps. Older dumps live offsite in S3 only. |
+| `DB_BACKUP_OFFSITE_BUCKET`          | `amax-db-backups-prod`                      | S3 bucket the offsite-sync cron pushes dumps to. |
+| `DB_BACKUP_OFFSITE_PREFIX`          | `dumps`                                     | Path inside the bucket. Final keys look like `s3://amax-db-backups-prod/dumps/amax-db-backup-…dump`. |
+| `DB_BACKUP_OFFSITE_REGION`          | _operator-set_ — region the bucket lives in | Passed to the aws CLI as `--region`. Set on the host that runs the offsite cron. |
+| `DB_BACKUP_OFFSITE_SSE`             | `AES256`                                    | Server-side encryption header on every uploaded object. |
+
+> **Deployment-target prerequisite.** The current `.replit` deployment
+> target is `autoscale`, which spins containers up and down on demand.
+> Local-disk paths and the in-process `setInterval` cron in
+> `server/index.ts` are not guaranteed to survive between scaling events
+> on autoscale. For the daily backup to actually fire and for
+> `/var/backups/amax-db` to retain dumps across restarts, production
+> must run as ONE of:
+>   1. a **Reserved VM** deployment with a persistent volume mounted at
+>      `/var/backups/amax-db`, OR
+>   2. an external scheduler (Replit Scheduled Deployment, host cron,
+>      AWS EventBridge) that invokes `npx tsx scripts/db-backup.ts`
+>      against a host that mounts the persistent volume.
+>
+> The env vars above are already set so that as soon as the
+> deployment-target migration lands, the daily backup, weekly restore
+> drill, and freshness watchdog all activate on the next deploy with no
+> further config change. Until then the in-process cron is best-effort
+> on autoscale (a container that happens to live > 7 minutes will
+> attempt the first backup); the watchdog will page if no successful
+> backup row appears within 48 hours, which is exactly the visibility
+> we want into the gap.
+
+### Offsite-sync cron
+
+`scripts/db-backup-offsite.sh` is the offsite shipping half. It uses
+`aws s3 sync` to mirror every `amax-db-backup-*.dump` from
+`$DB_BACKUP_DIR` up to `s3://$DB_BACKUP_OFFSITE_BUCKET/$DB_BACKUP_OFFSITE_PREFIX/`.
+It does **not** pass `--delete`, so dumps live in S3 until the bucket's
+lifecycle policy expires them — that gives offsite a longer retention
+window than the local 14-day prune.
+
+Install on the production host as a daily cron, scheduled ~30 minutes
+after the in-process backup so the latest dump has finished writing:
+
+```cron
+# /etc/cron.d/amax-db-backup-offsite
+DB_BACKUP_DIR=/var/backups/amax-db
+DB_BACKUP_OFFSITE_BUCKET=amax-db-backups-prod
+DB_BACKUP_OFFSITE_PREFIX=dumps
+DB_BACKUP_OFFSITE_REGION=eu-west-1
+DB_BACKUP_OFFSITE_SSE=AES256
+AWS_PROFILE=amax-db-backups
+15 2 * * * runner /opt/amax/scripts/db-backup-offsite.sh >> /var/log/amax-db-backup-offsite.log 2>&1
+```
+
+The IAM principal behind `AWS_PROFILE=amax-db-backups` only needs
+`s3:PutObject`, `s3:GetObject`, and `s3:ListBucket` on the bucket — no
+delete (lifecycle handles expiry, and we want offsite dumps to be
+write-only from the production host's perspective so a host compromise
+cannot wipe them).
+
+### Bucket lifecycle policy
+
+Configure once on `amax-db-backups-prod` (Terraform / AWS console). The
+policy is what gives offsite dumps their longer retention:
+
+| Rule                  | Action                                         |
+| --------------------- | ---------------------------------------------- |
+| `expire-old-dumps`    | After **90 days**, delete current versions.    |
+| `abort-multipart`     | Abort incomplete multipart uploads after 7 d.  |
+
+Versioning + MFA-delete on the bucket is recommended so an accidental
+`aws s3 rm` cannot unrecoverably destroy the offsite copies.
+
+### Restoring from an offsite dump
+
+If `$DB_BACKUP_DIR` is gone (host failure), pull the dump back down
+before running the restore in step 4c:
+
+```sh
+aws s3 cp \
+  s3://amax-db-backups-prod/dumps/amax-db-backup-2026-04-27T02-00-00Z.dump \
+  /tmp/amax-db-backup-2026-04-27T02-00-00Z.dump
+DATABASE_URL=postgres://... \
+  npx tsx scripts/db-restore.ts \
+  --dump=/tmp/amax-db-backup-2026-04-27T02-00-00Z.dump \
+  --target=$DATABASE_URL \
+  --i-know-what-im-doing
+```
+
+`aws s3 ls s3://amax-db-backups-prod/dumps/ --recursive | sort | tail -10`
+is the offsite equivalent of the `ls -lt $DB_BACKUP_DIR` listing in step 4a.
+
 ## Reference: integrity checks
 
 Each weekly drill runs the following on the restored copy:

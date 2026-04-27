@@ -24,9 +24,28 @@ These must be set in the Replit deployment secrets pane (not just the workspace 
 | `NODE_ENV` | Should be `production`; tags observability and gates env separation. |
 | `LOG_DIR` | Persistent volume for `errors.log`; fallback `./logs` is ephemeral inside the container. |
 | `OPERATOR_ALERT_WEBHOOK_URL` | The alerting drill in the gate dispatches one drill alert per known source; without a webhook configured the gate is NO-GO. |
-| `DB_BACKUP_DIR` | The infrastructure & rollback sections check the latest successful backup and restore drill freshness against this dir. |
+| `DB_BACKUP_DIR` | The infrastructure & rollback sections check the latest successful backup and restore drill freshness against this dir. Set in production secrets to `/var/backups/amax-db` (Task #170). See the deployment-target prerequisite in `docs/runbooks/rollback.md` — the path needs a persistent mount, which means a Reserved VM deployment or an external-scheduler shape. |
 
 If any are missing the deploy log will show the failing check and a `> **What to do:** …` hint pointing at the fix. See `docs/runbooks/go-no-go.md` for what each section verifies and what `drill: true` artefacts the gate leaves behind on every deploy.
+
+### Offsite backup shipping (Task #170)
+
+`DB_BACKUP_DIR` covers local dump retention. The offsite-shipping half lives outside the application, in a host cron that runs `scripts/db-backup-offsite.sh` daily. The application-side env vars below are set in the production environment of the deployment secrets pane:
+
+| Variable | Production value | Purpose |
+| --- | --- | --- |
+| `DB_BACKUP_OFFSITE_BUCKET` | `amax-db-backups-prod` | Production S3 bucket. |
+| `DB_BACKUP_OFFSITE_PREFIX` | `dumps` | Path inside the bucket. |
+| `DB_BACKUP_OFFSITE_SSE` | `AES256` | Server-side encryption header. |
+
+Set on the offsite-cron host (NOT in the application's env, since the script is invoked from cron):
+
+| Variable | Purpose |
+| --- | --- |
+| `DB_BACKUP_OFFSITE_REGION` | AWS region the bucket lives in. |
+| `AWS_PROFILE` | IAM principal with `s3:PutObject`, `s3:GetObject`, `s3:ListBucket` on the bucket — no delete (the bucket lifecycle policy expires old dumps; we want offsite to be write-only from the host). |
+
+Full setup, the cron line, the bucket lifecycle policy (90-day expiry), and the offsite-restore commands are in `docs/runbooks/rollback.md` → "Reference: production storage & offsite shipping".
 
 ### Manually re-running the gate
 

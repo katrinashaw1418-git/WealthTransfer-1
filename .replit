@@ -49,6 +49,13 @@ ALLOW_LOCAL_DEV_AUTH = "true"
 [userenv.shared]
 PLATFORM_USER_ID = "11"
 
+[userenv.production]
+DB_BACKUP_DIR = "/var/backups/amax-db"
+DB_BACKUP_RETENTION = "14"
+DB_BACKUP_OFFSITE_BUCKET = "amax-db-backups-prod"
+DB_BACKUP_OFFSITE_PREFIX = "dumps"
+DB_BACKUP_OFFSITE_SSE = "AES256"
+
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
