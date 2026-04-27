@@ -248,6 +248,22 @@ const EXISTING_SCRIPTS: Array<{
 // nable manually for compliance-gap tracking; the underlying gaps are
 // owned by their respective tasks. Re-include here once #95/#96/#98
 // are fully adopted in the planner write paths.
+// Task #220 — DO NOT add `scripts/test-fee-deduction-gate-b.ts` or
+// `scripts/test-transaction-safety.ts` to this list. Both scripts call
+// `getOrCreateSuspenseAccount` / `getOrCreateFeeAccount` on the
+// platform user (the same shape that leaked in Task #219), but they
+// are ALREADY orphan-row gated today via two independent paths:
+//   1. EXISTING_SCRIPTS above (Stage 1) wraps each with the per-script
+//      `snapshotPlatformLedger` + `snapshotPlatformOrphanCounts`
+//      (Task #198) snapshot, so a leak on either `accounts` or
+//      `transactions` fails their `ledger-leak: ...` gate here.
+//   2. The canonical CI coverage list in
+//      `scripts/ci-ledger-leak-gate.sh` already invokes both scripts
+//      via `ci-ledger-leak-gate.ts`, which calls the same
+//      `snapshotPlatformOrphanCounts` shape.
+// Adding them here would duplicate execution in pre-launch (Stage 1
+// AND Stage 4 for the same script), violating this list's "no script
+// run twice" contract documented above.
 const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   "scripts/test-fee-insufficient-funds.ts",
   "scripts/test-no-synthetic-portfolio-data.ts",
