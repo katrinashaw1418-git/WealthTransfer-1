@@ -47,11 +47,58 @@
 //     leaves no half-written state.
 //
 // Usage:
-//   npx tsx scripts/cleanup-prelaunch-residue.ts
+//   npx tsx scripts/cleanup-prelaunch-residue.ts            # mutating run
+//   npx tsx scripts/cleanup-prelaunch-residue.ts --dry-run  # preview only
 //
 // Verification:
 //   npx tsx scripts/pre-launch-safety.ts --strict
 //   Expected: 10 PASS / 0 FAIL / 0 SKIP after this script has run.
+//
+// =============================================================================
+// OPERATOR PRE-FLIGHT CHECKLIST (REQUIRED before running on production)
+// =============================================================================
+// The hardcoded IDs below (PHANTOM_TX_IDS, ORPHAN_DEDUCTION_ID, SYSTEM_USER_ID,
+// ADMIN_USER_ID) were captured against the failing pre-launch snapshot
+// referenced in the Task #181 description. They are environment-specific.
+// Before running this script against ANY database other than the dev DB
+// these IDs were captured on, the operator MUST verify they still describe
+// the residue that needs to be cleaned. Run the script with `--dry-run`
+// FIRST — it prints the resolved residue without mutating, so a mismatch
+// is obvious before any write.
+//
+// Pre-flight SQL (run against the target DB first):
+//
+//   -- Cut 2 (#159): confirm the phantom-tx ids are still single-leg fixtures
+//   --              with no FK references that would block deletion.
+//   SELECT id, user_id, type, description
+//     FROM transactions
+//    WHERE id IN (320, 1124);
+//   SELECT transaction_id, COUNT(*) AS legs,
+//          SUM(CASE WHEN direction='credit' THEN amount::numeric
+//                   ELSE -amount::numeric END) AS net
+//     FROM ledger_entries
+//    WHERE transaction_id IN (320, 1124)
+//    GROUP BY transaction_id;
+//   SELECT COUNT(*) FROM audit_logs
+//    WHERE entity_type='transaction' AND entity_id IN ('320','1124');
+//   SELECT id FROM adviser_fee_deductions
+//    WHERE settled_transaction_id IN (320, 1124)
+//       OR reversal_transaction_id IN (320, 1124);
+//
+//   -- Cut 3 (#181): confirm the orphan deduction is still un-reversed
+//   --              and its settled tx still has the expected balanced legs.
+//   SELECT id, client_user_id, settled_transaction_id, reversal_transaction_id
+//     FROM adviser_fee_deductions
+//    WHERE id = 144;
+//   SELECT user_id, currency, direction, amount
+//     FROM ledger_entries
+//    WHERE transaction_id = (SELECT settled_transaction_id
+//                              FROM adviser_fee_deductions WHERE id = 144);
+//
+// If ANY of those queries returns unexpected rows (different counts,
+// different users, no rows where rows were expected, etc.) DO NOT run
+// this script — open a new task with the captured snapshot and update
+// the constants below.
 // =============================================================================
 
 import { eq, inArray, sql } from "drizzle-orm";
@@ -71,9 +118,136 @@ const PHANTOM_TX_IDS = [320, 1124];
 const ORPHAN_DEDUCTION_ID = 144;
 const SYSTEM_USER_ID = 11;
 const ADMIN_USER_ID = 13; // `wise` — used as the reversed_by_user_id actor
+const AFFECTED_WALLET_USER_IDS = [43, 44, 45];
+
+// --dry-run: resolve and PRINT the residue these IDs currently point at,
+// then exit WITHOUT mutating. Lets the operator confirm the hardcoded IDs
+// still describe the residue they think they do — required as the
+// pre-flight check before running this script against any database other
+// than the dev DB the IDs were originally captured against (see
+// "OPERATOR PRE-FLIGHT CHECKLIST" in the file header).
+const DRY_RUN = process.argv.includes("--dry-run");
+
+async function previewResidue(): Promise<void> {
+  console.log("[cleanup] === DRY RUN — no mutations will be performed ===");
+  console.log(
+    `[cleanup] hardcoded constants: PHANTOM_TX_IDS=${JSON.stringify(
+      PHANTOM_TX_IDS,
+    )}, ORPHAN_DEDUCTION_ID=${ORPHAN_DEDUCTION_ID}, ` +
+      `SYSTEM_USER_ID=${SYSTEM_USER_ID}, ADMIN_USER_ID=${ADMIN_USER_ID}, ` +
+      `AFFECTED_WALLET_USER_IDS=${JSON.stringify(AFFECTED_WALLET_USER_IDS)}`,
+  );
+
+  // Cut 2 (#159) preview — phantom-tx legs + balance + FK refs.
+  const phantomLegs = await db.execute<{
+    transaction_id: number;
+    legs: number;
+    net: string;
+  }>(sql`
+    SELECT transaction_id, COUNT(*)::int AS legs,
+           COALESCE(SUM(CASE WHEN direction='credit' THEN amount::numeric
+                             ELSE -amount::numeric END), 0)::text AS net
+      FROM ledger_entries
+     WHERE transaction_id IN (${sql.join(
+       PHANTOM_TX_IDS.map((id) => sql`${id}`),
+       sql`, `,
+     )})
+     GROUP BY transaction_id
+     ORDER BY transaction_id
+  `);
+  console.log("[cleanup] cut 2 preview — phantom-tx ledger_entries:");
+  const phantomRows = (phantomLegs as any).rows ?? [];
+  if (phantomRows.length === 0) {
+    console.log("  (none — cut 2 already applied or IDs no longer point here)");
+  } else {
+    for (const r of phantomRows) {
+      console.log(
+        `  tx#${r.transaction_id}: legs=${r.legs} net=${r.net} (cleanup will DELETE)`,
+      );
+    }
+  }
+  const fkRefs = await db.execute<{ refs: number }>(sql`
+    SELECT COUNT(*)::int AS refs
+      FROM adviser_fee_deductions
+     WHERE settled_transaction_id IN (${sql.join(
+       PHANTOM_TX_IDS.map((id) => sql`${id}`),
+       sql`, `,
+     )})
+        OR reversal_transaction_id IN (${sql.join(
+          PHANTOM_TX_IDS.map((id) => sql`${id}`),
+          sql`, `,
+        )})
+  `);
+  const fkCount = (fkRefs as any).rows?.[0]?.refs ?? 0;
+  console.log(
+    `[cleanup] cut 2 preview — adviser_fee_deductions FKs to phantom-tx ids: ${fkCount} ` +
+      `(must be 0 for safe delete; non-zero means STOP and update the constants)`,
+  );
+
+  // Cut 3 (#181) preview — orphan deduction + its settled-tx legs.
+  const [deduction] = await db
+    .select()
+    .from(adviserFeeDeductions)
+    .where(eq(adviserFeeDeductions.id, ORPHAN_DEDUCTION_ID));
+  console.log("[cleanup] cut 3 preview — adviser_fee_deductions row:");
+  if (!deduction) {
+    console.log(
+      `  deduction #${ORPHAN_DEDUCTION_ID} NOT FOUND (cut 3 will be skipped)`,
+    );
+  } else {
+    console.log(
+      `  id=${deduction.id} client_user_id=${deduction.clientUserId} ` +
+        `settled_tx=${deduction.settledTransactionId ?? "null"} ` +
+        `reversal_tx=${deduction.reversalTransactionId ?? "null"} ` +
+        `total_accrued=${deduction.totalAccrued}`,
+    );
+    if (deduction.settledTransactionId && !deduction.reversalTransactionId) {
+      const legs = await db
+        .select({
+          accountId: ledgerEntries.accountId,
+          userId: ledgerEntries.userId,
+          currency: ledgerEntries.currency,
+          direction: ledgerEntries.direction,
+          amount: ledgerEntries.amount,
+        })
+        .from(ledgerEntries)
+        .where(eq(ledgerEntries.transactionId, deduction.settledTransactionId));
+      console.log(
+        `  settled tx#${deduction.settledTransactionId} has ${legs.length} ledger leg(s) ` +
+          `(cleanup will mirror these with FLIPPED direction):`,
+      );
+      for (const l of legs) {
+        console.log(
+          `    user=${l.userId} acct=${l.accountId} ${l.currency} ${l.direction} ${l.amount}`,
+        );
+      }
+    } else if (deduction.reversalTransactionId) {
+      console.log(`  (cut 3 already applied — reversal exists)`);
+    } else {
+      console.log(`  (cut 3 will be skipped — no settled_transaction_id)`);
+    }
+  }
+
+  console.log(
+    "[cleanup] dry-run complete. Re-run WITHOUT --dry-run to apply, " +
+      "or update the hardcoded constants if any of the above does not " +
+      "match the residue you expected.",
+  );
+}
 
 async function main(): Promise<void> {
+  if (DRY_RUN) {
+    await previewResidue();
+    return;
+  }
+
   console.log("[cleanup] starting pre-launch residue cleanup");
+  console.log(
+    `[cleanup] target IDs (verify these match your target DB!): ` +
+      `PHANTOM_TX_IDS=${JSON.stringify(PHANTOM_TX_IDS)}, ` +
+      `ORPHAN_DEDUCTION_ID=${ORPHAN_DEDUCTION_ID}, ` +
+      `SYSTEM_USER_ID=${SYSTEM_USER_ID}, ADMIN_USER_ID=${ADMIN_USER_ID}`,
+  );
 
   await db.transaction(async (tx) => {
     // -----------------------------------------------------------------
@@ -219,7 +393,7 @@ async function main(): Promise<void> {
   // (transactional) from the cache refresh (idempotent recompute)
   // makes a partial failure easier to recover from manually.
   // -----------------------------------------------------------------
-  for (const userId of [43, 44, 45]) {
+  for (const userId of AFFECTED_WALLET_USER_IDS) {
     const result = await refreshWalletCacheBalance(db, userId, "AUD");
     if (result) {
       console.log(
@@ -256,7 +430,9 @@ async function main(): Promise<void> {
   console.log("[cleanup] complete");
 }
 
-main().catch((err) => {
-  console.error("[cleanup] crashed:", err);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error("[cleanup] crashed:", err);
+    process.exit(1);
+  });

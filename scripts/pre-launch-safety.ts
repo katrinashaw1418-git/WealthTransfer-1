@@ -963,7 +963,17 @@ async function postSyntheticLeg(opts: {
     );
     const suspenseAccount = await getOrCreateSuspenseAccount(opts.currency, tx);
     pushUnique(created.accountIds, clientAccount.id);
-    pushUnique(created.accountIds, suspenseAccount.id);
+    // Task #181 (review comment c) — DO NOT track the platform suspense
+    // account for cleanup. It is shared infrastructure across the whole
+    // pre-launch run AND across every subprocess test (test-transaction-
+    // safety, test-fee-deduction-gate-b, test-task-35-suppression) that
+    // posts against it during Stage 1. Tracking + deleting it here at
+    // end-of-run causes those subprocess tests to re-create the account
+    // on the NEXT pre-launch run, which then trips the per-script
+    // ledger-leak gate (orphan rows accounts: N -> N+1 delta +1) on
+    // test-transaction-safety. The same warning is documented at the
+    // PLATFORM_USER_ID resolution block below (~line 2211): the platform
+    // user is shared infrastructure, not a per-scenario fixture.
 
     const amt = new Decimal(opts.amount).toFixed(8);
     const entries =
@@ -2274,14 +2284,59 @@ async function main(): Promise<void> {
     // The flip is idempotent and only touches the single platform row,
     // so re-runs are cheap. We do this AFTER the resolution block above
     // so it covers both code paths uniformly.
+    //
+    // Task #181 (review comment b) — ALLOW-LIST GUARD. The flip is now
+    // gated by a username check: we refuse to set is_demo=true unless
+    // the resolved row's username matches one of the known platform
+    // identifiers (`__prelaunch_platform` minted by this script, or
+    // `system` — the dev-DB shared platform fixture). This protects
+    // against an operator (or CI) accidentally pointing PLATFORM_USER_ID
+    // at a real human user id and silently flipping that human into a
+    // demo account, which would in turn cause the reconciler to skip
+    // genuine wallet drift on that user. On mismatch we ABORT the run
+    // with exit code 2 rather than continue with the platform-suspense
+    // legs landing on a real customer.
     // -------------------------------------------------------------------
     {
       const platformIdResolved = parseInt(process.env.PLATFORM_USER_ID!, 10);
       if (Number.isInteger(platformIdResolved) && platformIdResolved > 0) {
-        await db
-          .update(users)
-          .set({ isDemo: true })
+        const ALLOWED_PLATFORM_USERNAMES = new Set<string>([
+          PLATFORM_USERNAME, // "__prelaunch_platform"
+          "system", // dev-DB shared platform fixture (user id=11)
+        ]);
+        const [resolvedRow] = await db
+          .select({ id: users.id, username: users.username, isDemo: users.isDemo })
+          .from(users)
           .where(eq(users.id, platformIdResolved));
+        if (!resolvedRow) {
+          console.error(
+            `pre-launch: PLATFORM_USER_ID=${platformIdResolved} does not ` +
+              `resolve to any users row. Refusing to flip is_demo. Aborting.`,
+          );
+          process.exit(2);
+        }
+        if (!ALLOWED_PLATFORM_USERNAMES.has(resolvedRow.username)) {
+          console.error(
+            `pre-launch: REFUSING to flip is_demo=true on user ` +
+              `id=${resolvedRow.id} username='${resolvedRow.username}' — ` +
+              `not in the platform-user allow-list ` +
+              `[${Array.from(ALLOWED_PLATFORM_USERNAMES).join(", ")}]. ` +
+              `If this is a new platform fixture, add its username to ` +
+              `ALLOWED_PLATFORM_USERNAMES in scripts/pre-launch-safety.ts. ` +
+              `Aborting to avoid silently demoting a real customer.`,
+          );
+          process.exit(2);
+        }
+        if (!resolvedRow.isDemo) {
+          await db
+            .update(users)
+            .set({ isDemo: true })
+            .where(eq(users.id, platformIdResolved));
+          console.log(
+            `pre-launch: flipped is_demo=true on platform user ` +
+              `id=${resolvedRow.id} username='${resolvedRow.username}'`,
+          );
+        }
       }
     }
 
