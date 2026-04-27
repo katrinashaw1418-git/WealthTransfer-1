@@ -77,7 +77,7 @@
 
 import "./_bootstrap-test-env";
 import type { Express, Request } from "express";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { db } from "../server/db";
 import {
   users,
@@ -2135,23 +2135,30 @@ async function main(): Promise<void> {
   });
 
   // ---- Post-suite invariant: every planner fixture advice record (i.e.
-  // every adviceRecords row owned by a __planner_* client) MUST end at
-  // exactly status='issued'. This is the canonical terminal state — tests
-  // #10 (transition), #11 (review_pending lock) and #13 (blocked-write
-  // audit) all flip status during their probes and normalize back to
-  // 'issued' in their finally blocks. Any other status here means a future
-  // edit dropped the restore — fail hard with the offending IDs and statuses.
+  // every adviceRecords row owned by a __planner_* client, regardless of
+  // whether the row was created by this run or a prior aborted one) MUST
+  // end at exactly status='issued'. This is the canonical terminal state —
+  // tests #10 (transition), #11 (review_pending lock) and #13
+  // (blocked-write audit) all flip status during their probes and
+  // normalize back to 'issued' in their finally blocks. Any other status
+  // here means a future edit dropped the restore — fail hard with the
+  // offending IDs/statuses/owners. Sweep is a username-prefix join on
+  // users so it covers every __planner_* client, not just the two active
+  // fixture client IDs in this run.
   const planneradviceRows = await db
-    .select({ id: adviceRecords.id, status: adviceRecords.status })
+    .select({
+      id: adviceRecords.id,
+      status: adviceRecords.status,
+      ownerUsername: users.username,
+    })
     .from(adviceRecords)
-    .where(
-      inArray(adviceRecords.clientId, [clientUserId, otherClientUserId]),
-    );
+    .innerJoin(users, eq(adviceRecords.clientId, users.id))
+    .where(like(users.username, "__planner_%"));
   const offending = planneradviceRows.filter((r) => r.status !== "issued");
   if (offending.length > 0) {
     console.error(
       `\nINVARIANT VIOLATION: ${offending.length} planner advice record(s) ended at a non-canonical status (expected exactly 'issued'). Offending: ${offending
-        .map((r) => `id=${r.id} status='${r.status}'`)
+        .map((r) => `id=${r.id} status='${r.status}' owner='${r.ownerUsername}'`)
         .join("; ")}. A test mutated status without restoring it to 'issued' — wrap the flip in try/finally and set status='issued' in the finally.`,
     );
     process.exit(1);
