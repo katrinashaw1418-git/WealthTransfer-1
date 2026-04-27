@@ -66,7 +66,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { Express, Request } from "express";
-import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 
 import { db } from "../server/db";
@@ -155,6 +155,16 @@ const CANONICAL_ORDER: string[] = [
   "platform-leg: lifecycle 2e (idempotency: investments)",
   "lifecycle: reversal symmetry",
   "platform-leg: lifecycle 3 (reversal symmetry)",
+  // Task #210 — end-of-Stage-2 contract gate. After every lifecycle
+  // scenario has run AND scrubbed its own fixture user (Task #202's
+  // per-scenario `runScenarioWithPlatformLegAssert` wrapper), assert
+  // that EVERY `__prelaunch_%` fixture user owns zero transactions.
+  // This locks in the self-clean contract: a future scenario added
+  // outside the wrapper (or with a mismatched fixture username) will
+  // FAIL this gate loudly with a per-user residue count, instead of
+  // its leftover ledger entries silently leaking into Stage 3
+  // reconciliation as a misleading critical wallet-vs-ledger alert.
+  "lifecycle: end-of-Stage-2 fixture-user contract",
   "reconciliation: wallet-ledger clean-room",
   "reconciliation: ledger-vs-custodian clean-room",
   "reconciliation: posting-receipt invariant clean-room",
@@ -587,8 +597,12 @@ async function assertPlatformLegInvariantAndScrub(
 
     // Per-scenario scrub: delete the fixture user's transactions, which
     // cascades to delete the scenario's platform-side legs (they share
-    // the same transaction_id). This is the per-scenario counterpart to
-    // `scrubLifecyclePlatformLegs()` at end of Stage 2.
+    // the same transaction_id). This is the sole cleanup path for
+    // lifecycle scenarios; the previous bulk end-of-Stage-2 scrub was
+    // retired (Task #201) once every scenario adopted this wrapper.
+    // The end-of-Stage-2 contract gate (Task #210,
+    // `assertFixtureUsersHaveZeroTransactions`) verifies this scrub
+    // actually ran for every fixture user the run created.
     await resetScenarioState([fixtureRow.id]);
 
     const after = await snapshotPlatformPerCurrency(platformUserId, currencies);
@@ -643,7 +657,120 @@ async function assertPlatformLegInvariantAndScrub(
 //      (user, currency) pairs entirely. So even if a stray platform-side
 //      leg slipped past the per-scenario scrub, it would not surface as
 //      a wallet-vs-ledger reconciliation alert.
-// Together these make the bulk Stage-2.5 scrub redundant.
+// Together these made the bulk Stage-2.5 scrub redundant.
+//
+// Task #210 then converted the absent end-of-Stage-2 scrub into a strict
+// CONTRACT gate (`assertFixtureUsersHaveZeroTransactions` below): rather
+// than re-running a bulk scrub that would now be a defensive no-op, we
+// instead assert the per-scenario scrubs DID their job. Any new scenario
+// that bypasses `runScenarioWithPlatformLegAssert` (or whose fixture
+// username does not match the username it scrubs) leaves transactions
+// behind on a `__prelaunch_%` user and is caught loudly here, instead of
+// silently leaking residue into Stage 3 reconciliation.
+
+// ---------------------------------------------------------------------------
+// Task #210 — end-of-Stage-2 fixture-user contract gate.
+//
+// Asserts that every `__prelaunch_%` fixture user owns zero transactions
+// at the boundary between Stage 2 (lifecycle scenarios) and Stage 3
+// (reconciliation clean-rooms). The platform user (resolved via
+// `PLATFORM_USER_ID`) is intentionally EXCLUDED — it is shared
+// infrastructure across the whole pre-launch run and across every Stage-1
+// subprocess test, not a per-scenario fixture, so there is no per-run
+// "back to zero" expectation on its rows.
+//
+// Outcomes:
+//   - PASS  — every fixture user has zero transactions; per-scenario
+//             scrub contract holds.
+//   - FAIL  — at least one fixture user still owns transactions; the
+//             failure names each offender and its transaction count so
+//             the operator can map directly back to the scenario that
+//             skipped the scrub.
+//   - SKIP  — no `__prelaunch_%` fixture users exist (every Stage 2
+//             lifecycle was skipped before creating its user, e.g. all
+//             route handlers missing). Reported as SKIP rather than
+//             a free PASS so --strict treats it as unverified.
+// ---------------------------------------------------------------------------
+async function assertFixtureUsersHaveZeroTransactions(): Promise<void> {
+  const gateName = "lifecycle: end-of-Stage-2 fixture-user contract";
+  try {
+    const platformUserIdRaw = process.env.PLATFORM_USER_ID;
+    const platformUserId = platformUserIdRaw
+      ? parseInt(platformUserIdRaw, 10)
+      : NaN;
+
+    // Match every fixture user this script may have created, but exclude
+    // the platform user (it may itself be `__prelaunch_platform` when
+    // PLATFORM_USER_ID was unset at startup).
+    //
+    // The literal underscores in `__prelaunch_` are SQL LIKE single-char
+    // wildcards by default, so we escape them via `ESCAPE '\\'` (matches
+    // the precedent in scripts/test-wealth-planner-compliance.ts) — a
+    // bare `LIKE '__prelaunch_%'` would also match e.g. `xxprelaunch_foo`
+    // and produce false-positive failures from unrelated test fixtures.
+    const prelaunchPrefixMatch = sql`${users.username} LIKE '\_\_prelaunch\_%' ESCAPE '\\'`;
+    const whereClause =
+      Number.isInteger(platformUserId) && platformUserId > 0
+        ? and(prelaunchPrefixMatch, ne(users.id, platformUserId))
+        : prelaunchPrefixMatch;
+
+    const fixtureUsers = await db
+      .select({ id: users.id, username: users.username })
+      .from(users)
+      .where(whereClause);
+
+    if (fixtureUsers.length === 0) {
+      skip(
+        gateName,
+        `no __prelaunch_% fixture users exist (excluding the platform ` +
+          `user); nothing to verify — every Stage 2 lifecycle was likely ` +
+          `skipped before creating its fixture`,
+      );
+      return;
+    }
+
+    const fixtureUserIds = fixtureUsers.map((u) => u.id);
+    const txRows = await db
+      .select({ userId: transactions.userId, id: transactions.id })
+      .from(transactions)
+      .where(inArray(transactions.userId, fixtureUserIds));
+
+    if (txRows.length === 0) {
+      pass(
+        gateName,
+        `every __prelaunch_% fixture user (n=${fixtureUsers.length}, ` +
+          `excluding platform user id=${platformUserId}) owns zero ` +
+          `transactions at end of Stage 2 — the per-scenario scrub ` +
+          `contract holds`,
+      );
+      return;
+    }
+
+    const usernameById = new Map(fixtureUsers.map((u) => [u.id, u.username]));
+    const countsByUserId = new Map<number, number>();
+    for (const t of txRows) {
+      countsByUserId.set(t.userId, (countsByUserId.get(t.userId) ?? 0) + 1);
+    }
+    const offenders = Array.from(countsByUserId.entries())
+      .map(([uid, n]) => `${usernameById.get(uid) ?? `user#${uid}`}=${n}`)
+      .sort()
+      .join(", ");
+
+    fail(
+      gateName,
+      `${txRows.length} leftover transaction row(s) on ` +
+        `${countsByUserId.size} fixture user(s) at end of Stage 2: ` +
+        `${offenders}. Every Stage 2 lifecycle scenario MUST self-clean ` +
+        `via runScenarioWithPlatformLegAssert (which deletes the fixture ` +
+        `user's transactions, cascading to its platform-side legs). A ` +
+        `non-zero count here means a scenario was added that bypasses ` +
+        `that wrapper, or its fixture username does not match the ` +
+        `username the wrapper scrubs.`,
+    );
+  } catch (err: any) {
+    fail(gateName, `threw: ${err?.message ?? err}`);
+  }
+}
 
 async function ensureWallet(userId: number, currency: string): Promise<void> {
   const [existing] = await db
@@ -2349,13 +2476,26 @@ async function main(): Promise<void> {
     });
 
     // -------------------------------------------------------------------
-    // Task #201 removed the previous Stage 2.5 scrub. The platform user
-    // is now flagged is_demo=true at provisioning time, which makes the
-    // wallet-vs-ledger reconciler skip its (user, currency) pairs
-    // entirely. The lifecycle scenarios' SUSPENSE legs therefore land
-    // on a user the reconciler ignores, so no critical wallet-vs-
-    // ledger mismatch can surface from the Stage 2 traffic — WITHOUT
-    // having to delete the audit trail of those balanced ledger pairs.
+    // Stage 2.5 — end-of-Stage-2 fixture-user contract gate.
+    //
+    // Task #201 removed the previous bulk `scrubLifecyclePlatformLegs()`
+    // call that ran here, because every Stage 2 scenario above is now
+    // wrapped in `runScenarioWithPlatformLegAssert` (Task #202), which
+    // scrubs the fixture user's transactions PER-SCENARIO. The bulk
+    // scrub had become a defensive no-op.
+    //
+    // Task #210 then converted the now-redundant scrub into a strict
+    // CONTRACT assertion: every `__prelaunch_%` fixture user MUST own
+    // zero transactions at this point. If a future scenario is added
+    // without the per-scenario wrapper (or with a mismatched fixture
+    // username), this gate FAILs loudly and names the offender —
+    // instead of the residue silently leaking into the Stage 3
+    // reconciliation clean-rooms below as a misleading critical
+    // wallet-vs-ledger alert. The platform user (resolved via
+    // PLATFORM_USER_ID, also flagged is_demo=true so the reconciler
+    // ignores its rows) is excluded from this assertion: it is shared
+    // infrastructure across the whole pre-launch run, not a per-
+    // scenario fixture.
     //
     // Stage 3: operator-alert clean rooms (Task #142 — one gate per
     // reconciliation service). Runs LAST so any drift the lifecycle
@@ -2363,6 +2503,9 @@ async function main(): Promise<void> {
     // critical/alert row instead of being masked. Each service is its
     // own gate so SKIP / FAIL / PASS is reported independently.
     // -------------------------------------------------------------------
+    console.log("\n--- pre-launch: end-of-Stage-2 fixture-user contract ---");
+    await assertFixtureUsersHaveZeroTransactions();
+
     console.log("\n--- pre-launch: reconciliation: wallet-ledger clean room ---");
     await reconWalletLedgerCleanRoom();
 
