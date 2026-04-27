@@ -75,3 +75,11 @@ Any failure prints `PRE-LAUNCH SAFETY: FAIL — one or more gates failed. Do not
 The script is idempotent across re-runs: every fixture row is
 prefixed `__prelaunch_` and the cleanup phase deletes only rows whose
 primary keys were captured during this run.
+
+## Post-merge rechecks
+
+Each line below records one auto-run of `scripts/post-merge-safety-recheck.ts`
+after a merge that was gated on `scripts/pre-launch-safety.ts --strict` (the
+go-live rollup). The runner appends a new line per invocation; nothing is
+overwritten so prior verdicts stay visible in version control.
+- 2026-04-27T02:35:02.380Z — 🔴 RED (9 passed, 1 failed, 0 skipped, exit=1) — commit `07f3d14f86fe` — [`post-merge-safety-recheck-2026-04-27T02-35-02-380Z.md`](./golive/post-merge-safety-recheck-2026-04-27T02-35-02-380Z.md)
