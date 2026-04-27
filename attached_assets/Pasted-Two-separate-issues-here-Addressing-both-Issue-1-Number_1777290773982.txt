@@ -1,0 +1,93 @@
+Two separate issues here. Addressing both.
+
+---
+
+**Issue 1 — Numbers not linked to real portfolio data**
+
+The landing page shows:
+
+```
+$4.8M+    Assets under reporting
+5         Investment products
+3         Asset classes
+Tier 2    Verification tier
+```
+
+These are hardcoded marketing stats, not live data. That is actually correct for a public landing page — you do not want unauthenticated visitors querying the real ledger. However they need to either be clearly static marketing figures or removed entirely.
+
+The risk right now is that $4.8M appears to reference real AUM. If that number is coincidentally close to the actual test user portfolio value, it looks like it is leaking real data. It is not — it is hardcoded — but it creates a perception problem.
+
+**Fix:** Add a small label under the stats block: "Figures are illustrative. Actual platform AUM is not disclosed publicly." Or replace the stats entirely with capability-focused figures that are not dollar amounts.
+
+---
+
+**Issue 2 — Landing page amendments**
+
+Here is a full review of what needs fixing before this goes anywhere near real users.
+
+**Critical — fix before any external use:**
+
+```
+AFSL Number: [placeholder]
+AR Number: [placeholder]
+ABN: [placeholder]
+AFCA Member Number: [placeholder]
+AUSTRAC Registration: [placeholder]
+```
+
+All five placeholders are in the footer right now. These are not optional. A financial services landing page without real licence numbers is not legally compliant for external use. The footer already has the right disclaimer — "Draft — placeholder regulatory details... Final legal review and AFSL partner sign-off required before external use" — which is good. But the page should not be publicly accessible until these are real.
+
+**Add a dev/staging banner at the top of the page** if this URL is accessible externally right now:
+
+```
+⚠ This platform is in development. Not available to the public.
+  Do not submit personal or financial information.
+```
+
+The existing "Notice: This website is currently under development" is too small and easily missed.
+
+---
+
+**Content amendments — lower priority but worth fixing:**
+
+**1. "Get my recommendation" button**
+This button is on the public landing page before any login or KYC. It implies personal advice is available on demand. That is a problem under RG 175. Rename it to "Learn more" or "Apply for access" or remove it entirely until the advice workflow is AFSL-ready.
+
+**2. "I am an Investor / I am a Wealth Planner" split**
+This is good UX. Keep it. But the Wealth Planner path should make clear upfront that access requires AFSL or AR credentials — not just "sign in." Currently the split looks like anyone can sign up as a planner.
+
+**3. Investment product cards**
+The three product cards (Real Estate, Corporate Credit, Bitcoin Tracker) are visible to unauthenticated visitors. Under RG 65 and s1018A, offering documents and product details to unverified visitors may constitute a financial product offer. Add a gate: "These products are available to verified wholesale investors only. Sign in or apply to view product details." Blur or hide the specifics (IRR, minimum, term) behind that gate.
+
+**4. "General market insights — General info only — not personal financial advice"**
+The disclaimer is correct. Keep it. But the label "General market insights" paired with "Get my recommendation" on the same page creates mixed messaging. One says general info, the other implies personalised advice. Resolve the inconsistency.
+
+**5. Wholesale investor eligibility section**
+This section is well written and legally accurate. Keep it as-is. The six pathways are correct under s761G and s761GA.
+
+**6. Footer contact details**
++61 2 8320 1908 and info@amaxwealth.com.au — are these real and monitored? If not, replace with a contact form or remove until they are live.
+
+**7. AFCA number**
+"AFCA: 1800 931 678" in the footer — this is the AFCA general helpline, not your member number. These should not appear on the same line. Separate them:
+
+```
+AFCA helpline: 1800 931 678
+AMAX AFCA Member No: [your actual number]
+```
+
+---
+
+**Summary of what to fix in priority order:**
+
+```
+1. Add prominent dev/staging banner if externally accessible
+2. Gate investment product details behind login/verification
+3. Rename "Get my recommendation" to "Apply for access"
+4. Fill in or explicitly remove all placeholder licence numbers
+5. Separate AFCA helpline from AFCA member number in footer
+6. Label the AUM stats as illustrative, not live data
+7. Clarify Wealth Planner path requires AFSL/AR credentials
+```
+
+Items 1 through 4 should be done before this URL is shared with anyone outside the development team.

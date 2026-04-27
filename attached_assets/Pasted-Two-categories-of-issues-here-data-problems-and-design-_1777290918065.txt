@@ -1,0 +1,117 @@
+Two categories of issues here — data problems and design problems. Addressing both.
+
+---
+
+**Data problems — fix these first**
+
+**1. Assets under advice shows $0 across all clients**
+
+The real portfolio value for the test client is $4.8M but the adviser dashboard shows $0 everywhere. This means the adviser AUM calculation is not pulling from the ledger. It is either using wallet.balance directly (which may be stale) or the adviser-client link is not correctly joining to the portfolio snapshot or ledger total.
+
+Fix: the adviser AUM query needs to sum ledger-derived balances for all linked clients, converted to AUD, same calculation used on the client portfolio page.
+
+**2. Client names are missing**
+
+The top portfolios list shows blank names alongside $0 values. The linked clients are showing as anonymous. This means the adviserClients join to users is not returning display names. Check the query — it likely needs to join users.name or users.email to the adviserClients table.
+
+**3. KYC tasks reference raw IDs**
+
+```
+Follow up KYC for Client #26
+Follow up KYC for Client #24
+```
+
+These should show client names, not database IDs. Same join problem as above. The task generation logic is creating tasks with userId but the display is not resolving the name.
+
+**4. "Linked Client" as a name**
+
+One entry shows literally "Linked Client" as the client name. This is a fallback placeholder leaking into the UI. The name resolution is failing for at least one client and falling back to a default string.
+
+---
+
+**Design problems — fix after data is correct**
+
+**1. Dashboard stat cards are good but incomplete**
+
+The four cards (linked clients, open tasks, fee consents expiring, pending reports) are the right structure. Add one more:
+
+```
+Advice records active    [count]
+```
+
+This is the core compliance metric for an adviser. Knowing how many active advice records exist across the book is more important than pending report requests.
+
+**2. "Client consent required: 0 — No instructions waiting" is well designed**
+
+Keep this exactly as is. The zero state is clear and the wording is correct.
+
+**3. Top open tasks — five high priority KYC tasks**
+
+The tasks are correct but the display needs improvement:
+
+```
+Current:   Follow up KYC for Client #26   Due 3 May
+Better:    [Client Name]  KYC pending     Due 3 May  [View client →]
+```
+
+Add a direct link to the client record from each task row. The adviser should be able to click straight to the client without navigating separately.
+
+**4. Assets under advice — $0**
+
+Once the data is fixed, add a currency label and a note:
+
+```
+Assets under advice
+AUD $4,849,850.70
+Indicative · Based on latest portfolio snapshots
+```
+
+Without the note, the adviser does not know if this is live or delayed.
+
+**5. Top portfolios list**
+
+Once names and values are fixed, add a mini allocation indicator:
+
+```
+Wise User        AUD $4,849,850     ████████████░░░  100%
+[Next client]    AUD $0             ░░░░░░░░░░░░░░░    0%
+```
+
+This gives the adviser an immediate sense of book concentration.
+
+**6. Scope of adviser access section**
+
+The two-paragraph you can / you cannot block is well written and legally correct. Keep the content. One design change: move it to a collapsible or sidebar rather than the main page body. It is important information but it does not need to occupy prime real estate on every dashboard load. After the first read an adviser knows what they can and cannot do.
+
+**7. Missing: fee consent status per client**
+
+The dashboard shows fee consents expiring in 30 days as a count (currently 0) but does not show which clients those are. Add a section below the workflow priority:
+
+```
+Fee consent status
+All fee consents active · Next expiry: [date] for [client name]
+```
+
+or if any are expiring:
+
+```
+⚠ 2 fee consents expiring within 30 days
+  [Client Name]  expires 15 May  [Renew →]
+  [Client Name]  expires 28 May  [Renew →]
+```
+
+---
+
+**Priority order for fixes:**
+
+```
+1. Fix the AUM query — pull from ledger, convert to AUD
+2. Fix client name resolution in adviserClients join
+3. Fix task display — show names not IDs
+4. Add direct client links to task rows
+5. Add advice records active stat card
+6. Add fee consent expiry detail below the count card
+7. Move scope of access to collapsible
+```
+
+Items 1 through 3 are data integrity issues. Fix them before anything else — the design improvements are meaningless if the underlying data is wrong.
