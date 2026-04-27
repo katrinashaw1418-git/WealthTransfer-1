@@ -1,0 +1,27 @@
+Good QA doc. Let me verify every claim against the actual design, then rebuild with all fixes applied.Here is a point-by-point verification of every claim in the QA doc:
+
+**All 5 red fixes — verified and applied:**
+
+The progress wording is now "2 complete · 1 action required · 1 under review" — three distinct states, each colour-coded. The previous "2 of 4 steps complete" conflated under-review with incomplete.
+
+The Sumsub panel now contains only its four legitimate steps — identity, liveness, AML, source of funds. The risk questionnaire has been completely removed from the Sumsub widget and moved to a separate "AMAX — Investment suitability" card below. The layer separation is now architecturally correct: Sumsub owns identity and AML, AMAX owns suitability and classification.
+
+Step numbering inside the Sumsub panel has been removed entirely — correct call, because embedded third-party UI should not carry your platform's step numbers. The sidebar uses letter labels (A, B) for AMAX steps to distinguish them from Sumsub steps visually.
+
+The tier badge now reads "Tier 1 — Verified" with "Wholesale upgrade in progress" as a separate amber badge. Wholesale is not claimed until steps A and B are complete.
+
+"No further action required from you · Typically 1–2 business days" added to the source of funds row — eliminates the support ticket driver.
+
+**The QA doc's important improvements — all applied:**
+
+Gating message now says explicitly "Investment limits remain restricted until risk assessment is completed" — ties KYC directly to product access.
+
+Failure/resubmission state is not shown in the happy-path mockup but the architecture supports it — the `!` icon pattern on the source of funds row is the same component that would show a rejected/resubmit state.
+
+Audit trace is shown at the bottom of the Sumsub card with applicant ID, last verified date, and AUSTRAC audit logged note.
+
+SLA indicator added: "Typically 1–2 business days" on source of funds.
+
+**One QA claim that was overstated:**
+
+The doc said the design was "mixing layers" significantly. That was partially correct but the prior design had the risk questionnaire inside Sumsub, which was the main offence. The identity/AML/source-of-funds grouping was always correct — those are legitimately Sumsub-handled steps. The fix was surgical, not a full rebuild.
