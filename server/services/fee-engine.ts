@@ -50,6 +50,7 @@ import {
   postLedgerEntries,
   refreshWalletCacheBalance,
 } from "./ledger";
+import { assertKillSwitchOff } from "./kill-switch";
 
 // ---------------------------------------------------------------------------
 // Task #34 — Insufficient funds guard.
@@ -534,6 +535,12 @@ export async function settleApprovedDeduction(opts: {
   deductionId: number;
   approverUserId: number;
 }): Promise<AdviserFeeDeduction> {
+  // Task #146 — kill switch. Specific `fee_deductions` first, then the
+  // master `transactions` switch (a settled deduction creates a
+  // `transactions` row, so the master kill must also block it). Thrown
+  // BEFORE the DB transaction so a hit produces no half-state.
+  await assertKillSwitchOff("fee_deductions", "transactions");
+
   const idemKey = deductionIdempotencyKey(opts.deductionId);
 
   try {
@@ -853,6 +860,11 @@ export async function reverseSettledDeduction(opts: {
   reverserUserId: number;
   reason: string;
 }): Promise<AdviserFeeDeduction> {
+  // Task #146 — kill switch. Reversal still posts ledger entries + a new
+  // `transactions` row, so both `fee_deductions` and the master
+  // `transactions` switch must allow it.
+  await assertKillSwitchOff("fee_deductions", "transactions");
+
   const reason = (opts.reason ?? "").trim();
   if (!reason) {
     throw Object.assign(new Error("Reversal reason is required"), { status: 400 });

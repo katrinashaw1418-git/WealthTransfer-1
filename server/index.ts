@@ -319,6 +319,19 @@ app.use((req, res, next) => {
   }
 
   async function runDailyFeeAccrualsCronInner() {
+    // Task #146 — kill switch. When fee_deductions is disabled, scheduled
+    // accrual still represents fee work that operators have asked us to
+    // stop. Bail with a single info-level summary line so the cron leaves
+    // a clean trace in `background_job_runs` (instead of a blank pass that
+    // looks identical to "no rules to accrue").
+    const { isKillSwitchActive } = await import("./services/kill-switch");
+    if (await isKillSwitchActive("fee_deductions")) {
+      const note =
+        "skipped: kill switch fee_deductions is engaged — no accruals run";
+      log(`[fee-accruals] ${note}`);
+      return note;
+    }
+
     const today = startOfUtcDay(new Date());
 
     // Decide which UTC dates to run. Default: today only. If a previous
@@ -588,6 +601,21 @@ app.use((req, res, next) => {
       // wrapper only needs to swallow errors so a single failure doesn't
       // crash the server.
       await withBackgroundJobRunRecord("insufficient-funds-sweep", async () => {
+        // Task #146 — kill switch. Mirror the fee-accruals cron skip:
+        // emit an explicit, recognisable summary line so operators can
+        // tell "we skipped because the switch is engaged" apart from
+        // "we ran and there was nothing to do" in background_job_runs.
+        // The service itself also bails to be safe for any non-cron
+        // caller, but the cron summary is what shows in the dashboard.
+        const { isKillSwitchActive } = await import(
+          "./services/kill-switch"
+        );
+        if (await isKillSwitchActive("fee_deductions")) {
+          const note =
+            "skipped: kill switch fee_deductions is engaged — no settlements attempted";
+          log(`[insufficient-funds-sweep] ${note}`);
+          return note;
+        }
         const r = await runInsufficientFundsSweep();
         // The service returns a structured summary; surface the key counts so
         // the dashboard's "summary" cell tells operators what happened.

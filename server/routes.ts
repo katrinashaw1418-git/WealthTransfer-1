@@ -53,6 +53,11 @@ import {
 import { MATCH_EPSILON } from "./services/reconciliation";
 import { emitAuditWriteFailureAlert } from "./services/audit";
 import {
+  assertKillSwitchOff,
+  getAllKillSwitchStates,
+  sendKillSwitchResponse,
+} from "./services/kill-switch";
+import {
   DEFAULT_REBALANCING_BENCHMARK,
   computeRebalancingGap,
   resolveBenchmarkForRiskTolerance,
@@ -613,6 +618,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerAdviserRoutes(app);
   registerAdminRoutes(app);
   registerClientRoutes(app);
+
+  // ---------------------------------------------------------------------------
+  // Task #146 — Public kill-switch status
+  // -----------------------------------------------------------------------------
+  // Read-only endpoint the client/adviser UI polls to render the
+  // "Temporarily unavailable" banners on affected screens. Does NOT require
+  // auth — the existence of a switch is not sensitive information and
+  // returning 401 here would deny anonymous status pages of their banner.
+  // The response intentionally omits `reason` to avoid leaking internal
+  // operator notes; the admin page surfaces the reason behind the auth wall.
+  // ---------------------------------------------------------------------------
+  app.get("/api/kill-switches/status", async (_req, res) => {
+    try {
+      const states = await getAllKillSwitchStates();
+      const out: Record<string, { disabled: boolean }> = {};
+      for (const s of states) out[s.key] = { disabled: s.enabled };
+      res.json({ switches: out });
+    } catch (err: any) {
+      // Fail open from the client's perspective — render no banner — so a
+      // transient DB hiccup doesn't paint a scary "everything is down"
+      // banner. The actual money-movement guards still consult the DB on
+      // the request path.
+      console.error("[kill-switches] status read failed", err);
+      res.json({ switches: {} });
+    }
+  });
 
   // Ensure crypto + GBP FX rates exist (seed missing rows, reset sequence first)
   {
@@ -3048,6 +3079,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { userId } = requireAuth(req);
       await requireKyc(userId, storage);
+      // Task #146 — kill switch. Master `transactions` switch covers
+      // FX exchange (no narrower category exists for this op).
+      await assertKillSwitchOff("transactions");
 
       const parsed = fxExchangeSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -3124,6 +3158,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "fx_exchange", "transaction", String(txRecord?.id), { fromCurrency, toCurrency, amount: rawAmount }, req.ip || null);
       res.json(responseBody);
     } catch (error: any) {
+      if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to process FX exchange" });
     }
@@ -3137,6 +3172,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { userId } = requireAuth(req);
       await requireKyc(userId, storage);
+      // Task #146 — kill switch. Specific `deposits` first so the response
+      // names the most precise reason; master `transactions` is the fallback.
+      await assertKillSwitchOff("deposits", "transactions");
       const parsedDeposit = depositSchema.safeParse(req.body);
       if (!parsedDeposit.success) return res.status(400).json({ error: parsedDeposit.error.errors[0].message });
       const { currency, amount: rawAmount, description } = parsedDeposit.data;
@@ -3227,6 +3265,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ) {
         return;
       }
+      if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("[deposit] failed", error);
       res.status(500).json({ error: "Failed to process deposit" });
@@ -3244,6 +3283,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { userId } = requireAuth(req);
       await requireKyc(userId, storage);
+      // Task #146 — kill switch. Specific `withdrawals` first, master
+      // `transactions` second.
+      await assertKillSwitchOff("withdrawals", "transactions");
       const parsedWithdraw = withdrawSchema.safeParse(req.body);
       if (!parsedWithdraw.success) return res.status(400).json({ error: parsedWithdraw.error.errors[0].message });
       const { currency, amount: rawAmount, description } = parsedWithdraw.data;
@@ -3356,6 +3398,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ) {
         return;
       }
+      if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("[withdraw] failed", error);
       res.status(500).json({ error: "Failed to process withdrawal" });
@@ -3707,6 +3750,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { userId } = requireAuth(req);
       await requireKyc(userId, storage);
+      // Task #146 — kill switch. Investments are an internal money-movement
+      // and don't have their own switch — they fall under `transactions`.
+      await assertKillSwitchOff("transactions");
       const parsedInvestment = investmentSchema.safeParse(req.body);
       if (!parsedInvestment.success) return res.status(400).json({ error: parsedInvestment.error.errors[0].message });
       const { productId, amount: rawAmount, sourceCurrency = "USD", sourceAmount: rawSourceAmount } = parsedInvestment.data;
@@ -3779,6 +3825,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "investment_created", "investment", String(investRecord?.id), { productId, amount: rawAmount, currency }, req.ip || null);
       res.json(responseBody);
     } catch (error: any) {
+      if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to create investment" });
     }
@@ -3792,6 +3839,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { userId } = requireAuth(req);
       await requireKyc(userId, storage);
+      // Task #146 — kill switch. Wallet conversion is internal money-movement
+      // and falls under the master `transactions` switch.
+      await assertKillSwitchOff("transactions");
       const parsedTransfer = walletTransferSchema.safeParse(req.body);
       if (!parsedTransfer.success) return res.status(400).json({ error: parsedTransfer.error.errors[0].message });
       const { fromCurrency, toCurrency, amount: rawAmount } = parsedTransfer.data;
@@ -3863,6 +3913,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "wallet_transfer", "transaction", String(txRecord?.id), { fromCurrency, toCurrency, amount: rawAmount }, req.ip || null);
       res.json(responseBody);
     } catch (error: any) {
+      if (sendKillSwitchResponse(res, error)) return;
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to process transfer" });
     }

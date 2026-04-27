@@ -85,6 +85,17 @@ import {
   getInProcessCounters,
   getLastSuccessfulHealthProbeAt,
 } from "./services/error-log";
+import {
+  getAllKillSwitchStates,
+  getKillSwitchHistory,
+  isKillSwitchKey,
+  KillSwitchActiveError,
+  killSwitchEnvVarName,
+  killSwitchKeyValues,
+  killSwitchLabel,
+  setKillSwitchState,
+  type KillSwitchKey,
+} from "./services/kill-switch";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
 import { storage } from "./storage";
@@ -145,6 +156,16 @@ async function auditTx(
 }
 
 function handleError(res: any, error: any, fallbackMessage: string) {
+  // Task #146 — every admin route surface (including the fee-deduction
+  // settle/reverse paths that throw via the fee-engine) MUST emit the
+  // canonical 503 envelope when a kill switch is engaged. Centralising
+  // here means a future admin route that reuses settleApprovedDeduction
+  // (or any other guarded call) gets the right shape automatically.
+  if (error instanceof KillSwitchActiveError) {
+    return res
+      .status(503)
+      .json({ error: "operation_disabled", switch: error.switchKey });
+  }
   if (error?.status) {
     const payload: Record<string, unknown> = { error: error.message };
     // Errors may attach extra fields (e.g. inviteLink for the email-delivery
@@ -4239,6 +4260,134 @@ export function registerAdminRoutes(app: Express): void {
         period: { from: from.toISOString(), to: to.toISOString() },
         stuckCutoff: stuckCutoff.toISOString(),
         items,
+        users: usersMap,
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #146 — Kill switches admin
+  // -------------------------------------------------------------------------
+  // GET  /api/admin/kill-switches              — list all four switches with
+  //                                              current state, env-forced
+  //                                              flag, and human label.
+  // POST /api/admin/kill-switches/:key         — toggle (body: enabled, reason).
+  // GET  /api/admin/kill-switches/:key/history — recent audit entries for the
+  //                                              switch (entity_type=kill_switch).
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/kill-switches",
+    adminRoute(async () => {
+      const states = await getAllKillSwitchStates();
+      // Resolve toggle-author display names so the UI doesn't have to
+      // round-trip a second time. We only fetch ids that actually appear.
+      const userIds = states
+        .map((s) => s.lastToggledByUserId)
+        .filter((x): x is number => typeof x === "number");
+      const usersMap = userIds.length ? await getUserNameMap(userIds) : {};
+
+      return {
+        switches: states.map((s) => ({
+          key: s.key,
+          label: killSwitchLabel(s.key),
+          envVar: killSwitchEnvVarName(s.key),
+          enabled: s.enabled,
+          envForced: s.envForced,
+          reason: s.reason,
+          lastToggledByUserId: s.lastToggledByUserId,
+          lastToggledAt: s.lastToggledAt
+            ? s.lastToggledAt.toISOString()
+            : null,
+        })),
+        users: usersMap,
+      };
+    }),
+  );
+
+  // Body validator — kept here (not in @shared) because it never leaves the
+  // admin route surface and references a server-only enum helper.
+  const killSwitchToggleSchema = z.object({
+    enabled: z.boolean(),
+    // Reason is mandatory on every flip — surfaces in the audit log and
+    // operator alert. Trim + min-length is enforced inside
+    // setKillSwitchState too, but we duplicate here so a bad payload gets
+    // a 400 with a Zod-shaped error envelope before any DB work.
+    reason: z.string().trim().min(1, "Reason is required").max(1000),
+  });
+
+  app.post(
+    "/api/admin/kill-switches/:key",
+    adminRoute(async (req, auth) => {
+      const key = req.params.key;
+      if (!isKillSwitchKey(key)) {
+        throw Object.assign(new Error(`Unknown kill switch: ${key}`), {
+          status: 400,
+        });
+      }
+      const parsed = killSwitchToggleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error(parsed.error.errors[0]?.message ?? "Invalid payload"),
+          { status: 400 },
+        );
+      }
+      const state = await setKillSwitchState({
+        key: key as KillSwitchKey,
+        enabled: parsed.data.enabled,
+        reason: parsed.data.reason,
+        actorUserId: auth.userId,
+        ipAddress: req.ip ?? null,
+      });
+      return {
+        switch: {
+          key: state.key,
+          label: killSwitchLabel(state.key),
+          envVar: killSwitchEnvVarName(state.key),
+          enabled: state.enabled,
+          envForced: state.envForced,
+          reason: state.reason,
+          lastToggledByUserId: state.lastToggledByUserId,
+          lastToggledAt: state.lastToggledAt
+            ? state.lastToggledAt.toISOString()
+            : null,
+        },
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/kill-switches/:key/history",
+    adminRoute(async (req) => {
+      const key = req.params.key;
+      if (!isKillSwitchKey(key)) {
+        throw Object.assign(new Error(`Unknown kill switch: ${key}`), {
+          status: 400,
+        });
+      }
+      const limitRaw = Number(req.query.limit ?? 50);
+      const limit =
+        Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 200
+          ? limitRaw
+          : 50;
+      const history = await getKillSwitchHistory(
+        key as KillSwitchKey,
+        limit,
+      );
+      const userIds = history
+        .map((h) => h.userId)
+        .filter((x): x is number => typeof x === "number");
+      const usersMap = userIds.length ? await getUserNameMap(userIds) : {};
+      return {
+        key,
+        label: killSwitchLabel(key as KillSwitchKey),
+        history: history.map((h) => ({
+          id: h.id,
+          userId: h.userId,
+          action: h.action,
+          metadata: h.metadata,
+          ipAddress: h.ipAddress,
+          createdAt: h.createdAt ? h.createdAt.toISOString() : null,
+        })),
         users: usersMap,
       };
     }),

@@ -14,6 +14,7 @@ import { useWallets } from "@/hooks/use-portfolio";
 import { TrendingUp, Building, CreditCard, Rocket, Bitcoin, DollarSign, Clock, Shield, Filter, X, ChevronDown } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { InvestmentPerformanceChart } from "@/components/dashboard/investment-performance-chart";
+import { KillSwitchBanner } from "@/components/kill-switch-banner";
 
 const categoryIcons = {
   real_estate: Building,
@@ -247,7 +248,10 @@ export default function Investments() {
 
   return (
     <div className="p-6 space-y-6">
-
+      <KillSwitchBanner
+        switches={["transactions"]}
+        message="New investment buys are temporarily paused. You can still view your existing positions and performance."
+      />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Investment Products</h1>

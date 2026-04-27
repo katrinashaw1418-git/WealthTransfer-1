@@ -8,6 +8,7 @@ import { useFxRate } from "@/hooks/use-fx-rates";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+import { KillSwitchBanner } from "@/components/kill-switch-banner";
 
 const currencies = [
   { code: "USD", name: "US Dollar" },
@@ -82,6 +83,10 @@ export default function FxExchangeTool() {
         <p className="text-xs text-gray-500 mt-1">Executed via AMAX Global (AUSTRAC-registered)</p>
       </CardHeader>
       <CardContent>
+        <KillSwitchBanner
+          switches={["transactions"]}
+          message="FX exchange is temporarily paused. New conversions are disabled while we resolve an operational issue. Existing wallet balances are unaffected."
+        />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-4">
             <div>

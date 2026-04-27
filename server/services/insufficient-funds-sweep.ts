@@ -40,6 +40,7 @@ import {
   InsufficientFundsError,
 } from "./fee-engine";
 import { writeAuditLog } from "./audit";
+import { isKillSwitchActive } from "./kill-switch";
 import { sendInsufficientFundsEmail } from "../email";
 
 // Default 7-day re-notification debounce. Override with the
@@ -114,6 +115,14 @@ export async function runInsufficientFundsSweep(
     notificationsSkippedDueToDebounce: 0,
     notificationsFailed: 0,
   };
+
+  // Task #146 — kill switch. Skip cleanly when fee_deductions is engaged
+  // so a sweep doesn't trigger settlement work operators have asked us to
+  // pause. We bail BEFORE selecting candidates so we don't even bump
+  // `lastRecheckedAt` while the switch is held.
+  if (await isKillSwitchActive("fee_deductions")) {
+    return summary;
+  }
 
   // Snapshot the candidate set up-front so a row that gets settled mid-loop
   // (and therefore moves out of the insufficient_funds status) still has its

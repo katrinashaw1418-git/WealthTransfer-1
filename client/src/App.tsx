@@ -54,6 +54,7 @@ import AdminFeeConsents from "@/pages/admin/fee-consents";
 import AdminFees from "@/pages/admin/fees";
 import AdminReconciliation from "@/pages/admin/reconciliation";
 import AdminBackgroundJobs from "@/pages/admin/background-jobs";
+import AdminKillSwitches from "@/pages/admin/kill-switches";
 import ClientInstructions from "@/pages/client-instructions";
 import ClientFeeConsents from "@/pages/client/fee-consents";
 import ClientWealthPlanner from "@/pages/client/wealth-planner";
@@ -117,6 +118,7 @@ function AdminApp() {
         <Route path="/admin/fees" component={AdminFees} />
         <Route path="/admin/reconciliation" component={AdminReconciliation} />
         <Route path="/admin/background-jobs" component={AdminBackgroundJobs} />
+        <Route path="/admin/kill-switches" component={AdminKillSwitches} />
         <Route path="/legal" component={Legal} />
         <Route component={NotFound} />
       </Switch>

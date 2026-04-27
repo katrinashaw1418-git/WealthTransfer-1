@@ -2476,3 +2476,48 @@ export type OperatorAlertAcknowledgement =
 export type InsertOperatorAlertAcknowledgement = z.infer<
   typeof insertOperatorAlertAcknowledgementSchema
 >;
+
+// =============================================================================
+// TASK #146 — Operator kill switches for money-movement operations
+// -----------------------------------------------------------------------------
+// One row per known switch key. The DB row is the runtime source of truth for
+// the admin-toggle path; the matching env var (DISABLE_TRANSACTIONS,
+// DISABLE_DEPOSITS, DISABLE_WITHDRAWALS, DISABLE_FEE_DEDUCTIONS) acts as a
+// boot-time / ops escape hatch that, when truthy, FORCES the switch on
+// regardless of the DB row. The history of toggles lives in `audit_logs`
+// (entity_type='kill_switch', entity_id=<key>).
+// =============================================================================
+export const killSwitchKeyValues = [
+  "transactions",
+  "deposits",
+  "withdrawals",
+  "fee_deductions",
+] as const;
+
+export type KillSwitchKey = (typeof killSwitchKeyValues)[number];
+
+export const killSwitches = pgTable("kill_switches", {
+  id: serial("id").primaryKey(),
+  // One of `killSwitchKeyValues`. Unique so we always have at most one row
+  // per switch — the loader upserts on first read so the row is created
+  // lazily and never duplicated by a race.
+  switchKey: text("switch_key").notNull().unique(),
+  // true == switch is ENGAGED (operation disabled). Default false so a
+  // freshly-created row mirrors the "everything available" baseline.
+  enabled: boolean("enabled").notNull().default(false),
+  // Free-text reason captured at the most recent toggle. Required by the
+  // admin route on every flip — surfaced in the audit log too.
+  reason: text("reason"),
+  // Who toggled it last + when. Both nullable for the seed row created
+  // before any human touched the switch.
+  lastToggledByUserId: integer("last_toggled_by_user_id").references(() => users.id),
+  lastToggledAt: timestamp("last_toggled_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export const insertKillSwitchSchema = createInsertSchema(killSwitches).omit({
+  id: true,
+  createdAt: true,
+});
+export type KillSwitch = typeof killSwitches.$inferSelect;
+export type InsertKillSwitch = z.infer<typeof insertKillSwitchSchema>;
