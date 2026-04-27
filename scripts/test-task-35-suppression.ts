@@ -212,7 +212,7 @@ async function main() {
   // -------------------------------------------------------------------------
   // 1. Baseline drifted run — one notification, one row written.
   // -------------------------------------------------------------------------
-  await setWalletAndLedger(userId, "1050.00000000", "1000.00000000"); // drift = +50
+  await setWalletAndLedger(userId, "2000.00000000", "1000.00000000"); // drift = +1000 (critical)
   const summary1 = await runWalletLedgerReconciliation();
   console.log("[run1 summary]", summary1);
   assert(summary1.operatorNotifications >= 1, "run1 dispatched at least one operator notification");
@@ -231,8 +231,8 @@ async function main() {
   });
   assert(ack.id > 0, "acknowledge inserted a row");
   assert(
-    Math.abs(Number(ack.acknowledgedDriftAmount) - 50) < 1e-6,
-    `ack snapshot drift ≈ 50 (got ${ack.acknowledgedDriftAmount})`,
+    Math.abs(Number(ack.acknowledgedDriftAmount) - 1000) < 1e-6,
+    `ack snapshot drift ≈ 1000 (got ${ack.acknowledgedDriftAmount})`,
   );
 
   const summary2 = await runWalletLedgerReconciliation();
@@ -267,7 +267,7 @@ async function main() {
   // -------------------------------------------------------------------------
   // 3. Drift moves materially — next run pages again.
   // -------------------------------------------------------------------------
-  await setWalletAndLedger(userId, "1100.50000000", "1000.00000000"); // drift = +100.5 (moved by 50.5)
+  await setWalletAndLedger(userId, "2100.50000000", "1000.00000000"); // drift = +1100.5 (moved by 100.5)
   const summary3 = await runWalletLedgerReconciliation();
   console.log("[run3 summary]", summary3);
   assert(
@@ -294,7 +294,7 @@ async function main() {
   // 4. Drift moves only within MATCH_EPSILON — still suppressed.
   // -------------------------------------------------------------------------
   // Reset to original drift +50 and re-ack.
-  await setWalletAndLedger(userId, "1050.00000000", "1000.00000000");
+  await setWalletAndLedger(userId, "2000.00000000", "1000.00000000");
   await clearWalletLedgerDriftAcknowledgement({
     userId,
     currency: TEST_CURRENCY,
@@ -304,11 +304,11 @@ async function main() {
   await acknowledgeWalletLedgerDrift({
     userId,
     currency: TEST_CURRENCY,
-    note: "re-ack at +50",
+    note: "re-ack at +1000",
     actorUserId: userId,
   });
   // Move drift by 0.005 (well below MATCH_EPSILON = 0.01).
-  await setWalletAndLedger(userId, "1050.00500000", "1000.00000000");
+  await setWalletAndLedger(userId, "2000.00500000", "1000.00000000");
   const summary4 = await runWalletLedgerReconciliation();
   console.log("[run4 summary]", summary4);
   assert(
@@ -349,7 +349,7 @@ async function main() {
   // -------------------------------------------------------------------------
   // 7. Conflict — second active ack rejected.
   // -------------------------------------------------------------------------
-  await setWalletAndLedger(userId, "1050.00000000", "1000.00000000");
+  await setWalletAndLedger(userId, "2000.00000000", "1000.00000000");
   await acknowledgeWalletLedgerDrift({
     userId,
     currency: TEST_CURRENCY,
@@ -384,7 +384,7 @@ async function main() {
     actorUserId: userId,
     reason: "reset for ttl test",
   });
-  await setWalletAndLedger(userId, "1050.00000000", "1000.00000000");
+  await setWalletAndLedger(userId, "2000.00000000", "1000.00000000");
   const freshAck = await acknowledgeWalletLedgerDrift({
     userId,
     currency: TEST_CURRENCY,

@@ -469,10 +469,26 @@ export async function runWalletLedgerReconciliation(): Promise<WalletLedgerRecon
           ? severity
           : "info";
 
+      // Task #203 — per the consolidation plan, ONLY `critical` and `alert`
+      // severities should proactively page the operator. `warning` and
+      // `info` rows are still written to the audit table (the loop below
+      // unconditionally inserts the row), but they must NOT generate a
+      // Slack/email page — those low-severity drifts are routine background
+      // noise that the daily admin review picks up. This gate sits BEFORE
+      // the suppression check so the metrics line up: a row that wouldn't
+      // have notified anyway is not counted as "notification suppressed".
+      const shouldNotify =
+        severity === "critical" || severity === "alert";
+
       const ack = await getActiveDriftAcknowledgement(userId, currency);
       const suppress = ack !== null && shouldSuppressNotification(drift, ack);
 
-      if (suppress && ack) {
+      if (!shouldNotify) {
+        // Severity is `warning` or `info` — the row is still inserted
+        // below, but we deliberately skip the operator page. No suppression
+        // counter increment because there was nothing to suppress; the
+        // notification was never going to fire for this severity.
+      } else if (suppress && ack) {
         const ackDate = ack.acknowledgedAt.toISOString().slice(0, 10);
         const suppressionLine =
           `Operator alert suppressed: drift acknowledged on ${ackDate} ` +
