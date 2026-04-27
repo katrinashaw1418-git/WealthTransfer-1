@@ -88,9 +88,25 @@ describe("listAdviserClients — live portfolio totals", () => {
     }
   });
 
+  // Per Task #288 the list endpoint also returns the soonest active
+  // fee-consent expiry per client and a `lastActivityAt` derived from
+  // adviser_clients.linked_at + the latest investmentInstructions /
+  // adviceRecords / adviserTasks / adviserNotes touch. Helper to stage
+  // the four "no activity" rowsets after the two fee-consent rowsets.
+  const stageNoActivity = () => {
+    stage([]); // investmentInstructions max-by-client
+    stage([]); // adviceRecords max-by-client
+    stage([]); // adviserTasks max-by-client
+    stage([]); // adviserNotes max-by-client
+  };
+
   it("returns live per-client totals (ignoring the stale snapshot column)", async () => {
     stage([linkRow(20), linkRow(21)]); // adviser_clients ⨝ users
     stage([{ clientId: 20, count: 2 }]); // active fee consents grouped by client
+    stage([
+      { clientId: 20, expiringAt: new Date("2026-09-01T00:00:00.000Z") },
+    ]); // soonest active expiry grouped by client
+    stageNoActivity();
 
     valuation.mockImplementation(async (clientId: number) => {
       if (clientId === 20) return ok(1_000_000);
@@ -104,13 +120,19 @@ describe("listAdviserClients — live portfolio totals", () => {
     const byUser = new Map(rows.map((r) => [r.userId, r]));
     expect(byUser.get(20)!.portfolioValueAud).toBe("1000000.00");
     expect(byUser.get(20)!.activeFeeConsents).toBe(2);
+    expect(byUser.get(20)!.feeConsentExpiringAt?.toISOString()).toBe(
+      "2026-09-01T00:00:00.000Z",
+    );
     expect(byUser.get(21)!.portfolioValueAud).toBe("250000.50");
     expect(byUser.get(21)!.activeFeeConsents).toBe(0);
+    expect(byUser.get(21)!.feeConsentExpiringAt).toBeNull();
   });
 
   it("falls back to '0' for a client whose valuation throws, without breaking the rest", async () => {
     stage([linkRow(20), linkRow(21)]);
     stage([]); // no fee consent rows
+    stage([]); // no fee expiry rows
+    stageNoActivity();
 
     valuation.mockImplementation(async (clientId: number) => {
       if (clientId === 20) return ok(750_000);
@@ -127,32 +149,71 @@ describe("listAdviserClients — live portfolio totals", () => {
     expect(byUser.get(21)!.portfolioValueAud).toBe("0");
   });
 
-  it("falls back to '0' when the live valuation reports unpriced wallets", async () => {
+  // Task #288 reverses the Task #278 hasUnpricedWallets→"0" rule on this
+  // code path: the per-client detail endpoint surfaces the partial total in
+  // that case, and the list MUST agree so a high-balance real client never
+  // shows up as "$0" because of one stray unpriced wallet. The engine still
+  // flags hasUnpricedWallets so the adviser-access logger can record the gap.
+  it("surfaces the partial total when the live valuation reports unpriced wallets", async () => {
     stage([linkRow(20), linkRow(21)]);
     stage([]);
+    stage([]); // no fee expiry rows
+    stageNoActivity();
 
     valuation.mockImplementation(async (clientId: number) => {
       if (clientId === 20) return ok(500_000);
-      // Client 21 has wallets the valuation engine couldn't price — must NOT
-      // surface a partial number to the adviser (Task Step 2).
       return {
-        fiatValue: 100,
+        fiatValue: 4_800_000,
         cryptoValue: 0,
         stablecoinValue: 0,
-        investmentValue: 0,
-        totalValue: 100,
+        investmentValue: 49_850,
+        totalValue: 4_849_850,
         hasUnpricedWallets: true,
         unpricedCurrencies: ["XYZ"],
       };
     });
 
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const rows = await listAdviserClients(ADVISER);
-    errSpy.mockRestore();
+    const warnings = warnSpy.mock.calls.map((c) => String(c[0]));
+    warnSpy.mockRestore();
 
     const byUser = new Map(rows.map((r) => [r.userId, r]));
     expect(byUser.get(20)!.portfolioValueAud).toBe("500000.00");
-    expect(byUser.get(21)!.portfolioValueAud).toBe("0");
+    // Real $4.8M total survives — only the unpriced slice is excluded by
+    // the engine; the rest of the book is still counted.
+    expect(byUser.get(21)!.portfolioValueAud).toBe("4849850.00");
+    // We still log the partial valuation so ops can chase the missing FX rate.
+    expect(
+      warnings.some((w) => w.includes("unpriced wallets") && w.includes("client 21")),
+    ).toBe(true);
+  });
+
+  it("returns lastActivityAt = max(linkedAt, latest touches across all sources)", async () => {
+    stage([
+      linkRow(50, { linkedAt: new Date("2025-01-01T00:00:00.000Z") }),
+      linkRow(51, { linkedAt: new Date("2025-06-01T00:00:00.000Z") }),
+    ]);
+    stage([]); // fee counts
+    stage([]); // fee expiry
+    // Client 50: latest is from adviceRecords (2025-08-01)
+    stage([{ clientId: 50, lastAt: new Date("2025-03-15T00:00:00.000Z") }]); // instructions
+    stage([{ clientId: 50, lastAt: new Date("2025-08-01T00:00:00.000Z") }]); // advice
+    stage([{ clientId: 50, lastAt: new Date("2025-04-01T00:00:00.000Z") }]); // tasks
+    stage([]); // notes — none for 51 either; only linkedAt for 51
+
+    valuation.mockImplementation(async () => ok(0));
+
+    const rows = await listAdviserClients(ADVISER);
+    const byUser = new Map(rows.map((r) => [r.userId, r]));
+    // Client 50: adviceRecords' 2025-08-01 wins over linkedAt and the others.
+    expect(byUser.get(50)!.lastActivityAt?.toISOString()).toBe(
+      "2025-08-01T00:00:00.000Z",
+    );
+    // Client 51: no activity rows, falls back to linkedAt.
+    expect(byUser.get(51)!.lastActivityAt?.toISOString()).toBe(
+      "2025-06-01T00:00:00.000Z",
+    );
   });
 
   it("returns an empty list (and never values anything) when adviser has no linked clients", async () => {
@@ -182,6 +243,8 @@ describe("listAdviserClients — live portfolio totals", () => {
     // real adviser email next.
     stage([{ email: "real.adviser@advisers.test" }]);
     stage([{ clientId: 30, count: 1 }]); // fee consents grouped by client
+    stage([]); // fee expiry rows
+    stageNoActivity();
 
     valuation.mockImplementation(async (clientId: number) => {
       if (clientId === 30) return ok(500_000);
@@ -218,6 +281,8 @@ describe("listAdviserClients — live portfolio totals", () => {
     // Adviser email lookup → also a fixture pattern.
     stage([{ email: "__feegate_b_adviser@example.com" }]);
     stage([]); // no fee consents
+    stage([]); // no fee expiry
+    stageNoActivity();
 
     valuation.mockImplementation(async (clientId: number) => ok(1_000));
 

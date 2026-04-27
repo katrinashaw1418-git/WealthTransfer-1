@@ -25,6 +25,7 @@ import {
   feeConsents,
   adviceRecords,
   adviceAcknowledgements,
+  adviserNotes,
   portfolios,
   wallets,
   investmentProducts,
@@ -240,7 +241,15 @@ export interface AdviserClientSummary {
   linkedAt: Date | null;
   relationshipType: string;
   activeFeeConsents: number;
+  // Soonest expiry across this client's currently-active fee consents, or
+  // null when there are none. Used by the linked-clients list page to render
+  // the "Active · exp <Mon YYYY>" / "⚠ Expiring <DD MMM>" cell.
+  feeConsentExpiringAt: Date | null;
   portfolioValueAud: string; // decimal as string (preserves precision)
+  // Most recent adviser-side touch with this client: linked_at, latest
+  // investment instruction, latest advice record, latest adviser task, or
+  // latest adviser note. Null if none exist (no link timestamp recorded).
+  lastActivityAt: Date | null;
 }
 
 export async function listAdviserClients(
@@ -277,7 +286,9 @@ export async function listAdviserClients(
 
   const clientIds = linkRows.map((r) => r.userId);
 
-  // Active-fee-consent counts grouped by client.
+  // Active-fee-consent counts grouped by client. Same shape as the Business
+  // page's "Active fee consents" surface so a row that shows "Active" on the
+  // detail page also shows a non-zero count here.
   const feeRows = await db
     .select({
       clientId: feeConsents.clientId,
@@ -293,6 +304,102 @@ export async function listAdviserClients(
     .groupBy(feeConsents.clientId);
   const feeByClient = new Map(feeRows.map((r) => [r.clientId, r.count]));
 
+  // Soonest active fee-consent expiry per client — feeds the "Active · exp
+  // <Mon YYYY>" / "⚠ Expiring <DD MMM>" cell on /adviser/clients without a
+  // separate detail-page round trip per row.
+  const feeExpiryRows = await db
+    .select({
+      clientId: feeConsents.clientId,
+      expiringAt: sql<Date | null>`min(${feeConsents.consentExpiryDate})`,
+    })
+    .from(feeConsents)
+    .where(
+      and(
+        inArray(feeConsents.clientId, clientIds),
+        eq(feeConsents.renewalStatus, "active"),
+      ),
+    )
+    .groupBy(feeConsents.clientId);
+  const feeExpiryByClient = new Map(
+    feeExpiryRows.map((r) => [r.clientId, r.expiringAt ? new Date(r.expiringAt) : null]),
+  );
+
+  // Last-activity timestamps per client, sourced from every table that
+  // records an adviser-side touch on this (adviser, client) pair. Done as a
+  // small handful of grouped MAX() queries (rather than a single multi-join)
+  // because each table has its own (adviser, client) shape and indices, and
+  // the per-table grouped MAX is index-friendly. The fold-merge below picks
+  // the latest of all sources, including the link's own linkedAt.
+  const [instructionRows, adviceRows, taskRows, noteRows] = await Promise.all([
+    db
+      .select({
+        clientId: investmentInstructions.clientUserId,
+        lastAt: sql<Date | null>`max(${investmentInstructions.updatedAt})`,
+      })
+      .from(investmentInstructions)
+      .where(
+        and(
+          eq(investmentInstructions.adviserUserId, adviserUserId),
+          inArray(investmentInstructions.clientUserId, clientIds),
+        ),
+      )
+      .groupBy(investmentInstructions.clientUserId),
+    db
+      .select({
+        clientId: adviceRecords.clientId,
+        lastAt: sql<Date | null>`max(${adviceRecords.updatedAt})`,
+      })
+      .from(adviceRecords)
+      .where(
+        and(
+          eq(adviceRecords.adviserId, adviserUserId),
+          inArray(adviceRecords.clientId, clientIds),
+        ),
+      )
+      .groupBy(adviceRecords.clientId),
+    db
+      .select({
+        clientId: adviserTasks.clientUserId,
+        lastAt: sql<Date | null>`max(${adviserTasks.updatedAt})`,
+      })
+      .from(adviserTasks)
+      .where(
+        and(
+          eq(adviserTasks.adviserUserId, adviserUserId),
+          inArray(adviserTasks.clientUserId, clientIds),
+        ),
+      )
+      .groupBy(adviserTasks.clientUserId),
+    db
+      .select({
+        clientId: adviserNotes.clientUserId,
+        lastAt: sql<Date | null>`max(${adviserNotes.createdAt})`,
+      })
+      .from(adviserNotes)
+      .where(
+        and(
+          eq(adviserNotes.adviserUserId, adviserUserId),
+          inArray(adviserNotes.clientUserId, clientIds),
+        ),
+      )
+      .groupBy(adviserNotes.clientUserId),
+  ]);
+  const lastActivityByClient = new Map<number, Date>();
+  const mergeActivity = (rows: Array<{ clientId: number; lastAt: Date | null }>) => {
+    for (const r of rows) {
+      if (!r.lastAt) continue;
+      const candidate = new Date(r.lastAt);
+      const existing = lastActivityByClient.get(r.clientId);
+      if (!existing || candidate.getTime() > existing.getTime()) {
+        lastActivityByClient.set(r.clientId, candidate);
+      }
+    }
+  };
+  mergeActivity(instructionRows);
+  mergeActivity(adviceRows);
+  mergeActivity(taskRows);
+  mergeActivity(noteRows);
+
   // Portfolio totals — compute LIVE per client via the same valuation engine
   // the per-client portfolio detail endpoint uses. Reading the
   // `portfolios.totalValue` snapshot column directly would surface "$0" for
@@ -301,22 +408,27 @@ export async function listAdviserClients(
   // "Top portfolios" displays misleading under AFSL.
   //
   // Run valuations in parallel so the list endpoint stays responsive for
-  // advisers with many linked clients. If a single client's valuation throws
-  // OR returns hasUnpricedWallets (some balances couldn't be priced), fall
-  // back to "0" for that one client and log enough detail to diagnose,
-  // rather than surfacing a partial total to the adviser or failing the
-  // whole list. This matches today's behaviour for clients with no snapshot
-  // row at all.
+  // advisers with many linked clients. If a single client's valuation
+  // throws, fall back to "0" for that one client and log so the rest of
+  // the list still loads.
+  //
+  // Task #288: Previously this code path ALSO zeroed out a client whose
+  // valuation reported `hasUnpricedWallets`, which in production was firing
+  // for high-balance clients (e.g. Wise User ~$4.8M AUD) whose books happen
+  // to include any single currency the FX layer couldn't price. The
+  // per-client detail endpoint surfaces the partial total in that case;
+  // the list now does the same so both views agree, and a real client's
+  // book never shows up as "$0" because of one stray unpriced wallet. The
+  // engine still flags `hasUnpricedWallets` for diagnosis (logged below).
   const now = new Date();
   const valuationResults = await Promise.all(
     clientIds.map(async (clientId) => {
       try {
         const totals = await calculatePortfolioTotalsAtDate(clientId, now);
         if (totals.hasUnpricedWallets) {
-          console.error(
-            `[adviser-access] live portfolio valuation has unpriced wallets for client ${clientId} (adviser ${adviserUserId}); falling back to 0. unpricedCurrencies=${JSON.stringify(totals.unpricedCurrencies)}`,
+          console.warn(
+            `[adviser-access] live portfolio valuation has unpriced wallets for client ${clientId} (adviser ${adviserUserId}); surfacing partial total ${totals.totalValue.toFixed(2)}. unpricedCurrencies=${JSON.stringify(totals.unpricedCurrencies)}`,
           );
-          return { clientId, value: "0" };
         }
         return { clientId, value: totals.totalValue.toFixed(2) };
       } catch (err) {
@@ -332,11 +444,24 @@ export async function listAdviserClients(
     valuationResults.map((r) => [r.clientId, r.value]),
   );
 
-  return linkRows.map((r) => ({
-    ...r,
-    activeFeeConsents: feeByClient.get(r.userId) ?? 0,
-    portfolioValueAud: portfolioByClient.get(r.userId) ?? "0",
-  }));
+  return linkRows.map((r) => {
+    const linkedAt = r.linkedAt ? new Date(r.linkedAt) : null;
+    const fromTouches = lastActivityByClient.get(r.userId) ?? null;
+    let lastActivityAt: Date | null = null;
+    if (linkedAt && fromTouches) {
+      lastActivityAt =
+        fromTouches.getTime() > linkedAt.getTime() ? fromTouches : linkedAt;
+    } else {
+      lastActivityAt = fromTouches ?? linkedAt;
+    }
+    return {
+      ...r,
+      activeFeeConsents: feeByClient.get(r.userId) ?? 0,
+      feeConsentExpiringAt: feeExpiryByClient.get(r.userId) ?? null,
+      portfolioValueAud: portfolioByClient.get(r.userId) ?? "0",
+      lastActivityAt,
+    };
+  });
 }
 
 // -----------------------------------------------------------------------------
