@@ -83,3 +83,5 @@ after a merge that was gated on `scripts/pre-launch-safety.ts --strict` (the
 go-live rollup). The runner appends a new line per invocation; nothing is
 overwritten so prior verdicts stay visible in version control.
 - 2026-04-27T02:35:02.380Z — 🔴 RED (9 passed, 1 failed, 0 skipped, exit=1) — commit `07f3d14f86fe` — [`post-merge-safety-recheck-2026-04-27T02-35-02-380Z.md`](./golive/post-merge-safety-recheck-2026-04-27T02-35-02-380Z.md)
+- 2026-04-27T02:49:50.738Z — 🔴 RED (14 passed, 0 failed, 0 skipped, exit=0) — commit `52cb3172f230` — [`post-merge-safety-recheck-2026-04-27T02-49-50-738Z.md`](./golive/post-merge-safety-recheck-2026-04-27T02-49-50-738Z.md)
+- 2026-04-27T02:51:23.010Z — 🟢 GREEN (14 passed, 0 failed, 0 skipped, exit=0) — commit `52cb3172f230` — [`post-merge-safety-recheck-2026-04-27T02-51-23-010Z.md`](./golive/post-merge-safety-recheck-2026-04-27T02-51-23-010Z.md)

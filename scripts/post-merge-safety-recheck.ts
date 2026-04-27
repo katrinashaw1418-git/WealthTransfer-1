@@ -64,10 +64,19 @@ const CHECKLIST_PATH = path.resolve(
 const STARTED_AT = new Date();
 
 // The canonical clean strict result the post-merge recheck must reproduce.
-// Matches `Summary: 10 passed, 0 failed, 0 skipped` from the script output.
-const EXPECTED_PASS_COUNT = 10;
+// Matches `Summary: 14 passed, 0 failed, 0 skipped` from the script output.
+//
+// Task #188 — bumped from 10 → 14 to track the four additional idempotency-
+// under-concurrency lifecycle gates (withdraw, fx-exchange,
+// wallets/transfer, investments) that have been added to
+// `pre-launch-safety.ts` since this recheck was authored. The forward-
+// compatible prefix check below already surfaces new "lifecycle: …" /
+// "reconciliation: …" / "existing: …" gates, but the verdict comparison
+// has to know the new total or every clean run reports RED with a stale
+// "expected=10" footnote.
+const EXPECTED_PASS_COUNT = 14;
 
-// The 10 canonical roll-up gate names emitted by pre-launch-safety.ts in
+// The canonical roll-up gate names emitted by pre-launch-safety.ts in
 // its final reporter block. The four spawned sub-scripts ALSO print their
 // own internal `PASS <name> — <details>` assertion lines (e.g.
 // `PASS deposit idempotency — …`, `PASS 1. retention defaults wired — …`)
@@ -86,6 +95,12 @@ const EXPECTED_CANONICAL_GATE_NAMES = new Set<string>([
   "existing: test-task-35-suppression",
   "lifecycle: happy-path wallet matches ledger",
   "lifecycle: idempotency under concurrency",
+  // Task #188 — added the four new lifecycle idempotency-under-concurrency
+  // gates that pre-launch-safety.ts now emits (one per money route).
+  "lifecycle: idempotency under concurrency (withdraw)",
+  "lifecycle: idempotency under concurrency (fx-exchange)",
+  "lifecycle: idempotency under concurrency (wallets/transfer)",
+  "lifecycle: idempotency under concurrency (investments)",
   "lifecycle: reversal symmetry",
   "reconciliation: wallet-ledger clean-room",
   "reconciliation: ledger-vs-custodian clean-room",
