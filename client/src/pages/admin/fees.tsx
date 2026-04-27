@@ -308,6 +308,15 @@ interface FeeAccrualRunSummary {
   duplicates: number;
   byGateReason: Record<string, number>;
   errorMessage: string | null;
+  // Task #29 — present (non-null) when the daily-accruals cron's planned
+  // backfill window exceeded the 14-day cap and the oldest dates were
+  // dropped. Admins must replay these via the manual "Run today's accruals"
+  // trigger below.
+  droppedFromBackfill: {
+    start: string; // 'YYYY-MM-DD'
+    end: string; // 'YYYY-MM-DD'
+    count: number;
+  } | null;
   startedAt: string;
   finishedAt: string | null;
 }
@@ -443,6 +452,27 @@ function LatestRunSummary({ run }: { run: FeeAccrualRunSummary }) {
           <AlertTitle>Run failed</AlertTitle>
           <AlertDescription className="font-mono text-xs">
             {run.errorMessage}
+          </AlertDescription>
+        </Alert>
+      )}
+      {run.droppedFromBackfill && (
+        <Alert variant="destructive" data-testid="alert-dropped-from-backfill">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>
+            {run.droppedFromBackfill.count} day(s) dropped from auto-backfill
+          </AlertTitle>
+          <AlertDescription className="text-xs space-y-1">
+            <div>
+              The gap since the last accrual exceeded the 14-day safety cap, so
+              UTC dates{" "}
+              <strong data-testid="text-dropped-range">
+                {run.droppedFromBackfill.start}
+              </strong>
+              {" through "}
+              <strong>{run.droppedFromBackfill.end}</strong>{" "}
+              were skipped. Replay them by setting the date below and pressing{" "}
+              <strong>Run</strong> for each missed day.
+            </div>
           </AlertDescription>
         </Alert>
       )}

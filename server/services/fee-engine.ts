@@ -1083,10 +1083,25 @@ export type { AdviserFeeAccrual };
 // This is a thin wrapper on top of the gated CRUD primitive — it does not
 // move money, schedule itself, or interact with wallets / ledger.
 // ---------------------------------------------------------------------------
+// Task #29 — shape of the optional "we clipped the auto-backfill window"
+// annotation persisted alongside each run row. Populated by the cron when
+// the actual gap exceeded FEE_ACCRUAL_BACKFILL_MAX_DAYS so the admin Fees
+// page can warn that some UTC dates need a manual replay. NULL on every
+// other call site (manual admin trigger, cleanly-caught-up cron tick).
+export interface DroppedFromBackfill {
+  start: string; // 'YYYY-MM-DD' (oldest dropped UTC date, inclusive)
+  end: string; // 'YYYY-MM-DD' (newest dropped UTC date, inclusive)
+  count: number;
+}
+
 export async function runDailyAccrualsAndRecord(opts: {
   accrualDate: Date;
   trigger: "cron" | "manual";
   triggeredByUserId: number | null;
+  // Task #29 — when set, written verbatim to the run row so the admin UI
+  // can render the "dropped older than the cap" warning. The cron sets the
+  // SAME object on every per-date call within a single clipped tick.
+  droppedFromBackfill?: DroppedFromBackfill | null;
 }): Promise<{
   run: FeeAccrualRun;
   inserted: number;
@@ -1095,6 +1110,7 @@ export async function runDailyAccrualsAndRecord(opts: {
   byGateReason: Record<string, number>;
 }> {
   const accrualDate = startOfUtcDay(opts.accrualDate);
+  const droppedFromBackfill = opts.droppedFromBackfill ?? null;
   try {
     const summary = await runDailyAccruals({ accrualDate });
     const [row] = await db
@@ -1108,6 +1124,7 @@ export async function runDailyAccrualsAndRecord(opts: {
         duplicates: summary.duplicates,
         byGateReason: summary.byGateReason as any,
         errorMessage: null,
+        droppedFromBackfill: droppedFromBackfill as any,
         finishedAt: new Date(),
       })
       .returning();
@@ -1125,6 +1142,7 @@ export async function runDailyAccrualsAndRecord(opts: {
       duplicates: 0,
       byGateReason: {} as any,
       errorMessage: String(err?.message ?? err),
+      droppedFromBackfill: droppedFromBackfill as any,
       finishedAt: new Date(),
     });
     throw err;

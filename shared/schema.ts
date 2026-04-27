@@ -1987,6 +1987,16 @@ export const feeAccrualRuns = pgTable(
     // case so an admin can distinguish "ran cleanly, nothing to do" from
     // "ran and crashed".
     errorMessage: text("error_message"),
+    // Task #29 — when the cron's auto-backfill window was clipped by the
+    // FEE_ACCRUAL_BACKFILL_MAX_DAYS cap, this records the contiguous range of
+    // older UTC dates that were dropped from the planned sweep, so admins can
+    // see at a glance which dates still need a manual "Run today's accruals".
+    // Shape: { start: 'YYYY-MM-DD', end: 'YYYY-MM-DD', count: number }.
+    // NULL on every row produced by a tick that did NOT clip (i.e. the
+    // overwhelming majority of rows). All rows produced by a single clipped
+    // cron tick carry the SAME object so the latest-row UI surface keeps
+    // working without joining sibling rows.
+    droppedFromBackfill: jsonb("dropped_from_backfill"),
     startedAt: timestamp("started_at").notNull().defaultNow(),
     finishedAt: timestamp("finished_at"),
   },

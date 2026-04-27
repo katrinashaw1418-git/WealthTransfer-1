@@ -27,6 +27,7 @@
 import {
   getLatestAccrualDate,
   runDailyAccrualsAndRecord,
+  type DroppedFromBackfill,
 } from "./fee-engine";
 import { isKillSwitchActive } from "./kill-switch";
 import {
@@ -92,6 +93,11 @@ export async function runFeeAccrualsCronOnce(
   // today (capped). If the table is empty (first ever run) we don't try
   // to invent history — we just do today.
   let plannedDates: Date[] = [today];
+  // Task #29 — when the gap exceeds FEE_ACCRUAL_BACKFILL_MAX_DAYS we drop the
+  // oldest computed dates and remember which ones were dropped so the admin
+  // Fees page can warn that those dates need a manual replay. NULL on a
+  // tick where the gap fits inside the cap.
+  let droppedFromBackfill: DroppedFromBackfill | null = null;
   try {
     const latest = await getLatestAccrualDate();
     if (latest) {
@@ -104,10 +110,22 @@ export async function runFeeAccrualsCronOnce(
         for (let i = 1; i <= gapDays; i++) {
           computed.push(new Date(latestDay.getTime() + i * DAY_MS));
         }
-        plannedDates =
-          computed.length > FEE_ACCRUAL_BACKFILL_MAX_DAYS
-            ? computed.slice(computed.length - FEE_ACCRUAL_BACKFILL_MAX_DAYS)
-            : computed;
+        if (computed.length > FEE_ACCRUAL_BACKFILL_MAX_DAYS) {
+          const dropped = computed.slice(
+            0,
+            computed.length - FEE_ACCRUAL_BACKFILL_MAX_DAYS,
+          );
+          droppedFromBackfill = {
+            start: dropped[0].toISOString().slice(0, 10),
+            end: dropped[dropped.length - 1].toISOString().slice(0, 10),
+            count: dropped.length,
+          };
+          plannedDates = computed.slice(
+            computed.length - FEE_ACCRUAL_BACKFILL_MAX_DAYS,
+          );
+        } else {
+          plannedDates = computed;
+        }
       }
     }
   } catch (e) {
@@ -116,6 +134,7 @@ export async function runFeeAccrualsCronOnce(
       e,
     );
     plannedDates = [today];
+    droppedFromBackfill = null;
   }
 
   let totalInserted = 0;
@@ -132,6 +151,10 @@ export async function runFeeAccrualsCronOnce(
         accrualDate,
         trigger: "cron",
         triggeredByUserId: null,
+        // Task #29 — annotate every per-date row from this clipped tick so
+        // the latest-row admin UI surface still sees the warning regardless
+        // of which date in the window happened to land last.
+        droppedFromBackfill,
       });
       totalInserted += s.inserted;
       totalSkipped += s.skipped;
@@ -157,6 +180,12 @@ export async function runFeeAccrualsCronOnce(
     datesFailed.length > 0
       ? `, ${datesFailed.length} failed (${datesFailed.join(",")})`
       : "";
+  // Task #29 — surface the dropped-older-than-cap range in the cron's log
+  // line too. The persistent admin UI signal lives on the run row's
+  // `droppedFromBackfill` field; this just keeps the log story consistent.
+  const droppedSuffix = droppedFromBackfill
+    ? `, dropped ${droppedFromBackfill.count} day(s) older than cap (${droppedFromBackfill.start}..${droppedFromBackfill.end} — replay manually)`
+    : "";
 
   // "today only" is reserved for the case where the cron PLANNED a single
   // tick (no backfill needed). If we planned multiple dates and only some
@@ -171,7 +200,7 @@ export async function runFeeAccrualsCronOnce(
     summaryLine =
       `for ${todayIso} (today only): ` +
       `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
-      `${totalDuplicates} duplicate(s)${failedSuffix}`;
+      `${totalDuplicates} duplicate(s)${failedSuffix}${droppedSuffix}`;
     logLine("fee-accruals", `completed ${summaryLine}`);
   } else {
     const firstPlanned = plannedDates[0].toISOString().slice(0, 10);
@@ -184,7 +213,7 @@ export async function runFeeAccrualsCronOnce(
     summaryLine =
       `for ${firstPlanned}..${lastPlanned} (backfilled ${backfilled} day(s)): ` +
       `${totalInserted} inserted, ${totalSkipped} gated (${gateBreakdown}), ` +
-      `${totalDuplicates} duplicate(s)${failedSuffix}`;
+      `${totalDuplicates} duplicate(s)${failedSuffix}${droppedSuffix}`;
     if (datesRun.length > 0 || datesFailed.length > 0) {
       logLine("fee-accruals", `completed ${summaryLine}`);
     }

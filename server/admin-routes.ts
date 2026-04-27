@@ -3662,6 +3662,10 @@ export function registerAdminRoutes(app: Express): void {
           duplicates: feeAccrualRuns.duplicates,
           byGateReason: feeAccrualRuns.byGateReason,
           errorMessage: feeAccrualRuns.errorMessage,
+          // Task #29 — surfaces the "we clipped the auto-backfill window"
+          // annotation so the admin Fees page can warn that some UTC dates
+          // need a manual replay.
+          droppedFromBackfill: feeAccrualRuns.droppedFromBackfill,
           startedAt: feeAccrualRuns.startedAt,
           finishedAt: feeAccrualRuns.finishedAt,
         })
