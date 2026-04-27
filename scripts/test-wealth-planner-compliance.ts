@@ -1190,8 +1190,6 @@ async function test10_transitionAndImmutability(opts: {
   let r1!: ReturnType<typeof makeMockReqRes>;
   let r2!: ReturnType<typeof makeMockReqRes>;
   let afterRow: { adviceType: string | null; riskProfileId: number | null; status: string | null } | undefined;
-  let __t10_didThrow = false;
-  let __t10_thrown: unknown = undefined;
   try {
     // Probe with a payload that ALSO tries to mutate adviceType and
     // riskProfileId. The route's zod schema (transitionSchema in
@@ -1230,20 +1228,18 @@ async function test10_transitionAndImmutability(opts: {
       })
       .from(adviceRecords)
       .where(eq(adviceRecords.id, opts.adviceRecordId));
-  } catch (err) {
-    __t10_didThrow = true;
-    __t10_thrown = err;
   } finally {
     // Normalize parent row to the canonical fixture terminal status so
     // the post-suite invariant (status === 'issued' for every planner
-    // advice record) holds. Versions written by the transitions are left
-    // intact — they are deleted by cleanupForUserIds() on the next run.
+    // advice record) holds. Runs even if a probe above throws, after
+    // which the exception continues to propagate naturally. Versions
+    // written by the transitions are left intact — they are deleted by
+    // cleanupForUserIds() on the next run.
     await db
       .update(adviceRecords)
       .set({ status: "issued" })
       .where(eq(adviceRecords.id, opts.adviceRecordId));
   }
-  if (__t10_didThrow) throw __t10_thrown;
 
   const adviceTypeImmutable = afterRow?.adviceType === beforeRow?.adviceType;
   const riskProfileImmutable = afterRow?.riskProfileId === beforeRow?.riskProfileId;
@@ -1732,10 +1728,6 @@ async function test13_blockedWriteAuditRow(opts: {
 
   // From here on, every operation either flips the row or could throw —
   // wrap in try/finally so the restore at the bottom always runs.
-  // Track threw via an explicit boolean so a pathological `throw undefined`
-  // still re-raises after the finally restore.
-  let __t13_didThrow = false;
-  let __t13_thrown: unknown = undefined;
   try {
   // Mint a real adviser JWT so the route handlers' auth middleware passes
   // and we exercise the production handleError path that maps thrown
@@ -1833,19 +1825,16 @@ async function test13_blockedWriteAuditRow(opts: {
     probes[4].reason = typeof err?.reason === "string" ? err.reason : undefined;
   }
 
-  } catch (err) {
-    __t13_didThrow = true;
-    __t13_thrown = err;
   } finally {
     // Normalize parent row to the canonical fixture terminal status
     // ('issued') so reruns, downstream assertions, and the post-suite
-    // invariant all hold — runs even if a probe above threw.
+    // invariant all hold — runs even if a probe above throws, after
+    // which the exception continues to propagate naturally.
     await db
       .update(adviceRecords)
       .set({ status: "issued" })
       .where(eq(adviceRecords.id, opts.adviceRecordId));
   }
-  if (__t13_didThrow) throw __t13_thrown;
 
   // Pull every blocked-write audit row produced AFTER the snapshot id, for
   // THIS advice record. Filtering on entityId AND id-after-baseline keeps
