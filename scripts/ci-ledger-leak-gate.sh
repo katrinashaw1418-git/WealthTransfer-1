@@ -33,6 +33,25 @@ SCRIPTS=(
   scripts/test-task-35-suppression.ts
   scripts/test-fee-insufficient-funds.ts
   scripts/test-no-synthetic-portfolio-data.ts
+  # Task #216 — newer safety tests, audited and added to the gate so any
+  # future regression into the same try/finally-cleanup leak pattern
+  # fixed by Tasks #158 and #187 is caught at PR time.
+  #   - test-platform-leg-gate.ts:
+  #       posts a platform-suspense leg under a `__pgate209_contam`
+  #       transaction; cleanup drops both legs by transactionId in
+  #       try/finally so the platform user's per-currency snapshot
+  #       returns to baseline.
+  #   - test-prelaunch-fixture-contract.ts:
+  #       only seeds rows on its own per-run `__pftest213*_*` fixture
+  #       users (no platform-user writes); each case has try/finally
+  #       cleanup plus a final global sweep bounded by RUN_SUFFIX.
+  #   - test-task-200-recon-gate.ts:
+  #       only seeds rows on `__task200_recon_gate_test__` (no
+  #       platform-user writes); end-of-main cleanup wipes the seeded
+  #       wallet/ledger/recon/operator_alerts rows.
+  scripts/test-platform-leg-gate.ts
+  scripts/test-prelaunch-fixture-contract.ts
+  scripts/test-task-200-recon-gate.ts
 )
 
 # Join the array with commas for the --scripts CSV arg.
