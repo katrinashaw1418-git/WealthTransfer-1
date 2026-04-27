@@ -1623,6 +1623,612 @@ describe("ledger-primitive caller coverage walk (Task #190)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 6c. Raw ledger_entries / wallets writer coverage walk (Task #195)
+// ---------------------------------------------------------------------------
+// Section 6b above proves every CALLER of postLedgerEntries /
+// refreshWalletCacheBalance is itself kill-switched. That closes the loop
+// for code that goes THROUGH the ledger primitives. This block closes the
+// symmetric gap one layer below: a future refactor that bypasses the
+// primitives entirely and writes the underlying tables directly via raw
+// drizzle calls would slip past Section 6b because the call-graph walk
+// only sees calls TO the primitives, not direct table writes.
+//
+// CONCRETE FAILURE MODES THIS CATCHES
+//   * A new helper that calls `tx.insert(ledgerEntries).values(...)`
+//     directly. That path skips the same-transaction posting guard
+//     (the ledger_postings receipt PK lock — Task #22 / #37), the
+//     balanced-pair / single-currency check, AND every kill-switch
+//     upstream of postLedgerEntries.
+//   * A new helper that calls `tx.update(wallets).set({ balance, ... })`
+//     directly. `storage.updateWallet` already throws at runtime when
+//     `balance` or `availableBalance` is in the patch, but a brand-new
+//     helper that builds the SQL itself would not be caught — the
+//     denormalised cache would silently drift from SUM(ledger_entries),
+//     which the daily reconciliation would then surface as a mismatch
+//     after the fact.
+//
+// PRIMITIVES IN SCOPE
+//   * `ledgerEntries` table — only `postLedgerEntries` in
+//     `server/services/ledger.ts` is permitted to insert here.
+//   * `wallets` table where `balance` or `availableBalance` is written —
+//     only `refreshWalletCacheBalance` in `server/services/ledger.ts`
+//     is permitted to write those columns. Other column updates on the
+//     `wallets` table (e.g. `walletType`, `currency`) are fine and not
+//     in scope for this check.
+//
+// FILES IN SCOPE
+//   Every `.ts` file under `server/` (recursive), excluding `*.test.ts`.
+//   Unlike Section 6b which is narrowed to ledger-primitive callers,
+//   this walk is FULL-SERVER because the bypass we are guarding against
+//   can land anywhere — a fresh service module, a new admin route, a
+//   utility in `server/storage.ts`, etc.
+//
+//   `scripts/*.ts` are deliberately OUT OF SCOPE for the same reason as
+//   Section 6b: those are operator-only maintenance utilities that run
+//   with elevated trust outside the request path.
+//
+// MATCHING POLICY
+//   We use the TypeScript checker (same `ts.Program` machinery as
+//   Section 6b) so that:
+//     * `import { ledgerEntries } from "@shared/schema"` is resolved by
+//       symbol identity, not by spelling — a future variable named
+//       `ledgerEntries` in some unrelated file cannot trigger a false
+//       match, and an `import { ledgerEntries as le } from "..."` plus
+//       `tx.insert(le).values(...)` would still be caught.
+//     * `import { wallets } from "@shared/schema"` likewise.
+//
+//   For `ledgerEntries` we flag EVERY `<x>.insert(<id>)` call where the
+//   resolved declaration of `<id>` lives in `shared/schema.ts` and is
+//   the `ledgerEntries` table.
+//
+//   For `wallets` we flag a `<x>.update(<id>)` call where the resolved
+//   declaration of `<id>` is the `wallets` table AND the chained
+//   `.set(<arg>)` on the resulting `Drizzle` query builder COULD touch
+//   `balance` / `availableBalance`. Concretely:
+//     * `<arg>` is an object literal containing a `balance` or
+//       `availableBalance` property → DEFINITELY a balance write → flag.
+//     * `<arg>` is anything other than an object literal (variable,
+//       function call, spread, etc.) → COULD include those fields
+//       (we cannot statically prove otherwise) → flag.
+//     * `<arg>` is an object literal whose property names do NOT
+//       include `balance` or `availableBalance` → SAFE → not flagged.
+//       This matches the runtime contract of `storage.updateWallet`'s
+//       `WalletUpdatePayload` type (which excludes those two fields).
+//
+// HOW THE ALLOWLIST WORKS
+//   Each callsite is identified by `<file>:<enclosingContext>`, where
+//   the enclosing context is derived by walking up the AST until we hit
+//   one of (in priority order):
+//     1. A named function declaration (`function foo() {...}`).
+//     2. A variable declaration whose initializer is an arrow /
+//        function expression (`const handleDeposit = async (...) => {}`).
+//     3. A class method declaration (`class DatabaseStorage { async
+//        updateWallet() {...} }`) — recorded as `Class.method`.
+//     4. An `app.<verb>("<path>", ...)` call expression (the
+//        registration site for an inline route handler) — recorded as
+//        `<VERB> <path>`.
+//     5. Synthetic `<top-level>` if none of the above is found.
+//
+//   Each registry entry records the EXPECTED COUNT of callsites in
+//   that context. A NEW write smuggled into an already-allowlisted
+//   handler would tip the count over and fail the test, so a primitive
+//   bypass cannot hide under cover of an existing legacy bypass.
+//
+// FAILURE MODES THE TEST CATCHES
+//   * A NEW callsite appears in a context that is not in the registry
+//     → fail with the file, context, and line, and instruct the author
+//     to either route through `postLedgerEntries` /
+//     `refreshWalletCacheBalance` or — only when there is a documented
+//     reason the primitive cannot be used — register the context here
+//     with that reason.
+//   * An EXISTING allowlisted context grows a new callsite (count goes
+//     up) → fail asking the author to either remove the new bypass or
+//     bump the registered count with a reason for the additional site.
+//   * An EXISTING allowlisted context loses callsites (count goes
+//     down to zero) → fail asking the author to remove the stale entry
+//     so the doc-of-record stays accurate. (A non-zero shrink is also
+//     a failure — the count must match exactly, not "≥".)
+//
+// HOW TO EXTEND
+//   When you legitimately need to write `ledger_entries` or
+//   `wallets.balance` outside the sanctioned primitives:
+//     1. Strongly consider routing through the primitive instead — that
+//        is the intended path and what the kill-switch fence is built
+//        around.
+//     2. If you genuinely cannot (e.g. a one-off backfill that runs
+//        OFFLINE outside the request path — though those should live in
+//        `scripts/*.ts`, which is out of scope for this walk anyway),
+//        add the context to RAW_LEDGER_ENTRIES_WRITER_REGISTRY or
+//        RAW_WALLET_BALANCE_WRITER_REGISTRY below with
+//        `{ count: <N>, reason: "<one-line summary>" }`.
+// ---------------------------------------------------------------------------
+
+const SCHEMA_SOURCE = path.resolve(REPO_ROOT, "shared", "schema.ts");
+
+type RawWriteRegistryEntry = { count: number; reason: string };
+
+// Allowlisted callers of `tx.insert(ledgerEntries)`. The scan FAILS if
+// any unlisted file/context calls insert on `ledgerEntries`, OR if a
+// listed context's callsite count drifts away from the recorded value.
+const RAW_LEDGER_ENTRIES_WRITER_REGISTRY: Record<string, RawWriteRegistryEntry> = {
+  "services/ledger.ts:postLedgerEntries": {
+    count: 1,
+    reason:
+      "The ONE sanctioned writer of ledger_entries. Performs the same-transaction posting guard (ledger_postings PK lock — Task #22/#37), the balanced-pair check, and the single-currency check before inserting. Every other server-side caller MUST route through this function.",
+  },
+};
+
+// Allowlisted callers of `tx.update(wallets).set({...})` where the set
+// payload could touch `balance` / `availableBalance`. Same drift rules
+// as above. Object-literal `.set(...)` payloads that demonstrably do
+// NOT mention `balance` or `availableBalance` are out of scope and
+// neither flagged nor counted here.
+const RAW_WALLET_BALANCE_WRITER_REGISTRY: Record<string, RawWriteRegistryEntry> = {
+  "services/ledger.ts:refreshWalletCacheBalance": {
+    count: 1,
+    reason:
+      "The ONE sanctioned writer of wallets.balance / wallets.availableBalance. Recomputes SUM(ledger_entries) for (userId, currency) and writes the cached value inside the same DB transaction in which the entries were just posted. Every other server-side caller MUST route through this function.",
+  },
+  "storage.ts:DatabaseStorage.updateWallet": {
+    count: 1,
+    reason:
+      "Generic wallet patch helper. Set arg is a typed `WalletUpdatePayload` (Partial<Omit<InsertWallet, 'balance' | 'availableBalance'>>) — the type forbids the two cached columns at compile time, AND the function additionally throws at runtime if either field appears in the patch. The static scan flags this site because the set arg is a variable (not an object literal) and could in principle include the cached columns; the runtime guard is the second line of defence.",
+  },
+  // Pre-Task #17 legacy direct writes in routes.ts. These three handlers
+  // bypass the ledger entirely and update `wallets.balance` /
+  // `wallets.availableBalance` directly inside the transaction. They are
+  // kill-switched at the HTTP layer (every handler calls
+  // `assertKillSwitchOff(...)` before opening its DB tx) so the
+  // operator's switch still stops them, but they predate the
+  // ledger-as-source-of-truth migration and produce drift the daily
+  // reconciliation surfaces. They are recorded here so the test does NOT
+  // silently approve a NEW bypass landing alongside them — adding any
+  // further `tx.update(wallets).set({balance,...})` callsite in any of
+  // these handlers WILL tip the count and fail the test.
+  "routes.ts:POST /api/fx-exchange": {
+    count: 2,
+    reason:
+      "Pre-Task-#17 legacy direct wallet write — debits the source wallet and credits the target wallet inside a SERIALIZABLE transaction without posting ledger entries. Kill-switched at the HTTP layer via `assertKillSwitchOff('transactions')` at the top of the handler. Slated for migration onto `postLedgerEntries` + `refreshWalletCacheBalance`.",
+  },
+  "routes.ts:POST /api/investments": {
+    count: 1,
+    reason:
+      "Pre-Task-#17 legacy direct wallet write — debits the source currency wallet for an investment buy without posting ledger entries. Kill-switched at the HTTP layer via `assertKillSwitchOff('transactions')` at the top of the handler. Slated for migration onto `postLedgerEntries` + `refreshWalletCacheBalance`.",
+  },
+  "routes.ts:POST /api/wallets/transfer": {
+    count: 2,
+    reason:
+      "Pre-Task-#17 legacy direct wallet write — debits the source wallet and credits the target wallet inside a SERIALIZABLE transaction without posting ledger entries. Kill-switched at the HTTP layer via `assertKillSwitchOff('transactions')` at the top of the handler. Slated for migration onto `postLedgerEntries` + `refreshWalletCacheBalance`.",
+  },
+};
+
+type RawTableWrite = {
+  file: string; // path relative to server/, e.g. "services/ledger.ts"
+  context: string; // function/method/route id
+  id: string; // `<file>:<context>`
+  line: number; // 1-indexed
+};
+
+// Recursively gather every `.ts` file under server/ excluding tests. We
+// rebuild this list each test run rather than baking in a static list
+// so a brand-new file under `server/` is automatically swept into the
+// scan (which is the point — a primitive bypass might hide in code
+// that didn't exist when this test was last touched).
+async function listServerSourceFiles(): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile()) {
+        if (!entry.name.endsWith(".ts")) continue;
+        if (entry.name.endsWith(".test.ts")) continue;
+        out.push(path.resolve(full));
+      }
+    }
+  }
+  await walk(SERVER_DIR);
+  return out;
+}
+
+async function discoverRawTableWrites(): Promise<{
+  ledgerEntriesWrites: RawTableWrite[];
+  walletBalanceWrites: RawTableWrite[];
+}> {
+  const ts = await import("typescript");
+  const inScopeFiles = await listServerSourceFiles();
+
+  const tsconfigPath = path.resolve(REPO_ROOT, "tsconfig.json");
+  const cf = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+  if (cf.error) {
+    throw new Error(
+      `Failed to read tsconfig at ${tsconfigPath}: ${ts.flattenDiagnosticMessageText(cf.error.messageText, "\n")}`,
+    );
+  }
+  const parsed = ts.parseJsonConfigFileContent(
+    cf.config,
+    ts.sys,
+    path.dirname(tsconfigPath),
+  );
+  const program = ts.createProgram({
+    rootNames: inScopeFiles,
+    options: { ...parsed.options, noEmit: true, skipLibCheck: true },
+  });
+  const checker = program.getTypeChecker();
+
+  function relFile(absPath: string): string {
+    return path.relative(SERVER_DIR, absPath);
+  }
+
+  function resolvedDeclName(node: ts.Identifier): {
+    declFile: string;
+    declName: string | undefined;
+  } | null {
+    let symbol = checker.getSymbolAtLocation(node);
+    if (!symbol) return null;
+    if (symbol.flags & ts.SymbolFlags.Alias) {
+      try {
+        symbol = checker.getAliasedSymbol(symbol);
+      } catch {
+        /* unresolvable alias — leave as-is */
+      }
+    }
+    const decl = symbol.declarations?.[0];
+    if (!decl) return null;
+    return {
+      declFile: path.resolve(decl.getSourceFile().fileName),
+      declName: symbol.name,
+    };
+  }
+
+  // Walk up from `node` to find the enclosing context — see Section 6c
+  // header for the priority order. The FIRST hit wins, so an inline
+  // route-handler arrow inside `app.post("/api/x", async () => {...})`
+  // resolves to "POST /api/x" (the inner-most app.<verb>) before we ever
+  // reach the outer `registerRoutes` arrow.
+  function getEnclosingContext(node: ts.Node): string {
+    let current: ts.Node | undefined = node.parent;
+    while (current) {
+      if (ts.isFunctionDeclaration(current) && current.name) {
+        return current.name.text;
+      }
+      if (
+        ts.isVariableDeclaration(current) &&
+        ts.isIdentifier(current.name) &&
+        current.initializer &&
+        (ts.isArrowFunction(current.initializer) ||
+          ts.isFunctionExpression(current.initializer))
+      ) {
+        return current.name.text;
+      }
+      if (
+        ts.isMethodDeclaration(current) &&
+        ts.isIdentifier(current.name)
+      ) {
+        let cls: ts.Node | undefined = current.parent;
+        while (cls && !ts.isClassDeclaration(cls)) cls = cls.parent;
+        const className =
+          cls && ts.isClassDeclaration(cls) && cls.name
+            ? cls.name.text
+            : "<anon-class>";
+        return `${className}.${current.name.text}`;
+      }
+      if (
+        ts.isCallExpression(current) &&
+        ts.isPropertyAccessExpression(current.expression) &&
+        ts.isIdentifier(current.expression.expression) &&
+        current.expression.expression.text === "app" &&
+        ts.isIdentifier(current.expression.name) &&
+        ["post", "put", "patch", "delete", "get"].includes(
+          current.expression.name.text,
+        )
+      ) {
+        const firstArg = current.arguments[0];
+        if (firstArg && ts.isStringLiteral(firstArg)) {
+          return `${current.expression.name.text.toUpperCase()} ${firstArg.text}`;
+        }
+      }
+      current = current.parent;
+    }
+    return "<top-level>";
+  }
+
+  function lineOf(sf: ts.SourceFile, pos: number): number {
+    return sf.getLineAndCharacterOfPosition(pos).line + 1;
+  }
+
+  const ledgerEntriesWrites: RawTableWrite[] = [];
+  const walletBalanceWrites: RawTableWrite[] = [];
+
+  for (const filePath of inScopeFiles) {
+    const sf = program.getSourceFile(filePath);
+    if (!sf) {
+      throw new Error(`TS Program missing in-scope source file ${filePath}`);
+    }
+    const file = relFile(filePath);
+
+    function visit(node: ts.Node) {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.name) &&
+        node.arguments.length >= 1
+      ) {
+        const methodName = node.expression.name.text;
+        // Accept both identifier-form (`tx.insert(ledgerEntries)`) and
+        // property-access-form (`tx.insert(schema.ledgerEntries)`). For
+        // property access we resolve the symbol of the trailing
+        // identifier (`.name`) — that's the name actually bound to the
+        // exported table, regardless of whether the import is
+        // `import { ledgerEntries }` or `import * as schema`.
+        const arg = node.arguments[0];
+        let tableArg: ts.Identifier | null = null;
+        if (ts.isIdentifier(arg)) {
+          tableArg = arg;
+        } else if (
+          ts.isPropertyAccessExpression(arg) &&
+          ts.isIdentifier(arg.name)
+        ) {
+          tableArg = arg.name;
+        }
+        if (!tableArg) {
+          node.forEachChild(visit);
+          return;
+        }
+
+        if (methodName === "insert") {
+          const resolved = resolvedDeclName(tableArg);
+          if (
+            resolved &&
+            resolved.declFile === SCHEMA_SOURCE &&
+            resolved.declName === "ledgerEntries"
+          ) {
+            const context = getEnclosingContext(node);
+            ledgerEntriesWrites.push({
+              file,
+              context,
+              id: `${file}:${context}`,
+              line: lineOf(sf!, node.getStart()),
+            });
+          }
+        } else if (methodName === "update") {
+          const resolved = resolvedDeclName(tableArg);
+          if (
+            resolved &&
+            resolved.declFile === SCHEMA_SOURCE &&
+            resolved.declName === "wallets"
+          ) {
+            // Find the chained `.set(...)` — `update(wallets).set(...)`
+            // is a property access on this node's parent. Drizzle returns
+            // a fluent builder so `.set` is the next method in the chain.
+            // We accept either:
+            //   tx.update(wallets).set({...})              [direct]
+            //   tx.update(wallets)                          [stored, .set later — rare]
+            // For the direct shape we inspect the .set arg to decide
+            // whether `balance` / `availableBalance` is in scope. For the
+            // stored shape (no immediate .set), we conservatively treat
+            // it as in scope because we cannot trace the builder forward
+            // statically.
+            let setArg: ts.Expression | null = null;
+            let sawSetCall = false;
+            const parent = node.parent;
+            if (
+              parent &&
+              ts.isPropertyAccessExpression(parent) &&
+              ts.isIdentifier(parent.name) &&
+              parent.name.text === "set" &&
+              parent.parent &&
+              ts.isCallExpression(parent.parent) &&
+              parent.parent.expression === parent
+            ) {
+              sawSetCall = true;
+              setArg = parent.parent.arguments[0] ?? null;
+            }
+
+            let touchesBalance = true;
+            if (sawSetCall && setArg && ts.isObjectLiteralExpression(setArg)) {
+              // Object literal: inspect properties. Only flag if the
+              // payload mentions `balance` or `availableBalance`. This
+              // mirrors the runtime contract of `storage.updateWallet`
+              // (its `WalletUpdatePayload` type explicitly excludes the
+              // two cache columns).
+              touchesBalance = false;
+              for (const prop of setArg.properties) {
+                let name: string | null = null;
+                if (
+                  (ts.isPropertyAssignment(prop) ||
+                    ts.isShorthandPropertyAssignment(prop)) &&
+                  ts.isIdentifier(prop.name)
+                ) {
+                  name = prop.name.text;
+                } else if (
+                  ts.isShorthandPropertyAssignment(prop) &&
+                  ts.isIdentifier(prop.name)
+                ) {
+                  name = prop.name.text;
+                } else if (
+                  ts.isPropertyAssignment(prop) &&
+                  ts.isStringLiteral(prop.name)
+                ) {
+                  name = prop.name.text;
+                } else if (ts.isSpreadAssignment(prop)) {
+                  // Conservative: a spread could carry balance fields.
+                  touchesBalance = true;
+                  break;
+                }
+                if (name === "balance" || name === "availableBalance") {
+                  touchesBalance = true;
+                  break;
+                }
+              }
+            }
+            // sawSetCall=false OR setArg is non-literal → conservative
+            // `touchesBalance = true` (left at its default).
+
+            if (touchesBalance) {
+              const context = getEnclosingContext(node);
+              walletBalanceWrites.push({
+                file,
+                context,
+                id: `${file}:${context}`,
+                line: lineOf(sf!, node.getStart()),
+              });
+            }
+          }
+        }
+      }
+      node.forEachChild(visit);
+    }
+    visit(sf);
+  }
+
+  return { ledgerEntriesWrites, walletBalanceWrites };
+}
+
+function validateRawWriteRegistry(
+  label: string,
+  writes: RawTableWrite[],
+  registry: Record<string, RawWriteRegistryEntry>,
+  fixupHint: string,
+): string[] {
+  const issues: string[] = [];
+  // Group findings by context id.
+  const byId = new Map<string, RawTableWrite[]>();
+  for (const w of writes) {
+    const arr = byId.get(w.id) ?? [];
+    arr.push(w);
+    byId.set(w.id, arr);
+  }
+
+  for (const [id, sites] of byId) {
+    const reg = registry[id];
+    if (!reg) {
+      const lines = sites
+        .map((s) => `${s.file}:${s.line}`)
+        .join(", ");
+      issues.push(
+        `${label}: NEW callsite in unlisted context "${id}" (${sites.length} site(s) at ${lines}). ${fixupHint} If this write is genuinely necessary and routing through the primitive is impossible, register the context with { count: ${sites.length}, reason: "<one-line summary>" } and document why the primitive cannot be used.`,
+      );
+      continue;
+    }
+    if (reg.count !== sites.length) {
+      const lines = sites.map((s) => `${s.file}:${s.line}`).join(", ");
+      issues.push(
+        `${label}: registered context "${id}" expected count=${reg.count} but the scan found ${sites.length} callsite(s) at ${lines}. If a NEW write was added to this handler/function, ${fixupHint} If a callsite was legitimately removed, drop the count to match the new total (or remove the entry entirely if it dropped to zero).`,
+      );
+    }
+  }
+
+  for (const id of Object.keys(registry)) {
+    if (!byId.has(id)) {
+      issues.push(
+        `${label}: registered context "${id}" no longer matches any callsite — remove the stale registry entry so the doc-of-record stays accurate.`,
+      );
+    }
+  }
+
+  return issues;
+}
+
+describe("raw ledger_entries / wallets writer coverage walk (Task #195)", () => {
+  it("every direct insert(ledgerEntries) callsite is routed through postLedgerEntries or explicitly allowlisted", async () => {
+    const { ledgerEntriesWrites } = await discoverRawTableWrites();
+
+    // Anchor: discovery must locate the one sanctioned writer
+    // (postLedgerEntries) — otherwise the scan silently broke (wrong
+    // dir, broken symbol resolution, etc.) and every per-context check
+    // below would falsely "pass".
+    const sanctioned = ledgerEntriesWrites.filter(
+      (w) => w.id === "services/ledger.ts:postLedgerEntries",
+    );
+    expect(
+      sanctioned.length,
+      "Static scan failed to locate the sanctioned ledger_entries writer (services/ledger.ts:postLedgerEntries). Symbol resolution or file walk is broken.",
+    ).toBeGreaterThanOrEqual(1);
+
+    const issues = validateRawWriteRegistry(
+      "ledger_entries",
+      ledgerEntriesWrites,
+      RAW_LEDGER_ENTRIES_WRITER_REGISTRY,
+      "Route the insert through `postLedgerEntries(transactionId, entries, tx)` in `server/services/ledger.ts` so the same-transaction posting guard, balanced-pair check, and upstream kill-switches all run.",
+    );
+
+    if (issues.length > 0) {
+      throw new Error(
+        `Raw ledger_entries writer scan failed:\n  - ${issues.join(
+          "\n  - ",
+        )}`,
+      );
+    }
+  });
+
+  it("every direct update(wallets).set({balance,...}) callsite is routed through refreshWalletCacheBalance or explicitly allowlisted", async () => {
+    const { walletBalanceWrites } = await discoverRawTableWrites();
+
+    // Anchor: same as above — make sure the scan saw the sanctioned
+    // wallet-balance writer and the runtime-guarded storage helper.
+    const sanctioned = walletBalanceWrites.filter(
+      (w) => w.id === "services/ledger.ts:refreshWalletCacheBalance",
+    );
+    expect(
+      sanctioned.length,
+      "Static scan failed to locate the sanctioned wallet-balance writer (services/ledger.ts:refreshWalletCacheBalance). Symbol resolution or file walk is broken.",
+    ).toBeGreaterThanOrEqual(1);
+    const guarded = walletBalanceWrites.filter(
+      (w) => w.id === "storage.ts:DatabaseStorage.updateWallet",
+    );
+    expect(
+      guarded.length,
+      "Static scan failed to locate the runtime-guarded wallet update helper (storage.ts:DatabaseStorage.updateWallet). Symbol resolution or file walk is broken.",
+    ).toBeGreaterThanOrEqual(1);
+
+    const issues = validateRawWriteRegistry(
+      "wallets.balance",
+      walletBalanceWrites,
+      RAW_WALLET_BALANCE_WRITER_REGISTRY,
+      "Route the update through `refreshWalletCacheBalance(tx, userId, currency)` in `server/services/ledger.ts` immediately after `postLedgerEntries(...)` in the SAME transaction, so the cached balance can never lag the ledger.",
+    );
+
+    if (issues.length > 0) {
+      throw new Error(
+        `Raw wallets.balance writer scan failed:\n  - ${issues.join(
+          "\n  - ",
+        )}`,
+      );
+    }
+  });
+
+  it("registries cover the sanctioned primitives and known legacy bypasses (anchor)", () => {
+    // Belt-and-braces: independent of the discovery walk, assert the
+    // headline writers (sanctioned + runtime-guarded + known legacy
+    // bypasses) are still listed. If someone deletes a registry entry
+    // AND the underlying callsite in the same change, the "stale
+    // entry" check above goes silent — this anchor keeps the headline
+    // writer set explicit.
+    expect(RAW_LEDGER_ENTRIES_WRITER_REGISTRY).toHaveProperty(
+      "services/ledger.ts:postLedgerEntries",
+    );
+    expect(RAW_WALLET_BALANCE_WRITER_REGISTRY).toHaveProperty(
+      "services/ledger.ts:refreshWalletCacheBalance",
+    );
+    expect(RAW_WALLET_BALANCE_WRITER_REGISTRY).toHaveProperty(
+      "storage.ts:DatabaseStorage.updateWallet",
+    );
+    expect(RAW_WALLET_BALANCE_WRITER_REGISTRY).toHaveProperty(
+      "routes.ts:POST /api/fx-exchange",
+    );
+    expect(RAW_WALLET_BALANCE_WRITER_REGISTRY).toHaveProperty(
+      "routes.ts:POST /api/investments",
+    );
+    expect(RAW_WALLET_BALANCE_WRITER_REGISTRY).toHaveProperty(
+      "routes.ts:POST /api/wallets/transfer",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7. HTTP entry-point coverage walk (Task #189)
 // ---------------------------------------------------------------------------
 // Section 6 above catches a new MONEY-MOVEMENT FUNCTION landing in
