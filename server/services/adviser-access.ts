@@ -953,6 +953,13 @@ export interface ExpiringFeeConsentDetail {
   expiryDate: string; // ISO timestamp
 }
 
+export interface NextFeeConsentExpiry {
+  feeConsentId: number;
+  clientUserId: number;
+  clientName: string;
+  expiryDate: string; // ISO timestamp
+}
+
 export interface AdviserDashboardSummary {
   linkedClients: number;
   openTasks: number;
@@ -966,6 +973,11 @@ export interface AdviserDashboardSummary {
   // Task #284 — detail rows for the same 30-day window the count uses,
   // so the UI can render a per-consent renew list without a second call.
   expiringFeeConsentDetail: ExpiringFeeConsentDetail[];
+  // Task #284 — soonest upcoming fee consent expiry across visible
+  // clients (any future date, not capped to 30 days). Used by the UI
+  // zero-state copy "All fee consents active · Next expiry: <date>
+  // for <client>". null when no active future consents exist.
+  nextFeeConsentExpiry: NextFeeConsentExpiry | null;
 }
 
 export async function getAdviserDashboardSummary(
@@ -1081,6 +1093,41 @@ export async function getAdviserDashboardSummary(
     }));
   }
 
+  // Task #284 — soonest upcoming consent expiry across all visible
+  // clients (any future date). Used for the zero-state UI copy.
+  let nextFeeConsentExpiry: NextFeeConsentExpiry | null = null;
+  if (visibleClientIds.length > 0) {
+    const [nextRow] = await db
+      .select({
+        id: feeConsents.id,
+        clientId: feeConsents.clientId,
+        consentExpiryDate: feeConsents.consentExpiryDate,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+      })
+      .from(feeConsents)
+      .innerJoin(users, eq(users.id, feeConsents.clientId))
+      .where(
+        and(
+          inArray(feeConsents.clientId, visibleClientIds),
+          eq(feeConsents.renewalStatus, "active"),
+          gte(feeConsents.consentExpiryDate, now),
+        ),
+      )
+      .orderBy(feeConsents.consentExpiryDate)
+      .limit(1);
+
+    if (nextRow && nextRow.consentExpiryDate) {
+      nextFeeConsentExpiry = {
+        feeConsentId: nextRow.id,
+        clientUserId: nextRow.clientId,
+        clientName: clientDisplayName(nextRow, nextRow.clientId),
+        expiryDate: nextRow.consentExpiryDate.toISOString(),
+      };
+    }
+  }
+
   return {
     linkedClients: visibleClientIds.length,
     openTasks,
@@ -1088,6 +1135,7 @@ export async function getAdviserDashboardSummary(
     pendingReports,
     adviceRecordsActive,
     expiringFeeConsentDetail,
+    nextFeeConsentExpiry,
   };
 }
 

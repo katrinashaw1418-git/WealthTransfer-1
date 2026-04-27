@@ -176,6 +176,15 @@ describe("getAdviserDashboardSummary — Task #284 fields", () => {
     expect(detail.feeConsentId).toBeGreaterThan(0);
   });
 
+  it("returns the soonest upcoming consent expiry across all linked clients", async () => {
+    const summary = await getAdviserDashboardSummary(adviserId);
+    expect(summary.nextFeeConsentExpiry).not.toBeNull();
+    // The 5-day consent for client B is the soonest among the fixtures.
+    expect(summary.nextFeeConsentExpiry!.clientUserId).toBe(clientBId);
+    expect(summary.nextFeeConsentExpiry!.clientName).toBe(CLIENT_B_EMAIL);
+    expect(typeof summary.nextFeeConsentExpiry!.expiryDate).toBe("string");
+  });
+
   it("preserves existing summary fields", async () => {
     const summary = await getAdviserDashboardSummary(adviserId);
     expect(summary.linkedClients).toBe(2);

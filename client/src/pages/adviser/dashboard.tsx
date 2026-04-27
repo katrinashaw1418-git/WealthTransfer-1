@@ -32,6 +32,13 @@ interface ExpiringFeeConsentDetail {
   expiryDate: string;
 }
 
+interface NextFeeConsentExpiry {
+  feeConsentId: number;
+  clientUserId: number;
+  clientName: string;
+  expiryDate: string;
+}
+
 interface DashboardSummary {
   linkedClients: number;
   openTasks: number;
@@ -39,6 +46,7 @@ interface DashboardSummary {
   pendingReports: number;
   adviceRecordsActive: number;
   expiringFeeConsentDetail: ExpiringFeeConsentDetail[];
+  nextFeeConsentExpiry: NextFeeConsentExpiry | null;
 }
 
 interface AdviserClientRow {
@@ -134,11 +142,22 @@ function safeNum(v: unknown): number {
 const audAmountFormatter = new Intl.NumberFormat("en-AU", {
   style: "currency",
   currency: "AUD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const audWholeFormatter = new Intl.NumberFormat("en-AU", {
+  style: "currency",
+  currency: "AUD",
   maximumFractionDigits: 0,
 });
 
 function formatAud(value: number): string {
   return audAmountFormatter.format(Number.isFinite(value) ? value : 0);
+}
+
+function formatAudWhole(value: number): string {
+  return audWholeFormatter.format(Number.isFinite(value) ? value : 0);
 }
 
 function formatDate(value: string | null): string {
@@ -204,6 +223,7 @@ export default function AdviserDashboard() {
   );
 
   const expiringConsents = summary.data?.expiringFeeConsentDetail ?? [];
+  const nextExpiry = summary.data?.nextFeeConsentExpiry ?? null;
 
   return (
     <div className="p-6 space-y-6" data-testid="page-adviser-dashboard">
@@ -305,7 +325,7 @@ export default function AdviserDashboard() {
                     >
                       <span className="truncate">
                         <span className="capitalize font-medium">{i.action}</span>{" "}
-                        {formatAud(safeNum(i.amount))}{" "}
+                        {formatAudWhole(safeNum(i.amount))}{" "}
                         <span className="text-slate-500">in</span> {i.productName}
                       </span>
                       <span className="text-xs text-slate-400 whitespace-nowrap">
@@ -352,13 +372,12 @@ export default function AdviserDashboard() {
                           </div>
                           <div className="text-xs text-slate-500 mt-0.5 flex items-center gap-3">
                             <span className="truncate">{clientLabel}</span>
-                            <Link href={`/adviser/clients/${t.clientUserId}`}>
-                              <a
-                                className="text-sky-600 hover:text-sky-700 whitespace-nowrap"
-                                data-testid={`dash-task-view-client-${t.id}`}
-                              >
-                                View client →
-                              </a>
+                            <Link
+                              href={`/adviser/clients/${t.clientUserId}`}
+                              className="text-sky-600 hover:text-sky-700 whitespace-nowrap"
+                              data-testid={`dash-task-view-client-${t.id}`}
+                            >
+                              View client →
                             </Link>
                           </div>
                         </div>
@@ -428,13 +447,14 @@ export default function AdviserDashboard() {
                         data-testid={`dash-top-client-${c.userId}`}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <Link href={`/adviser/clients/${c.userId}`}>
-                            <a className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate">
-                              {clientDisplayName(c, c.userId)}
-                            </a>
+                          <Link
+                            href={`/adviser/clients/${c.userId}`}
+                            className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate"
+                          >
+                            {clientDisplayName(c, c.userId)}
                           </Link>
                           <span className="text-sm text-slate-700 tabular-nums">
-                            {formatAud(value)}
+                            {formatAudWhole(value)}
                           </span>
                         </div>
                         {totalAum > 0 && (
@@ -481,7 +501,24 @@ export default function AdviserDashboard() {
               data-testid="fee-consents-all-active"
             >
               <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-              All fee consents active. No renewals due in the next 30 days.
+              <span>
+                All fee consents active
+                {nextExpiry ? (
+                  <>
+                    {" · "}
+                    <span className="text-slate-500">Next expiry:</span>{" "}
+                    {formatExpiryDate(nextExpiry.expiryDate)} for{" "}
+                    <Link
+                      href={`/adviser/clients/${nextExpiry.clientUserId}`}
+                      className="text-sky-600 hover:text-sky-700"
+                    >
+                      {nextExpiry.clientName}
+                    </Link>
+                  </>
+                ) : (
+                  "."
+                )}
+              </span>
             </div>
           ) : (
             <ul className="divide-y divide-slate-100">
@@ -492,22 +529,22 @@ export default function AdviserDashboard() {
                   data-testid={`fee-consent-expiring-${c.feeConsentId}`}
                 >
                   <div className="min-w-0">
-                    <Link href={`/adviser/clients/${c.clientUserId}`}>
-                      <a className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate">
-                        {c.clientName}
-                      </a>
+                    <Link
+                      href={`/adviser/clients/${c.clientUserId}`}
+                      className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate"
+                    >
+                      {c.clientName}
                     </Link>
                     <div className="text-xs text-slate-500">
                       Expires {formatExpiryDate(c.expiryDate)}
                     </div>
                   </div>
-                  <Link href="/adviser/fee-consents">
-                    <a
-                      className="text-sm text-sky-600 hover:text-sky-700 whitespace-nowrap"
-                      data-testid={`fee-consent-renew-${c.feeConsentId}`}
-                    >
-                      Renew →
-                    </a>
+                  <Link
+                    href="/adviser/fee-consents"
+                    className="text-sm text-sky-600 hover:text-sky-700 whitespace-nowrap"
+                    data-testid={`fee-consent-renew-${c.feeConsentId}`}
+                  >
+                    Renew →
                   </Link>
                 </li>
               ))}
