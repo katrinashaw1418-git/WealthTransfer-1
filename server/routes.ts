@@ -51,6 +51,7 @@ import {
   mapLedgerUnbalancedToHttpResponse,
 } from "./services/ledger";
 import { MATCH_EPSILON } from "./services/reconciliation";
+import { emitAuditWriteFailureAlert } from "./services/audit";
 import {
   DEFAULT_REBALANCING_BENCHMARK,
   computeRebalancingGap,
@@ -163,6 +164,15 @@ async function saveIdempotentResponse(
 // ---------------------------------------------------------------------------
 // Persistent audit log writer — writes finance-grade event records to DB.
 // ---------------------------------------------------------------------------
+// Failure semantics (TASK #145):
+//   This legacy local writer must KEEP its swallow-on-failure behaviour to
+//   honour the original "Audit log failures must never crash money routes"
+//   contract — the surrounding callers in this file rely on it. But silent
+//   loss of audit rows is exactly the operator-paging trigger we just wired
+//   up, so we now fire the same `audit-log-write-failure` operator alert as
+//   the canonical writer in services/audit.ts before swallowing. This keeps
+//   the admin "audit-log-write-failure" alert stream consistent regardless of
+//   which code path attempted the insert.
 async function writeAuditLog(
   userId: number | null,
   action: string,
@@ -183,10 +193,19 @@ async function writeAuditLog(
   } catch (err) {
     // Audit log failures must never crash money routes — but we DO record
     // the failure into the persistent error log + the in-process metrics
-    // counter (Task #144). Without that, audit-log write failures would
-    // disappear into the void and the admin metrics tile would show
-    // misleadingly clean numbers.
+    // counter (Task #144), AND fire the same `audit-log-write-failure`
+    // operator alert as the canonical writer in services/audit.ts
+    // (Task #145). Together: the metrics counter is the "how often",
+    // the operator alert is the "wake someone up RIGHT NOW", and the
+    // suppression key collapses repeats of the same failing row to one
+    // ack-able signature.
     recordAuditWriteFailure(err, { userId, action });
+    await emitAuditWriteFailureAlert(
+      { userId, action, entityType, entityId, before: null, after: null },
+      err,
+    );
+    // Intentional: re-throwing here would crash a money route mid-flight.
+    // The two compensating controls above are the substitute.
   }
 }
 

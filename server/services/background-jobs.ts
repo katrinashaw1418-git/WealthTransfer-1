@@ -108,6 +108,12 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
     description:
       "Daily verification that every transaction with ledger entries also has a posting receipt row.",
   },
+  {
+    name: "stuck-pending-transactions",
+    label: "Stuck pending transactions watch",
+    description:
+      "Hourly check that no transaction has been in 'pending' or 'processing' for longer than the configured threshold (default 60 minutes).",
+  },
 ] as const;
 
 const KNOWN_JOB_NAMES = new Set(KNOWN_BACKGROUND_JOBS.map((j) => j.name));

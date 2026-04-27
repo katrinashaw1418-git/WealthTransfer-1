@@ -3,6 +3,41 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Task #145: Three missing operator alerts + ack-suppression flow
+
+Wired three pre-launch operator alerts (audit-log write failures, stuck pending transactions, repeated DB connection drops) and made every one suppressible through the same acknowledgement pattern that wallet-drift alerts already use.
+
+**New schema** (`shared/schema.ts`):
+- `operatorAlertAcknowledgements` — generic ack table keyed by `(alertSource, suppressionKey)`. Active partial unique index on `(alert_source, suppression_key) WHERE cleared_at IS NULL` enforces "exactly one active ack per signature". Append-only-style: clearing sets `clearedAt` rather than deleting so audit history survives. Pushed via `npm run db:push`.
+
+**New suppression helper** (`server/services/operator-alerts.ts`):
+- `notifyOperatorWithSuppression(alert, suppressionKey)` looks up an active ack on `(alert.source, suppressionKey)`. If found, logs one suppression line and returns `{ suppressed: true, ack }` WITHOUT calling `notifyOperator` (so no new operator_alerts row is written for the suppressed case). Otherwise dispatches normally and returns `{ suppressed: false, result }`. Lookup throws on DB failure (re-paging is safer than silently never-paging).
+
+**Three new alert sources, all ackable**:
+1. `audit-log-write-failure` — `server/services/audit.ts` wraps the canonical `writeAuditLog`: on insert failure fires the alert with sanitised payload (action / entityType / entityId / userId / hasBefore / hasAfter / errorMessage / errorClass — never the free-form before/after blob), then re-throws. Suppression key = `action|entityType|entityId`. The legacy local `writeAuditLog` in `server/routes.ts` (which must keep its swallow-on-failure contract for money routes) now fires the same alert before swallowing — same source, same suppression-key shape, so the admin stream is consistent regardless of code path.
+2. `stuck-pending-transactions` — new `server/services/stuck-pending-transactions.ts`, hourly cron via `withBackgroundJobRunRecord("stuck-pending-transactions", …)`. Selects `status IN ('pending','processing') AND createdAt < now - threshold`, threshold from env `STUCK_PENDING_THRESHOLD_MINUTES` (default 60). Suppression key = `count=N|sha256=…` of sorted stuck-id set, so the same set ⇒ no re-page; one row joining/leaving ⇒ key changes ⇒ alert re-fires. Payload caps the listed sample at 50 ids to bound size.
+3. `db-connection-failure` — new `server/services/db-health-watcher.ts`, independent `setInterval` started from the IIFE. Pings `SELECT 1`; module-level counter tracks consecutive failures with a first-failure timestamp. Fires when `consecutiveFailures >= DB_HEALTH_FAIL_THRESHOLD` AND elapsed `<= DB_HEALTH_FAIL_WINDOW_SECONDS`, then resets the counter so re-fire requires another full streak. Suppression key fixed: `"db-connection-failure"`. Defaults: threshold=3, window=60s, ping interval=30s. Deliberately NOT wrapped in `withBackgroundJobRunRecord` — the recorder writes to the DB; if connectivity is broken the recorder write would throw and mask the alert we're trying to fire.
+
+**Cron + KNOWN_BACKGROUND_JOBS wiring** (`server/index.ts`, `server/services/background-jobs.ts`):
+- Added `stuck-pending-transactions` to `KNOWN_BACKGROUND_JOBS` so the admin Background Jobs page shows it alongside the others.
+- Stuck-pending cron staggered 360s after start, then `setInterval(60 min)`. DB health watcher started with no stagger (it must observe outages from boot).
+
+**Admin endpoints** (`server/admin-routes.ts`):
+- `GET /api/admin/operator-alert-acknowledgements` — list with `activeOnly`, `source`, paging.
+- `POST /api/admin/operator-alert-acknowledgements` — create. Allow-listed to the three new sources (wallet-drift has its own dedicated table and route). 409 on existing active row, audit-logs the action.
+- `POST /api/admin/operator-alert-acknowledgements/clear` — clear by id, audit-logs the action.
+
+**Admin UI** (`client/src/pages/admin/operator-alerts.tsx`):
+- New "Alert types" legend card listing every alert source the codebase actually emits, with an `ackable` badge marking the three new ones. Authoritative list (audit-log-write-failure, db-connection-failure, ledger-balance-guard.* family, operator-alerts-prune-watchdog, posting-receipt-invariant, stuck-pending-transactions, wallet-ledger-reconciliation), kept in lock-step with the `notifyOperator(...)` call sites by file comment. Dynamic-suffix sources like `ledger-balance-guard.<callsite>` resolve via a regex pattern in `lookupAlertType()` so a new callsite picks up the correct legend row automatically.
+- New "Active acknowledgements" card listing currently-suppressing acks with a per-row Clear button.
+- In the alert detail Sheet, an "Acknowledge & suppress" form (note + derived suppression-key preview + button) appears only for the three ackable sources. Suppression key is derived in the client from the alert's `details` payload (so the operator sees what they're silencing before they confirm).
+
+**Failure-mode guarantees**:
+- `notifyOperatorWithSuppression` **fails OPEN on ack lookup errors** — if the DB is the very thing being paged about (audit-write-failure or db-connection-failure), the lookup itself may throw, so we log loudly and dispatch via `notifyOperator` as if no ack existed. Fail-closed would have silently never-paged in the exact scenarios these alerts exist to surface.
+- `db-health-watcher` uses a **rolling-window ring buffer** of the last `failThreshold` failure timestamps and fires when the buffer is full AND its span ≤ window. The earlier "anchor from first failure" approach could permanently suppress re-fires during a sustained outage with timer jitter (e.g. 3 pings at 30s cadence taking 91s end-to-end exceeds a 60s window even though the DB is clearly still down).
+
+**Files**: `shared/schema.ts` (new table), `server/services/operator-alerts.ts` (helper), `server/services/audit.ts` (wrap + emitter), `server/routes.ts` (legacy writer + import), `server/services/stuck-pending-transactions.ts` (new), `server/services/db-health-watcher.ts` (new), `server/services/background-jobs.ts` (new known job), `server/index.ts` (cron wiring), `server/admin-routes.ts` (3 endpoints), `client/src/pages/admin/operator-alerts.tsx` (legend + acks UI + acknowledge button).
+
 ## Recent Changes (April 2026) — Task #132: Remove synthetic portfolio data from production code paths
 
 Closed three synthetic-data surfaces a regulator or client could mistake for real portfolio numbers, and added a CI tripwire so they cannot reappear.

@@ -1667,6 +1667,214 @@ export function registerAdminRoutes(app: Express): void {
   );
 
   // -------------------------------------------------------------------------
+  // TASK #145 — Generic operator-alert acknowledgement endpoints
+  // -------------------------------------------------------------------------
+  // Mirror the wallet-drift ack endpoints above but generic over
+  // (alertSource, suppressionKey). The new alert types added in this task
+  // — audit-log-write-failure, stuck-pending-transactions, db-connection-failure
+  // — all suppress through this table.
+  //
+  // Allow-list of alert sources that this surface can acknowledge. The
+  // wallet-drift case has its own dedicated table and does NOT belong here.
+  // Restricting the allow-list at the route layer means a typo in the UI
+  // can't silently park acks against an unknown source that no dispatcher
+  // ever consults.
+  // -------------------------------------------------------------------------
+  const ACKABLE_OPERATOR_ALERT_SOURCES = [
+    "audit-log-write-failure",
+    "stuck-pending-transactions",
+    "db-connection-failure",
+  ] as const;
+
+  const operatorAckCreateSchema = z.object({
+    alertSource: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .refine(
+        (s) =>
+          (ACKABLE_OPERATOR_ALERT_SOURCES as readonly string[]).includes(s),
+        {
+          message: `alertSource must be one of: ${ACKABLE_OPERATOR_ALERT_SOURCES.join(", ")}`,
+        },
+      ),
+    suppressionKey: z.string().trim().min(1).max(256),
+    note: z.string().trim().max(2000).optional().nullable(),
+  });
+
+  const operatorAckClearSchema = z.object({
+    id: z.number().int().positive(),
+    reason: z.string().trim().max(2000).optional().nullable(),
+  });
+
+  app.get(
+    "/api/admin/operator-alert-acknowledgements",
+    adminRoute(async (req) => {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const offset = (page - 1) * limit;
+      const activeOnly =
+        String(req.query.activeOnly ?? "").toLowerCase() === "true";
+      const sourceRaw =
+        typeof req.query.source === "string" ? req.query.source.trim() : "";
+      const validSource =
+        sourceRaw.length > 0 && sourceRaw.length <= 128 ? sourceRaw : null;
+
+      const result = await db.execute(sql`
+        SELECT a.id,
+               a.alert_source            AS "alertSource",
+               a.suppression_key         AS "suppressionKey",
+               a.note,
+               a.acknowledged_by_user_id AS "acknowledgedByUserId",
+               a.acknowledged_at         AS "acknowledgedAt",
+               a.cleared_at              AS "clearedAt",
+               a.cleared_by_user_id      AS "clearedByUserId",
+               a.clear_reason            AS "clearReason",
+               ua.username               AS "acknowledgedByUsername",
+               uc.username               AS "clearedByUsername"
+          FROM operator_alert_acknowledgements a
+          LEFT JOIN users ua ON ua.id = a.acknowledged_by_user_id
+          LEFT JOIN users uc ON uc.id = a.cleared_by_user_id
+         WHERE 1 = 1
+           ${activeOnly ? sql`AND a.cleared_at IS NULL` : sql``}
+           ${validSource ? sql`AND a.alert_source = ${validSource}` : sql``}
+         ORDER BY a.acknowledged_at DESC, a.id DESC
+         LIMIT ${limit}
+        OFFSET ${offset}
+      `);
+      const totalResult = await db.execute(sql`
+        SELECT COUNT(*)::int AS count
+          FROM operator_alert_acknowledgements
+         WHERE 1 = 1
+           ${activeOnly ? sql`AND cleared_at IS NULL` : sql``}
+           ${validSource ? sql`AND alert_source = ${validSource}` : sql``}
+      `);
+      const items = (result as any).rows ?? [];
+      const total = Number(
+        ((totalResult as any).rows ?? [{ count: 0 }])[0]?.count ?? 0,
+      );
+      return { items, page, limit, total };
+    }),
+  );
+
+  app.post(
+    "/api/admin/operator-alert-acknowledgements",
+    adminRoute(async (req, auth) => {
+      const parsed = operatorAckCreateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error(parsed.error.issues.map((i) => i.message).join("; ")),
+          { status: 400 },
+        );
+      }
+      const { alertSource, suppressionKey, note } = parsed.data;
+
+      // Enforce one-active-row at the route layer too, even though the
+      // partial unique index would also reject it. Cleaner 409 than the
+      // raw "duplicate key value" error from Postgres.
+      const existing = await db.execute(sql`
+        SELECT id
+          FROM operator_alert_acknowledgements
+         WHERE alert_source    = ${alertSource}
+           AND suppression_key = ${suppressionKey}
+           AND cleared_at IS NULL
+         LIMIT 1
+      `);
+      const existingRow = ((existing as any).rows ?? [])[0];
+      if (existingRow?.id) {
+        throw Object.assign(
+          new Error(
+            `An active acknowledgement already exists for this alert (id=${existingRow.id}). ` +
+              `Clear it before creating a new one.`,
+          ),
+          { status: 409 },
+        );
+      }
+
+      const inserted = await db.execute(sql`
+        INSERT INTO operator_alert_acknowledgements
+          (alert_source, suppression_key, note, acknowledged_by_user_id)
+        VALUES
+          (${alertSource}, ${suppressionKey}, ${note ?? null}, ${auth.userId})
+        RETURNING id, alert_source AS "alertSource", suppression_key AS "suppressionKey",
+                  note, acknowledged_by_user_id AS "acknowledgedByUserId",
+                  acknowledged_at AS "acknowledgedAt"
+      `);
+      const ack = ((inserted as any).rows ?? [])[0];
+
+      await db.insert(auditLogs).values({
+        userId: auth.userId,
+        action: "operator_alert_acknowledged",
+        entityType: "operator_alert_acknowledgement",
+        entityId: String(ack?.id ?? ""),
+        metadata: {
+          alertSource,
+          suppressionKey,
+          note: note ?? null,
+          note_to_ops:
+            "Operator notifications for this (source, suppressionKey) pair will be suppressed until cleared.",
+        } as any,
+        ipAddress: req.ip ?? null,
+      });
+
+      return { acknowledgement: ack };
+    }),
+  );
+
+  app.post(
+    "/api/admin/operator-alert-acknowledgements/clear",
+    adminRoute(async (req, auth) => {
+      const parsed = operatorAckClearSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error(parsed.error.issues.map((i) => i.message).join("; ")),
+          { status: 400 },
+        );
+      }
+      const { id, reason } = parsed.data;
+
+      const cleared = await db.execute(sql`
+        UPDATE operator_alert_acknowledgements
+           SET cleared_at         = now(),
+               cleared_by_user_id = ${auth.userId},
+               clear_reason       = ${reason ?? null}
+         WHERE id = ${id}
+           AND cleared_at IS NULL
+        RETURNING id, alert_source AS "alertSource", suppression_key AS "suppressionKey",
+                  cleared_at AS "clearedAt", cleared_by_user_id AS "clearedByUserId",
+                  clear_reason AS "clearReason"
+      `);
+      const row = ((cleared as any).rows ?? [])[0];
+      if (!row) {
+        throw Object.assign(
+          new Error(
+            `No active acknowledgement with id=${id} (already cleared, or never existed).`,
+          ),
+          { status: 404 },
+        );
+      }
+
+      await db.insert(auditLogs).values({
+        userId: auth.userId,
+        action: "operator_alert_acknowledgement_cleared",
+        entityType: "operator_alert_acknowledgement",
+        entityId: String(row.id),
+        metadata: {
+          alertSource: row.alertSource,
+          suppressionKey: row.suppressionKey,
+          reason: reason ?? null,
+          note_to_ops:
+            "Operator notifications resume on the next dispatch attempt for this alert.",
+        } as any,
+        ipAddress: req.ip ?? null,
+      });
+
+      return { acknowledgement: row };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
   // TASK #36 — Operator alert audit log viewer
   // -------------------------------------------------------------------------
   // Read-only history of every alert dispatched by `notifyOperator`. One row

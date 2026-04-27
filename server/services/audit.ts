@@ -38,6 +38,7 @@
 import { db } from "../db";
 import { auditLogs } from "../../shared/schema";
 import { recordAuditWriteFailure } from "./error-log";
+import { notifyOperatorWithSuppression } from "./operator-alerts";
 
 // Inferred from the insert().returning() shape so the return type stays in
 // lock-step with the table definition without a hand-maintained alias.
@@ -129,14 +130,81 @@ export async function writeAuditLog(
 
     return row;
   } catch (err) {
-    // Task #144 — even though we re-throw (this writer is fail-closed by
-    // design so the surrounding tx rolls back), we tally the failure so the
-    // admin metrics tile can show "audit-log write failures in last 24h"
-    // without scraping the rotating error log.
+    // Task #144 — tally the failure into the persistent error log + the
+    // in-process metrics counter so the admin "audit-log write failures
+    // in last 24h" tile stays accurate without scraping log files.
     recordAuditWriteFailure(err, {
       userId: opts.userId,
       action: opts.action,
     });
+    // Task #145 — also page an operator. The two paths are complementary:
+    // the metrics counter is the "how often is this happening" view, and
+    // the operator alert is the "wake someone up RIGHT NOW" view, with a
+    // suppression key that collapses repeats of the same failing row to
+    // one ack-able signature so a flapping FK doesn't carpet-bomb the
+    // inbox. Dispatch BEFORE re-throwing so a downstream catch that
+    // decides to swallow can't suppress the page.
+    await emitAuditWriteFailureAlert(opts, err);
     throw err;
+  }
+}
+
+// Exported so the legacy local writeAuditLog in server/routes.ts can fire
+// the same operator alert with the same suppression-key shape, keeping the
+// admin UI's "audit-log-write-failure" stream consistent regardless of which
+// code path attempted the insert.
+export async function emitAuditWriteFailureAlert(
+  opts: Pick<
+    WriteAuditLogOpts,
+    "userId" | "action" | "entityType" | "entityId" | "before" | "after"
+  >,
+  err: unknown,
+): Promise<void> {
+  const errorMessage =
+    err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
+  const errorClass = err instanceof Error ? err.constructor.name : typeof err;
+
+  // Sanitised payload: NEVER include the free-form before/after blobs (they
+  // may carry PII or large jsonb that bloats the alert). hasBefore/hasAfter
+  // is enough for the operator to know whether a real diff was being audited.
+  const details = {
+    action: opts.action,
+    entityType: opts.entityType,
+    entityId: opts.entityId,
+    userId: opts.userId,
+    hasBefore: opts.before != null,
+    hasAfter: opts.after != null,
+    errorMessage,
+    errorClass,
+  };
+
+  // (action|entityType|entityId) — same row failing repeatedly collapses to a
+  // single ack-able signature. A null entityId still gets a stable key.
+  const suppressionKey = `${opts.action}|${opts.entityType ?? "null"}|${opts.entityId ?? "null"}`;
+
+  try {
+    await notifyOperatorWithSuppression(
+      {
+        source: "audit-log-write-failure",
+        severity: "critical",
+        title: `Audit log write failed for action=${opts.action}`,
+        details: {
+          ...details,
+          message:
+            `An attempt to write an audit_logs row failed (${errorClass}: ${errorMessage}). ` +
+            `The surrounding write may or may not have rolled back depending on whether ` +
+            `the caller passed a tx handle. Investigate immediately — every state change ` +
+            `must produce an audit row.`,
+        },
+      },
+      suppressionKey,
+    );
+  } catch (alertErr) {
+    // Alerting must never mask the original audit error. Log loudly and let
+    // the original throw propagate from the caller.
+    console.error(
+      "[audit] failed to dispatch audit-log-write-failure operator alert",
+      alertErr,
+    );
   }
 }

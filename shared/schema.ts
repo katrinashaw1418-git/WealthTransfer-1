@@ -2396,3 +2396,83 @@ export const insertAdviceRecordVersionSchema = createInsertSchema(adviceRecordVe
 });
 export type AdviceRecordVersion = typeof adviceRecordVersions.$inferSelect;
 export type InsertAdviceRecordVersion = z.infer<typeof insertAdviceRecordVersionSchema>;
+
+// =============================================================================
+// TASK #145 — Generic operator-alert acknowledgements
+// -----------------------------------------------------------------------------
+// The original wallet-drift acknowledgement table (above) is keyed by a
+// (userId, currency) pair because that is the natural identity of a wallet
+// drift case. The three new alert types added in this task — audit-log write
+// failures, stuck pending transactions, and DB connection drops — do not
+// share that shape, but they need the same "ack and stop re-paging" flow so
+// operators can stop alert spam on a known incident without losing the audit
+// trail.
+//
+// This table is the generic equivalent: an ack is keyed by `(alertSource,
+// suppressionKey)`, where:
+//   - alertSource    = the operator-alert `source` string (e.g.
+//                      "audit-log-write-failure", "stuck-pending-transactions",
+//                      "db-connection-failure")
+//   - suppressionKey = a stable identity for the incident, computed by the
+//                      dispatching call-site (e.g. the action+entity tuple
+//                      for an audit failure, the sorted-id-set hash for a
+//                      stuck-pending batch, a constant for db drops).
+//
+// Hard rules (mirror the wallet-drift table):
+//   1. The reconciliation/diagnostic side-effects (logged lines, persisted
+//      operator_alerts rows for non-suppressed cases) are unchanged. Only
+//      the dispatch path for the SUPPRESSED case skips the operator alert.
+//   2. Exactly one ACTIVE (clearedAt IS NULL) ack per (source, key) pair —
+//      enforced by a partial unique index. A second ack attempt while one
+//      is open returns 409.
+//   3. Append-only-ish: clearing an ack sets clearedAt rather than deleting
+//      so "alert suppressed because acknowledged on YYYY-MM-DD by Z" stays
+//      auditable forever.
+// =============================================================================
+export const operatorAlertAcknowledgements = pgTable(
+  "operator_alert_acknowledgements",
+  {
+    id: serial("id").primaryKey(),
+    // Matches operator_alerts.source. Capped to 128 chars at the route layer.
+    alertSource: text("alert_source").notNull(),
+    // Stable identity for the incident — computed by the dispatching call-site.
+    // 256 chars is plenty for a sorted-id-set hash or "action|entity|id" tuple.
+    suppressionKey: text("suppression_key").notNull(),
+    // Free-form note from the admin: ticket id, root-cause hypothesis, etc.
+    note: text("note"),
+    // Admin who recorded the acknowledgement.
+    acknowledgedByUserId: integer("acknowledged_by_user_id")
+      .references(() => users.id)
+      .notNull(),
+    acknowledgedAt: timestamp("acknowledged_at").defaultNow().notNull(),
+    // When set, the acknowledgement is no longer active and notifications
+    // resume on the next dispatch attempt.
+    clearedAt: timestamp("cleared_at"),
+    clearedByUserId: integer("cleared_by_user_id").references(() => users.id),
+    clearReason: text("clear_reason"),
+  },
+  (table) => ({
+    sourceKeyIdx: index("operator_alert_ack_source_key_idx").on(
+      table.alertSource,
+      table.suppressionKey,
+    ),
+    activeUniq: uniqueIndex("operator_alert_ack_active_uidx")
+      .on(table.alertSource, table.suppressionKey)
+      .where(sql`cleared_at IS NULL`),
+  }),
+);
+
+export const insertOperatorAlertAcknowledgementSchema = createInsertSchema(
+  operatorAlertAcknowledgements,
+).omit({
+  id: true,
+  acknowledgedAt: true,
+  clearedAt: true,
+  clearedByUserId: true,
+  clearReason: true,
+});
+export type OperatorAlertAcknowledgement =
+  typeof operatorAlertAcknowledgements.$inferSelect;
+export type InsertOperatorAlertAcknowledgement = z.infer<
+  typeof insertOperatorAlertAcknowledgementSchema
+>;

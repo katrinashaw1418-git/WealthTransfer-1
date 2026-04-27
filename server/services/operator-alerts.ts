@@ -30,8 +30,14 @@
 //      logged loudly so the gap in the audit trail is itself observable.
 // =============================================================================
 
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../db";
-import { operatorAlerts, type InsertOperatorAlertRecord } from "@shared/schema";
+import {
+  operatorAlerts,
+  operatorAlertAcknowledgements,
+  type InsertOperatorAlertRecord,
+  type OperatorAlertAcknowledgement,
+} from "@shared/schema";
 
 export type OperatorAlertSeverity = "info" | "warning" | "alert" | "critical";
 
@@ -331,4 +337,102 @@ export async function notifyOperator(alert: OperatorAlert): Promise<OperatorAler
     channels: successfulChannels,
     alertId,
   };
+}
+
+// =============================================================================
+// TASK #145 — Generic acknowledgement-based suppression
+// -----------------------------------------------------------------------------
+// Mirrors the wallet-drift suppression flow but is generic over any
+// (alertSource, suppressionKey) pair, so the three new alert types added in
+// this task — audit-log write failures, stuck pending transactions, and DB
+// connection drops — can be ack'd by operators without re-paging.
+//
+// Hard rule (mirroring wallet-drift): the diagnostic side-effects of the
+// CALLER (logged lines, rows in service-specific run tables, etc.) are
+// unchanged. Only the dispatch path is suppressed for the ack'd case. We do
+// NOT write a new operator_alerts row for the suppressed case — that would
+// just push noise into the very table we are trying to keep readable.
+// =============================================================================
+
+/**
+ * Look up the most recent ACTIVE acknowledgement for a (source, key) pair.
+ * The partial unique index `operator_alert_ack_active_uidx` guarantees at
+ * most one such row exists; the LIMIT 1 here is defensive only.
+ */
+export async function getActiveOperatorAlertAcknowledgement(
+  alertSource: string,
+  suppressionKey: string,
+): Promise<OperatorAlertAcknowledgement | null> {
+  const [row] = await db
+    .select()
+    .from(operatorAlertAcknowledgements)
+    .where(
+      and(
+        eq(operatorAlertAcknowledgements.alertSource, alertSource),
+        eq(operatorAlertAcknowledgements.suppressionKey, suppressionKey),
+        isNull(operatorAlertAcknowledgements.clearedAt),
+      ),
+    )
+    .orderBy(desc(operatorAlertAcknowledgements.acknowledgedAt))
+    .limit(1);
+  return row ?? null;
+}
+
+export type SuppressedOperatorAlertResult =
+  | {
+      suppressed: true;
+      ack: OperatorAlertAcknowledgement;
+      result: null;
+    }
+  | {
+      suppressed: false;
+      ack: null;
+      result: OperatorAlertResult;
+    };
+
+/**
+ * Dispatch an operator alert ONLY when there is no active acknowledgement
+ * for `(alert.source, suppressionKey)`. When suppressed, returns the
+ * acknowledgement record so the caller can log a one-line "alert suppressed"
+ * message with the ack id / acknowledger / date. When not suppressed,
+ * delegates to `notifyOperator` and returns its result.
+ *
+ * Failure-mode: **fail OPEN on ack lookup errors** — if the ack lookup throws
+ * (e.g. DB outage), we MUST still dispatch the alert. The two highest-stakes
+ * callers of this helper are the audit-write-failure alert and the
+ * db-connection-failure watcher; for both of those the DB is exactly what's
+ * failing, so a fail-closed lookup would silently never page anyone in the
+ * exact scenarios these alerts exist to surface. We log the lookup failure
+ * loudly (so the missing suppression check is itself visible in ops logs)
+ * and then dispatch via `notifyOperator` as if no ack existed.
+ */
+export async function notifyOperatorWithSuppression(
+  alert: OperatorAlert,
+  suppressionKey: string,
+): Promise<SuppressedOperatorAlertResult> {
+  let ack: OperatorAlertAcknowledgement | null = null;
+  try {
+    ack = await getActiveOperatorAlertAcknowledgement(
+      alert.source,
+      suppressionKey,
+    );
+  } catch (lookupErr) {
+    console.error(
+      `[operator-alerts] suppression lookup FAILED for source=${alert.source} ` +
+        `key=${suppressionKey} — failing OPEN and dispatching anyway:`,
+      (lookupErr as Error)?.message ?? lookupErr,
+    );
+    const result = await notifyOperator(alert);
+    return { suppressed: false, ack: null, result };
+  }
+  if (ack) {
+    const ackDate = ack.acknowledgedAt.toISOString().slice(0, 10);
+    console.log(
+      `[operator-alerts] dispatch suppressed: source=${alert.source} ` +
+        `key=${suppressionKey} (acknowledged on ${ackDate}, ack id=${ack.id})`,
+    );
+    return { suppressed: true, ack, result: null };
+  }
+  const result = await notifyOperator(alert);
+  return { suppressed: false, ack: null, result };
 }

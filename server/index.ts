@@ -680,6 +680,52 @@ app.use((req, res, next) => {
     setInterval(runPostingReceiptInvariantCron, 24 * 60 * 60 * 1000);
   }, 30 * 1000);
 
+  // ---------------------------------------------------------------------------
+  // TASK #145 — Stuck pending transactions watch (hourly)
+  // ---------------------------------------------------------------------------
+  // Runs once per hour. The check is read-only against `transactions` and
+  // dispatches one ack-suppressible operator alert per stable "set of stuck
+  // ids". Wrapped in `withBackgroundJobRunRecord` so the admin Background
+  // Jobs page sees this job alongside the others.
+  // ---------------------------------------------------------------------------
+  const { runStuckPendingTransactionsCheck } = await import(
+    "./services/stuck-pending-transactions"
+  );
+
+  async function runStuckPendingTransactionsCron() {
+    try {
+      await withBackgroundJobRunRecord("stuck-pending-transactions", async () => {
+        const r = await runStuckPendingTransactionsCheck();
+        if (r.stuckCount === 0) {
+          return `ok: 0 stuck (threshold=${r.thresholdMinutes}m)`;
+        }
+        return (
+          `${r.stuckCount} stuck (threshold=${r.thresholdMinutes}m), ` +
+          `alerted=${r.alerted}, suppressed=${r.suppressed}`
+        );
+      });
+    } catch (e) {
+      console.error("[stuck-pending-transactions] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runStuckPendingTransactionsCron();
+    setInterval(runStuckPendingTransactionsCron, 60 * 60 * 1000);
+  }, 360 * 1000);
+
+  // ---------------------------------------------------------------------------
+  // TASK #145 — DB connection health watcher
+  // ---------------------------------------------------------------------------
+  // Independent setInterval: pings the DB on a fixed cadence and dispatches
+  // an operator alert when N consecutive pings have failed within an
+  // M-second window. Deliberately NOT wrapped in `withBackgroundJobRunRecord`
+  // — the recorder itself writes to the DB; if connectivity is broken, the
+  // recorder write would throw and mask the alert we are trying to fire.
+  // ---------------------------------------------------------------------------
+  const { startDbHealthWatcher } = await import("./services/db-health-watcher");
+  startDbHealthWatcher();
+
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.
