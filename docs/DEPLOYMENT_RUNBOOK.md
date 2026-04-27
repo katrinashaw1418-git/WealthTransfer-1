@@ -6,8 +6,31 @@ Operational checklist for deploying schema changes to production. Keep this shor
 
 1. Merge the task branch into the main app.
 2. Click **Publish**.
-3. Replit's deploy build runs `npm run db:push` against the production database.
-4. The new revision goes live.
+3. Replit's deploy build runs `bash scripts/predeploy-build.sh`, which:
+   - Runs `npx tsx scripts/go-no-go.ts` against the production-equivalent environment as a pre-deploy launch readiness gate.
+   - Aborts the deploy on a NO-GO verdict (non-zero exit) and pastes the full report into the deploy log so you can see which check failed.
+   - On GO, runs `npm run build` and copies the latest report into `dist/go-no-go-report.md` so it ships as part of the deploy artefact.
+4. Replit's deploy build runs `npm run db:push` against the production database.
+5. The new revision goes live.
+
+### Required deployment secrets for the launch readiness gate (Task #180)
+
+These must be set in the Replit deployment secrets pane (not just the workspace `.env`) — the gate validates them against a snapshot taken **before** any dev-time fallback runs (`scripts/_raw-env-snapshot.ts`), so a missing prod secret produces a NO-GO and blocks the deploy:
+
+| Secret | Why |
+| --- | --- |
+| `DATABASE_URL` | Production DB the deploy will boot against. |
+| `JWT_SECRET` | Auth layer refuses to boot without it. |
+| `NODE_ENV` | Should be `production`; tags observability and gates env separation. |
+| `LOG_DIR` | Persistent volume for `errors.log`; fallback `./logs` is ephemeral inside the container. |
+| `OPERATOR_ALERT_WEBHOOK_URL` | The alerting drill in the gate dispatches one drill alert per known source; without a webhook configured the gate is NO-GO. |
+| `DB_BACKUP_DIR` | The infrastructure & rollback sections check the latest successful backup and restore drill freshness against this dir. |
+
+If any are missing the deploy log will show the failing check and a `> **What to do:** …` hint pointing at the fix. See `docs/runbooks/go-no-go.md` for what each section verifies and what `drill: true` artefacts the gate leaves behind on every deploy.
+
+### Manually re-running the gate
+
+The gate can also be invoked by hand against any environment with `npx tsx scripts/go-no-go.ts`. The deploy wiring described above is just a no-human-required call of the same script — there is no separate code path.
 
 ## One-shot post-`db:push` steps
 

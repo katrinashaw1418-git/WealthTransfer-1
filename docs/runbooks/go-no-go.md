@@ -32,6 +32,28 @@ compliance check.)
 
 ## 2. How to run
 
+### Automatic (every deploy — Task #180)
+
+The gate runs automatically as a pre-deploy step on every `Publish`. It
+is wired into `.replit` `[deployment].build` via
+`scripts/predeploy-build.sh`, which:
+
+1. Runs `npx tsx scripts/go-no-go.ts` against the production-equivalent
+   environment (the same secrets the deploy will boot under).
+2. **A NO-GO verdict (non-zero exit) blocks the deploy.** Replit's
+   build aborts and the new revision is never promoted. The full
+   report is pasted into the deploy log so you can see which check
+   failed without re-running the script.
+3. On GO, runs `npm run build` and copies the report into
+   `dist/go-no-go-report.md` — it ships as part of the deploy
+   artefact and is inspectable post-deploy at the same path inside
+   the running container.
+
+See `docs/DEPLOYMENT_RUNBOOK.md` for the full deploy procedure and the
+list of deployment secrets the gate needs.
+
+### Manual (interactive)
+
 ```sh
 # From project root, with DATABASE_URL pointed at the env you want to
 # validate AND the same secrets the deploy will boot with.
@@ -49,6 +71,10 @@ docs/golive/go-no-go-<ISO-timestamp>.md
 ```
 
 The script prints the path on the first line of its summary block.
+
+The auto-deploy wiring is just a no-human-required call of the same
+script — there is no separate code path, so an interactive run and an
+auto-deploy run produce identical reports.
 
 ### Required environment
 

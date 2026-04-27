@@ -84,6 +84,19 @@ jobs:
       - name: No-synthetic-data tripwire (Task #132)
         run: npx tsx scripts/test-no-synthetic-portfolio-data.ts
 
+  predeploy-gate-smoke:
+    # Pure-bash smoke test for scripts/predeploy-build.sh exit semantics
+    # (Task #180). Stubs npx/npm on PATH so the wrapper exercises every
+    # branch — NO-GO + report, crash without report, GO + report — without
+    # touching the live launch readiness gate. Guards the deploy wiring
+    # against regressions like surfacing a stale report on a crash, or
+    # shipping a GO build without an attached current-run report.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Predeploy wrapper smoke test (Task #180)
+        run: bash scripts/test-predeploy-gate.sh
+
   ledger-leak-gate:
     runs-on: ubuntu-latest
     env:
