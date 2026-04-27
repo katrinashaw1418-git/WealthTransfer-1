@@ -343,8 +343,6 @@ export default function AdviserDashboard() {
                     >
                       <Link href={`/adviser/clients/${c.userId}`}>
                         <a className="text-sm font-medium text-slate-900 hover:text-sky-600 truncate">
-                          {/* Task #283 — never render a blank label when
-                              firstName/lastName are empty placeholders. */}
                           {clientDisplayName(c, c.userId)}
                         </a>
                       </Link>

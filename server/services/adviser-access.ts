@@ -1138,7 +1138,6 @@ export async function getAdviserNotifications(
       : [];
   const clientNameById = new Map<number, string>();
   for (const r of clientNameRows) {
-    // Task #283 — single source of truth in @shared/display-name.
     clientNameById.set(r.id, clientDisplayName(r, r.id));
   }
 
@@ -1201,7 +1200,6 @@ export async function getAdviserNotifications(
   }
 
   for (const r of kycRows) {
-    // Task #283 — single source of truth in @shared/display-name.
     const name = clientDisplayName(r, r.id);
     items.push({
       id: `kyc:${r.id}`,

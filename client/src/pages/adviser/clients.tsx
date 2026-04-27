@@ -128,7 +128,6 @@ export default function AdviserClients() {
                   <TableRow key={row.userId} data-testid={`row-client-${row.userId}`}>
                     <TableCell>
                       <div className="font-medium text-gray-900">
-                        {/* Task #283 — name -> email -> Client #<id> */}
                         {clientDisplayName(row, row.userId)}
                       </div>
                       <div className="text-xs text-gray-500">{row.email}</div>

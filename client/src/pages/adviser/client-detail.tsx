@@ -185,7 +185,6 @@ export default function AdviserClientDetail() {
             </Button>
           </Link>
           <h1 className="text-2xl font-bold text-gray-900">
-            {/* Task #283 — name -> email -> Client #<id> */}
             {clientDisplayName(client, client.id)}
           </h1>
           <p className="text-sm text-gray-500">{client.email}</p>

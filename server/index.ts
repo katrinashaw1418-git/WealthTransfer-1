@@ -176,22 +176,9 @@ app.use((req, res, next) => {
   );
   await ensureOperatorAlertFailoverColumns();
 
-  // ---------------------------------------------------------------------------
-  // Task #283 — adviser data hygiene at boot
-  // ---------------------------------------------------------------------------
-  // Idempotent one-shot pass that NULLs known dev-fixture placeholder
-  // names (e.g. "Linked Client") on the `users` table, so adviser surfaces
-  // never render them as if they were a real human's name. Documented in
-  // `services/data-hygiene.ts`. Wrapped so a failure here can never block
-  // boot — the body itself has its own try/catch but the import is safe
-  // to fail too.
-  // ---------------------------------------------------------------------------
-  try {
-    const { runStartupDataHygiene } = await import("./services/data-hygiene");
-    await runStartupDataHygiene();
-  } catch (err) {
-    console.error("[boot] data-hygiene module failed to load:", err);
-  }
+  // Task #283 — clear known dev-fixture placeholder names at boot.
+  const { runStartupDataHygiene } = await import("./services/data-hygiene");
+  await runStartupDataHygiene();
 
   const server = await registerRoutes(app);
 

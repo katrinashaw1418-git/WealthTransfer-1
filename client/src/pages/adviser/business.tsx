@@ -271,7 +271,6 @@ export default function AdviserBusiness() {
                       <TableCell>
                         <Link href={`/adviser/clients/${c.userId}`}>
                           <a className="font-medium text-slate-900 hover:text-sky-600">
-                            {/* Task #283 — name -> email -> Client #<id> */}
                             {clientDisplayName(c, c.userId)}
                           </a>
                         </Link>

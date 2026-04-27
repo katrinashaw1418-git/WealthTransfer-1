@@ -1,19 +1,6 @@
-// =============================================================================
-// Task #283 — adviser task generator end-to-end test
-// -----------------------------------------------------------------------------
-// Drives `runAdviserTaskAutomation()` against the real dev DB to confirm
-// that when a linked client has blank firstName/lastName but a usable
-// email, the generated KYC task title and notes contain the EMAIL
-// (not "Client #<id>"). The helper-only label test pins the pure
-// function; this test pins the actual title written into adviser_tasks.
-//
-// Fixture lifecycle:
-//   - beforeAll inserts: one adviser, one blank-name client, an active
-//     adviser_clients link, and ensures no leftover adviser_tasks rows
-//     exist for the pair.
-//   - afterAll deletes adviser_tasks, the link, and both users so the
-//     dev DB is restored regardless of test outcome.
-// =============================================================================
+// End-to-end: drive runAdviserTaskAutomation against the dev DB and
+// assert the persisted KYC task title + notes contain email, not Client #<id>.
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { db } from "../db";
 import { users, adviserClients, adviserTasks } from "@shared/schema";
@@ -49,9 +36,8 @@ async function cleanup() {
   await db.delete(users).where(inArray(users.email, FIXTURE_EMAILS));
 }
 
-describe("runAdviserTaskAutomation — KYC task label end-to-end", () => {
+describe("runAdviserTaskAutomation — KYC label end-to-end", () => {
   beforeAll(async () => {
-    // Cold-start cleanup in case a prior failed run left residue.
     await db.delete(users).where(inArray(users.email, FIXTURE_EMAILS));
 
     const [adviser] = await db
@@ -72,12 +58,9 @@ describe("runAdviserTaskAutomation — KYC task label end-to-end", () => {
         username: "task283-e2e-blank-name",
         email: CLIENT_EMAIL,
         password: "x",
-        // Blank name on purpose — this is the regression case the task
-        // automation must handle gracefully.
         firstName: "",
         lastName: "",
         role: "client",
-        // kycStatus != verified so the KYC follow-up trigger fires.
         kycStatus: "pending",
       })
       .returning({ id: users.id });
@@ -93,11 +76,9 @@ describe("runAdviserTaskAutomation — KYC task label end-to-end", () => {
     });
   });
 
-  afterAll(async () => {
-    await cleanup();
-  });
+  afterAll(cleanup);
 
-  it("writes a KYC task whose title and notes contain the email, not Client #<id>", async () => {
+  it("writes a KYC task whose title and notes contain the email", async () => {
     await runAdviserTaskAutomation();
 
     const tasks = await db
@@ -118,12 +99,10 @@ describe("runAdviserTaskAutomation — KYC task label end-to-end", () => {
     expect(tasks.length).toBeGreaterThanOrEqual(1);
     const kyc = tasks[0];
 
-    // Title contract:
     expect(kyc.title).toContain(CLIENT_EMAIL);
     expect(kyc.title).not.toContain(`Client #${clientId}`);
     expect(kyc.title.startsWith("Follow up KYC for ")).toBe(true);
 
-    // Notes contract: the body now echoes the label so it's standalone.
     expect(kyc.notes).not.toBeNull();
     expect(kyc.notes!).toContain(CLIENT_EMAIL);
     expect(kyc.notes!).not.toContain(`Client #${clientId}`);

@@ -200,7 +200,6 @@ export default function AdviserTasks() {
                         <SelectContent>
                           {clients.data?.map((c) => (
                             <SelectItem key={c.userId} value={String(c.userId)}>
-                              {/* Task #283 — name -> email -> Client #<id> */}
                               {clientDisplayName(c, c.userId)}
                             </SelectItem>
                           ))}

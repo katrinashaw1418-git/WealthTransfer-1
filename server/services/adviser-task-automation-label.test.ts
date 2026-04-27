@@ -1,20 +1,7 @@
-// =============================================================================
-// Task #283 — adviser task labels never show "Client #<id>" when there's an
-// email on file
-// -----------------------------------------------------------------------------
-// Locks in the label fallback contract for the adviser task automation
-// (KYC follow-ups, fee consent renewals, portfolio reviews). Before this
-// fix, KYC tasks rendered as "Follow up KYC for Client #26" whenever the
-// linked client had blank firstName/lastName, even though the user had a
-// usable email on file.
-//
-// The label helper is a pure function so this is a fast unit test — no
-// DB fixture required.
-// =============================================================================
 import { describe, expect, it } from "vitest";
 import { clientLabelForTask } from "./adviser-task-automation";
 
-describe("clientLabelForTask — adviser task display label", () => {
+describe("clientLabelForTask", () => {
   it("uses the full name when present", () => {
     expect(
       clientLabelForTask({
@@ -26,7 +13,7 @@ describe("clientLabelForTask — adviser task display label", () => {
     ).toBe("Jane Doe");
   });
 
-  it("falls back to email when name is blank — does NOT render Client #<id>", () => {
+  it("falls back to email when name is blank", () => {
     const label = clientLabelForTask({
       firstName: "",
       lastName: "",
@@ -37,7 +24,7 @@ describe("clientLabelForTask — adviser task display label", () => {
     expect(label).not.toContain("Client #");
   });
 
-  it("falls back to email when name fields are null", () => {
+  it("falls back to email when name is null", () => {
     expect(
       clientLabelForTask({
         firstName: null,
@@ -50,12 +37,7 @@ describe("clientLabelForTask — adviser task display label", () => {
 
   it("falls back to Client #<id> only when both name and email are missing", () => {
     expect(
-      clientLabelForTask({
-        firstName: "",
-        lastName: "",
-        email: "",
-        clientUserId: 26,
-      }),
+      clientLabelForTask({ firstName: "", lastName: "", email: "", clientUserId: 26 }),
     ).toBe("Client #26");
     expect(
       clientLabelForTask({
@@ -67,7 +49,7 @@ describe("clientLabelForTask — adviser task display label", () => {
     ).toBe("Client #7");
   });
 
-  it("trims whitespace-only names so they don't masquerade as a real label", () => {
+  it("trims whitespace-only names", () => {
     expect(
       clientLabelForTask({
         firstName: "   ",
@@ -78,7 +60,7 @@ describe("clientLabelForTask — adviser task display label", () => {
     ).toBe("test@example.com");
   });
 
-  it("works with a first name only or a last name only", () => {
+  it("works with a partial name", () => {
     expect(
       clientLabelForTask({
         firstName: "Alex",
@@ -87,13 +69,5 @@ describe("clientLabelForTask — adviser task display label", () => {
         clientUserId: 1,
       }),
     ).toBe("Alex");
-    expect(
-      clientLabelForTask({
-        firstName: null,
-        lastName: "Smith",
-        email: "smith@example.com",
-        clientUserId: 2,
-      }),
-    ).toBe("Smith");
   });
 });

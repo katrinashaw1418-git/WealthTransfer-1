@@ -61,14 +61,7 @@ const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-// ---------------------------------------------------------------------------
-// Display label for a client used in adviser task titles / notes.
-// Thin adapter around `@shared/display-name` so the cron, the
-// adviser-access notifications, and the adviser UI all resolve names the
-// same way. Kept as a re-export so existing imports keep working and so
-// the test file `adviser-task-automation-label.test.ts` still has a
-// stable target.
-// ---------------------------------------------------------------------------
+// Adapter around the shared display-name helper so server and UI agree.
 import { clientDisplayName } from "@shared/display-name";
 
 export function clientLabelForTask(input: {
@@ -187,9 +180,7 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
       kycStatus: users.kycStatus,
       firstName: users.firstName,
       lastName: users.lastName,
-      // Pulled so the task label can fall back to email when name fields
-      // are empty — without this, automated tasks render as "Client #26"
-      // instead of an actionable label.
+      // Email is part of the label fallback chain (see clientLabelForTask).
       email: users.email,
     })
     .from(adviserClients)
@@ -227,9 +218,6 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
   // 3. Per-link processing. Errors on one link must never abort the rest.
   for (const link of links) {
     try {
-      // See clientLabelForTask. Only affects newly-created tasks;
-      // historical task titles keep their existing wording (no backfill —
-      // see task #283 scope).
       const clientLabel = clientLabelForTask(link);
 
       // Trigger A — KYC follow-up
@@ -242,9 +230,6 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
             clientUserId: link.clientUserId,
             taskType: "kyc_followup",
             title: `Follow up KYC for ${clientLabel}`,
-            // Notes carry the same client label as the title so the body
-            // is readable on its own (e.g. when surfaced in a digest or
-            // copied into an email). Task #283.
             notes: `Client: ${clientLabel}. KYC status is "${link.kycStatus ?? "unknown"}". Verify outstanding documentation and chase the client to complete identity verification.`,
             priority: "high",
             dueAt: new Date(now.getTime() + SEVEN_DAYS_MS),
@@ -269,7 +254,6 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
           clientUserId: link.clientUserId,
           taskType: "fee_consent_renewal",
           title: `Renew fee consent for ${clientLabel}`,
-          // See KYC trigger above for why notes echo the label. Task #283.
           notes: `Client: ${clientLabel}. Fee consent #${consent.id} expires in ${daysToExpiry} day(s). Initiate the renewal conversation and re-sign before the expiry to avoid a fee-collection gap.`,
           priority: daysToExpiry <= 7 ? "urgent" : "high",
           dueAt: consent.consentExpiryDate,
@@ -287,7 +271,6 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
           clientUserId: link.clientUserId,
           taskType: "portfolio_review",
           title: `Quarterly portfolio review for ${clientLabel}`,
-          // See KYC trigger above for why notes echo the label. Task #283.
           notes: `Client: ${clientLabel}. It has been at least 90 days since the last portfolio review. Schedule a review meeting and document the discussion.`,
           priority: "normal",
           dueAt: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000),
