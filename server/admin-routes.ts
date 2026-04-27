@@ -2215,6 +2215,10 @@ export function registerAdminRoutes(app: Express): void {
       const qRaw = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const fromRaw = typeof req.query.from === "string" ? req.query.from.trim() : "";
       const toRaw = typeof req.query.to === "string" ? req.query.to.trim() : "";
+      const deliveryStatusRaw =
+        typeof req.query.deliveryStatus === "string"
+          ? req.query.deliveryStatus.trim()
+          : "";
       // Allow-list severity to the four supported values so a typo can never
       // reach the DB and a malicious client can never inject an arbitrary
       // value past the filter.
@@ -2224,6 +2228,16 @@ export function registerAdminRoutes(app: Express): void {
         severityRaw === "alert" ||
         severityRaw === "critical"
           ? severityRaw
+          : null;
+      // Task #175 — deliveryStatus filter mirrors the dashboard "delivery
+      // health" tile. Only the three rollup values defined on operator_alerts
+      // are accepted; anything else is silently dropped so a stale link or
+      // malformed querystring degrades to "no filter" instead of erroring.
+      const validDeliveryStatus =
+        deliveryStatusRaw === "delivered" ||
+        deliveryStatusRaw === "failed" ||
+        deliveryStatusRaw === "suppressed_duplicate"
+          ? deliveryStatusRaw
           : null;
       // Bound source length so we don't index a 1MB query string.
       const validSource = sourceRaw.length > 0 && sourceRaw.length <= 128 ? sourceRaw : null;
@@ -2265,6 +2279,9 @@ export function registerAdminRoutes(app: Express): void {
       const conditions: SQL[] = [];
       if (validSource) conditions.push(eq(operatorAlerts.source, validSource));
       if (validSeverity) conditions.push(eq(operatorAlerts.severity, validSeverity));
+      if (validDeliveryStatus) {
+        conditions.push(eq(operatorAlerts.deliveryStatus, validDeliveryStatus));
+      }
       if (fromDate) conditions.push(gte(operatorAlerts.createdAt, fromDate));
       if (toDate) conditions.push(lte(operatorAlerts.createdAt, toDate));
       // Task #143 — exclude alerts attributable to demo users so the admin
@@ -2356,20 +2373,38 @@ export function registerAdminRoutes(app: Express): void {
   app.get(
     "/api/admin/operator-alerts/summary",
     adminRoute(async () => {
-      const rows = await db
-        .select({
-          severity: operatorAlerts.severity,
-          last24h: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '24 hours')::int`,
-          last7d: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '7 days')::int`,
-        })
-        .from(operatorAlerts)
-        .where(sql`${operatorAlerts.createdAt} >= now() - interval '7 days'`)
-        .groupBy(operatorAlerts.severity);
+      // Run the severity breakdown and the delivery-health breakdown in
+      // parallel against a 7-day window. Both queries are tiny aggregates
+      // backed by `operator_alerts_created_at_idx`, so doing them as two
+      // round-trips is still cheaper than building one fragile UNION here.
+      const [severityRows, deliveryRows] = await Promise.all([
+        db
+          .select({
+            severity: operatorAlerts.severity,
+            last24h: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '24 hours')::int`,
+            last7d: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '7 days')::int`,
+          })
+          .from(operatorAlerts)
+          .where(sql`${operatorAlerts.createdAt} >= now() - interval '7 days'`)
+          .groupBy(operatorAlerts.severity),
+        // Task #175 — delivery rollup feeds the dashboard health card. We
+        // only need last hour + last 24h here; older rows are irrelevant
+        // for spotting an in-progress webhook outage.
+        db
+          .select({
+            deliveryStatus: operatorAlerts.deliveryStatus,
+            lastHour: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '1 hour')::int`,
+            last24h: sql<number>`count(*) filter (where ${operatorAlerts.createdAt} >= now() - interval '24 hours')::int`,
+          })
+          .from(operatorAlerts)
+          .where(sql`${operatorAlerts.createdAt} >= now() - interval '24 hours'`)
+          .groupBy(operatorAlerts.deliveryStatus),
+      ]);
 
       const empty = { info: 0, warning: 0, alert: 0, critical: 0 };
       const last24h = { ...empty };
       const last7d = { ...empty };
-      for (const row of rows) {
+      for (const row of severityRows) {
         const sev = row.severity as keyof typeof empty;
         if (sev in empty) {
           last24h[sev] = Number(row.last24h ?? 0);
@@ -2377,9 +2412,28 @@ export function registerAdminRoutes(app: Express): void {
         }
       }
 
+      // Task #175 — keep the shape stable: every known delivery status is
+      // always present even when its count is zero so the UI can render a
+      // fixed-shape grid (and the red "delivery failures" banner can rely
+      // on `failed` being a number, not undefined).
+      const emptyDelivery = { delivered: 0, failed: 0, suppressed_duplicate: 0 };
+      const deliveryLastHour = { ...emptyDelivery };
+      const deliveryLast24h = { ...emptyDelivery };
+      for (const row of deliveryRows) {
+        const status = row.deliveryStatus as keyof typeof emptyDelivery;
+        if (status in emptyDelivery) {
+          deliveryLastHour[status] = Number(row.lastHour ?? 0);
+          deliveryLast24h[status] = Number(row.last24h ?? 0);
+        }
+      }
+
       return {
         last24h,
         last7d,
+        deliveryHealth: {
+          lastHour: deliveryLastHour,
+          last24h: deliveryLast24h,
+        },
         generatedAt: new Date().toISOString(),
       };
     }),

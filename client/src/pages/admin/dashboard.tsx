@@ -12,6 +12,9 @@ import {
   Activity,
   Info,
   Database,
+  AlertTriangle,
+  CheckCircle2,
+  Layers,
 } from "lucide-react";
 import { Link } from "wouter";
 import WriteKillSwitchPanel from "@/components/admin/write-kill-switch-panel";
@@ -77,9 +80,21 @@ const DRILL_STALE_HOURS = 14 * 24;
 
 type Severity = "info" | "warning" | "alert" | "critical";
 
+// Task #175 — delivery rollup recorded by `notifyOperator`. Mirrors the
+// allow-list on the server. Kept inline so the dashboard query stays
+// self-describing.
+type DeliveryStatus = "delivered" | "failed" | "suppressed_duplicate";
+
 interface OperatorAlertsSummary {
   last24h: Record<Severity, number>;
   last7d: Record<Severity, number>;
+  // Optional so the dashboard still renders against an older server build
+  // that hasn't shipped the delivery rollup yet — the health card simply
+  // skips itself in that case.
+  deliveryHealth?: {
+    lastHour: Record<DeliveryStatus, number>;
+    last24h: Record<DeliveryStatus, number>;
+  };
   generatedAt: string;
 }
 
@@ -290,6 +305,12 @@ export default function AdminDashboard() {
           )}
         </CardContent>
       </Card>
+
+      {/* Task #175 — Alert delivery health */}
+      <AlertDeliveryHealthCard
+        isLoading={alertsLoading}
+        deliveryHealth={alertsSummary?.deliveryHealth ?? null}
+      />
 
       {/* Key business metrics — Task #144 */}
       <Card>
@@ -777,4 +798,184 @@ function formatBytes(bytes: number | null): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+}
+
+// ---------------------------------------------------------------------------
+// Alert delivery health card (Task #175)
+// ---------------------------------------------------------------------------
+// The operator-alerts dispatcher tags every row with a delivery rollup
+// (delivered / failed / suppressed_duplicate). This card surfaces those
+// counts for the last hour and the last 24h so an operator landing on the
+// dashboard can spot a webhook outage at a glance — without having to open
+// the full alerts page and skim per-row outcomes.
+//
+// Layout:
+//   * Top: a red "delivery failures in the last hour" banner whenever
+//     `failed > 0` in the most recent hour. The banner deep-links into
+//     `/admin/operator-alerts?deliveryStatus=failed&window=1h` so a click
+//     lands the operator on exactly the failing rows.
+//   * Body: a 3-column grid (delivered / failed / coalesced) showing the
+//     last-hour count prominently, with the last-24h count below as
+//     context. Each tile deep-links to the same filtered alerts view with
+//     `window=24h` for the 24h click target.
+//
+// The whole card is intentionally optional — when the server hasn't
+// shipped the deliveryHealth payload yet, we simply don't render it
+// rather than show a half-broken UI.
+// ---------------------------------------------------------------------------
+const DELIVERY_TILES: Array<{
+  status: DeliveryStatus;
+  label: string;
+  description: string;
+  toneOk: string;
+  icon: React.ReactNode;
+}> = [
+  {
+    status: "delivered",
+    label: "Delivered",
+    description: "alerts that reached at least one channel",
+    toneOk: "bg-emerald-50 text-emerald-900 border-emerald-200 hover:border-emerald-400",
+    icon: <CheckCircle2 className="h-4 w-4 text-emerald-700" />,
+  },
+  {
+    status: "failed",
+    label: "Failed delivery",
+    description: "every channel attempt failed",
+    toneOk: "bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-400",
+    icon: <AlertTriangle className="h-4 w-4 text-red-700" />,
+  },
+  {
+    status: "suppressed_duplicate",
+    label: "Coalesced",
+    description: "absorbed by an in-window dedupe key",
+    toneOk: "bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-400",
+    icon: <Layers className="h-4 w-4 text-slate-600" />,
+  },
+];
+
+function AlertDeliveryHealthCard({
+  isLoading,
+  deliveryHealth,
+}: {
+  isLoading: boolean;
+  deliveryHealth: {
+    lastHour: Record<DeliveryStatus, number>;
+    last24h: Record<DeliveryStatus, number>;
+  } | null;
+}) {
+  // Backward-compat: an older server build that hasn't shipped the
+  // deliveryHealth payload returns no `deliveryHealth` field. In that
+  // case we hide the card entirely (rather than showing a permanent
+  // skeleton) so the dashboard doesn't carry a half-broken tile.
+  if (!isLoading && deliveryHealth === null) {
+    return null;
+  }
+  const failedLastHour = deliveryHealth?.lastHour.failed ?? 0;
+  const totalLastHour =
+    (deliveryHealth?.lastHour.delivered ?? 0) +
+    (deliveryHealth?.lastHour.failed ?? 0) +
+    (deliveryHealth?.lastHour.suppressed_duplicate ?? 0);
+  const totalLast24h =
+    (deliveryHealth?.last24h.delivered ?? 0) +
+    (deliveryHealth?.last24h.failed ?? 0) +
+    (deliveryHealth?.last24h.suppressed_duplicate ?? 0);
+
+  return (
+    <Card data-testid="card-alert-delivery-health">
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Activity className="h-4 w-4 text-violet-600" />
+          Alert delivery health
+        </CardTitle>
+        <Link href="/admin/operator-alerts?window=1h">
+          <a
+            className="text-xs text-violet-700 hover:underline"
+            data-testid="link-delivery-health-last-hour"
+          >
+            Open last hour →
+          </a>
+        </Link>
+      </CardHeader>
+      <CardContent>
+        {isLoading || deliveryHealth === null ? (
+          <Skeleton className="h-24 w-full" />
+        ) : (
+          <div className="space-y-3">
+            {failedLastHour > 0 && (
+              <Link href="/admin/operator-alerts?deliveryStatus=failed&window=1h">
+                <a
+                  className="block rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900 hover:bg-red-100"
+                  data-testid="banner-delivery-failures"
+                >
+                  <div className="flex items-center gap-2 font-medium">
+                    <AlertTriangle className="h-4 w-4" />
+                    {failedLastHour === 1
+                      ? "1 alert failed delivery in the last hour"
+                      : `${failedLastHour} alerts failed delivery in the last hour`}
+                  </div>
+                  <div className="text-xs mt-0.5 opacity-80">
+                    Click to open the failed rows — likely a webhook or
+                    transport issue.
+                  </div>
+                </a>
+              </Link>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {DELIVERY_TILES.map(({ status, label, description, toneOk, icon }) => {
+                const lastHour = deliveryHealth.lastHour[status] ?? 0;
+                const last24h = deliveryHealth.last24h[status] ?? 0;
+                // Only the "failed" tile escalates to red, and only when
+                // its last-hour count is non-zero. Everything else stays
+                // neutral — a high "delivered" count is good news, not a
+                // warning.
+                const tone =
+                  status === "failed" && lastHour > 0
+                    ? "bg-red-50 text-red-900 border-red-300 hover:border-red-500"
+                    : toneOk;
+                return (
+                  <Link
+                    key={status}
+                    href={`/admin/operator-alerts?deliveryStatus=${status}&window=24h`}
+                  >
+                    <a
+                      className={`block border rounded-md p-3 transition-colors cursor-pointer ${tone}`}
+                      data-testid={`tile-delivery-${status}`}
+                    >
+                      <div className="flex items-center gap-2 text-xs uppercase tracking-wide font-medium">
+                        {icon}
+                        {label}
+                      </div>
+                      <div className="mt-1 flex items-baseline gap-2">
+                        <span
+                          className="text-2xl font-semibold"
+                          data-testid={`text-delivery-${status}-1h`}
+                        >
+                          {lastHour}
+                        </span>
+                        <span className="text-xs opacity-70">last hour</span>
+                      </div>
+                      <div
+                        className="text-xs mt-1 opacity-80"
+                        data-testid={`text-delivery-${status}-24h`}
+                      >
+                        {last24h} in last 24h
+                      </div>
+                      <div className="text-xs mt-1 opacity-60">{description}</div>
+                    </a>
+                  </Link>
+                );
+              })}
+            </div>
+
+            <p className="text-xs text-slate-400" data-testid="text-delivery-health-totals">
+              {totalLastHour} alert{totalLastHour === 1 ? "" : "s"} dispatched
+              in the last hour · {totalLast24h} in the last 24h. Click any
+              tile to open the alerts page filtered to that delivery status.
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }

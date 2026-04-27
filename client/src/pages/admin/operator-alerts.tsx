@@ -306,6 +306,22 @@ function normalizeSeverity(raw: string | null): string {
   return SEVERITY_ANY;
 }
 
+// Task #175 — same allow-list pattern for the deliveryStatus deep-link
+// filter. The dashboard health card links here with
+// `?deliveryStatus=failed&window=1h` (etc.) so a reader can jump straight
+// to the failed rows that triggered the red banner. Anything off the
+// allow-list resolves to "no filter" so a stale link never errors.
+function normalizeDeliveryStatus(raw: string | null): string {
+  if (
+    raw === "delivered" ||
+    raw === "failed" ||
+    raw === "suppressed_duplicate"
+  ) {
+    return raw;
+  }
+  return "";
+}
+
 // Task #69 — datetime-local inputs need `YYYY-MM-DDTHH:mm` in *local* time.
 // Convert the server-side ISO/UTC value back to the user's local clock so
 // the picker shows what they typed; convert local input back to ISO when
@@ -330,6 +346,9 @@ function fromLocalInput(value: string): string {
 // links here with the window the admin clicked, so they land on a view
 // already scoped to the same period.
 function windowToFrom(raw: string | null): string {
+  // Task #175 — `1h` shortcut added so the dashboard delivery health card
+  // can deep-link straight to the rows from the most recent hour.
+  if (raw === "1h") return toLocalInput(new Date(Date.now() - 60 * 60 * 1000));
   if (raw === "24h") return toLocalInput(new Date(Date.now() - 24 * 60 * 60 * 1000));
   if (raw === "7d") return toLocalInput(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
   return "";
@@ -386,6 +405,10 @@ export default function AdminOperatorAlerts() {
   const initialSeverity = normalizeSeverity(initialParams.get("severity"));
   const initialSource = (initialParams.get("source") ?? "").slice(0, 128);
   const initialQ = (initialParams.get("q") ?? "").slice(0, 200);
+  // Task #175 — deep-link from the dashboard delivery health card.
+  const initialDeliveryStatus = normalizeDeliveryStatus(
+    initialParams.get("deliveryStatus"),
+  );
   // `from`/`to` win over the `window` shortcut so a deep link with explicit
   // bounds is never silently overridden by a stale shortcut.
   const initialFrom =
@@ -402,6 +425,13 @@ export default function AdminOperatorAlerts() {
   const [appliedSearch, setAppliedSearch] = useState(initialQ);
   const [appliedFrom, setAppliedFrom] = useState(initialFrom);
   const [appliedTo, setAppliedTo] = useState(initialTo);
+  // Task #175 — applied-only state. The deliveryStatus filter is currently
+  // surfaced exclusively via the dashboard deep-link, so there is no input
+  // box in the page UI; the only writer is the URL on first render. Clear
+  // it via the "Reset" button alongside the other filters.
+  const [appliedDeliveryStatus, setAppliedDeliveryStatus] = useState<string>(
+    initialDeliveryStatus,
+  );
   const [page, setPage] = useState(1);
   const [selectedAlert, setSelectedAlert] = useState<OperatorAlertRow | null>(null);
   const [ackNote, setAckNote] = useState("");
@@ -415,6 +445,7 @@ export default function AdminOperatorAlerts() {
       q: appliedSearch,
       from: appliedFrom,
       to: appliedTo,
+      deliveryStatus: appliedDeliveryStatus,
       page,
     },
   ];
@@ -437,6 +468,7 @@ export default function AdminOperatorAlerts() {
       if (appliedSource.trim()) params.set("source", appliedSource.trim());
       if (appliedSeverity !== SEVERITY_ANY) params.set("severity", appliedSeverity);
       if (appliedSearch.trim()) params.set("q", appliedSearch.trim());
+      if (appliedDeliveryStatus) params.set("deliveryStatus", appliedDeliveryStatus);
       const fromIso = fromLocalInput(appliedFrom);
       const toIso = fromLocalInput(appliedTo);
       if (fromIso) params.set("from", fromIso);
@@ -567,6 +599,11 @@ export default function AdminOperatorAlerts() {
     setAppliedSearch("");
     setAppliedFrom("");
     setAppliedTo("");
+    // Task #175 — clear the deep-link delivery status filter too so the
+    // user actually sees the full feed when they hit Reset; otherwise an
+    // admin who arrived from the dashboard banner would be stuck with the
+    // failed-only view after clearing everything else.
+    setAppliedDeliveryStatus("");
     setPage(1);
   }
 
@@ -830,6 +867,42 @@ export default function AdminOperatorAlerts() {
               )}
             </div>
           </div>
+          {appliedDeliveryStatus && (
+            // Task #175 — visible chip so the operator can see the deep-link
+            // delivery filter is in effect (and clear it without resetting
+            // every other filter they've adjusted since arriving).
+            <div
+              className="mt-3 flex items-center gap-2 text-xs"
+              data-testid="banner-delivery-status-filter"
+            >
+              <span className="text-slate-500">Filtered by delivery status:</span>
+              <Badge
+                variant="outline"
+                className={
+                  appliedDeliveryStatus === "failed"
+                    ? "bg-red-50 text-red-800 border-red-200"
+                    : appliedDeliveryStatus === "suppressed_duplicate"
+                      ? "bg-slate-100 text-slate-700 border-slate-300"
+                      : "bg-emerald-50 text-emerald-800 border-emerald-200"
+                }
+                data-testid="badge-delivery-status-filter"
+              >
+                {appliedDeliveryStatus}
+              </Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setAppliedDeliveryStatus("");
+                  setPage(1);
+                }}
+                data-testid="button-clear-delivery-status"
+              >
+                <X className="h-3 w-3 mr-1" />
+                Clear
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
