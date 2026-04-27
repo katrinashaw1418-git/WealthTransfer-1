@@ -195,6 +195,18 @@ async function cleanupTestUser(userId: number): Promise<void> {
   await db
     .delete(walletLedgerReconciliations)
     .where(eq(walletLedgerReconciliations.userId, userId));
+
+  // Task #186 — every settlement path in this script writes through
+  // `refreshWalletCacheBalance`, which leaves a non-zero `wallets.balance`
+  // row for the test user. We've just dropped all of that user's ledger
+  // entries above, so the cache now disagrees with an empty ledger. Re-run
+  // the same cache-refresh primitive: it recomputes the ledger sum (now 0)
+  // and writes it back into the cache so the next
+  // `runWalletLedgerReconciliation()` does not flag a wallet-vs-ledger
+  // drift alert against this user. Returns null (no-op) if the wallet
+  // row doesn't exist yet, which is fine for first-run start-of-test
+  // cleanup before `ensureFreshTestWallet` has created it.
+  await refreshWalletCacheBalance(db, userId, TEST_CURRENCY);
 }
 
 async function cleanupAdviserTestUser(adviserUserId: number): Promise<void> {
