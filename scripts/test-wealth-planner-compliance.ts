@@ -674,13 +674,17 @@ async function test5_crudWritesAuditRows(opts: {
   clientUserId: number;
   adviceRecordId: number;
 }): Promise<void> {
-  // Snapshot audit row count for this adviser BEFORE the calls so we don't
-  // miscount unrelated history.
+  // Snapshot the highest audit row id for this adviser BEFORE the calls so
+  // we count strictly the audit rows produced by THIS test, immune to
+  // accumulation from prior test-runs (audit_logs is regulatory append-only
+  // — rows from previous invocations of this test stay in the table for
+  // the same adviser userId, and slice() over an unordered SELECT becomes
+  // unreliable as the table grows).
   const auditBefore = await db
-    .select({ id: auditLogs.id, action: auditLogs.action })
+    .select({ id: auditLogs.id })
     .from(auditLogs)
     .where(eq(auditLogs.userId, opts.adviserUserId));
-  const beforeCount = auditBefore.length;
+  const maxBeforeId = auditBefore.reduce((m, r) => (r.id > m ? r.id : m), 0);
 
   const token = signToken({
     userId: opts.adviserUserId,
@@ -738,10 +742,10 @@ async function test5_crudWritesAuditRows(opts: {
   await new Promise((resolve) => setTimeout(resolve, 100));
 
   const auditAfter = await db
-    .select({ action: auditLogs.action })
+    .select({ id: auditLogs.id, action: auditLogs.action })
     .from(auditLogs)
     .where(eq(auditLogs.userId, opts.adviserUserId));
-  const newRows = auditAfter.slice(beforeCount);
+  const newRows = auditAfter.filter((r) => r.id > maxBeforeId);
   const newActions = new Set(newRows.map((r) => r.action));
 
   const requiredCreates = ["client_objective.create", "client_document.create"];
@@ -2134,17 +2138,19 @@ async function main(): Promise<void> {
     adviceRecordId,
   });
 
-  // ---- Post-suite invariant: every planner fixture advice record (i.e.
-  // every adviceRecords row owned by a __planner_* client, regardless of
-  // whether the row was created by this run or a prior aborted one) MUST
-  // end at exactly status='issued'. This is the canonical terminal state —
-  // tests #10 (transition), #11 (review_pending lock) and #13
-  // (blocked-write audit) all flip status during their probes and
-  // normalize back to 'issued' in their finally blocks. Any other status
-  // here means a future edit dropped the restore — fail hard with the
-  // offending IDs/statuses/owners. Sweep is a username-prefix join on
-  // users so it covers every __planner_* client, not just the two active
-  // fixture client IDs in this run.
+  // ---- Post-suite invariant: every planner-suite fixture advice record
+  // (every adviceRecords row owned by a __wpc_test_* client — see the
+  // CLIENT_USERNAME/OTHER_CLIENT_USERNAME constants at the top of this
+  // file, both of which start with the literal "__wpc_test_") MUST end at
+  // exactly status='issued'. This is the canonical terminal state — tests
+  // #10 (transition), #11 (review_pending lock) and #13 (blocked-write
+  // audit) all flip status during their probes and normalize back to
+  // 'issued' in their finally blocks. Any other status here means a future
+  // edit dropped the restore — fail hard with the offending
+  // IDs/statuses/owners. Sweep is a username-prefix join on users so it
+  // covers every __wpc_test_* client (including any rows left over from a
+  // prior aborted run that resurrected the same fixture username), not
+  // only the two client IDs currently in memory for this run.
   const planneradviceRows = await db
     .select({
       id: adviceRecords.id,
@@ -2153,7 +2159,7 @@ async function main(): Promise<void> {
     })
     .from(adviceRecords)
     .innerJoin(users, eq(adviceRecords.clientId, users.id))
-    .where(like(users.username, "__planner_%"));
+    .where(like(users.username, "__wpc_test_%"));
   const offending = planneradviceRows.filter((r) => r.status !== "issued");
   if (offending.length > 0) {
     console.error(
