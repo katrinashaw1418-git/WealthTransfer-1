@@ -74,7 +74,19 @@ const STARTED_AT = new Date();
 // "reconciliation: …" / "existing: …" gates, but the verdict comparison
 // has to know the new total or every clean run reports RED with a stale
 // "expected=10" footnote.
-const EXPECTED_PASS_COUNT = 14;
+//
+// Bumped from 14 → 19 after task #193 (CI ledger-leak gate) wired five
+// new top-level PASS lines into the strict reporter:
+//   - "ledger-leak: test-transaction-safety"     (1)
+//   - "ledger-leak: test-fee-deduction-gate-b"   (2)
+//   - "ledger-leak: test-wealth-planner-compliance" (3)
+//   - "ledger-leak: test-task-35-suppression"    (4)
+//   - "ledger-leak: ci-gate (other test-*.ts)"   (5)
+// These are roll-ups, not invariant gates per se, but pre-launch-safety
+// emits them with `PASS <name> — <details>` shape and the recheck's
+// summary parser counts them. This is the manual-review action the
+// recheck was designed to force whenever the gate count changes.
+const EXPECTED_PASS_COUNT = 19;
 
 // The canonical roll-up gate names emitted by pre-launch-safety.ts in
 // its final reporter block. The four spawned sub-scripts ALSO print their
@@ -87,6 +99,10 @@ const CANONICAL_GATE_NAME_PREFIXES = [
   "existing:",
   "lifecycle:",
   "reconciliation:",
+  // Task #193 — pre-launch-safety wraps each Stage-1 sub-script in a
+  // per-script ledger-leak gate AND emits a final ci-gate roll-up. All
+  // five emit canonical `PASS ledger-leak: <name> — <details>` lines.
+  "ledger-leak:",
 ] as const;
 const EXPECTED_CANONICAL_GATE_NAMES = new Set<string>([
   "existing: test-transaction-safety",
@@ -105,6 +121,14 @@ const EXPECTED_CANONICAL_GATE_NAMES = new Set<string>([
   "reconciliation: wallet-ledger clean-room",
   "reconciliation: ledger-vs-custodian clean-room",
   "reconciliation: posting-receipt invariant clean-room",
+  // Task #193 — five new ledger-leak roll-up gates from the per-script
+  // wraps + final ci-gate. Listed explicitly so the membership check
+  // succeeds even if a future change removes the prefix shortcut.
+  "ledger-leak: test-transaction-safety",
+  "ledger-leak: test-fee-deduction-gate-b",
+  "ledger-leak: test-wealth-planner-compliance",
+  "ledger-leak: test-task-35-suppression",
+  "ledger-leak: ci-gate (other test-*.ts)",
 ]);
 
 function isCanonicalGateName(name: string): boolean {

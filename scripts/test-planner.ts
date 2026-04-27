@@ -314,11 +314,15 @@ async function cleanup(): Promise<void> {
       .delete(adviceRecords)
       .where(inArray(adviceRecords.id, created.adviceRecordIds));
   }
-  if (created.auditIds.length > 0) {
-    await db
-      .delete(auditLogs)
-      .where(inArray(auditLogs.id, created.auditIds));
-  }
+  // INTENTIONALLY NOT deleting created.auditIds: audit_logs is append-only
+  // post-Task-#149 (a DB trigger throws code 23001 on DELETE). The audit
+  // entries are tied to deterministic __planner_* fixture users which the
+  // cleanup block below also leaves in place, so they accumulate alongside
+  // their owners — same intentional pattern, no orphaning, no leak risk
+  // (the entries are NOT against the platform user, so the ledger-leak
+  // gate is unaffected). Tracked entry ids stay in `created.auditIds` for
+  // observability, but no DELETE is attempted.
+  //
   // Leave adviser_clients linkage rows AND user rows in place between runs
   // so the next invocation reuses them — the username constants make that
   // safe and idempotent.
