@@ -1265,6 +1265,27 @@ export const investmentInstructions = pgTable("investment_instructions", {
     () => executionAuthorisations.id,
   ),
 
+  // Adviser explicitly acknowledged that the instruction is being raised
+  // without a linked advice record. Persisted so the audit trail can later
+  // distinguish "not set yet" (legacy rows) from "deliberately none".
+  adviceRecordNotLinked: boolean("advice_record_not_linked").notNull().default(false),
+
+  // Free-text rationale captured at the time of instruction. Required by the
+  // form when the chosen product is high-risk; optional otherwise. Persisted
+  // verbatim — no parsing.
+  suitabilityBasis: text("suitability_basis"),
+
+  // Source product for "switch" actions. Required at the route layer when
+  // action === "switch"; null for buy / sell.
+  switchFromProductId: integer("switch_from_product_id").references(
+    () => investmentProducts.id,
+  ),
+
+  // Consent expiry — the moment a pending instruction stops being actionable.
+  // Set by the route layer (default 7 days from creation) so the adviser
+  // table can render a clear deadline.
+  expiresAt: timestamp("expires_at"),
+
   notes: text("notes"),
   rejectionReason: text("rejection_reason"),
 

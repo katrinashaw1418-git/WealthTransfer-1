@@ -51,6 +51,15 @@ import {
   isTestFixtureEmail,
   matchTestFixtureEmail,
 } from "./test-fixture-emails";
+import { isKnownProductCategory } from "@shared/product-categories";
+
+// -----------------------------------------------------------------------------
+// Default consent expiry for newly-raised investment instructions. After this
+// window elapses with no client action, downstream sweeps may transition the
+// row to "cancelled" — the column is set at creation so the adviser table can
+// always render a clear deadline.
+// -----------------------------------------------------------------------------
+const INSTRUCTION_CONSENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // -----------------------------------------------------------------------------
 // Test-fixture email filter — defence in depth for adviser surfaces.
@@ -690,11 +699,28 @@ export async function getAdviserClientAdviceRecords(
 // client from this endpoint — this is purely the menu they see.
 // -----------------------------------------------------------------------------
 export async function listAdviserProducts(): Promise<InvestmentProduct[]> {
-  return db
+  const rows = await db
     .select()
     .from(investmentProducts)
     .where(eq(investmentProducts.isActive, true))
     .orderBy(desc(investmentProducts.createdAt));
+
+  // Drop any product whose `category` is not in the canonical human-readable
+  // set defined in `@shared/product-categories`. Test/incomplete fixtures
+  // (e.g. legacy `InRange825` with category `x`) therefore never appear in
+  // adviser dropdowns and cannot be referenced from a new instruction.
+  const filtered: InvestmentProduct[] = [];
+  for (const row of rows) {
+    if (isKnownProductCategory(row.category)) {
+      filtered.push(row);
+    } else {
+      console.warn(
+        `[adviser-access] excluded product with unknown category from adviser shelf: ` +
+          `productId=${row.id} name="${row.name}" category="${row.category}"`,
+      );
+    }
+  }
+  return filtered;
 }
 
 // -----------------------------------------------------------------------------
@@ -823,6 +849,10 @@ export async function listAdviserInstructions(
       adviceRecordId: investmentInstructions.adviceRecordId,
       feeConsentId: investmentInstructions.feeConsentId,
       executionAuthorisationId: investmentInstructions.executionAuthorisationId,
+      adviceRecordNotLinked: investmentInstructions.adviceRecordNotLinked,
+      suitabilityBasis: investmentInstructions.suitabilityBasis,
+      switchFromProductId: investmentInstructions.switchFromProductId,
+      expiresAt: investmentInstructions.expiresAt,
       notes: investmentInstructions.notes,
       rejectionReason: investmentInstructions.rejectionReason,
       consentedAt: investmentInstructions.consentedAt,
@@ -863,7 +893,14 @@ export interface CreateAdviserInstructionInput {
   amount: string; // decimal as string
   notes?: string | null;
   adviceRecordId?: number | null;
+  // Required when adviceRecordId is null/undefined — the adviser must
+  // explicitly acknowledge that the instruction is being raised without
+  // a linked advice record. Defence-in-depth against the form silently
+  // omitting both fields.
+  adviceRecordNotLinked?: boolean;
   feeConsentId?: number | null;
+  suitabilityBasis?: string | null;
+  switchFromProductId?: number | null;
 }
 
 export async function createAdviserInstruction(
@@ -873,9 +910,37 @@ export async function createAdviserInstruction(
   // Defence in depth: assert link even though the route already requires it.
   await assertAdviserClientLink(adviserUserId, input.clientUserId);
 
-  // Validate the product is on the active AMAX shelf.
+  // Server-side enforcement of the test-fixture filter. Even though the
+  // adviser clients dropdown drops fixture rows, a hand-crafted POST could
+  // still reference one — reject it here unless the rendering adviser is
+  // itself a fixture (mirrors the read-side `filterFixtureClientRows`
+  // / `loadAdviserFixtureFilterContext` policy in this file).
+  const [clientRow] = await db
+    .select({ email: users.email })
+    .from(users)
+    .where(eq(users.id, input.clientUserId))
+    .limit(1);
+  if (clientRow && isTestFixtureEmail(clientRow.email)) {
+    if (!(await isAdviserAFixture(adviserUserId))) {
+      logFixtureFiltered(adviserUserId, input.clientUserId, clientRow.email);
+      throw Object.assign(
+        new Error("Client is not eligible for adviser instructions"),
+        { status: 400 },
+      );
+    }
+  }
+
+  // Validate the product is on the active AMAX shelf AND has a known
+  // human-readable category. This mirrors the listAdviserProducts filter so
+  // a payload referencing an excluded test/fixture product is rejected at
+  // the create-write boundary, not just hidden from the dropdown.
   const [product] = await db
-    .select({ id: investmentProducts.id, isActive: investmentProducts.isActive })
+    .select({
+      id: investmentProducts.id,
+      isActive: investmentProducts.isActive,
+      category: investmentProducts.category,
+      riskProfile: investmentProducts.riskProfile,
+    })
     .from(investmentProducts)
     .where(eq(investmentProducts.id, input.productId))
     .limit(1);
@@ -885,8 +950,17 @@ export async function createAdviserInstruction(
   if (!product.isActive) {
     throw Object.assign(new Error("Product is not active and cannot be referenced"), { status: 400 });
   }
+  if (!isKnownProductCategory(product.category)) {
+    throw Object.assign(
+      new Error("Product is not on the adviser shelf and cannot be referenced"),
+      { status: 400 },
+    );
+  }
 
-  // If adviceRecordId provided, it must belong to the same client.
+  // Advice-record gate: caller must EITHER reference an advice record that
+  // belongs to this client OR explicitly opt out via adviceRecordNotLinked.
+  // Silently omitting both is rejected so a future form bug cannot drop the
+  // compliance acknowledgement on the floor.
   if (input.adviceRecordId != null) {
     const [ar] = await db
       .select({ id: adviceRecords.id, clientId: adviceRecords.clientId })
@@ -896,6 +970,67 @@ export async function createAdviserInstruction(
     if (!ar || ar.clientId !== input.clientUserId) {
       throw Object.assign(new Error("Advice record not valid for this client"), { status: 400 });
     }
+    if (input.adviceRecordNotLinked === true) {
+      throw Object.assign(
+        new Error("Cannot both link an advice record and mark it as 'no linked advice record'"),
+        { status: 400 },
+      );
+    }
+  } else if (input.adviceRecordNotLinked !== true) {
+    throw Object.assign(
+      new Error(
+        "Either choose a linked advice record or explicitly select 'no linked advice record'",
+      ),
+      { status: 400 },
+    );
+  }
+
+  // Suitability basis is required when the product is high-risk.
+  const suitabilityBasis = (input.suitabilityBasis ?? "").trim();
+  if (product.riskProfile === "high" && suitabilityBasis.length === 0) {
+    throw Object.assign(
+      new Error("Suitability basis is required for high-risk products"),
+      { status: 400 },
+    );
+  }
+
+  // Switch action requires a source product (different from the destination)
+  // that is itself on the active, known-category shelf.
+  let switchFromProductId: number | null = null;
+  if (input.action === "switch") {
+    if (input.switchFromProductId == null) {
+      throw Object.assign(
+        new Error("Switch instructions require a 'switch from' source product"),
+        { status: 400 },
+      );
+    }
+    if (input.switchFromProductId === input.productId) {
+      throw Object.assign(
+        new Error("Switch source and destination products must differ"),
+        { status: 400 },
+      );
+    }
+    const [src] = await db
+      .select({
+        id: investmentProducts.id,
+        isActive: investmentProducts.isActive,
+        category: investmentProducts.category,
+      })
+      .from(investmentProducts)
+      .where(eq(investmentProducts.id, input.switchFromProductId))
+      .limit(1);
+    if (!src || !src.isActive || !isKnownProductCategory(src.category)) {
+      throw Object.assign(
+        new Error("Switch source product is not on the adviser shelf"),
+        { status: 400 },
+      );
+    }
+    switchFromProductId = src.id;
+  } else if (input.switchFromProductId != null) {
+    throw Object.assign(
+      new Error("'switch from' product is only valid when action is 'switch'"),
+      { status: 400 },
+    );
   }
 
   // If feeConsentId provided, it must belong to the same client and be active.
@@ -913,6 +1048,8 @@ export async function createAdviserInstruction(
     }
   }
 
+  const expiresAt = new Date(Date.now() + INSTRUCTION_CONSENT_TTL_MS);
+
   const [row] = await db
     .insert(investmentInstructions)
     .values({
@@ -924,7 +1061,11 @@ export async function createAdviserInstruction(
       // Hard-coded — adviser cannot set status; everything starts pending.
       status: "pending_consent",
       adviceRecordId: input.adviceRecordId ?? null,
+      adviceRecordNotLinked: input.adviceRecordId == null,
       feeConsentId: input.feeConsentId ?? null,
+      suitabilityBasis: suitabilityBasis.length > 0 ? suitabilityBasis : null,
+      switchFromProductId,
+      expiresAt,
       notes: input.notes ?? null,
     })
     .returning();
@@ -966,6 +1107,10 @@ export async function listClientPendingInstructions(
       adviceRecordId: investmentInstructions.adviceRecordId,
       feeConsentId: investmentInstructions.feeConsentId,
       executionAuthorisationId: investmentInstructions.executionAuthorisationId,
+      adviceRecordNotLinked: investmentInstructions.adviceRecordNotLinked,
+      suitabilityBasis: investmentInstructions.suitabilityBasis,
+      switchFromProductId: investmentInstructions.switchFromProductId,
+      expiresAt: investmentInstructions.expiresAt,
       notes: investmentInstructions.notes,
       rejectionReason: investmentInstructions.rejectionReason,
       consentedAt: investmentInstructions.consentedAt,

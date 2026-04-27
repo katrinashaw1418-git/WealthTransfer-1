@@ -202,19 +202,41 @@ const createReportSchema = insertReportRequestSchema
 
 const INSTRUCTION_ACTIONS = ["buy", "sell", "switch"] as const;
 
-const createInstructionSchema = z.object({
-  clientUserId: z.number().int().positive(),
-  productId: z.number().int().positive(),
-  action: z.enum(INSTRUCTION_ACTIONS),
-  // Decimal AUD amount as string (preserves precision). Must be > 0.
-  amount: z
-    .string()
-    .regex(/^\d+(\.\d{1,2})?$/, "amount must be a non-negative decimal with up to 2 dp")
-    .refine((v) => Number(v) > 0, "amount must be greater than 0"),
-  notes: z.string().max(2000).optional().nullable(),
-  adviceRecordId: z.number().int().positive().optional().nullable(),
-  feeConsentId: z.number().int().positive().optional().nullable(),
-});
+const createInstructionSchema = z
+  .object({
+    clientUserId: z.number().int().positive(),
+    productId: z.number().int().positive(),
+    action: z.enum(INSTRUCTION_ACTIONS),
+    // Decimal AUD amount as string (preserves precision). Must be > 0.
+    amount: z
+      .string()
+      .regex(/^\d+(\.\d{1,2})?$/, "amount must be a non-negative decimal with up to 2 dp")
+      .refine((v) => Number(v) > 0, "amount must be greater than 0"),
+    notes: z.string().max(2000).optional().nullable(),
+    adviceRecordId: z.number().int().positive().optional().nullable(),
+    // Adviser must explicitly opt out of linking an advice record when no
+    // adviceRecordId is supplied. The service layer enforces the same rule;
+    // checking here too keeps the 400 message clean.
+    adviceRecordNotLinked: z.boolean().optional(),
+    feeConsentId: z.number().int().positive().optional().nullable(),
+    suitabilityBasis: z.string().max(4000).optional().nullable(),
+    switchFromProductId: z.number().int().positive().optional().nullable(),
+  })
+  .refine(
+    (v) => v.adviceRecordId != null || v.adviceRecordNotLinked === true,
+    {
+      message:
+        "Either choose a linked advice record or explicitly select 'no linked advice record'",
+      path: ["adviceRecordId"],
+    },
+  )
+  .refine(
+    (v) => v.action !== "switch" || (v.switchFromProductId != null && v.switchFromProductId !== v.productId),
+    {
+      message: "Switch instructions require a 'switch from' source product different from the destination",
+      path: ["switchFromProductId"],
+    },
+  );
 
 // ---------------------------------------------------------------------------
 // Route registration
@@ -416,6 +438,22 @@ export function registerAdviserRoutes(app: Express): void {
   );
 
   // -------------------------------------------------------------------------
+  // GET /api/adviser/clients/:id/advice-records — light advice-record list
+  // used by the New Investment Instruction form to populate the "Linked
+  // advice record" dropdown without re-fetching the full client detail.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/clients/:id/advice-records",
+    adviserRoute(async (req, auth) => {
+      const clientId = parseInt(req.params.id, 10);
+      if (!Number.isFinite(clientId)) {
+        throw Object.assign(new Error("Invalid client id"), { status: 400 });
+      }
+      return getAdviserClientAdviceRecords(auth.userId, clientId);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
   // SESSION 10B — Investment Instructions
   // -------------------------------------------------------------------------
   app.get(
@@ -449,6 +487,10 @@ export function registerAdviserRoutes(app: Express): void {
           productId: instruction.productId,
           action: instruction.action,
           amount: instruction.amount,
+          adviceRecordId: instruction.adviceRecordId,
+          adviceRecordNotLinked: instruction.adviceRecordNotLinked,
+          suitabilityBasisRecorded: instruction.suitabilityBasis != null,
+          switchFromProductId: instruction.switchFromProductId,
         },
         (req as Request).ip || null,
       );
