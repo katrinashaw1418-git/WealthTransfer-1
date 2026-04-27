@@ -28,9 +28,21 @@ export default function AiAdvisory() {
     queryKey: ["/api/ai-recommendations"],
   });
 
-  const insightCount = (recommendations as any[])?.length || 3;
-  const portfolioHealth = realMetrics?.diversificationScore ? Math.round(realMetrics.diversificationScore) : 71;
-  const cagr = realMetrics?.cagr != null ? realMetrics.cagr : 7.2;
+  // Show explicit "no data" / "—" states rather than synthetic-looking numeric
+  // fallbacks. A regulator or a client must be able to tell at a glance whether
+  // a number on this page came from their real data or from a developer's
+  // placeholder. Loading is rendered as "—" while the queries resolve.
+  const insightCount: number | null = recsLoading
+    ? null
+    : Array.isArray(recommendations) ? (recommendations as any[]).length : 0;
+  const portfolioHealth: number | null = metricsLoading
+    ? null
+    : (realMetrics?.diversificationScore != null
+        ? Math.round(realMetrics.diversificationScore)
+        : null);
+  const cagr: number | null = metricsLoading
+    ? null
+    : (realMetrics?.cagr != null ? realMetrics.cagr : null);
 
   return (
     <div className="p-6 space-y-6">
@@ -50,24 +62,48 @@ export default function AiAdvisory() {
         <Card>
           <CardContent className="p-5">
             <p className="text-xs font-medium text-gray-500 uppercase">PORTFOLIO HEALTH</p>
-            <p className="text-2xl font-bold">{metricsLoading ? "—" : portfolioHealth} / 100</p>
-            <p className="text-sm text-gray-500">HHI diversification score</p>
+            <p className="text-2xl font-bold" data-testid="text-portfolio-health">
+              {portfolioHealth == null ? "—" : `${portfolioHealth} / 100`}
+            </p>
+            <p className="text-sm text-gray-500">
+              {portfolioHealth == null ? "No data yet" : "HHI diversification score"}
+            </p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
             <p className="text-xs font-medium text-gray-500 uppercase">REALISED CAGR</p>
-            <p className={`text-2xl font-bold ${cagr >= 0 ? "text-green-600" : "text-red-600"}`}>
-              {cagr >= 0 ? "+" : ""}{cagr.toFixed(1)}%
-            </p>
-            <p className="text-sm text-gray-500">From transaction history</p>
+            {cagr == null ? (
+              <>
+                <p className="text-2xl font-bold text-gray-400" data-testid="text-cagr">—</p>
+                <p className="text-sm text-gray-500">No transaction history yet</p>
+              </>
+            ) : (
+              <>
+                <p
+                  className={`text-2xl font-bold ${cagr >= 0 ? "text-green-600" : "text-red-600"}`}
+                  data-testid="text-cagr"
+                >
+                  {cagr >= 0 ? "+" : ""}{cagr.toFixed(1)}%
+                </p>
+                <p className="text-sm text-gray-500">From transaction history</p>
+              </>
+            )}
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
             <p className="text-xs font-medium text-gray-500 uppercase">INSIGHTS</p>
-            <p className="text-2xl font-bold">{insightCount}</p>
-            <p className="text-sm text-gray-500">General information only</p>
+            <p className="text-2xl font-bold" data-testid="text-insight-count">
+              {insightCount == null ? "—" : insightCount}
+            </p>
+            <p className="text-sm text-gray-500">
+              {insightCount == null
+                ? "Loading…"
+                : insightCount === 0
+                  ? "No insights yet"
+                  : "General information only"}
+            </p>
           </CardContent>
         </Card>
       </div>

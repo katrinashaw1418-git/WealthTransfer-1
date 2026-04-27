@@ -50,6 +50,11 @@ import {
   mapLedgerUnbalancedToHttpResponse,
 } from "./services/ledger";
 import { MATCH_EPSILON } from "./services/reconciliation";
+import {
+  DEFAULT_REBALANCING_BENCHMARK,
+  computeRebalancingGap,
+  resolveBenchmarkForRiskTolerance,
+} from "./config/rebalancing-benchmark";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -2244,19 +2249,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? +(weightedInvReturn / totalInvested * 100).toFixed(2)
         : null;
 
-      // Rebalancing gap — one-sided turnover from a 25/25/25/25 equal-weight benchmark [0, 50%].
-      // ILLUSTRATIVE math metric only — NOT a personal target. A personalised target must be set
-      // by an adviser in a Statement of Advice. Surfaced alongside `rebalancingBenchmarkType` so
-      // callers can present it honestly to the user.
-      const rebalancingGap = 0.5 * (
-        Math.abs(alloc.fiat       - 0.25) +
-        Math.abs(alloc.crypto     - 0.25) +
-        Math.abs(alloc.stablecoin - 0.25) +
-        Math.abs(alloc.investment - 0.25)
-      ) * 100;
-      const rebalancingBenchmarkType = "equal_weight_illustrative" as const;
-      const rebalancingBenchmarkNote =
-        "Compared against an illustrative equal-weight (25/25/25/25) benchmark. A personalised benchmark must be set by your adviser in a Statement of Advice.";
+      // Rebalancing gap — one-sided turnover from the configured benchmark [0, 50%].
+      // ILLUSTRATIVE math metric only — NOT a personal target. The benchmark constants
+      // live in `server/config/rebalancing-benchmark.ts` so they can be audited in one
+      // place. The real-metrics route has no risk-tolerance input, so it falls back to
+      // the default illustrative equal-weight benchmark; a personalised target must be
+      // set by an adviser in a Statement of Advice.
+      const rebalancingBenchmark = DEFAULT_REBALANCING_BENCHMARK;
+      const rebalancingGap = computeRebalancingGap(alloc, rebalancingBenchmark) * 100;
+      const rebalancingBenchmarkType = rebalancingBenchmark.type;
+      const rebalancingBenchmarkNote = rebalancingBenchmark.note;
 
       // Snapshot history for period returns
       const now = new Date();
@@ -2661,27 +2663,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         totalValue,
       };
 
-      // Rebalancing gap — sum of absolute deviations from a 25/25/25/25 equal-weight
-      // benchmark, scaled by 0.5 so the result is a "one-sided" turnover measure
-      // (0 = perfectly balanced). This is an ILLUSTRATIVE math metric only — it is
-      // NOT a personal target benchmark. A personalised target is set by an adviser
-      // in a Statement of Advice. The response surfaces `rebalancingBenchmarkType`
-      // so callers can present it honestly to the user.
+      // Rebalancing gap — sum of absolute deviations from the configured benchmark,
+      // scaled by 0.5 so the result is a "one-sided" turnover measure (0 = perfectly
+      // balanced). Benchmark constants live in `server/config/rebalancing-benchmark.ts`.
+      // ILLUSTRATIVE math metric only — NOT a personal target. A personalised target
+      // is set by an adviser in a Statement of Advice. The response surfaces
+      // `rebalancingBenchmarkType` so callers can present it honestly to the user.
+      // This route receives a `riskTolerance` input, so the benchmark is resolved
+      // per risk band; missing/invalid input falls back to equal-weight.
       const allocationFractions = {
         fiat:       currentAllocation.fiat       / 100,
         crypto:     currentAllocation.crypto     / 100,
         stablecoin: currentAllocation.stablecoin / 100,
         investment: currentAllocation.investment / 100,
       };
-      const rebalancingGap = 0.5 * (
-        Math.abs(allocationFractions.fiat       - 0.25) +
-        Math.abs(allocationFractions.crypto     - 0.25) +
-        Math.abs(allocationFractions.stablecoin - 0.25) +
-        Math.abs(allocationFractions.investment - 0.25)
+      const rebalancingBenchmark = resolveBenchmarkForRiskTolerance(
+        typeof riskTolerance === "number" ? riskTolerance : Number(riskTolerance),
       );
-      const rebalancingBenchmarkType = "equal_weight_illustrative" as const;
-      const rebalancingBenchmarkNote =
-        "Compared against an illustrative equal-weight (25/25/25/25) benchmark. A personalised benchmark must be set by your adviser in a Statement of Advice.";
+      const rebalancingGap = computeRebalancingGap(allocationFractions, rebalancingBenchmark);
+      const rebalancingBenchmarkType = rebalancingBenchmark.type;
+      const rebalancingBenchmarkNote = rebalancingBenchmark.note;
 
       // Generate recommendations based on risk profile
       const recommendations: Array<{ userId: number; type: string; title: string; description: string; severity: string; isRead: boolean }> = [];

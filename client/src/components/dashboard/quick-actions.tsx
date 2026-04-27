@@ -1,17 +1,19 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PlusCircle, ChevronRight, TrendingUp } from "lucide-react";
-
-const tradingPairs = [
-  { symbol: 'BTC', name: 'Bitcoin', color: 'text-orange-600' },
-  { symbol: 'ETH', name: 'Ethereum', color: 'text-blue-600' },
-  { symbol: 'USDT', name: 'Tether', color: 'text-green-600' },
-  { symbol: 'USDC', name: 'USD Coin', color: 'text-purple-600' },
-];
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import type { InvestmentProduct } from "@shared/schema";
 
 export default function QuickActions() {
-  const handleTrade = (symbol: string) => {
-    window.open(`https://amax.com/trade/${symbol.toLowerCase()}`, '_blank');
+  const { data: cryptoProducts, isLoading } = useQuery<InvestmentProduct[]>({
+    queryKey: ["/api/investment-products", { category: "crypto" }],
+    queryFn: () => api.getInvestmentProducts({ category: "crypto" }),
+  });
+
+  const handleTrade = (productId: number) => {
+    window.location.pathname = `/investments/${productId}`;
   };
 
   return (
@@ -21,29 +23,48 @@ export default function QuickActions() {
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
-          {tradingPairs.map((pair) => (
+          {isLoading && (
+            <>
+              <Skeleton className="h-14 w-full" />
+              <Skeleton className="h-14 w-full" />
+              <Skeleton className="h-14 w-full" />
+            </>
+          )}
+
+          {!isLoading && (!cryptoProducts || cryptoProducts.length === 0) && (
+            <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-center">
+              <p className="text-sm font-medium text-gray-700">No crypto products available</p>
+              <p className="mt-1 text-xs text-gray-500">
+                Trading shortcuts appear here once your adviser enables crypto products on your shelf.
+              </p>
+            </div>
+          )}
+
+          {!isLoading && cryptoProducts?.map((product) => (
             <Button
-              key={pair.symbol}
+              key={product.id}
               variant="outline"
               className="w-full justify-between p-4 h-auto"
-              onClick={() => handleTrade(pair.symbol)}
+              onClick={() => handleTrade(product.id)}
+              data-testid={`button-trade-${product.id}`}
             >
               <div className="flex items-center space-x-3">
-                <TrendingUp className={`w-4 h-4 ${pair.color}`} />
-                <span className="font-medium">Trade {pair.symbol}</span>
+                <TrendingUp className="w-4 h-4 text-orange-600" />
+                <span className="font-medium">Trade {product.name}</span>
               </div>
               <ChevronRight className="w-4 h-4" />
             </Button>
           ))}
-          
+
           <Button
             variant="outline"
             className="w-full justify-between p-4 h-auto"
-            onClick={() => window.open('https://amax.com/account', '_blank')}
+            onClick={() => { window.location.pathname = "/investments"; }}
+            data-testid="button-view-investments"
           >
             <div className="flex items-center space-x-3">
               <PlusCircle className="w-4 h-4 text-secondary" />
-              <span className="font-medium">AMAX Account</span>
+              <span className="font-medium">View all investments</span>
             </div>
             <ChevronRight className="w-4 h-4" />
           </Button>

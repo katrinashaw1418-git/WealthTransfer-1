@@ -3,6 +3,29 @@
 ## Overview
 This platform is a comprehensive cross-border wealth management solution designed for high-net-worth individuals, the global Chinese diaspora, and SMEs with international financial needs. It integrates traditional finance and cryptocurrency services, offering dual-channel support for FX and crypto trading, multi-currency wallets, AI-powered wealth advisory, and robust compliance features. The vision is to provide a unified, intelligent, and secure platform for managing diverse global assets.
 
+## Recent Changes (April 2026) — Task #132: Remove synthetic portfolio data from production code paths
+
+Closed three synthetic-data surfaces a regulator or client could mistake for real portfolio numbers, and added a CI tripwire so they cannot reappear.
+
+**Audit table** lives at the bottom of `.local/tasks/task-132.md`. Three production-path surfaces required code changes; the previously-feared "estimated valuation placeholder" path in `calculateInvestmentTotalsAtDate` (`server/routes.ts:283-336`) was confirmed already safe — `calculateInvestmentPerformance` returns `currentValue=null` with `valuationStatus='missing_price_source'` / `'missing_product_rate'` for unpriced assets and the totals function excludes them, so no synthetic fill-in ships to the client.
+
+**Surface 1 — Rebalancing benchmark** (`server/config/rebalancing-benchmark.ts` + two route handlers):
+- New module is the single source of truth for the rebalancing-gap reference benchmark. Exports `DEFAULT_REBALANCING_BENCHMARK` (the equal-weight 25/25/25/25 quartet) plus per-risk-band illustrative benchmarks (conservative / moderate / aggressive), `resolveBenchmarkForRiskTolerance(riskTolerance: 1–5)`, and `computeRebalancingGap(allocation, benchmark)`.
+- `GET /api/portfolio/real-metrics` (real-metrics route, no risk input) now uses `DEFAULT_REBALANCING_BENCHMARK`. `POST /api/ai-recommendations/generate` (which already takes `riskTolerance`) resolves a per-band benchmark via `resolveBenchmarkForRiskTolerance`. Both routes still surface `rebalancingBenchmarkType` and a clear "illustrative — not a personal target — see SOA" note.
+- The previously-inlined `0.25 / 0.25 / 0.25 / 0.25` quartet in `server/routes.ts` is gone from both route handlers; the constant exists only inside the config module, where it is documented as illustrative.
+
+**Surface 2 — Dashboard quick-actions** (`client/src/components/dashboard/quick-actions.tsx`):
+- The hardcoded 4-row inline `tradingPairs` array (BTC/ETH/USDT/USDC pointing at external `amax.com/trade/...` URLs) is replaced with a `useQuery` against `/api/investment-products?category=crypto`. The component renders a loading skeleton, an explicit empty state ("No crypto products available — appears once your adviser enables crypto products on your shelf") when no products are returned, or one button per product wired to the in-app `/investments/:id` route.
+- Component is currently dead code (not imported by any page) but still compiled; this fix ensures it cannot ship synthetic shortcuts if it gets re-mounted.
+
+**Surface 3 — AI Advisory page metric fallbacks** (`client/src/pages/ai-advisory.tsx`):
+- The numeric fallbacks `71` (portfolio health), `7.2` (CAGR), and `3` (insight count) are replaced with explicit `null`-derived "—" / "No data yet" / "Loading…" / "No insights yet" states. A regulator or client can now distinguish at a glance between a real reading and a not-yet-available metric. The allocation-comparison card (already an empty state in prior work) is left alone.
+
+**Surface 4 — Regression tripwire** (`scripts/test-no-synthetic-portfolio-data.ts`):
+- Greps the three touched files for two failure modes: (a) any inline numeric array literal of length ≥ 4 (catches a developer pasting back a `[47, 30, 15, 8]`-style sample allocation) and (b) the magic `0.25/0.25/0.25/0.25` quartet specifically inside `server/routes.ts` (the config module is the only allowed home for it). Exits non-zero with file:line failure messages on regression. Run with `npx tsx scripts/test-no-synthetic-portfolio-data.ts`. Currently passes.
+
+**Files**: `server/config/rebalancing-benchmark.ts` (new), `server/routes.ts` (import + 2 route handlers), `client/src/components/dashboard/quick-actions.tsx` (rewritten), `client/src/pages/ai-advisory.tsx` (fallbacks + render), `scripts/test-no-synthetic-portfolio-data.ts` (new), `.local/tasks/task-132.md` (audit table appended).
+
 ## Recent Changes (April 2026) — Tasks #107 + #108: Adviser-side lock indicator UI + audit log on every blocked write
 
 These two tasks complete the admin-visibility layer started by Task #96 (the review-pending lock). #96 added the server-side gate that 423s adviser writes into a record under compliance review; what was missing was (a) any signal to the adviser BEFORE they tried, and (b) any record that the attempt happened.
