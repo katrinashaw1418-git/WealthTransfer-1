@@ -2593,6 +2593,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Task #155 — Public read-only endpoint for the write kill switch state.
+  // Used by client/adviser layouts to render the "temporarily read-only"
+  // banner without needing admin credentials. Returns ONLY the booleans +
+  // reason — no actor id / timestamps — to keep the public surface minimal.
+  // Failures fail-open (returns enabled:false) so a momentary DB blip
+  // cannot pop a misleading banner across every screen.
+  app.get("/api/system/write-state", async (_req, res) => {
+    try {
+      const { getWriteKillSwitchState } = await import("./services/write-kill-switch");
+      const state = await getWriteKillSwitchState();
+      res.json({
+        writeKillSwitchEnabled: state.enabled,
+        reason: state.reason,
+      });
+    } catch (e) {
+      console.error("[/api/system/write-state] read failed", e);
+      res.json({ writeKillSwitchEnabled: false, reason: null });
+    }
+  });
+
   // Diagnostic: expose the in-memory system event log for integrity monitoring
   // Returns the last MAX_SYSTEM_EVENTS entries (most recent first)
   // Requires authentication — unauthenticated access would leak internal state.

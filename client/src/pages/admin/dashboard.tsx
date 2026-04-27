@@ -14,6 +14,7 @@ import {
   Database,
 } from "lucide-react";
 import { Link } from "wouter";
+import WriteKillSwitchPanel from "@/components/admin/write-kill-switch-panel";
 
 interface DashboardData {
   applications: {
@@ -160,6 +161,10 @@ export default function AdminDashboard() {
           AFSL operations dashboard. Every state change you trigger here is recorded in the audit log.
         </p>
       </div>
+
+      {/* Task #155 — Global write kill switch panel. Sits at the top so an
+          admin landing on the dashboard during an incident sees it first. */}
+      <WriteKillSwitchPanel />
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

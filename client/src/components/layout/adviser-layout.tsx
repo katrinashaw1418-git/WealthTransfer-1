@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/contexts/auth";
 import { Menu, Search, Shield, LogOut } from "lucide-react";
 import NotificationsPopover from "@/components/notifications-popover";
+import WriteKillSwitchBanner from "@/components/write-kill-switch-banner";
 
 interface AdviserLayoutProps {
   children: React.ReactNode;
@@ -49,6 +50,9 @@ export default function AdviserLayout({ children }: AdviserLayoutProps) {
     <div className="flex min-h-screen bg-slate-50">
       <AdviserSidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       <div className="flex-1 flex flex-col lg:ml-64 min-w-0">
+        {/* Task #155 — visible above the topbar so a paused environment is
+            obvious before the adviser tries a write that would 503. */}
+        <WriteKillSwitchBanner />
         {/* Top bar */}
         <header
           className="sticky top-0 z-30 bg-white border-b border-slate-200 shadow-sm"

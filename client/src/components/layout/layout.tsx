@@ -10,6 +10,7 @@ import { Phone, MessageCircle, X } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import WriteKillSwitchBanner from "@/components/write-kill-switch-banner";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -42,6 +43,10 @@ export default function Layout({ children }: LayoutProps) {
     <div className="flex min-h-screen bg-neutral-50">
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       <div className="flex-1 flex flex-col lg:ml-64">
+        {/* Task #155 — global "temporarily read-only" banner. Renders
+            nothing when the kill switch is off; appears within ~30s when
+            an admin flips the switch. */}
+        <WriteKillSwitchBanner />
         <Header onMenuClick={() => setSidebarOpen(true)} />
         <main className="flex-1 overflow-y-auto">
           {children}

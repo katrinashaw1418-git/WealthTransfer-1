@@ -96,6 +96,11 @@ import {
   setKillSwitchState,
   type KillSwitchKey,
 } from "./services/kill-switch";
+// Task #155 — global write kill switch (admin toggle + read-only state).
+import {
+  getWriteKillSwitchState,
+  setWriteKillSwitch,
+} from "./services/write-kill-switch";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
 import { storage } from "./storage";
@@ -483,6 +488,119 @@ export function registerAdminRoutes(app: Express): void {
   );
 
   // -------------------------------------------------------------------------
+  // Task #155 — Global write kill switch
+  //
+  // GET  /api/admin/system-status        — full snapshot for the admin UI.
+  // POST /api/admin/write-kill-switch    — flip the switch (enabled+reason).
+  //
+  // Toggle endpoint always writes one audit_logs row with a before/after
+  // snapshot of the effective state, so an auditor can reconstruct who
+  // paused writes, when, why, and when they resumed.
+  //
+  // The middleware that enforces 503 for non-admin writes lives in
+  // server/middleware/write-kill-switch.ts and runs BEFORE this route, so
+  // an admin can always reach the toggle even after enabling it.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/system-status",
+    adminRoute(async () => {
+      const state = await getWriteKillSwitchState();
+      return {
+        writeKillSwitch: {
+          enabled: state.enabled,
+          envOverride: state.envOverride,
+          reason: state.reason,
+          enabledByUserId: state.enabledByUserId,
+          enabledAt: state.enabledAt,
+          updatedAt: state.updatedAt,
+        },
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #155 — POST /api/admin/write-kill-switch (toggle endpoint).
+  // Validates body, requires a reason on enable, persists the change, and
+  // writes one audit_logs row per call with a before/after snapshot.
+  // -------------------------------------------------------------------------
+  const writeKillSwitchToggleSchema = z.object({
+    enabled: z.boolean(),
+    // Reason is required when turning ON (so the audit trail is useful);
+    // ignored / nulled when turning OFF.
+    reason: z.string().max(500).optional().nullable(),
+  });
+
+  app.post(
+    "/api/admin/write-kill-switch",
+    adminRoute(async (req, auth) => {
+      const parsed = writeKillSwitchToggleSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        throw Object.assign(new Error(parsed.error.errors[0]?.message ?? "Invalid payload"), {
+          status: 400,
+        });
+      }
+      const { enabled, reason } = parsed.data;
+      if (enabled && (!reason || reason.trim().length === 0)) {
+        throw Object.assign(
+          new Error("A reason is required when enabling the write kill switch."),
+          { status: 400 },
+        );
+      }
+
+      const result = await setWriteKillSwitch({
+        enabled,
+        reason: reason ?? null,
+        actorUserId: auth.userId,
+      });
+
+      // Always write the audit row — even no-op toggles. An admin clicking
+      // a "confirm" button is itself a recordable action; the before/after
+      // pair makes no-op vs real changes easy to filter.
+      try {
+        await writeAuditLog({
+          userId: auth.userId,
+          action: "write_kill_switch.toggled",
+          entityType: "system_settings",
+          entityId: "1",
+          before: {
+            enabled: result.before.enabled,
+            envOverride: result.before.envOverride,
+            reason: result.before.reason,
+          },
+          after: {
+            enabled: result.after.enabled,
+            envOverride: result.after.envOverride,
+            reason: result.after.reason,
+          },
+          extra: {
+            requestedEnabled: enabled,
+            changed: result.changed,
+          },
+          ipAddress: (req.ip ?? null) as string | null,
+        });
+      } catch (e) {
+        // Audit failure must NOT mask the toggle from the caller — but it
+        // also must not be silent. Log loudly and continue; a regulator
+        // reading the log stream still sees the gap.
+        console.error("[write-kill-switch] audit log insert failed", e);
+      }
+
+      return {
+        ok: true,
+        changed: result.changed,
+        writeKillSwitch: {
+          enabled: result.after.enabled,
+          envOverride: result.after.envOverride,
+          reason: result.after.reason,
+          enabledByUserId: result.after.enabledByUserId,
+          enabledAt: result.after.enabledAt,
+          updatedAt: result.after.updatedAt,
+        },
+      };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
   // Task #147 — Backup health endpoint. Standalone version of the same
   // payload embedded in /api/admin/dashboard so the dashboard can re-fetch
   // (or a future "Backups" page can fetch only this) without re-running the
@@ -525,6 +643,7 @@ export function registerAdminRoutes(app: Express): void {
       handleError(res, error, "Failed to load runbook");
     }
   });
+
 
   // -------------------------------------------------------------------------
   // Applications

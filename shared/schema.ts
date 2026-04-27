@@ -2648,3 +2648,50 @@ export type DatabaseRestoreDrillRun = typeof databaseRestoreDrillRuns.$inferSele
 export type InsertDatabaseRestoreDrillRun = z.infer<
   typeof insertDatabaseRestoreDrillRunSchema
 >;
+
+// =============================================================================
+// TASK #155 — Global write kill switch (system_settings, single-row)
+// =============================================================================
+// One singleton row (id=1) carries platform-wide operational flags that
+// admins must be able to flip in seconds. The first such flag is the
+// write kill switch: when ON, every non-admin POST/PATCH/PUT/DELETE under
+// /api/* is rejected with HTTP 503 and a stable JSON shape, and background
+// jobs that perform writes skip cleanly. GETs and admin endpoints (incl.
+// the toggle itself) keep working.
+//
+// Why a dedicated table (not Redis / not a bare env var):
+//   * Persistent across deploys — flipping ON survives a restart.
+//   * Auditable — `enabledByUserId` + `enabledAt` + `reason` plus an
+//     audit_logs row written by the toggle endpoint give regulators a
+//     paper trail of who paused writes and why.
+//   * The env var WRITE_KILL_SWITCH=on is a separate "force ON at boot"
+//     escape hatch, evaluated by the service (see write-kill-switch.ts).
+//
+// Singleton enforcement: a CHECK constraint pins id=1 and the service
+// upserts that single row — there is no API to insert other ids.
+// =============================================================================
+export const systemSettings = pgTable("system_settings", {
+  // Pinned to 1 by the CHECK below — there is exactly one row.
+  id: integer("id").primaryKey().notNull(),
+
+  // The kill switch itself. Defaults to OFF — fail-open at table creation
+  // time so a fresh database does not lock writes.
+  writeKillSwitchEnabled: boolean("write_kill_switch_enabled").notNull().default(false),
+
+  // Optional human-readable reason an admin entered when flipping the
+  // switch ON ("incident #4123 — DB failover in progress"). Surfaced in
+  // the 503 response body and on the read-only status endpoint so callers
+  // can show the reason to end users without a separate lookup.
+  writeKillSwitchReason: text("write_kill_switch_reason"),
+
+  // Who flipped the switch most recently and when. Captured at toggle
+  // time by the admin route. Both nullable for the initial seed row.
+  writeKillSwitchEnabledBy: integer("write_kill_switch_enabled_by").references(() => users.id),
+  writeKillSwitchEnabledAt: timestamp("write_kill_switch_enabled_at"),
+
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => ({
+  singleton: check("system_settings_singleton_id", sql`${table.id} = 1`),
+}));
+
+export type SystemSettings = typeof systemSettings.$inferSelect;

@@ -5,6 +5,11 @@ import { registerRoutes } from "./routes";
 import { registerHealthRoutes } from "./health";
 import { setupVite, serveStatic, log } from "./vite";
 import { recordServerError } from "./services/error-log";
+import { writeKillSwitchMiddleware } from "./middleware/write-kill-switch";
+import {
+  ensureSystemSettingsTable,
+  assertWritesAllowed,
+} from "./services/write-kill-switch";
 
 const app = express();
 app.set("trust proxy", 1); // Trust first proxy hop (Replit's reverse proxy sets X-Forwarded-For)
@@ -118,6 +123,12 @@ app.use(
   })
 );
 
+// Task #155 — Global write kill switch enforcement on /api/*. Mounted
+// AFTER the body parser + rate limit (so blocked writes still count
+// against the abuse window) and BEFORE registerRoutes so no route handler
+// runs for a blocked write. GETs and admin requests pass through.
+app.use("/api", writeKillSwitchMiddleware);
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
@@ -137,6 +148,12 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Task #155 — Ensure the system_settings singleton table + row exist
+  // before any request middleware runs. Idempotent CREATE TABLE IF NOT
+  // EXISTS so this is safe on repeated boots and on top of a `db:push`
+  // that already created it.
+  await ensureSystemSettingsTable();
+
   const server = await registerRoutes(app);
 
   // ---------------------------------------------------------------------------
@@ -177,6 +194,11 @@ app.use((req, res, next) => {
   async function runWalletReconciliation() {
     try {
       await withBackgroundJobRunRecord("wallet-ledger-reconciliation", async () => {
+        // Task #155 — write kill switch: skip cleanly when paused.
+        const ks = await assertWritesAllowed("wallet-ledger-reconciliation");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
         const summary = await runWalletLedgerReconciliation();
         const line =
           `${summary.pairsChecked} pair(s), ${summary.matches} match, ` +
@@ -213,6 +235,10 @@ app.use((req, res, next) => {
   async function runLedgerReconciliationCron() {
     try {
       await withBackgroundJobRunRecord("ledger-reconciliation", async () => {
+        const ks = await assertWritesAllowed("ledger-reconciliation");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
         const summary = await runLedgerReconciliation();
         const line =
           `${summary.pairsChecked} pair(s), ${summary.matches} match, ` +
@@ -250,6 +276,10 @@ app.use((req, res, next) => {
   async function runAdviserTaskAutomationCron() {
     try {
       await withBackgroundJobRunRecord("adviser-task-automation", async () => {
+        const ks = await assertWritesAllowed("adviser-task-automation");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
         const s = await runAdviserTaskAutomation();
         // Aggregate skipped = open-task duplicates + 90-day cadence suppression.
         // We log both components so reviewers can tell idempotency hits from
@@ -326,6 +356,13 @@ app.use((req, res, next) => {
   }
 
   async function runDailyFeeAccrualsCronInner() {
+    // Task #155 — global write kill switch: skip the entire day's accrual
+    // sweep when ALL writes are paused, before any per-feature checks.
+    const ks = await assertWritesAllowed("fee-accruals");
+    if (!ks.allowed) {
+      return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+    }
+
     // Task #146 — kill switch. When fee_deductions is disabled, scheduled
     // accrual still represents fee work that operators have asked us to
     // stop. Bail with a single info-level summary line so the cron leaves
@@ -511,6 +548,10 @@ app.use((req, res, next) => {
       // Task #79: also records a generic row in `background_job_runs` so the
       // admin "Background Jobs" page sees this job alongside the others.
       await withBackgroundJobRunRecord("operator-alerts-prune", async () => {
+        const ks = await assertWritesAllowed("operator-alerts-prune");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
         const r = await pruneOperatorAlertsAndRecord();
         // r.prune is null only when the call threw, in which case the
         // wrapper has already re-thrown — by the time we reach this line
@@ -555,6 +596,12 @@ app.use((req, res, next) => {
   async function runOperatorAlertsPruneWatchdog() {
     try {
       await withBackgroundJobRunRecord("operator-alerts-prune-watchdog", async () => {
+        // Watchdog dispatches notifyOperator on staleness, which inserts
+        // an operator_alerts row — that counts as a write. Skip cleanly.
+        const ks = await assertWritesAllowed("operator-alerts-prune-watchdog");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
         const result = await checkOperatorAlertsPruneFreshness();
         if (result.fired) {
           log(
@@ -608,6 +655,13 @@ app.use((req, res, next) => {
       // wrapper only needs to swallow errors so a single failure doesn't
       // crash the server.
       await withBackgroundJobRunRecord("insufficient-funds-sweep", async () => {
+        // Task #155 — global write kill switch: skip before per-feature
+        // checks so a paused-platform incident shows the same summary
+        // shape across every cron in the dashboard.
+        const ks = await assertWritesAllowed("insufficient-funds-sweep");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
         // Task #146 — kill switch. Mirror the fee-accruals cron skip:
         // emit an explicit, recognisable summary line so operators can
         // tell "we skipped because the switch is engaged" apart from
@@ -670,6 +724,13 @@ app.use((req, res, next) => {
   async function runPostingReceiptInvariantCron() {
     try {
       await withBackgroundJobRunRecord("posting-receipt-invariant", async () => {
+      // Read-only check, BUT it dispatches notifyOperator on divergence
+      // which writes operator_alerts. Skip so a paused environment does
+      // not still page operators about background mismatches.
+      const ks = await assertWritesAllowed("posting-receipt-invariant");
+      if (!ks.allowed) {
+        return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+      }
       const r = await runPostingReceiptInvariantCheck();
       // Treat ANY non-zero divergence as such in the log (matches the
       // alert dispatch logic, which fires in both directions). Negative
