@@ -86,7 +86,23 @@ const STARTED_AT = new Date();
 // emits them with `PASS <name> — <details>` shape and the recheck's
 // summary parser counts them. This is the manual-review action the
 // recheck was designed to force whenever the gate count changes.
-const EXPECTED_PASS_COUNT = 19;
+//
+// Bumped from 19 → 27 after tasks #202 + #210 (platform-leg invariant
+// per Stage-2 scenario + end-of-Stage-2 fixture-user contract) wired
+// eight new top-level PASS lines into the strict reporter:
+//   - "platform-leg: lifecycle 1 (happy path)"                       (1)
+//   - "platform-leg: lifecycle 2 (idempotency: deposit)"             (2)
+//   - "platform-leg: lifecycle 2b (idempotency: withdraw)"           (3)
+//   - "platform-leg: lifecycle 2c (idempotency: fx-exchange)"        (4)
+//   - "platform-leg: lifecycle 2d (idempotency: wallets/transfer)"   (5)
+//   - "platform-leg: lifecycle 2e (idempotency: investments)"        (6)
+//   - "platform-leg: lifecycle 3 (reversal symmetry)"                (7)
+//   - "lifecycle: end-of-Stage-2 fixture-user contract"              (8)
+// Recounted from `CANONICAL_ORDER` in scripts/pre-launch-safety.ts
+// at the time of this fix (27 entries). If you add or remove a
+// canonical roll-up there, bump this constant in lockstep — that is
+// the entire point of this guard.
+const EXPECTED_PASS_COUNT = 27;
 
 // The canonical roll-up gate names emitted by pre-launch-safety.ts in
 // its final reporter block. The four spawned sub-scripts ALSO print their
@@ -103,6 +119,13 @@ const CANONICAL_GATE_NAME_PREFIXES = [
   // per-script ledger-leak gate AND emits a final ci-gate roll-up. All
   // five emit canonical `PASS ledger-leak: <name> — <details>` lines.
   "ledger-leak:",
+  // Task #202 — per-Stage-2-scenario platform-leg invariant. Each
+  // lifecycle scenario emits a canonical `PASS platform-leg: lifecycle
+  // <n> (<scenario>) — <details>` line. Listed as a prefix so that
+  // future scenarios added to CANONICAL_ORDER are forward-compatible
+  // with the recheck's parser without a code change here (the
+  // EXPECTED_PASS_COUNT mismatch will still force a manual review).
+  "platform-leg:",
 ] as const;
 const EXPECTED_CANONICAL_GATE_NAMES = new Set<string>([
   "existing: test-transaction-safety",
@@ -118,6 +141,20 @@ const EXPECTED_CANONICAL_GATE_NAMES = new Set<string>([
   "lifecycle: idempotency under concurrency (wallets/transfer)",
   "lifecycle: idempotency under concurrency (investments)",
   "lifecycle: reversal symmetry",
+  // Task #202 — per-Stage-2-scenario platform-leg invariant. Seven new
+  // canonical roll-up gates (one per lifecycle scenario), interleaved
+  // with their corresponding `lifecycle: …` gate in CANONICAL_ORDER.
+  "platform-leg: lifecycle 1 (happy path)",
+  "platform-leg: lifecycle 2 (idempotency: deposit)",
+  "platform-leg: lifecycle 2b (idempotency: withdraw)",
+  "platform-leg: lifecycle 2c (idempotency: fx-exchange)",
+  "platform-leg: lifecycle 2d (idempotency: wallets/transfer)",
+  "platform-leg: lifecycle 2e (idempotency: investments)",
+  "platform-leg: lifecycle 3 (reversal symmetry)",
+  // Task #210 — end-of-Stage-2 fixture-user contract. One new canonical
+  // roll-up gate that asserts every `__prelaunch_%` fixture user owns
+  // zero transactions after Stage-2 finishes scrubbing.
+  "lifecycle: end-of-Stage-2 fixture-user contract",
   "reconciliation: wallet-ledger clean-room",
   "reconciliation: ledger-vs-custodian clean-room",
   "reconciliation: posting-receipt invariant clean-room",
