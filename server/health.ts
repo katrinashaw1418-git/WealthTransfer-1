@@ -22,9 +22,14 @@
 //   * Return well under a second under normal load — the DB ping uses
 //     a 1s timeout so a hung pool can't make the endpoint slow either.
 //
-// The kill-switch task hadn't landed when these endpoints were written;
-// once it does, surface its state as `writeKillSwitch: { enabled, reason }`
-// in the /health payload (informational — does not flip status to 503).
+// Both payloads also include `writeKillSwitch: { enabled, reason }` taken
+// from `services/write-kill-switch`. This is INFORMATIONAL only: an
+// enabled kill-switch never flips the endpoint's status to 503. /health's
+// status is driven solely by the DB ping; /ready additionally factors in
+// background-job overdue state. The kill-switch field exists so an
+// uptime monitor or on-call engineer hitting /health can immediately see
+// "is the system rejecting writes right now?" without opening the admin
+// UI.
 // =============================================================================
 
 import type { Express } from "express";
@@ -38,6 +43,10 @@ import {
   type BackgroundJobsHealth,
 } from "./services/background-jobs";
 import { recordSuccessfulHealthProbe } from "./services/error-log";
+import {
+  getWriteKillSwitchState,
+  type WriteKillSwitchState,
+} from "./services/write-kill-switch";
 
 /** Hard cap on how long the DB ping is allowed to take before we mark the
  *  endpoint degraded. Matches the spec ("short timeout, e.g. 1s"). */
@@ -120,10 +129,19 @@ export interface HealthRouteDeps {
   dbPing?: (timeoutMs?: number) => Promise<DbPingResult>;
   /** Override the background-jobs health snapshot (tests inject overdue jobs). */
   jobsHealth?: () => Promise<BackgroundJobsHealth>;
+  /** Override the write-kill-switch snapshot (tests inject enabled/disabled). */
+  killSwitchState?: () => Promise<WriteKillSwitchState>;
   /** Override the version string so tests don't depend on package.json. */
   version?: string;
   /** Override `process.uptime()` for deterministic tests. */
   uptimeSeconds?: () => number;
+}
+
+/** Trimmed view of the kill-switch state surfaced on /health and /ready.
+ *  Intentionally INFORMATIONAL — never flips status to 503 on its own. */
+export interface WriteKillSwitchHealth {
+  enabled: boolean;
+  reason: string | null;
 }
 
 export interface HealthPayload {
@@ -131,6 +149,7 @@ export interface HealthPayload {
   uptimeSeconds: number;
   version: string;
   db: DbPingResult;
+  writeKillSwitch: WriteKillSwitchHealth;
 }
 
 export interface ReadyPayload extends HealthPayload {
@@ -154,20 +173,38 @@ export function registerHealthRoutes(
 ): void {
   const dbPing = deps.dbPing ?? pingDatabase;
   const jobsHealth = deps.jobsHealth ?? getBackgroundJobsHealth;
+  const killSwitchState = deps.killSwitchState ?? getWriteKillSwitchState;
   const version = deps.version ?? getServerVersion();
   const uptimeSeconds =
     deps.uptimeSeconds ?? (() => Math.floor(process.uptime()));
 
+  // Build the trimmed kill-switch view for /health + /ready. Failures here
+  // must NOT take the endpoint down — if we cannot read the switch, fall
+  // back to `enabled=false` so a broken admin row does not look like an
+  // active write block to incident responders.
+  async function loadKillSwitchHealth(): Promise<WriteKillSwitchHealth> {
+    try {
+      const s = await killSwitchState();
+      return { enabled: s.enabled, reason: s.reason };
+    } catch {
+      return { enabled: false, reason: null };
+    }
+  }
+
   app.get("/health", async (_req, res) => {
-    const db = await dbPing();
+    const [db, writeKillSwitch] = await Promise.all([
+      dbPing(),
+      loadKillSwitchHealth(),
+    ]);
     const payload: HealthPayload = {
+      // Status is driven by the DB ping ALONE — an enabled kill-switch is
+      // a deliberate operator action, not a service-degraded signal.
       status: db.ok ? "ok" : "degraded",
       uptimeSeconds: uptimeSeconds(),
       version,
       db,
+      writeKillSwitch,
     };
-    // The kill-switch field is intentionally omitted until that task lands;
-    // see the file header for the contract to add then.
     if (db.ok) {
       // Preserve the "lastSuccessfulHealthProbeAt" signal Task #144 wired
       // into the admin dashboard — only successful probes refresh it.
@@ -181,7 +218,10 @@ export function registerHealthRoutes(
   });
 
   app.get("/ready", async (_req, res) => {
-    const db = await dbPing();
+    const [db, writeKillSwitch] = await Promise.all([
+      dbPing(),
+      loadKillSwitchHealth(),
+    ]);
     let snapshot: BackgroundJobsHealth | null = null;
     let snapshotError: string | undefined;
     try {
@@ -193,12 +233,15 @@ export function registerHealthRoutes(
       ? snapshot.jobs.filter((j) => j.isOverdue).map((j) => j.name)
       : [];
     const jobsOk = snapshotError === undefined && overdueJobs.length === 0;
+    // An enabled kill-switch is informational here too — readiness is
+    // still driven only by DB reachability + background-job health.
     const ready = db.ok && jobsOk;
     const payload: ReadyPayload = {
       status: ready ? "ok" : "degraded",
       uptimeSeconds: uptimeSeconds(),
       version,
       db,
+      writeKillSwitch,
       jobs: {
         ok: jobsOk,
         overdueAfterMs: snapshot?.overdueAfterMs ?? DEFAULT_OVERDUE_AFTER_MS,
