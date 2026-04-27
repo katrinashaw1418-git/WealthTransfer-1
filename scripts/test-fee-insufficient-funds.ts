@@ -30,7 +30,7 @@
 //   npx tsx scripts/test-fee-insufficient-funds.ts
 // =============================================================================
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, inArray } from "drizzle-orm";
 import { db } from "../server/db";
 import {
   users,
@@ -1090,6 +1090,7 @@ async function main() {
     );
     process.env.PLATFORM_USER_ID = String(platformId);
   }
+  const platformUserId = parseInt(process.env.PLATFORM_USER_ID, 10);
 
   const clientUserId = await ensureUser(
     CLIENT_USERNAME,
@@ -1106,6 +1107,25 @@ async function main() {
   await cleanupForUser(adviserUserId);
   await ensureFreshTestWallet(clientUserId);
   await ensureFreshTestWallet(adviserUserId);
+
+  // Task #219 — snapshot the set of `accounts` PKs already owned by the
+  // platform user BEFORE this script runs. settleApprovedDeduction +
+  // topUpClient call getOrCreateSuspenseAccount / getOrCreateFeeAccount,
+  // both of which insert a fresh platform-side account row on a clean DB.
+  // cleanupForUser walks ledger_entries / transactions by user_id but
+  // never touches the platform-side accounts row, so without this
+  // snapshot+diff the platform user accumulates one new accounts row per
+  // fresh-DB run. The orphan-row gate (Task #198) flags exactly that. We
+  // delete by PK in the finally block so we can never wipe platform
+  // accounts owned by other concurrent test scripts.
+  const preExistingPlatformAccountIds = new Set<number>(
+    (
+      await db
+        .select({ id: accounts.id })
+        .from(accounts)
+        .where(eq(accounts.userId, platformUserId))
+    ).map((r) => r.id),
+  );
 
   let exitCode = 0;
   try {
@@ -1211,6 +1231,32 @@ async function main() {
     try {
       await cleanupForUser(clientUserId);
       await cleanupForUser(adviserUserId);
+
+      // Task #219 — cleanupForUser deletes ledger_entries by
+      // transaction_id IN (test client/adviser tx), which sweeps the
+      // platform-side legs because every settle/top-up tx is owned by
+      // the test client. That leaves the platform-side accounts rows
+      // (suspense + fee, owned by user_id=PLATFORM_USER_ID) with no
+      // remaining ledger references — but cleanupForUser never deletes
+      // accounts whose user_id is the platform user, so on a fresh DB
+      // those one-per-currency rows leaked and tripped Task #198's
+      // orphan-row gate. Diff against the start-of-script snapshot and
+      // PK-delete only the rows THIS script created, so concurrent test
+      // scripts that pin the same platform user are unaffected.
+      const currentPlatformAccountIds = (
+        await db
+          .select({ id: accounts.id })
+          .from(accounts)
+          .where(eq(accounts.userId, platformUserId))
+      ).map((r) => r.id);
+      const newPlatformAccountIds = currentPlatformAccountIds.filter(
+        (id) => !preExistingPlatformAccountIds.has(id),
+      );
+      if (newPlatformAccountIds.length > 0) {
+        await db
+          .delete(accounts)
+          .where(inArray(accounts.id, newPlatformAccountIds));
+      }
     } catch (cleanupErr) {
       console.error("Post-run cleanup threw:", cleanupErr);
       if (exitCode === 0) exitCode = 1;
