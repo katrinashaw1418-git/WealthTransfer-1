@@ -386,6 +386,26 @@ async function main() {
   await db
     .delete(ledgerEntries)
     .where(eq(ledgerEntries.userId, userId));
+  // Task #192 — drop ledger_postings receipts pointing at this user's
+  // transactions BEFORE deleting the transactions themselves. The receipt
+  // table FKs `transaction_id → transactions.id` with no ON DELETE clause,
+  // so the receipt minted by setWalletAndLedger() (see line ~188) would
+  // otherwise raise ledger_postings_transaction_id_transactions_id_fk and
+  // exit the test 1, even though every assertion above passed.
+  const finalTxIds = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.userId, userId));
+  if (finalTxIds.length > 0) {
+    await db
+      .delete(ledgerPostings)
+      .where(
+        inArray(
+          ledgerPostings.transactionId,
+          finalTxIds.map((r) => r.id),
+        ),
+      );
+  }
   await db
     .delete(transactions)
     .where(eq(transactions.userId, userId));
