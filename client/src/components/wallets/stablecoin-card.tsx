@@ -13,6 +13,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useFxRate } from "@/hooks/use-fx-rates";
 import { api } from "@/lib/api";
+import { KillSwitchBanner } from "@/components/kill-switch-banner";
 
 interface StablecoinCardProps {
   currency: "USDT" | "USDC";
@@ -263,6 +264,10 @@ export default function StablecoinCard({ currency, balance, availableBalance, co
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
+                <KillSwitchBanner
+                  switches={["deposits", "transactions"]}
+                  message={`${currency} deposits are temporarily paused while we resolve an operational issue. Please try again later.`}
+                />
                 <div className="text-center">
                   <div className="bg-white p-4 rounded-lg border mx-auto w-fit mb-3">
                     <QrCode className="w-32 h-32 mx-auto" />
@@ -323,6 +328,10 @@ export default function StablecoinCard({ currency, balance, availableBalance, co
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
+                <KillSwitchBanner
+                  switches={["withdrawals", "transactions"]}
+                  message={`${currency} withdrawals are temporarily paused while we resolve an operational issue. Please try again later.`}
+                />
                 <div className="space-y-2">
                   <Label>Destination Address</Label>
                   <Input 
