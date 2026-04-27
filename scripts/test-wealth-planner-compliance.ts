@@ -287,25 +287,18 @@ async function cleanupForUserIds(userIds: number[]): Promise<void> {
       .delete(adviceRecords)
       .where(inArray(adviceRecords.id, adviceIds));
   }
-  // Audit rows from prior runs — scope tightly to the new actions so we don't
-  // touch unrelated audit history.
-  await db
-    .delete(auditLogs)
-    .where(
-      and(
-        inArray(auditLogs.userId, userIds),
-        inArray(auditLogs.action, [
-          "client_objective.create",
-          "client_objective.read",
-          "client_document.create",
-          "client_document.read",
-          "adviser_note.create",
-          "adviser_note.read",
-          "advice_record.transition.issued",
-          "advice_record.transition.superseded",
-        ]),
-      ),
-    );
+  // Audit rows from prior runs are LEFT IN PLACE.
+  //
+  // `audit_logs` is regulatory append-only — the audit-immutability migration
+  // (server/services/audit-immutability-migration.ts) installed a per-row
+  // BEFORE-DELETE trigger that raises SQLSTATE 23001 on every DELETE attempt,
+  // even from this trusted maintenance script. This test was already designed
+  // to coexist with accumulated audit history: every audit count is taken
+  // relative to a `maxBeforeId` snapshot captured at the start of each
+  // scenario (see `auditBefore` / `maxBeforeId` later in this file), so prior-
+  // run rows for the same adviserUserId / clientUserId do not affect any
+  // assertion. Attempting to clear them would only crash the test (as it did
+  // before this fix) without changing observable behaviour.
 }
 
 // ---------------------------------------------------------------------------

@@ -1098,13 +1098,51 @@ async function main(): Promise<void> {
     // PLATFORM_USER_ID is needed by getOrCreateSuspenseAccount inside the
     // happy-path + reversal scenarios. If the env var isn't set, mint a
     // deterministic platform user and pin it for this process.
+    //
+    // CRITICAL: do NOT route this through ensureUser() — that helper auto-
+    // pushes the user id into `created.userIds`, which then makes the
+    // platform suspense account a "tracked account" in cleanupTrackedRows.
+    // The cleanup's FK-walk on accountIds would then delete the SUSPENSE
+    // legs of every subprocess test (test-transaction-safety,
+    // test-fee-deduction-gate-b, test-task-35-suppression) that posted
+    // against this same suspense account during Stage 1, leaving their
+    // CLIENT-side legs orphaned (single-leg, no receipt). The
+    // posting-receipt-invariant gate then fails on those orphans.
+    //
+    // The platform user is shared infrastructure across the whole pre-
+    // launch run AND every subprocess test it spawns — pre-launch must
+    // create it if missing, but must not claim its accounts for cleanup.
     // -------------------------------------------------------------------
     if (!process.env.PLATFORM_USER_ID) {
-      const platformId = await ensureUser({
-        username: PLATFORM_USERNAME,
-        email: "prelaunch-platform@test.invalid",
-        role: "admin",
-      });
+      const [existing] = await db
+        .select()
+        .from(users)
+        .where(eq(users.username, PLATFORM_USERNAME));
+      let platformId: number;
+      if (existing) {
+        if (existing.kycStatus !== "verified" || !existing.emailVerified) {
+          await db
+            .update(users)
+            .set({ kycStatus: "verified", emailVerified: true })
+            .where(eq(users.id, existing.id));
+        }
+        platformId = existing.id;
+      } else {
+        const [row] = await db
+          .insert(users)
+          .values({
+            username: PLATFORM_USERNAME,
+            email: "prelaunch-platform@test.invalid",
+            password: "not-a-real-password",
+            firstName: "PreLaunch",
+            lastName: "Platform",
+            role: "admin",
+            kycStatus: "verified",
+            emailVerified: true,
+          })
+          .returning();
+        platformId = row.id;
+      }
       process.env.PLATFORM_USER_ID = String(platformId);
     }
 

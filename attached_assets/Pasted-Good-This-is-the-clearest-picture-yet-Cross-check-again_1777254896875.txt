@@ -1,0 +1,71 @@
+Good. This is the clearest picture yet. Cross-check against everything in this conversation — confirmed accurate.
+
+**The situation is:**
+
+Everything discussed in this conversation is already shipped. #92, #94, #95, audit logs, planner compliance, all of it. The codebase is 60+ tasks ahead of where this conversation thought it was. The pre-launch safety script is running in strict mode and 7 of 10 gates pass.
+
+**Three cuts to green. Do them in this order:**
+
+**Cut 1 — Task #160 (idempotency race) — do this first**
+
+The 500 leaking a raw Postgres serialization error (`40001 could not serialize access`) is the most dangerous of the three because it is a money-movement failure mode that is visible to users and could cause duplicate processing if a client retries on a 500. One change in `server/routes.ts`: catch the `40001` serialization error in the deposit route, re-read the idempotency row, return the original response.
+
+```ts
+// In the deposit route, wrap the idempotency insert in a try/catch
+try {
+  await insertIdempotencyRecord(key, response);
+} catch (err: any) {
+  if (err.code === "40001") {
+    // Serialization failure — concurrent request won the race
+    // Re-read and return the stored response instead of 500ing
+    const existing = await getIdempotencyRecord(key);
+    if (existing) return res.status(200).json(existing.response);
+  }
+  throw err;
+}
+```
+
+**Cut 2 — Task #159 (phantom missing-receipt alert) — do this second**
+
+Delete transactions #320 and #1124 from the system account outright. They are stale test fixtures with no corresponding `ledger_postings` rows. Backfilling is the cautious option but deletion is cleaner since these are confirmed test artifacts not real transactions.
+
+```sql
+DELETE FROM transactions WHERE id IN (320, 1124);
+```
+
+Confirm no `ledger_postings`, `fee_deduction_journals`, or any other table references these IDs before deleting. If there are references, use the backfill script instead.
+
+**Cut 3 — Tasks #158 + #181 (user-11 wallet-ledger drift) — do this third**
+
+Two-part fix. First extend the test fixture cleanup to include the system-side leg of every double-entry posting so this does not recur. Second, one reconciliation entry to settle the current standing drift on user 11.
+
+```ts
+// In fixture cleanup, add:
+await db.update(wallets)
+  .set({ balance: "0.00" })
+  .where(eq(wallets.userId, SYSTEM_USER_ID));
+
+await createLedgerEntry({
+  userId: SYSTEM_USER_ID,
+  amount: currentDrift,
+  direction: driftIsPositive ? "debit" : "credit",
+  entryType: "reconciliation_adjustment",
+  referenceType: "system_fixture_cleanup",
+  referenceId: `system-drift-settle-${Date.now()}`,
+  metadata: { reason: "test fixture residual cleanup" },
+});
+```
+
+**After all three cuts:**
+
+```bash
+npx tsx scripts/pre-launch-safety.ts --strict
+```
+
+Must exit 0. Then #150 runs, produces the green go/no-go report, and launch is unblocked.
+
+**Post-launch queue assessment:**
+
+The tasks beyond green (#168–#180) are correctly sequenced. #168 (kill switch end-to-end test) and #169 (rollback runbook drill) should be the first two post-green tasks because they are safety validation, not feature work. Everything else (#170–#180) is operational hardening and can run in parallel after those two.
+
+**Proceed with the three cuts in order. Nothing else needs designing.**

@@ -325,6 +325,24 @@ async function main() {
     reason: "test cleanup",
   });
 
+  // End-of-run scrub — `setWalletAndLedger` writes single-leg ledger entries
+  // (it inserts ONE credit row to seed a target balance, intentionally
+  // bypassing postLedgerEntries because the WHOLE POINT is to create a
+  // wallet/ledger DRIFT for the gate to detect). Each call wipes the prior
+  // state at its top, but the LAST call's state is left behind. The pre-
+  // launch posting-receipt invariant gate, which runs in the SAME process
+  // immediately after this subprocess exits, would then page on the orphan.
+  // Wipe explicitly so the test leaves the DB in the same shape it found it.
+  await db
+    .delete(ledgerEntries)
+    .where(eq(ledgerEntries.userId, userId));
+  await db
+    .delete(transactions)
+    .where(eq(transactions.userId, userId));
+  await db
+    .delete(wallets)
+    .where(eq(wallets.userId, userId));
+
   console.log("\n✓✓✓ ALL TASK #35 ASSERTIONS PASSED");
   process.exit(0);
 }

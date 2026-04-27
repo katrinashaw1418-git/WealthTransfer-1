@@ -168,6 +168,82 @@ async function saveIdempotentResponse(
 }
 
 // ---------------------------------------------------------------------------
+// Task #160 — replay an idempotent response when a parallel request lost
+// the SERIALIZABLE race.
+//
+// Background:
+//   The money-movement handlers run inside `db.transaction(...)` with
+//   `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`. Two requests that share
+//   the same Idempotency-Key both pass `checkIdempotency()` (no row yet),
+//   then race for the same wallet row. Postgres aborts the loser with
+//   SQLSTATE 40001 ("could not serialize access due to concurrent update").
+//   Without this helper, that 40001 surfaces to the client as a 500 — a
+//   money-movement failure mode that is dangerous because clients usually
+//   retry on 5xx, which can lead to duplicate processing if the next retry
+//   races a third concurrent request.
+//
+// What this does:
+//   - Detects err.code === "40001" (or the wrapped form Postgres drivers use).
+//   - Polls `idempotencyKeys` with brief backoff until the winner has called
+//     `saveIdempotentResponse()` (which happens AFTER its tx commits, so a
+//     small window exists where the loser arrives before the winner has
+//     persisted).
+//   - Returns the stored response so the loser can reply 200 with
+//     `idempotent: true` instead of 500.
+//
+// Invariants:
+//   - Only triggers when an Idempotency-Key was actually present on the
+//     request. Without a key, there is nothing meaningful to replay.
+//   - Bounded retry (10 × 50ms = ~500ms wall-clock max). If the winner
+//     never persists, we fall through to the original 500 path so the
+//     failure is loud, not silently swallowed.
+//   - Read-only — does not mutate state; safe to call from a catch block.
+// ---------------------------------------------------------------------------
+const PG_SERIALIZATION_FAILURE = "40001";
+
+function isSerializationFailure(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; cause?: unknown };
+  if (e.code === PG_SERIALIZATION_FAILURE) return true;
+  // Some drivers wrap the original pg error in `.cause`.
+  if (e.cause && typeof e.cause === "object") {
+    const cause = e.cause as { code?: unknown };
+    if (cause.code === PG_SERIALIZATION_FAILURE) return true;
+  }
+  return false;
+}
+
+async function replayIdempotentOnSerializationFailure(
+  err: unknown,
+  userId: number | null,
+  route: string,
+  idemKey: string | undefined,
+): Promise<unknown | null> {
+  if (!idemKey || userId === null) return null;
+  if (!isSerializationFailure(err)) return null;
+
+  // The winning request commits the idempotency row OUTSIDE its DB
+  // transaction (saveIdempotentResponse is called after `db.transaction`
+  // returns). The loser may arrive here before the winner has persisted —
+  // poll briefly to cover that window.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const [row] = await db
+      .select()
+      .from(idempotencyKeys)
+      .where(
+        and(
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.route, route),
+          eq(idempotencyKeys.key, idemKey),
+        ),
+      );
+    if (row) return row.responseJson;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Persistent audit log writer — writes finance-grade event records to DB.
 // ---------------------------------------------------------------------------
 // Failure semantics (TASK #145):
@@ -3190,8 +3266,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Internal operation: write completed atomically; no pending pre-insert.
   // ---------------------------------------------------------------------------
   const handleDeposit = async (req: Request, res: any) => {
+    // Task #160 — `idemKey` and `userIdForReplay` are hoisted out of the try
+    // block so the catch handler can replay an idempotent response when a
+    // parallel request loses the SERIALIZABLE race (Postgres SQLSTATE 40001).
+    // We keep the in-try `userId` as a narrowed `number` (post-requireAuth)
+    // so downstream code does not have to re-prove non-null on every use.
+    const idemKey = req.headers["idempotency-key"] as string | undefined;
+    let userIdForReplay: number | null = null;
     try {
       const { userId } = requireAuth(req);
+      userIdForReplay = userId;
       await requireKyc(userId, storage);
       // Task #146 — kill switch. Specific `deposits` first so the response
       // names the most precise reason; master `transactions` is the fallback.
@@ -3201,7 +3285,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { currency, amount: rawAmount, description } = parsedDeposit.data;
       const amount = new Decimal(rawAmount);
 
-      const idemKey = req.headers["idempotency-key"] as string | undefined;
       const payloadHash = hashPayload(req.body);
       if (idemKey) {
         const idem = await checkIdempotency(userId, "/api/deposit", idemKey, payloadHash);
@@ -3272,6 +3355,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await writeAuditLog(userId, "deposit", "transaction", String(txRecord?.id), { currency, amount: rawAmount }, req.ip || null);
       res.json(txRecord);
     } catch (error: any) {
+      // Task #160 — when a parallel deposit with the same Idempotency-Key
+      // lost the SERIALIZABLE race (Postgres SQLSTATE 40001), replay the
+      // winner's stored response instead of leaking a 500 that a client
+      // would naively retry.  Runs FIRST so it pre-empts every other branch
+      // (including the unbalanced-ledger 422 mapper, which would otherwise
+      // page an operator about a benign concurrency conflict).
+      //
+      // We use `userIdForReplay` (assigned just inside the try right after
+      // requireAuth) rather than `userId` (which is const-scoped INSIDE
+      // the try and therefore not visible here). It is non-null whenever
+      // the failure happened after auth, which is the only window where a
+      // 40001 from the deposit transaction is possible.
+      if (userIdForReplay !== null && idemKey) {
+        const replay = await replayIdempotentOnSerializationFailure(
+          error, userIdForReplay, "/api/deposit", idemKey,
+        );
+        if (replay) {
+          return res.status(200).json({ ...(replay as object), idempotent: true });
+        }
+      }
       // Task #54 — unbalanced ledger journal (the double-entry invariant
       // tripped) maps to a stable 422 + clean message and pages an
       // operator. We check this BEFORE the generic `error.status` branch
