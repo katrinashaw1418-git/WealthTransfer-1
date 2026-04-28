@@ -38,6 +38,9 @@ import {
   reportRequests,
   adminReviewNotes,
   feeConsents,
+  // Task #302 — AMAX-branded consent PDF needs the adviser AFSL line on the
+  // letterhead (read-only join from the adviser user → adviser_profiles).
+  adviserProfiles,
   // Session 23A — fee engine Gate A / Session 23B — Gate B settlement
   adviserFeeRules,
   adviserFeeAccruals,
@@ -4004,46 +4007,87 @@ export function registerAdminRoutes(app: Express): void {
 
   // -------------------------------------------------------------------------
   // Task #293 — on-demand PDF rendering for the Actions column.
+  // Task #302 — Now renders an AMAX-branded form (per-page letterhead with the
+  //   licensee identity + AFSL details, the same legal language as the paper
+  //   consent template, a styled signature box reproducing the captured
+  //   signature name + IP + timestamp, and a separate "Audit Appendix" page
+  //   that lists the supersede chain and every revoke/supersede/sign event
+  //   tied to this artefact). Nothing is persisted: each call rebuilds the
+  //   document from current row state so superseded fields, expiry, etc.
+  //   always reflect the latest record. No money moves; this is read-only.
   // -----------------------------------------------------------------------------
-  // The two endpoints below stream a freshly generated PDF for an admin
-  // download. Nothing is persisted: each call builds the document from
-  // current row state so superseded fields, expiry, etc. always reflect
-  // the latest record. No money moves; this is a read-only export.
   // -----------------------------------------------------------------------------
-  function renderConsentPdfText(opts: {
-    title: string;
-    headerLines: string[];
-    sections: { heading: string; rows: Array<[string, string]> }[];
-    footer: string;
-  }): Promise<Buffer> {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const PDFDocument = (await import("pdfkit")).default;
-        const doc = new PDFDocument({ margin: 50, size: "A4" });
-        const chunks: Buffer[] = [];
-        doc.on("data", (c: Buffer) => chunks.push(c));
-        doc.on("end", () => resolve(Buffer.concat(chunks)));
-        doc.on("error", reject);
-        doc.fontSize(18).text(opts.title, { underline: true });
-        doc.moveDown(0.5);
-        doc.fontSize(10);
-        for (const line of opts.headerLines) doc.text(line);
-        doc.moveDown(0.5);
-        for (const section of opts.sections) {
-          doc.fontSize(12).text(section.heading, { underline: true });
-          doc.fontSize(10);
-          for (const [k, v] of section.rows) {
-            doc.text(`${k}: ${v}`);
-          }
-          doc.moveDown(0.5);
-        }
-        doc.moveDown(1);
-        doc.fontSize(8).fillColor("#555").text(opts.footer);
-        doc.end();
-      } catch (e) {
-        reject(e);
-      }
-    });
+  // Licensee identity disclosure. The legal values that appear in the
+  // letterhead, footer and "Parties" line ARE part of the regulatory
+  // disclosure on the paper template, so they must be the licensee's
+  // signed-off wording before any client/regulator copy goes out. We
+  // deliberately:
+  //   (1) source each value from an env var so a deploy can inject the
+  //       compliance-approved wording without a code change, and
+  //   (2) fall back to clearly-labelled "PLACEHOLDER" defaults so a missing
+  //       env var produces an obviously-not-real document, not a deceptively
+  //       formatted one with zero-stuffed identifiers.
+  // When ANY value is still a default, isLicenseeDisclosurePending() is
+  // true and the renderer paints a "DRAFT — PLACEHOLDER LICENSEE
+  // DISCLOSURE" diagonal watermark on every page plus a footer disclaimer
+  // (mirrors the pattern in server/services/reports.ts:drawAmaxWatermark
+  // and drawDisclosurePage). That makes it impossible to mistake a
+  // pre-config-finalisation export for a compliant copy.
+  // -----------------------------------------------------------------------------
+  const AMAX_LICENSEE_NAME =
+    process.env.AMAX_LICENSEE_NAME?.trim() || "AMAX Wealth Pty Ltd";
+  const AMAX_PLATFORM_NAME =
+    process.env.AMAX_PLATFORM_NAME?.trim() || "AMAX Wealth";
+  const AMAX_LICENSEE_AFSL =
+    process.env.AMAX_LICENSEE_AFSL?.trim() || "AFSL [PLACEHOLDER]";
+  const AMAX_LICENSEE_ABN =
+    process.env.AMAX_LICENSEE_ABN?.trim() || "ABN [PLACEHOLDER]";
+  const AMAX_LICENSEE_ADDRESS =
+    process.env.AMAX_LICENSEE_ADDRESS?.trim() ||
+      "[Registered office address — PLACEHOLDER, see compliance]";
+  const AMAX_LICENSEE_CONTACT =
+    process.env.AMAX_LICENSEE_CONTACT?.trim() ||
+      "[Compliance contact — PLACEHOLDER, see compliance]";
+
+  function isLicenseeDisclosurePending(): boolean {
+    return (
+      AMAX_LICENSEE_AFSL.includes("PLACEHOLDER") ||
+      AMAX_LICENSEE_ABN.includes("PLACEHOLDER") ||
+      AMAX_LICENSEE_ADDRESS.includes("PLACEHOLDER") ||
+      AMAX_LICENSEE_CONTACT.includes("PLACEHOLDER")
+    );
+  }
+
+  // Diagonal "DRAFT" watermark drawn behind page content when licensee
+  // disclosure values are still env-default placeholders. Same shape as
+  // server/services/reports.ts:drawAmaxWatermark; opacity tuned so the
+  // body text remains legible while the DRAFT label is unmissable.
+  function drawConsentDraftWatermark(doc: PDFKit.PDFDocument): void {
+    if (!isLicenseeDisclosurePending()) return;
+    doc.save();
+    doc.opacity(0.10);
+    doc.fillColor("#b91c1c").fontSize(72).font("Helvetica-Bold");
+    doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
+    doc.text("DRAFT — PLACEHOLDER LICENSEE DISCLOSURE",
+      0, doc.page.height / 2 - 36, {
+        width: doc.page.width, align: "center", lineBreak: false,
+      });
+    doc.restore();
+  }
+
+  function drawConsentDraftFooterDisclaimer(doc: PDFKit.PDFDocument): void {
+    if (!isLicenseeDisclosurePending()) return;
+    const left = 50;
+    const right = doc.page.width - 50;
+    const y = doc.page.height - 62;
+    drawConsentChromeText(
+      doc,
+      "DRAFT — Licensee AFSL / ABN / address / contact are PLACEHOLDER values; do not distribute to clients or regulators until compliance-approved values are configured (set AMAX_LICENSEE_AFSL, AMAX_LICENSEE_ABN, AMAX_LICENSEE_ADDRESS, AMAX_LICENSEE_CONTACT).",
+      left, y, {
+        width: right - left,
+        align: "center",
+      },
+    );
   }
 
   function fmtDate(v: unknown): string {
@@ -4064,6 +4108,726 @@ export function registerAdminRoutes(app: Express): void {
     }
   }
 
+  function fmtUtcStamp(v: Date | string | null | undefined): string {
+    if (!v) return "—";
+    const d = v instanceof Date ? v : new Date(v);
+    if (Number.isNaN(d.getTime())) return "—";
+    // Explicit UTC stamp so a forwarded PDF can't be misread across
+    // timezones — auditors compare directly against ledger entries (UTC).
+    return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+  }
+
+  function fmtFeeAmount(amountType: string, amount: string | number | null): string {
+    if (amount === null || amount === undefined || amount === "") return "—";
+    const s = String(amount);
+    if (amountType === "percentage") return `${s}%`;
+    if (amountType === "calculation_method") return s;
+    // fixed
+    const n = Number(s);
+    if (!Number.isFinite(n)) return s;
+    return n.toLocaleString("en-AU", { style: "currency", currency: "AUD" });
+  }
+
+  // Standardised AMAX consent legal language. Mirrors the paper consent
+  // template's "Authority and acknowledgements" block. Kept as one block of
+  // strings so a future compliance edit is a single search-and-replace.
+  const AMAX_CONSENT_LEGAL_PARAGRAPHS = [
+    "I authorise AMAX Wealth Pty Ltd (the licensee) and my adviser to deduct the fees described in this document from the nominated account on the schedule shown above. I confirm that I have read, understood and agreed to the fees, the basis on which they are calculated, and the frequency at which they will be deducted.",
+    "I acknowledge that this consent is given in connection with ongoing personal advice provided to me. I understand that under the Corporations Act 2001 (Cth) and ASIC Regulatory Guide 175 my consent must be renewed at least every twelve months and that no fee may be deducted after the consent expiry date shown above unless I provide a fresh written consent.",
+    "I may withdraw this consent at any time by notifying my adviser or the licensee in writing. Withdrawal takes effect from the next scheduled deduction following receipt of the notice. Fees already deducted in accordance with this consent prior to withdrawal will not be refunded automatically.",
+    "I acknowledge that this consent does not authorise the licensee or my adviser to deduct any fee that has not been clearly described in this document, and that any change to the fee type, amount, calculation method or frequency requires a fresh written consent.",
+    "I confirm that I have been given a Statement of Advice (or Record of Advice as applicable) and a Financial Services Guide that disclose the fees described in this document, and that I have had the opportunity to ask my adviser any questions I had about them before signing.",
+  ];
+
+  // ---------------------------------------------------------------------------
+  // Per-page letterhead. Drawn after content via bufferedPages so the page
+  // count is final by the time we paint "Page X of Y". Carries the four
+  // pieces of provenance an auditor needs at a glance: licensee identity,
+  // licensee AFSL, document reference, and page index.
+  // ---------------------------------------------------------------------------
+  // Render text at an absolute (x, y) position WITHOUT triggering PDFKit's
+  // auto-pagination. Drawing inside the top/bottom page margins (where the
+  // letterhead and footer live) would otherwise cause text() to silently
+  // call addPage() — which wedges multi-page chrome into its own pages.
+  function drawConsentChromeText(
+    doc: PDFKit.PDFDocument,
+    text: string,
+    x: number,
+    y: number,
+    options: PDFKit.Mixins.TextOptions,
+  ): void {
+    const margins = doc.page.margins;
+    const saved = { top: margins.top, bottom: margins.bottom };
+    margins.top = 0;
+    margins.bottom = 0;
+    try {
+      doc.text(text, x, y, { lineBreak: false, ...options });
+    } finally {
+      margins.top = saved.top;
+      margins.bottom = saved.bottom;
+    }
+  }
+
+  function drawConsentLetterhead(
+    doc: PDFKit.PDFDocument,
+    documentRef: string,
+  ): void {
+    const left = 50;
+    const right = doc.page.width - 50;
+    const yTop = 28;
+    doc.save();
+    // Licensee strip
+    doc.fillColor("#0f172a").fontSize(13).font("Helvetica-Bold");
+    drawConsentChromeText(doc, AMAX_PLATFORM_NAME.toUpperCase(), left, yTop, {});
+    doc.fillColor("#475569").fontSize(8).font("Helvetica");
+    drawConsentChromeText(
+      doc,
+      `${AMAX_LICENSEE_NAME} · ${AMAX_LICENSEE_AFSL} · ${AMAX_LICENSEE_ABN}`,
+      left, yTop + 16, {},
+    );
+    // Right-aligned document ref
+    doc.fillColor("#0f172a").fontSize(9).font("Helvetica-Bold");
+    drawConsentChromeText(doc, documentRef, left, yTop, {
+      width: right - left, align: "right",
+    });
+    doc.fillColor("#64748b").fontSize(8).font("Helvetica");
+    drawConsentChromeText(doc, "Fee Consent Document", left, yTop + 14, {
+      width: right - left, align: "right",
+    });
+    // Hairline below the letterhead band
+    doc.moveTo(left, yTop + 32)
+      .lineTo(right, yTop + 32)
+      .strokeColor("#cbd5e1").lineWidth(0.6).stroke();
+    doc.restore();
+  }
+
+  function drawConsentFooter(
+    doc: PDFKit.PDFDocument,
+    pageNum: number,
+    pageCount: number,
+    generatedAt: Date,
+  ): void {
+    const left = 50;
+    const right = doc.page.width - 50;
+    const y = doc.page.height - 48;
+    doc.save();
+    doc.moveTo(left, y).lineTo(right, y).strokeColor("#cbd5e1").lineWidth(0.5).stroke();
+    doc.fillColor("#64748b").fontSize(7.5).font("Helvetica");
+    drawConsentChromeText(
+      doc,
+      `${AMAX_LICENSEE_NAME} · ${AMAX_LICENSEE_ADDRESS}`,
+      left, y + 6, { width: right - left, align: "left" },
+    );
+    drawConsentChromeText(
+      doc,
+      AMAX_LICENSEE_CONTACT,
+      left, y + 16, { width: right - left, align: "left" },
+    );
+    drawConsentChromeText(
+      doc,
+      `Page ${pageNum} of ${pageCount}`,
+      left, y + 6, { width: right - left, align: "right" },
+    );
+    drawConsentChromeText(
+      doc,
+      `Generated ${fmtUtcStamp(generatedAt)}`,
+      left, y + 16, { width: right - left, align: "right" },
+    );
+    doc.restore();
+  }
+
+  function drawConsentSectionHeading(
+    doc: PDFKit.PDFDocument,
+    title: string,
+  ): void {
+    if (doc.y > doc.page.height - 140) doc.addPage();
+    doc.moveDown(0.4);
+    // Reset cursor x to the left margin: prior KV/table calls leave doc.x
+    // at the right-hand column, which would push the heading off-screen.
+    doc.x = 50;
+    doc.fillColor("#0f172a").fontSize(11).font("Helvetica-Bold").text(title, 50, doc.y);
+    doc.moveTo(50, doc.y + 2).lineTo(doc.page.width - 50, doc.y + 2)
+      .strokeColor("#cbd5e1").lineWidth(0.4).stroke();
+    doc.x = 50;
+    doc.moveDown(0.3);
+  }
+
+  function drawConsentKvPairs(
+    doc: PDFKit.PDFDocument,
+    rows: Array<[string, string]>,
+  ): void {
+    const left = 50;
+    const labelWidth = 160;
+    const valueLeft = left + labelWidth + 10;
+    const valueWidth = doc.page.width - 50 - valueLeft;
+    doc.fillColor("#0f172a").fontSize(9.5).font("Helvetica");
+    for (const [label, value] of rows) {
+      if (doc.y > doc.page.height - 90) doc.addPage();
+      const startY = doc.y;
+      doc.fillColor("#475569").font("Helvetica-Bold").text(label, left, startY, {
+        width: labelWidth, lineBreak: false,
+      });
+      doc.fillColor("#0f172a").font("Helvetica").text(value || "—", valueLeft, startY, {
+        width: valueWidth,
+      });
+      doc.moveDown(0.15);
+    }
+  }
+
+  function drawConsentLegalBlock(doc: PDFKit.PDFDocument): void {
+    drawConsentSectionHeading(doc, "Authority and acknowledgements");
+    doc.fillColor("#1e293b").fontSize(9).font("Helvetica");
+    AMAX_CONSENT_LEGAL_PARAGRAPHS.forEach((p, i) => {
+      if (doc.y > doc.page.height - 110) doc.addPage();
+      doc.text(`${i + 1}. ${p}`, 50, doc.y, {
+        width: doc.page.width - 100, align: "justify",
+      });
+      doc.moveDown(0.4);
+    });
+  }
+
+  // Styled signature box. For signed consents the captured client signature
+  // name + IP + timestamp are reproduced inside the box; for unsigned
+  // requests the box is rendered empty with "Awaiting client signature" so
+  // the document still matches the paper layout.
+  function drawConsentSignatureBox(
+    doc: PDFKit.PDFDocument,
+    signature: { name: string; signedAt: Date | null; ipAddress: string | null } | null,
+  ): void {
+    drawConsentSectionHeading(doc, "Client signature");
+    const left = 50;
+    const right = doc.page.width - 50;
+    const boxTop = doc.y + 4;
+    const boxHeight = 110;
+    if (boxTop + boxHeight > doc.page.height - 90) {
+      doc.addPage();
+    }
+    const top = doc.y + 4;
+    doc.save();
+    doc.roundedRect(left, top, right - left, boxHeight, 4)
+      .strokeColor("#94a3b8").lineWidth(0.8).stroke();
+
+    if (signature) {
+      // Signature script line — Helvetica-Oblique stands in for a wet
+      // signature. The name + timestamp + IP underneath is what auditors
+      // actually rely on; the script line is a visual nod to the paper form.
+      doc.fillColor("#0f172a").fontSize(20).font("Helvetica-Oblique")
+        .text(signature.name, left + 16, top + 16, {
+          width: right - left - 32, lineBreak: false,
+        });
+      doc.fillColor("#64748b").fontSize(8).font("Helvetica")
+        .text("Electronic signature captured by AMAX Wealth client portal.",
+          left + 16, top + 50, { width: right - left - 32, lineBreak: false });
+
+      // Three-up details strip at the bottom of the box.
+      const detailsTop = top + boxHeight - 38;
+      const colWidth = (right - left - 32) / 3;
+      doc.fillColor("#475569").fontSize(7.5).font("Helvetica-Bold")
+        .text("SIGNED BY", left + 16, detailsTop, { width: colWidth, lineBreak: false });
+      doc.fillColor("#0f172a").fontSize(9).font("Helvetica")
+        .text(signature.name, left + 16, detailsTop + 10, { width: colWidth, lineBreak: false });
+
+      doc.fillColor("#475569").fontSize(7.5).font("Helvetica-Bold")
+        .text("SIGNED AT", left + 16 + colWidth, detailsTop, { width: colWidth, lineBreak: false });
+      doc.fillColor("#0f172a").fontSize(9).font("Helvetica")
+        .text(fmtUtcStamp(signature.signedAt), left + 16 + colWidth, detailsTop + 10, {
+          width: colWidth, lineBreak: false,
+        });
+
+      doc.fillColor("#475569").fontSize(7.5).font("Helvetica-Bold")
+        .text("FROM IP ADDRESS", left + 16 + colWidth * 2, detailsTop, {
+          width: colWidth, lineBreak: false,
+        });
+      doc.fillColor("#0f172a").fontSize(9).font("Helvetica")
+        .text(signature.ipAddress ?? "—", left + 16 + colWidth * 2, detailsTop + 10, {
+          width: colWidth, lineBreak: false,
+        });
+    } else {
+      doc.fillColor("#94a3b8").fontSize(11).font("Helvetica-Oblique")
+        .text("Awaiting client signature", left + 16, top + boxHeight / 2 - 6, {
+          width: right - left - 32, align: "center", lineBreak: false,
+        });
+    }
+    doc.restore();
+    doc.y = top + boxHeight + 6;
+  }
+
+  function drawConsentAuditAppendix(
+    doc: PDFKit.PDFDocument,
+    chain: Array<{ ref: string; label: string; status: string; when: Date | null }>,
+    events: Array<{
+      when: Date | null;
+      action: string;
+      actorUserId: number | null;
+      ipAddress: string | null;
+      summary: string;
+    }>,
+    eventsTruncated: boolean,
+  ): void {
+    doc.addPage();
+    doc.fillColor("#0f172a").fontSize(14).font("Helvetica-Bold")
+      .text("Audit Appendix");
+    doc.moveDown(0.2);
+    doc.fillColor("#64748b").fontSize(9).font("Helvetica")
+      .text("Supersede chain and lifecycle events for this consent artefact. " +
+        "Sourced from the platform audit log; values are immutable once written.");
+    doc.moveDown(0.5);
+
+    drawConsentSectionHeading(doc, "Supersede chain");
+    if (chain.length === 0) {
+      doc.fillColor("#64748b").fontSize(9).font("Helvetica-Oblique")
+        .text("No supersede chain — this is a standalone consent artefact.", 50, doc.y);
+      doc.moveDown(0.4);
+    } else {
+      const left = 50;
+      const right = doc.page.width - 50;
+      const cols = [70, 100, 120, right - left - 290];
+      const headers = ["Reference", "Status", "When", "Role in chain"];
+      let y = doc.y;
+      doc.fillColor("#475569").fontSize(8.5).font("Helvetica-Bold");
+      let x = left;
+      headers.forEach((h, i) => {
+        doc.text(h, x, y, { width: cols[i], lineBreak: false });
+        x += cols[i];
+      });
+      doc.moveTo(left, y + 12).lineTo(right, y + 12)
+        .strokeColor("#cbd5e1").lineWidth(0.4).stroke();
+      y += 16;
+      doc.fillColor("#0f172a").fontSize(9).font("Helvetica");
+      for (const link of chain) {
+        if (y > doc.page.height - 100) { doc.addPage(); y = 96; }
+        x = left;
+        doc.text(link.ref, x, y, { width: cols[0], lineBreak: false }); x += cols[0];
+        doc.text(link.status, x, y, { width: cols[1], lineBreak: false }); x += cols[1];
+        doc.text(fmtUtcStamp(link.when), x, y, { width: cols[2], lineBreak: false });
+        x += cols[2];
+        doc.text(link.label, x, y, { width: cols[3] });
+        y += 14;
+      }
+      doc.y = y + 4;
+    }
+
+    drawConsentSectionHeading(doc, "Lifecycle events");
+    if (events.length === 0) {
+      doc.fillColor("#64748b").fontSize(9).font("Helvetica-Oblique")
+        .text("No lifecycle audit events recorded for this artefact.", 50, doc.y);
+      doc.moveDown(0.4);
+      return;
+    }
+    const left = 50;
+    const right = doc.page.width - 50;
+    const cols = [120, 170, 70, right - left - 360];
+    const headers = ["When (UTC)", "Action", "Actor", "Detail"];
+    let y = doc.y;
+    doc.fillColor("#475569").fontSize(8.5).font("Helvetica-Bold");
+    let x = left;
+    headers.forEach((h, i) => {
+      doc.text(h, x, y, { width: cols[i], lineBreak: false });
+      x += cols[i];
+    });
+    doc.moveTo(left, y + 12).lineTo(right, y + 12)
+      .strokeColor("#cbd5e1").lineWidth(0.4).stroke();
+    y += 16;
+    doc.fillColor("#0f172a").fontSize(8.5).font("Helvetica");
+    for (const e of events) {
+      const detail = `${e.summary}${e.ipAddress ? ` · IP ${e.ipAddress}` : ""}`;
+      // Measure detail height so multi-line entries stay aligned.
+      const detailH = doc.heightOfString(detail, { width: cols[3] });
+      const rowH = Math.max(14, detailH + 4);
+      if (y + rowH > doc.page.height - 90) { doc.addPage(); y = 96; }
+      x = left;
+      doc.text(fmtUtcStamp(e.when), x, y, { width: cols[0], lineBreak: false }); x += cols[0];
+      doc.text(e.action, x, y, { width: cols[1], lineBreak: false }); x += cols[1];
+      doc.text(e.actorUserId === null ? "system" : `#${e.actorUserId}`, x, y, {
+        width: cols[2], lineBreak: false,
+      }); x += cols[2];
+      doc.text(detail, x, y, { width: cols[3] });
+      y += rowH;
+    }
+    doc.y = y;
+    if (eventsTruncated) {
+      doc.moveDown(0.4);
+      doc.x = 50;
+      doc.fillColor("#b91c1c").fontSize(8.5).font("Helvetica-Bold")
+        .text(
+          `Note: appendix truncated at ${CONSENT_APPENDIX_AUDIT_CAP} entries. ` +
+          "Older events exist in the audit log; export the audit log directly " +
+          "for the full history.",
+          50, doc.y, { width: doc.page.width - 100 },
+        );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Walk the supersede chain for a given consent OR request and return all
+  // artefacts touched, sorted oldest → newest by their authoritative
+  // timestamp (request.createdAt, consent.consentedAt). DFS-with-memo over
+  // every link type rather than two stitched-together linear walks: that
+  // means the same algorithm handles deep multi-supersede chains and
+  // future link types (e.g. a request created by an admin supersede that
+  // is itself superseded again) without needing per-direction edge cases.
+  // Bounded transitively by the per-id Set so cycles are impossible.
+  // ---------------------------------------------------------------------------
+  async function buildConsentSupersedeChain(opts: {
+    kind: "consent" | "request";
+    id: number;
+  }): Promise<{
+    chain: Array<{ ref: string; label: string; status: string; when: Date | null }>;
+    requestIds: number[];
+    consentIds: number[];
+  }> {
+    const requestIds = new Set<number>();
+    const consentIds = new Set<number>();
+
+    async function visitRequest(id: number): Promise<void> {
+      if (requestIds.has(id)) return;
+      requestIds.add(id);
+      const [row] = await db.select().from(feeConsentRequests)
+        .where(eq(feeConsentRequests.id, id)).limit(1);
+      if (!row) return;
+      if (row.supersedesRequestId) await visitRequest(row.supersedesRequestId);
+      if (row.signedFeeConsentId) await visitConsent(row.signedFeeConsentId);
+    }
+
+    async function visitConsent(id: number): Promise<void> {
+      if (consentIds.has(id)) return;
+      consentIds.add(id);
+      const [row] = await db.select().from(feeConsents)
+        .where(eq(feeConsents.id, id)).limit(1);
+      if (!row) return;
+      const [signingReq] = await db.select({ id: feeConsentRequests.id })
+        .from(feeConsentRequests)
+        .where(eq(feeConsentRequests.signedFeeConsentId, id)).limit(1);
+      if (signingReq) await visitRequest(signingReq.id);
+      if (row.supersededByRequestId) await visitRequest(row.supersededByRequestId);
+    }
+
+    if (opts.kind === "request") await visitRequest(opts.id);
+    else await visitConsent(opts.id);
+
+    const requestIdList = Array.from(requestIds);
+    const consentIdList = Array.from(consentIds);
+    const reqRows = requestIdList.length > 0
+      ? await db.select().from(feeConsentRequests)
+          .where(inArray(feeConsentRequests.id, requestIdList))
+      : [];
+    const conRows = consentIdList.length > 0
+      ? await db.select().from(feeConsents)
+          .where(inArray(feeConsents.id, consentIdList))
+      : [];
+
+    type Entry = {
+      ref: string;
+      label: string;
+      status: string;
+      when: Date | null;
+      sortKey: number;
+    };
+    const entries: Entry[] = [];
+    for (const r of reqRows) {
+      const isAudit = opts.kind === "request" && r.id === opts.id;
+      entries.push({
+        ref: `FCR-${r.id}`,
+        status: r.status,
+        when: r.createdAt,
+        label: isAudit
+          ? "Fee consent request (THIS DOCUMENT)"
+          : `Fee consent request · ${r.feeType}`,
+        sortKey: r.createdAt?.getTime() ?? 0,
+      });
+    }
+    for (const c of conRows) {
+      const isAudit = opts.kind === "consent" && c.id === opts.id;
+      entries.push({
+        ref: `FC-${c.id}`,
+        status: c.renewalStatus,
+        when: c.consentedAt,
+        label: isAudit
+          ? "Signed consent (THIS DOCUMENT)"
+          : `Signed consent · ${c.feeType}`,
+        sortKey: c.consentedAt?.getTime() ?? 0,
+      });
+    }
+    // Stable sort by timestamp; ties broken by ref (FCR-N ordering before
+    // FC-N for the same instant — a request always precedes the consent it
+    // produced, even when the seeded test fixture stamps them on the same
+    // millisecond).
+    entries.sort((a, b) => {
+      if (a.sortKey !== b.sortKey) return a.sortKey - b.sortKey;
+      return a.ref.startsWith("FCR-") && b.ref.startsWith("FC-") ? -1
+        : a.ref.startsWith("FC-") && b.ref.startsWith("FCR-") ? 1 : 0;
+    });
+
+    return {
+      chain: entries.map(({ sortKey, ...rest }) => rest),
+      requestIds: requestIdList,
+      consentIds: consentIdList,
+    };
+  }
+
+  // Friendly summary line per audit action so the appendix reads like a
+  // narrative, not a stream of slugs. Falls back to the raw action when
+  // we don't have a curated string for it.
+  function summariseConsentAuditAction(
+    action: string,
+    metadata: unknown,
+  ): string {
+    const md = (metadata && typeof metadata === "object" ? metadata : {}) as Record<string, unknown>;
+    switch (action) {
+      case "fee_consent_requested":
+        return "Adviser requested a new fee consent from the client";
+      case "fee_consent_signed":
+        return `Client signed the consent${md.signatureName ? ` (${String(md.signatureName)})` : ""}`;
+      case "fee_consent_created":
+        return "Executed fee consent record created from the signed request";
+      case "fee_consent_declined":
+        return `Client declined the request${md.reason ? ` — ${String(md.reason)}` : ""}`;
+      case "fee_consent_request_withdrawn":
+        return `Adviser withdrew the request${md.reason ? ` — ${String(md.reason)}` : ""}`;
+      case "fee_consent_request_revoked_by_admin":
+        return `Admin revoked the pending request${md.reason ? ` — ${String(md.reason)}` : ""}`;
+      case "fee_consent_superseded_by_admin":
+        return `Admin superseded the live consent${md.reason ? ` — ${String(md.reason)}` : ""}`;
+      case "fee_consent_request_created_by_admin_supersede":
+        return "Admin created a replacement request as part of a supersede";
+      case "fee_consent_request_pdf_exported":
+      case "fee_consent_pdf_exported":
+        return "Admin downloaded the consent PDF for record-keeping";
+      default:
+        return action;
+    }
+  }
+
+  // Audit-event cap. 500 covers any realistic consent lifecycle (request,
+  // sign, supersede chains, multiple PDF exports). We fetch 501 so we can
+  // detect overflow and surface a clear truncation banner in the appendix
+  // rather than silently dropping events.
+  const CONSENT_APPENDIX_AUDIT_CAP = 500;
+  async function loadConsentAuditEvents(opts: {
+    requestIds: number[];
+    consentIds: number[];
+  }): Promise<{
+    events: Array<{
+      when: Date | null;
+      action: string;
+      actorUserId: number | null;
+      ipAddress: string | null;
+      summary: string;
+    }>;
+    truncated: boolean;
+  }> {
+    if (opts.requestIds.length === 0 && opts.consentIds.length === 0) {
+      return { events: [], truncated: false };
+    }
+    const conds: SQL[] = [];
+    if (opts.requestIds.length > 0) {
+      conds.push(and(
+        eq(auditLogs.entityType, "fee_consent_request"),
+        inArray(auditLogs.entityId, opts.requestIds.map(String)),
+      )!);
+    }
+    if (opts.consentIds.length > 0) {
+      conds.push(and(
+        eq(auditLogs.entityType, "fee_consent"),
+        inArray(auditLogs.entityId, opts.consentIds.map(String)),
+      )!);
+    }
+    const where = conds.length === 1 ? conds[0] : or(...conds)!;
+    const rows = await db
+      .select({
+        action: auditLogs.action,
+        userId: auditLogs.userId,
+        ipAddress: auditLogs.ipAddress,
+        createdAt: auditLogs.createdAt,
+        metadata: auditLogs.metadata,
+      })
+      .from(auditLogs)
+      .where(where)
+      .orderBy(asc(auditLogs.createdAt))
+      .limit(CONSENT_APPENDIX_AUDIT_CAP + 1);
+    const truncated = rows.length > CONSENT_APPENDIX_AUDIT_CAP;
+    const kept = truncated ? rows.slice(0, CONSENT_APPENDIX_AUDIT_CAP) : rows;
+    return {
+      events: kept.map((r) => ({
+        when: r.createdAt,
+        action: r.action,
+        actorUserId: r.userId,
+        ipAddress: r.ipAddress,
+        summary: summariseConsentAuditAction(r.action, r.metadata),
+      })),
+      truncated,
+    };
+  }
+
+  interface ConsentPdfData {
+    documentRef: string;
+    documentTitle: string;
+    isSigned: boolean;
+    status: string;
+    generatedAt: Date;
+    exportedByAdminUserId: number;
+    parties: {
+      adviserUserId: number | null;
+      adviserUsername: string;
+      adviserAfsl: string | null;
+      adviserAuthRep: string | null;
+      clientUserId: number;
+      clientUsername: string;
+      adviceRecordId: number | null;
+    };
+    feeTerms: {
+      feeType: string;
+      amountType: string;
+      amount: string | null;
+      calculationMethod: string | null;
+      accountNumber: string;
+      accountName: string | null;
+      deductionFrequency: string;
+      referenceDay: Date | null;
+      renewalWindowStart: Date | null;
+      renewalWindowEnd: Date | null;
+      consentExpiryDate: Date | null;
+    };
+    signature: { name: string; signedAt: Date | null; ipAddress: string | null } | null;
+    requestNote: string | null;
+    declineReason: string | null;
+    lifecycle: Array<[string, string]>;
+    chain: Array<{ ref: string; label: string; status: string; when: Date | null }>;
+    auditEvents: Array<{
+      when: Date | null;
+      action: string;
+      actorUserId: number | null;
+      ipAddress: string | null;
+      summary: string;
+    }>;
+    auditEventsTruncated: boolean;
+  }
+
+  function renderConsentPdf(data: ConsentPdfData): Promise<Buffer> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const PDFDocument = (await import("pdfkit")).default;
+        // Top margin is bumped to 80px to clear the per-page letterhead;
+        // bottom margin to 70px for the two-line footer.
+        const doc = new PDFDocument({
+          size: "A4",
+          margins: { top: 80, bottom: 70, left: 50, right: 50 },
+          bufferPages: true,
+          info: {
+            Title: `${data.documentTitle} ${data.documentRef}`,
+            Author: `${AMAX_LICENSEE_NAME} (${AMAX_LICENSEE_AFSL})`,
+            Subject: data.isSigned
+              ? "Signed fee consent"
+              : "Fee consent request (pre-signature)",
+          },
+        });
+        const chunks: Buffer[] = [];
+        doc.on("data", (c: Buffer) => chunks.push(c));
+        doc.on("end", () => resolve(Buffer.concat(chunks)));
+        doc.on("error", reject);
+
+        // ---- Page 1: Document title block --------------------------------------
+        doc.fillColor("#0f172a").fontSize(16).font("Helvetica-Bold")
+          .text(data.documentTitle);
+        doc.fillColor("#64748b").fontSize(9.5).font("Helvetica")
+          .text(`Document reference: ${data.documentRef} · Status: ${data.status}`);
+        doc.fillColor("#64748b").fontSize(9.5).font("Helvetica")
+          .text(`Generated ${fmtUtcStamp(data.generatedAt)} · Exported by admin user #${data.exportedByAdminUserId}`);
+        doc.moveDown(0.5);
+
+        drawConsentSectionHeading(doc, "Parties");
+        drawConsentKvPairs(doc, [
+          ["Licensee", `${AMAX_LICENSEE_NAME} (${AMAX_LICENSEE_AFSL})`],
+          [
+            "Adviser (Authorised Rep.)",
+            `${data.parties.adviserUsername}` +
+              (data.parties.adviserUserId !== null ? ` (user #${data.parties.adviserUserId})` : "") +
+              (data.parties.adviserAuthRep ? ` · AR ${data.parties.adviserAuthRep}` : "") +
+              (data.parties.adviserAfsl && data.parties.adviserAfsl !== AMAX_LICENSEE_AFSL
+                ? ` · ${data.parties.adviserAfsl}` : ""),
+          ],
+          [
+            "Client",
+            `${data.parties.clientUsername} (user #${data.parties.clientUserId})`,
+          ],
+          [
+            "Linked advice record",
+            data.parties.adviceRecordId
+              ? `#${data.parties.adviceRecordId}`
+              : "— (legacy, pre-Task #293)",
+          ],
+        ]);
+
+        drawConsentSectionHeading(doc, "Fee terms");
+        drawConsentKvPairs(doc, [
+          ["Fee type", data.feeTerms.feeType],
+          ["Amount type", data.feeTerms.amountType],
+          ["Amount", fmtFeeAmount(data.feeTerms.amountType, data.feeTerms.amount)],
+          ["Calculation method", data.feeTerms.calculationMethod ?? "—"],
+          [
+            "Nominated account",
+            `${data.feeTerms.accountNumber}` +
+              (data.feeTerms.accountName ? ` (${data.feeTerms.accountName})` : ""),
+          ],
+          ["Deduction frequency", data.feeTerms.deductionFrequency],
+          ["Reference day", fmtDate(data.feeTerms.referenceDay)],
+          [
+            "Renewal window",
+            `${fmtDate(data.feeTerms.renewalWindowStart)}  →  ${fmtDate(data.feeTerms.renewalWindowEnd)}`,
+          ],
+          ["Consent expiry", fmtDate(data.feeTerms.consentExpiryDate)],
+        ]);
+
+        if (data.requestNote) {
+          drawConsentSectionHeading(doc, "Adviser note to client");
+          doc.fillColor("#0f172a").fontSize(9.5).font("Helvetica")
+            .text(data.requestNote, 50, doc.y, {
+              width: doc.page.width - 100, align: "left",
+            });
+          doc.moveDown(0.3);
+        }
+
+        drawConsentLegalBlock(doc);
+        drawConsentSignatureBox(doc, data.signature);
+
+        if (data.declineReason) {
+          drawConsentSectionHeading(doc, "Decline reason");
+          doc.fillColor("#0f172a").fontSize(9.5).font("Helvetica")
+            .text(data.declineReason, 50, doc.y, {
+              width: doc.page.width - 100, align: "left",
+            });
+          doc.moveDown(0.3);
+        }
+
+        if (data.lifecycle.length > 0) {
+          drawConsentSectionHeading(doc, "Lifecycle");
+          drawConsentKvPairs(doc, data.lifecycle);
+        }
+
+        // ---- Audit Appendix on its own page -------------------------------
+        drawConsentAuditAppendix(doc, data.chain, data.auditEvents, data.auditEventsTruncated);
+
+        // ---- Per-page letterhead + footer ---------------------------------
+        // Done last so bufferedPageRange.count is final by the time we
+        // paint "Page X of Y" — adding a page from inside this loop would
+        // invalidate the count.
+        const range = doc.bufferedPageRange();
+        for (let i = range.start; i < range.start + range.count; i++) {
+          doc.switchToPage(i);
+          // Watermark first so it sits BEHIND the letterhead/footer text.
+          drawConsentDraftWatermark(doc);
+          drawConsentLetterhead(doc, data.documentRef);
+          drawConsentFooter(doc, i - range.start + 1, range.count, data.generatedAt);
+          drawConsentDraftFooterDisclaimer(doc);
+        }
+
+        doc.end();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
   app.get(
     "/api/admin/fee-consent-requests/:id/pdf",
     adminStreamRoute(async (req, res, auth) => {
@@ -4081,7 +4845,7 @@ export function registerAdminRoutes(app: Express): void {
           status: 404,
         });
       }
-      const [adviser, client] = await Promise.all([
+      const [adviser, client, adviserProfile] = await Promise.all([
         db
           .select({ username: users.username })
           .from(users)
@@ -4092,69 +4856,106 @@ export function registerAdminRoutes(app: Express): void {
           .from(users)
           .where(eq(users.id, row.clientUserId))
           .limit(1),
+        db
+          .select({
+            afslNumber: adviserProfiles.afslNumber,
+            authorisedRepNumber: adviserProfiles.authorisedRepNumber,
+          })
+          .from(adviserProfiles)
+          .where(eq(adviserProfiles.userId, row.adviserUserId))
+          .limit(1),
       ]);
-      const buf = await renderConsentPdfText({
-        title: `Fee Consent Request #${row.id}`,
-        headerLines: [
-          `Generated: ${new Date().toISOString()}`,
-          `Status: ${row.status}`,
+      // Walk the supersede chain (forward + backward) and pull every audit
+      // event tied to any artefact in the chain. If the request was already
+      // signed, the signed consent shows up in `consentIds` so its
+      // fee_consent_created / fee_consent_signed / supersede events make it
+      // into the appendix too.
+      const { chain, requestIds, consentIds } = await buildConsentSupersedeChain({
+        kind: "request",
+        id: row.id,
+      });
+      const auditResult = await loadConsentAuditEvents({ requestIds, consentIds });
+      const generatedAt = new Date();
+      // If the request has already been signed, surface the captured
+      // signature on the document as well — an admin downloading a
+      // post-signature request PDF still wants the signature box filled in.
+      let signature: ConsentPdfData["signature"] = null;
+      if (row.signedFeeConsentId) {
+        const [signedConsent] = await db
+          .select({
+            clientSignatureName: feeConsents.clientSignatureName,
+            consentedAt: feeConsents.consentedAt,
+          })
+          .from(feeConsents)
+          .where(eq(feeConsents.id, row.signedFeeConsentId))
+          .limit(1);
+        const [ipRow] = await db
+          .select({ ipAddress: auditLogs.ipAddress })
+          .from(auditLogs)
+          .where(
+            and(
+              eq(auditLogs.entityType, "fee_consent"),
+              eq(auditLogs.entityId, String(row.signedFeeConsentId)),
+              eq(auditLogs.action, "fee_consent_created"),
+            ),
+          )
+          .orderBy(desc(auditLogs.createdAt))
+          .limit(1);
+        if (signedConsent) {
+          signature = {
+            name: signedConsent.clientSignatureName,
+            signedAt: signedConsent.consentedAt,
+            ipAddress: ipRow?.ipAddress ?? null,
+          };
+        }
+      }
+      const buf = await renderConsentPdf({
+        documentRef: `FCR-${row.id}`,
+        documentTitle: "AMAX Wealth — Fee Consent Request",
+        isSigned: !!row.signedFeeConsentId,
+        status: row.status,
+        generatedAt,
+        exportedByAdminUserId: auth.userId,
+        parties: {
+          adviserUserId: row.adviserUserId,
+          adviserUsername: adviser[0]?.username ?? "—",
+          adviserAfsl: adviserProfile[0]?.afslNumber ?? null,
+          adviserAuthRep: adviserProfile[0]?.authorisedRepNumber ?? null,
+          clientUserId: row.clientUserId,
+          clientUsername: client[0]?.username ?? "—",
+          adviceRecordId: row.adviceRecordId,
+        },
+        feeTerms: {
+          feeType: row.feeType,
+          amountType: row.amountType,
+          amount: row.amount === null ? null : String(row.amount),
+          calculationMethod: row.calculationMethod,
+          accountNumber: row.accountNumber,
+          accountName: row.accountName,
+          deductionFrequency: row.deductionFrequency,
+          referenceDay: row.proposedReferenceDay,
+          renewalWindowStart: row.proposedRenewalWindowStart,
+          renewalWindowEnd: row.proposedRenewalWindowEnd,
+          consentExpiryDate: row.proposedConsentExpiryDate,
+        },
+        signature,
+        requestNote: row.requestNote,
+        declineReason: row.declineReason,
+        lifecycle: [
+          ["Request created", fmtDate(row.createdAt)],
+          ["Client responded", fmtDate(row.respondedAt)],
+          [
+            "Signed → consent",
+            row.signedFeeConsentId ? `FC-${row.signedFeeConsentId}` : "—",
+          ],
+          [
+            "Supersedes prior request",
+            row.supersedesRequestId ? `FCR-${row.supersedesRequestId}` : "—",
+          ],
         ],
-        sections: [
-          {
-            heading: "Parties",
-            rows: [
-              ["Adviser", `${adviser[0]?.username ?? "?"} (#${row.adviserUserId})`],
-              ["Client", `${client[0]?.username ?? "?"} (#${row.clientUserId})`],
-              [
-                "Linked advice record",
-                row.adviceRecordId
-                  ? `#${row.adviceRecordId}`
-                  : "— (legacy, pre-Task#293)",
-              ],
-            ],
-          },
-          {
-            heading: "Fee terms",
-            rows: [
-              ["Fee type", row.feeType],
-              ["Amount type", row.amountType],
-              ["Amount", row.amount === null ? "—" : String(row.amount)],
-              ["Calculation method", row.calculationMethod ?? "—"],
-              ["Account", `${row.accountNumber} (${row.accountName ?? "—"})`],
-              ["Frequency", row.deductionFrequency],
-              ["Reference day", fmtDate(row.proposedReferenceDay)],
-              [
-                "Renewal window",
-                `${fmtDate(row.proposedRenewalWindowStart)}  →  ${fmtDate(
-                  row.proposedRenewalWindowEnd,
-                )}`,
-              ],
-              ["Expiry", fmtDate(row.proposedConsentExpiryDate)],
-            ],
-          },
-          {
-            heading: "Lifecycle",
-            rows: [
-              ["Created", fmtDate(row.createdAt)],
-              ["Responded", fmtDate(row.respondedAt)],
-              ["Decline reason", row.declineReason ?? "—"],
-              [
-                "Signed → consent",
-                row.signedFeeConsentId ? `#${row.signedFeeConsentId}` : "—",
-              ],
-              [
-                "Supersedes request",
-                row.supersedesRequestId ? `#${row.supersedesRequestId}` : "—",
-              ],
-            ],
-          },
-          {
-            heading: "Adviser note to client",
-            rows: [["Note", row.requestNote ?? "—"]],
-          },
-        ],
-        footer: `Exported by admin user #${auth.userId} on ${new Date().toISOString()}. ` +
-          `This document is informational only — no money will be moved by AMAX based on this consent.`,
+        chain,
+        auditEvents: auditResult.events,
+        auditEventsTruncated: auditResult.truncated,
       });
       // Task #318 — apply per-download confidential watermark BEFORE
       // streaming to disk. The shared helper resolves the (client, adviser)
@@ -4173,7 +4974,7 @@ export function registerAdminRoutes(app: Express): void {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="fee-consent-request-${row.id}.pdf"`,
+        `attachment; filename="amax-fee-consent-request-${row.id}.pdf"`,
       );
       res.setHeader("Content-Length", String(watermarked.length));
       await writeAuditLog({
@@ -4225,7 +5026,7 @@ export function registerAdminRoutes(app: Express): void {
       if (!row) {
         throw Object.assign(new Error("Fee consent not found"), { status: 404 });
       }
-      const [adviser, client] = await Promise.all([
+      const [adviser, client, adviserProfile] = await Promise.all([
         row.adviserId
           ? db
               .select({ username: users.username })
@@ -4238,6 +5039,16 @@ export function registerAdminRoutes(app: Express): void {
           .from(users)
           .where(eq(users.id, row.clientId))
           .limit(1),
+        row.adviserId
+          ? db
+              .select({
+                afslNumber: adviserProfiles.afslNumber,
+                authorisedRepNumber: adviserProfiles.authorisedRepNumber,
+              })
+              .from(adviserProfiles)
+              .where(eq(adviserProfiles.userId, row.adviserId))
+              .limit(1)
+          : Promise.resolve([]),
       ]);
       // Pull the recorded sign IP from the audit row written at sign time.
       const [ipRow] = await db
@@ -4252,68 +5063,61 @@ export function registerAdminRoutes(app: Express): void {
         )
         .orderBy(desc(auditLogs.createdAt))
         .limit(1);
-      const buf = await renderConsentPdfText({
-        title: `Fee Consent #${row.id}`,
-        headerLines: [
-          `Generated: ${new Date().toISOString()}`,
-          `Renewal status: ${row.renewalStatus}`,
+      const { chain, requestIds, consentIds } = await buildConsentSupersedeChain({
+        kind: "consent",
+        id: row.id,
+      });
+      const auditResult = await loadConsentAuditEvents({ requestIds, consentIds });
+      const generatedAt = new Date();
+      const buf = await renderConsentPdf({
+        documentRef: `FC-${row.id}`,
+        documentTitle: "AMAX Wealth — Fee Consent",
+        isSigned: true,
+        status: row.renewalStatus,
+        generatedAt,
+        exportedByAdminUserId: auth.userId,
+        parties: {
+          adviserUserId: row.adviserId,
+          adviserUsername: adviser[0]?.username ?? "—",
+          adviserAfsl: adviserProfile[0]?.afslNumber ?? null,
+          adviserAuthRep: adviserProfile[0]?.authorisedRepNumber ?? null,
+          clientUserId: row.clientId,
+          clientUsername: client[0]?.username ?? "—",
+          adviceRecordId: row.adviceRecordId,
+        },
+        feeTerms: {
+          feeType: row.feeType,
+          amountType: row.amountType,
+          amount: row.amount === null ? null : String(row.amount),
+          calculationMethod: row.calculationMethod,
+          accountNumber: row.accountNumber,
+          accountName: row.accountName,
+          deductionFrequency: row.deductionFrequency,
+          referenceDay: row.referenceDay,
+          renewalWindowStart: row.renewalWindowStart,
+          renewalWindowEnd: row.renewalWindowEnd,
+          consentExpiryDate: row.consentExpiryDate,
+        },
+        signature: {
+          name: row.clientSignatureName,
+          signedAt: row.consentedAt,
+          ipAddress: ipRow?.ipAddress ?? null,
+        },
+        requestNote: null,
+        declineReason: null,
+        lifecycle: [
+          ["Consent signed", fmtDate(row.consentedAt)],
+          ["Withdrawn at", fmtDate(row.withdrawnAt)],
+          [
+            "Superseded by request",
+            row.supersededByRequestId ? `FCR-${row.supersededByRequestId}` : "—",
+          ],
+          ["Superseded at", fmtDate(row.supersededAt)],
+          ["Superseded reason", row.supersededReason ?? "—"],
         ],
-        sections: [
-          {
-            heading: "Parties",
-            rows: [
-              [
-                "Adviser",
-                `${adviser[0]?.username ?? "?"} (#${row.adviserId ?? "—"})`,
-              ],
-              ["Client", `${client[0]?.username ?? "?"} (#${row.clientId})`],
-              ["Linked advice record", `#${row.adviceRecordId}`],
-            ],
-          },
-          {
-            heading: "Fee terms",
-            rows: [
-              ["Fee type", row.feeType],
-              ["Amount type", row.amountType],
-              ["Amount", row.amount === null ? "—" : String(row.amount)],
-              ["Calculation method", row.calculationMethod ?? "—"],
-              ["Account", `${row.accountNumber} (${row.accountName ?? "—"})`],
-              ["Frequency", row.deductionFrequency],
-              ["Reference day", fmtDate(row.referenceDay)],
-              [
-                "Renewal window",
-                `${fmtDate(row.renewalWindowStart)}  →  ${fmtDate(
-                  row.renewalWindowEnd,
-                )}`,
-              ],
-              ["Expiry", fmtDate(row.consentExpiryDate)],
-            ],
-          },
-          {
-            heading: "Signature",
-            rows: [
-              ["Signed by", row.clientSignatureName],
-              ["Signed at", fmtDate(row.consentedAt)],
-              ["Signed from IP", ipRow?.ipAddress ?? "—"],
-            ],
-          },
-          {
-            heading: "Lifecycle",
-            rows: [
-              ["Withdrawn at", fmtDate(row.withdrawnAt)],
-              [
-                "Superseded by request",
-                row.supersededByRequestId
-                  ? `#${row.supersededByRequestId}`
-                  : "—",
-              ],
-              ["Superseded at", fmtDate(row.supersededAt)],
-              ["Superseded reason", row.supersededReason ?? "—"],
-            ],
-          },
-        ],
-        footer: `Exported by admin user #${auth.userId} on ${new Date().toISOString()}. ` +
-          `This document is informational only — no money will be moved by AMAX based on this consent.`,
+        chain,
+        auditEvents: auditResult.events,
+        auditEventsTruncated: auditResult.truncated,
       });
       // Task #318 — apply per-download confidential watermark BEFORE
       // streaming. See the matching block on the fee-consent-request PDF
@@ -4329,7 +5133,7 @@ export function registerAdminRoutes(app: Express): void {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="fee-consent-${row.id}.pdf"`,
+        `attachment; filename="amax-fee-consent-${row.id}.pdf"`,
       );
       res.setHeader("Content-Length", String(watermarked.length));
       await writeAuditLog({
