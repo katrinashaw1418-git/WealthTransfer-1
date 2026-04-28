@@ -104,13 +104,14 @@ interface ClientLite {
   lastName: string;
 }
 
+// Task #368 — adviser-task surface is locked to the three trigger types
+// the automation manages. Manual creation of fee_consent_renewal is
+// blocked here too (the route requires a feeConsentId we have no way to
+// surface from this generic dialog), leaving the adviser with the two
+// types they can manually open: kyc_followup and portfolio_review.
 const TASK_TYPES = [
   { value: "portfolio_review", label: "Portfolio review" },
-  { value: "fee_consent_renewal", label: "Fee consent renewal" },
   { value: "kyc_followup", label: "KYC follow-up" },
-  { value: "document_request", label: "Document request" },
-  { value: "meeting_prep", label: "Meeting prep" },
-  { value: "other", label: "Other" },
 ];
 const PRIORITIES = ["low", "normal", "high", "urgent"];
 

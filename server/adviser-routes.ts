@@ -70,7 +70,11 @@ import {
   assertAdviserClientLink,
   loadAdviserFixtureFilterContext,
 } from "./services/adviser-access";
-import { insertAdviserTaskSchema, insertReportRequestSchema } from "@shared/schema";
+import {
+  insertAdviserTaskSchema,
+  insertReportRequestSchema,
+  ADVISER_TASK_ALLOWED_TYPES,
+} from "@shared/schema";
 
 // Task #94 — wealth planner compliance helpers (objectives, documents,
 // append-only adviser notes, advice-record version snapshot hook).
@@ -200,14 +204,13 @@ function handleError(res: any, error: any, fallbackMessage: string) {
 // ---------------------------------------------------------------------------
 // Validation schemas
 // ---------------------------------------------------------------------------
-const TASK_TYPES = [
-  "portfolio_review",
-  "fee_consent_renewal",
-  "kyc_followup",
-  "document_request",
-  "meeting_prep",
-  "other",
-] as const;
+// Task #368 — the adviser-task surface is restricted to exactly the three
+// trigger types the automation manages. Manual creation through the route
+// uses the same allow-list as the automation, sourced from the schema so
+// the contract cannot drift between layers. Older route inputs
+// ("document_request", "meeting_prep", "other") are intentionally rejected
+// at validation time with a 400.
+const TASK_TYPES = ADVISER_TASK_ALLOWED_TYPES;
 const TASK_STATUSES = ["open", "in_progress", "done", "cancelled"] as const;
 const TASK_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 const REPORT_TYPES = [
@@ -218,12 +221,26 @@ const REPORT_TYPES = [
 ] as const;
 
 const createTaskSchema = insertAdviserTaskSchema
-  .omit({ adviserUserId: true })
+  .omit({ adviserUserId: true, triggerKey: true })
   .extend({
     taskType: z.enum(TASK_TYPES),
     priority: z.enum(TASK_PRIORITIES).optional(),
     status: z.enum(TASK_STATUSES).optional(),
     dueAt: z.coerce.date().optional().nullable(),
+    // Task #368 — required when manually creating a fee_consent_renewal
+    // task; the service uses it to derive the per-condition triggerKey
+    // so the recheck/auto-close pipeline can later evaluate the consent.
+    feeConsentId: z.coerce.number().int().positive().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.taskType === "fee_consent_renewal" && !val.feeConsentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["feeConsentId"],
+        message:
+          "feeConsentId is required when manually creating a fee_consent_renewal task",
+      });
+    }
   });
 
 const updateTaskSchema = z.object({

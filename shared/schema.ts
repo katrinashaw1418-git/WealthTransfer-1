@@ -1655,9 +1655,13 @@ export const adviserTasks = pgTable("adviser_tasks", {
   // The client this task is about. Adviser MUST be linked to the client at the
   // time of insert (enforced in the route via assertAdviserClientLink).
   clientUserId: integer("client_user_id").references(() => users.id).notNull(),
-  // portfolio_review | fee_consent_renewal | kyc_followup | document_request |
-  // meeting_prep | other — kept as text rather than enum so we can extend
-  // without a migration; route validates with zod.
+  // Task #368 — the only legal taskType values are the three trigger types
+  // below. The full set is exported as `ADVISER_TASK_ALLOWED_TYPES` and the
+  // service layer rejects anything else. Pre-existing rows with legacy types
+  // (e.g. "document_request", "meeting_prep") survive untouched but are not
+  // managed by the recheck/auto-close pipeline (they have no triggerKey).
+  //   kyc_followup        | fee_consent_renewal | portfolio_review
+  // Kept as text so legacy rows continue to read cleanly without a migration.
   taskType: text("task_type").notNull(),
   title: text("title").notNull(),
   notes: text("notes"),
@@ -1678,6 +1682,30 @@ export const adviserTasks = pgTable("adviser_tasks", {
   // anchor the next portfolio_review due date (instead of cron-run +
   // 14 days). Null for non-review task types.
   nextReviewAt: timestamp("next_review_at"),
+  // Task #368 — encodes the exact condition that justified creating this
+  // task, so the recheck pipeline can re-evaluate it cheaply at fetch
+  // time and decide whether the task should auto-close. Format:
+  //   kyc:<clientUserId>                         (kyc_followup)
+  //   consent:<feeConsentId>                     (fee_consent_renewal)
+  //   review:<adviserUserId>:<clientUserId>      (portfolio_review)
+  // Nullable so historical rows that pre-date Task #368 stay untouched
+  // (the recheck/auto-close pipeline ignores rows without a triggerKey).
+  triggerKey: text("trigger_key"),
+  // Task #368 — `true` when the adviser explicitly closed the task
+  // themselves (status set to 'done' or 'cancelled' via PATCH). The
+  // automation must NOT recreate a task while a dismissed row still
+  // exists with the same triggerKey AND that dismissal hasn't yet been
+  // "consumed" by the underlying condition resolving (i.e. autoCloseReason
+  // remains NULL). Once the condition resolves, the recheck stamps
+  // autoCloseReason on the dismissed row, freeing the suppression so a
+  // future flip back to unresolved can create a fresh task.
+  dismissedByAdviser: boolean("dismissed_by_adviser").notNull().default(false),
+  // Task #368 — populated by the recheck pipeline when it auto-closes a
+  // stale task ("resolved automatically"), or when it consumes a previously
+  // dismissed task because its condition has now resolved. Tasks where
+  // this is set AND dismissedByAdviser is false are excluded from the
+  // adviser-facing list response — they "never appear" in the inbox.
+  autoCloseReason: text("auto_close_reason"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (table) => ({
@@ -1685,7 +1713,92 @@ export const adviserTasks = pgTable("adviser_tasks", {
   adviserStatusIdx: index("adviser_tasks_adviser_status_idx").on(table.adviserUserId, table.status),
   // "show me all tasks for this client" — used on client-detail
   clientIdx: index("adviser_tasks_client_idx").on(table.clientUserId),
+  // Task #368 — fast lookup of "is there already a task with this triggerKey
+  // for this adviser+client?" used by the automation's idempotency check
+  // and by the recheck/auto-close pipeline.
+  triggerLookupIdx: index("adviser_tasks_trigger_lookup_idx").on(
+    table.adviserUserId,
+    table.clientUserId,
+    table.triggerKey,
+  ),
 }));
+
+// Task #368 — closed allow-list of adviser-task trigger types. Kept here
+// alongside the table so the schema, automation, route and storage paths
+// all import from the same source of truth. Updating this list also
+// updates the createInsertSchema enum below.
+export const ADVISER_TASK_ALLOWED_TYPES = [
+  "kyc_followup",
+  "fee_consent_renewal",
+  "portfolio_review",
+] as const;
+export type AdviserTaskAllowedType = (typeof ADVISER_TASK_ALLOWED_TYPES)[number];
+
+/**
+ * Defence-in-depth guard used at every code path that inserts into
+ * `adviser_tasks` (route service, automation cron). Throws a structured
+ * 400-ish error so callers can surface the rejection in their normal
+ * error-handling envelope. Pre-existing legacy rows (with task types
+ * outside this set) are left untouched in the database; only NEW writes
+ * are constrained.
+ */
+export function assertAllowedAdviserTaskType(taskType: string): void {
+  if (!(ADVISER_TASK_ALLOWED_TYPES as readonly string[]).includes(taskType)) {
+    throw Object.assign(
+      new Error(
+        `adviser_tasks.taskType must be one of ${ADVISER_TASK_ALLOWED_TYPES.join(", ")}; got "${taskType}"`,
+      ),
+      { status: 400, reason: "adviser_task_type_not_allowed" },
+    );
+  }
+}
+
+/**
+ * Build the canonical triggerKey for a (taskType, …) tuple. The encoding
+ * is a flat string so the column stays a simple text + indexable.
+ *
+ *   kyc_followup           → kyc:<clientUserId>
+ *   fee_consent_renewal    → consent:<feeConsentId>
+ *   portfolio_review       → review:<adviserUserId>:<clientUserId>
+ *
+ * Throws if a required identifier is missing — that's a programmer error,
+ * not a user input error.
+ */
+export function buildAdviserTaskTriggerKey(input: {
+  taskType: AdviserTaskAllowedType;
+  adviserUserId: number;
+  clientUserId: number;
+  feeConsentId?: number | null;
+}): string {
+  switch (input.taskType) {
+    case "kyc_followup":
+      return `kyc:${input.clientUserId}`;
+    case "fee_consent_renewal":
+      if (!input.feeConsentId) {
+        throw new Error(
+          "buildAdviserTaskTriggerKey: feeConsentId is required for fee_consent_renewal",
+        );
+      }
+      return `consent:${input.feeConsentId}`;
+    case "portfolio_review":
+      return `review:${input.adviserUserId}:${input.clientUserId}`;
+  }
+}
+
+/**
+ * Inverse of `buildAdviserTaskTriggerKey` — parses the consent id out of
+ * a `consent:<id>` triggerKey for the recheck pipeline. Returns null when
+ * the key has the wrong shape (legacy / corrupt rows).
+ */
+export function parseFeeConsentTriggerKey(
+  triggerKey: string | null,
+): number | null {
+  if (!triggerKey) return null;
+  const m = /^consent:(\d+)$/.exec(triggerKey);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
 
 export const insertAdviserTaskSchema = createInsertSchema(adviserTasks).omit({
   id: true,
@@ -1694,6 +1807,12 @@ export const insertAdviserTaskSchema = createInsertSchema(adviserTasks).omit({
   completedAt: true,
   completionNotes: true,
   nextReviewAt: true,
+  // Task #368 — these columns are written exclusively by the recheck
+  // pipeline (autoCloseReason) or by the updateAdviserTask service
+  // (dismissedByAdviser when an adviser closes a task). Callers must
+  // not be able to backdoor either through the insert schema.
+  dismissedByAdviser: true,
+  autoCloseReason: true,
 });
 export type AdviserTask = typeof adviserTasks.$inferSelect;
 export type InsertAdviserTask = z.infer<typeof insertAdviserTaskSchema>;

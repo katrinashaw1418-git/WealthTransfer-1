@@ -36,6 +36,10 @@ import {
   adviserNotificationDismissals,
   type AdviserTask,
   type InsertAdviserTask,
+  ADVISER_TASK_ALLOWED_TYPES,
+  assertAllowedAdviserTaskType,
+  buildAdviserTaskTriggerKey,
+  type AdviserTaskAllowedType,
   type ReportRequest,
   type InsertReportRequest,
   type InvestmentProduct,
@@ -52,6 +56,10 @@ import {
   matchTestFixtureEmail,
 } from "./test-fixture-emails";
 import { isKnownProductCategory } from "@shared/product-categories";
+// Task #368 — recheck/auto-close pipeline; called at the top of
+// listAdviserTasks so the GET response is always consistent with the
+// underlying conditions.
+import { recheckAdviserTasks } from "./adviser-task-recheck";
 
 // -----------------------------------------------------------------------------
 // Consent expiry for newly-raised investment instructions. After this window
@@ -1313,10 +1321,33 @@ export async function listAdviserTasks(
   adviserUserId: number,
   filters?: { status?: string; clientUserId?: number },
 ): Promise<AdviserTaskWithClient[]> {
+  // Task #368 — recheck and auto-close stale tasks BEFORE reading. This
+  // guarantees that the response never contains an open task whose
+  // underlying condition has already been resolved (the row is silently
+  // closed with autoCloseReason='resolved automatically'); and that any
+  // dismissed-suppression that should be released has been released, so
+  // that the very next automation pass can recreate the task if the
+  // condition flips back. Cheap when there's nothing to do (single
+  // candidate-fetch query short-circuits on an empty result set).
+  await recheckAdviserTasks(adviserUserId);
+
   const conditions = [eq(adviserTasks.adviserUserId, adviserUserId)];
   if (filters?.status) conditions.push(eq(adviserTasks.status, filters.status));
   if (filters?.clientUserId)
     conditions.push(eq(adviserTasks.clientUserId, filters.clientUserId));
+
+  // Task #368 — exclude rows that the recheck/auto-close pipeline closed
+  // ("resolved automatically") and that the adviser never dismissed
+  // themselves. These tasks effectively never existed from the adviser's
+  // point of view: the condition resolved before they could act on it,
+  // so showing them would be noise. Adviser-dismissed rows ARE retained
+  // so the historical audit/UI can still surface them if needed.
+  conditions.push(
+    or(
+      isNull(adviserTasks.autoCloseReason),
+      eq(adviserTasks.dismissedByAdviser, true),
+    )!,
+  );
 
   // Defence in depth (Task #286): a task pinned to a fixture client must
   // not appear on a real adviser's workflow page. Resolve the visible-
@@ -1345,6 +1376,13 @@ export async function listAdviserTasks(
       completedAt: adviserTasks.completedAt,
       completionNotes: adviserTasks.completionNotes,
       nextReviewAt: adviserTasks.nextReviewAt,
+      // Task #368 — surface the recheck/auto-close metadata so callers
+      // (UI badges, audit views) can distinguish "still actionable" from
+      // "adviser dismissed" from "auto-closed by recheck" without a
+      // second query.
+      triggerKey: adviserTasks.triggerKey,
+      dismissedByAdviser: adviserTasks.dismissedByAdviser,
+      autoCloseReason: adviserTasks.autoCloseReason,
       createdAt: adviserTasks.createdAt,
       updatedAt: adviserTasks.updatedAt,
       clientFirstName: users.firstName,
@@ -1362,13 +1400,36 @@ export async function listAdviserTasks(
 
 export async function createAdviserTask(
   adviserUserId: number,
-  input: Omit<InsertAdviserTask, "adviserUserId">,
+  input: Omit<InsertAdviserTask, "adviserUserId"> & {
+    feeConsentId?: number | null;
+  },
 ): Promise<AdviserTask> {
   // Defence in depth: even though the route validates the link, re-check here.
   await assertAdviserClientLink(adviserUserId, input.clientUserId);
+
+  // Task #368 — single allow-list check on every write path. Mirrors the
+  // route validation but stops any internal caller (cron, future helpers)
+  // from inserting anything other than the three trigger types.
+  assertAllowedAdviserTaskType(input.taskType);
+  const taskType = input.taskType as AdviserTaskAllowedType;
+
+  // Task #368 — every new row carries a triggerKey so the recheck/auto-
+  // close pipeline can re-evaluate its underlying condition. For manual
+  // creation the route layer doesn't know which fee_consents row the
+  // adviser has in mind, so we require the explicit feeConsentId field
+  // when manually creating a fee_consent_renewal task. KYC follow-up and
+  // portfolio review derive their key from (adviser, client) alone.
+  const triggerKey = buildAdviserTaskTriggerKey({
+    taskType,
+    adviserUserId,
+    clientUserId: input.clientUserId,
+    feeConsentId: input.feeConsentId ?? null,
+  });
+
+  const { feeConsentId: _omit, ...rest } = input;
   const [row] = await db
     .insert(adviserTasks)
-    .values({ ...input, adviserUserId })
+    .values({ ...rest, adviserUserId, triggerKey })
     .returning();
   return row;
 }
@@ -1404,6 +1465,34 @@ export async function updateAdviserTask(
   if (!existing) return null;
 
   const update: Record<string, unknown> = { ...patch, updatedAt: new Date() };
+
+  // -------------------------------------------------------------------------
+  // Task #368 — adviser dismissal flag.
+  //
+  // Whenever the adviser transitions a task to a closed status ('done' OR
+  // 'cancelled') we mark `dismissedByAdviser = true` on the row. This is
+  // the signal the recheck/auto-close pipeline keys on:
+  //
+  //   - The next time runAdviserTaskAutomation evaluates the same trigger,
+  //     `hasSuppressionForTriggerKey` will see the dismissed-not-consumed
+  //     row and refuse to recreate the task — adviser dismissals are
+  //     honored.
+  //   - As soon as the underlying condition resolves (the client's KYC
+  //     becomes verified, the consent gets renewed, a fresh review is
+  //     completed), the recheck stamps autoCloseReason on the dismissed
+  //     row, "consuming" the suppression and freeing a future flip back
+  //     to unresolved to produce a fresh task.
+  //
+  // Auto-close writes from the recheck pipeline DO NOT come through this
+  // function (they go straight to the table) so they correctly leave
+  // dismissedByAdviser = false.
+  // -------------------------------------------------------------------------
+  if (
+    (patch.status === "done" || patch.status === "cancelled") &&
+    existing.status !== patch.status
+  ) {
+    update.dismissedByAdviser = true;
+  }
 
   // -------------------------------------------------------------------------
   // Task #285 — compliance gating when transitioning a task to "done".

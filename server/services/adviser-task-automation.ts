@@ -38,9 +38,13 @@ import {
   adviserClients,
   adviserTasks,
   feeConsents,
+  assertAllowedAdviserTaskType,
+  buildAdviserTaskTriggerKey,
+  type AdviserTaskAllowedType,
 } from "@shared/schema";
-import { and, desc, eq, gte, lte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lte, inArray, isNull, or, sql } from "drizzle-orm";
 import { clientDisplayName } from "@shared/display-name";
+import { recheckAdviserTasksForAdvisers } from "./adviser-task-recheck";
 
 export interface TaskAutomationSummary {
   linksScanned: number;
@@ -73,13 +77,30 @@ export function clientLabelForTask(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Has this adviser already got an OPEN or IN_PROGRESS task of `taskType` for
-// this client? If so, the cron should not create another.
+// Task #368 — suppression check, keyed on the per-condition triggerKey rather
+// than the broader (adviser, client, taskType) tuple. Returns true when ANY
+// of the following is true for the given triggerKey:
+//
+//   1. There is an OPEN/IN_PROGRESS task for this triggerKey
+//      → the adviser has not yet acted; don't duplicate.
+//
+//   2. There is a task that the adviser explicitly dismissed
+//      (status='done' or 'cancelled' AND dismissedByAdviser = true)
+//      whose `autoCloseReason` is NULL
+//      → the adviser said "no thanks" and the recheck pipeline has not yet
+//        seen the underlying condition resolve. We therefore must NOT
+//        recreate. Once the condition resolves, the recheck stamps an
+//        `autoCloseReason` on the dismissed row, releasing the suppression
+//        so a future flip back to unresolved produces a fresh task.
+//
+// Tasks that were auto-closed by the recheck (autoCloseReason set, but not
+// dismissedByAdviser) DO NOT suppress — re-creating after an auto-close is
+// the legitimate "condition flipped back" path.
 // ---------------------------------------------------------------------------
-async function hasOpenTask(
+async function hasSuppressionForTriggerKey(
   adviserUserId: number,
   clientUserId: number,
-  taskType: string,
+  triggerKey: string,
 ): Promise<boolean> {
   const [row] = await db
     .select({ id: adviserTasks.id })
@@ -88,8 +109,15 @@ async function hasOpenTask(
       and(
         eq(adviserTasks.adviserUserId, adviserUserId),
         eq(adviserTasks.clientUserId, clientUserId),
-        eq(adviserTasks.taskType, taskType),
-        inArray(adviserTasks.status, ["open", "in_progress"]),
+        eq(adviserTasks.triggerKey, triggerKey),
+        or(
+          inArray(adviserTasks.status, ["open", "in_progress"]),
+          and(
+            inArray(adviserTasks.status, ["done", "cancelled"]),
+            eq(adviserTasks.dismissedByAdviser, true),
+            isNull(adviserTasks.autoCloseReason),
+          ),
+        ),
       ),
     )
     .limit(1);
@@ -127,20 +155,27 @@ async function hasRecentPortfolioReview(
 // createAdviserTask service function — just without the route-layer
 // assertAdviserClientLink call, because the caller already iterated the
 // link table to obtain (adviserUserId, clientUserId).
+//
+// Task #368 — every insert now carries a `triggerKey` and is gated by the
+// shared allow-list (`assertAllowedAdviserTaskType`) so the storage layer
+// rejects any future code path that tries to slip in a non-trigger task.
 // ---------------------------------------------------------------------------
 async function createTask(input: {
   adviserUserId: number;
   clientUserId: number;
-  taskType: string;
+  taskType: AdviserTaskAllowedType;
+  triggerKey: string;
   title: string;
   notes: string;
   priority: "low" | "normal" | "high" | "urgent";
   dueAt: Date | null;
 }): Promise<void> {
+  assertAllowedAdviserTaskType(input.taskType);
   await db.insert(adviserTasks).values({
     adviserUserId: input.adviserUserId,
     clientUserId: input.clientUserId,
     taskType: input.taskType,
+    triggerKey: input.triggerKey,
     title: input.title,
     notes: input.notes,
     priority: input.priority,
@@ -195,6 +230,18 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
   summary.linksScanned = links.length;
   if (links.length === 0) return summary;
 
+  // Task #368 — run the recheck/auto-close pipeline FIRST so that any
+  // dismissed-but-now-resolved task gets its `autoCloseReason` stamped
+  // before the suppression check runs below. Without this, an adviser
+  // whose dismissed kyc_followup task pre-dates the client becoming
+  // verified would never get a fresh prompt when the client's KYC later
+  // reverted to pending. The recheck is per-adviser to keep its working
+  // set bounded, but we batch all the advisers we're about to scan into a
+  // single call so the heavy queries (kyc, consents, last reviews) only
+  // touch each table once.
+  const adviserIds = Array.from(new Set(links.map((l) => l.adviserUserId)));
+  await recheckAdviserTasksForAdvisers(adviserIds);
+
   // 2. Pre-fetch all expiring fee consents in ONE query, then index by
   //    clientId for O(1) lookups inside the link loop.
   const linkedClientIds = Array.from(new Set(links.map((l) => l.clientUserId)));
@@ -227,7 +274,18 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
 
       // Trigger A — KYC follow-up
       if (link.kycStatus !== "verified") {
-        if (await hasOpenTask(link.adviserUserId, link.clientUserId, "kyc_followup")) {
+        const kycTriggerKey = buildAdviserTaskTriggerKey({
+          taskType: "kyc_followup",
+          adviserUserId: link.adviserUserId,
+          clientUserId: link.clientUserId,
+        });
+        if (
+          await hasSuppressionForTriggerKey(
+            link.adviserUserId,
+            link.clientUserId,
+            kycTriggerKey,
+          )
+        ) {
           summary.idempotencySkips += 1;
         } else {
           // Task #285 — anchor the due date on the per-client signal
@@ -244,6 +302,7 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
             adviserUserId: link.adviserUserId,
             clientUserId: link.clientUserId,
             taskType: "kyc_followup",
+            triggerKey: kycTriggerKey,
             title: `Follow up KYC for ${clientLabel}`,
             notes: `Client: ${clientLabel}. KYC status is "${link.kycStatus ?? "unknown"}". Verify outstanding documentation and chase the client to complete identity verification.`,
             priority: "high",
@@ -253,12 +312,28 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
         }
       }
 
-      // Trigger B — Fee consent renewal (one task per expiring consent)
+      // Trigger B — Fee consent renewal (one task per expiring consent).
+      // Task #368 — suppression now keys on the SPECIFIC consent (via
+      // triggerKey) so that an adviser who renewed consent #5 (releasing
+      // its task) but still has consent #6 expiring will see a fresh task
+      // for #6 instead of being silently skipped.
       const expiring = expiringByClient.get(link.clientUserId) ?? [];
       for (const consent of expiring) {
-        if (await hasOpenTask(link.adviserUserId, link.clientUserId, "fee_consent_renewal")) {
+        const consentTriggerKey = buildAdviserTaskTriggerKey({
+          taskType: "fee_consent_renewal",
+          adviserUserId: link.adviserUserId,
+          clientUserId: link.clientUserId,
+          feeConsentId: consent.id,
+        });
+        if (
+          await hasSuppressionForTriggerKey(
+            link.adviserUserId,
+            link.clientUserId,
+            consentTriggerKey,
+          )
+        ) {
           summary.idempotencySkips += 1;
-          break; // one open renewal task per (adviser, client) is enough
+          continue;
         }
         const daysToExpiry = Math.max(
           0,
@@ -268,17 +343,33 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
           adviserUserId: link.adviserUserId,
           clientUserId: link.clientUserId,
           taskType: "fee_consent_renewal",
+          triggerKey: consentTriggerKey,
           title: `Renew fee consent for ${clientLabel}`,
           notes: `Client: ${clientLabel}. Fee consent #${consent.id} expires in ${daysToExpiry} day(s). Initiate the renewal conversation and re-sign before the expiry to avoid a fee-collection gap.`,
           priority: daysToExpiry <= 7 ? "urgent" : "high",
           dueAt: consent.consentExpiryDate,
         });
         summary.feeConsentRenewalsCreated += 1;
-        break; // one task covers all expiring consents for this client
       }
 
-      // Trigger C — Quarterly portfolio review
-      if (await hasRecentPortfolioReview(link.adviserUserId, link.clientUserId, ninetyDaysAgo)) {
+      // Trigger C — Quarterly portfolio review.
+      // Task #368 — short-circuit on the per-condition triggerKey so a
+      // dismissed (status='cancelled' / status='done' + dismissedByAdviser)
+      // task with autoCloseReason still NULL keeps suppressing recreation.
+      const reviewTriggerKey = buildAdviserTaskTriggerKey({
+        taskType: "portfolio_review",
+        adviserUserId: link.adviserUserId,
+        clientUserId: link.clientUserId,
+      });
+      if (
+        await hasSuppressionForTriggerKey(
+          link.adviserUserId,
+          link.clientUserId,
+          reviewTriggerKey,
+        )
+      ) {
+        summary.idempotencySkips += 1;
+      } else if (await hasRecentPortfolioReview(link.adviserUserId, link.clientUserId, ninetyDaysAgo)) {
         summary.cadenceSkips += 1;
       } else {
         // Task #285 — anchor the due date on the per-client signal:
@@ -308,6 +399,7 @@ export async function runAdviserTaskAutomation(): Promise<TaskAutomationSummary>
           adviserUserId: link.adviserUserId,
           clientUserId: link.clientUserId,
           taskType: "portfolio_review",
+          triggerKey: reviewTriggerKey,
           title: `Quarterly portfolio review for ${clientLabel}`,
           notes: `Client: ${clientLabel}. It has been at least 90 days since the last portfolio review. Schedule a review meeting and document the discussion.`,
           priority: "normal",
