@@ -52,6 +52,14 @@ import {
 } from "./ledger";
 import { assertKillSwitchOff } from "./kill-switch";
 import { writeAuditLog } from "./audit";
+// Task #307 — single source of truth for "is this consent legally valid for
+// execution right now?". Lifted out of the inline gate ladder below so the
+// deduction-approve and rule-resume execution chokepoints share the same
+// definition (and the same gateReason vocabulary) as the daily accrual job.
+import {
+  assertConsentValidForExecution,
+  validateRuleAmountAgainstConsent,
+} from "./consent-integrity";
 
 // Task #294 — terminal lifecycle states a rule can land in. Any rule already
 // in one of these states is invisible to createFeeRule (the supersede pass
@@ -290,6 +298,21 @@ export async function createFeeRule(
         { status: 400 },
       );
     }
+
+    // Task #307 — parameter equality between rule and consent. Closes the
+    // class of bug where a $150 ongoing-fee consent shipped with a $495
+    // adviser_fee_rule attached. The DB trigger installed by
+    // installFeeRuleAmountEqualityTrigger is the hard backstop — this
+    // service-layer call produces the friendly 400 message before the
+    // trigger fires its check_violation.
+    validateRuleAmountAgainstConsent(
+      {
+        amountType: input.amountType,
+        fixedAmount: (input.fixedAmount as string | number | null | undefined) ?? null,
+        rateBps: (input.rateBps as number | null | undefined) ?? null,
+      },
+      consent,
+    );
 
     // Account number always comes from the consent — never trusted from the
     // client / route input. This is the field the partial unique index
@@ -634,26 +657,16 @@ export async function runDailyAccruals(opts: {
     for (const rule of rules) {
       let gate: GateReason | null = null;
 
-      // (a) Underlying consent.
-      const [consent] = await tx
-        .select()
-        .from(feeConsents)
-        .where(eq(feeConsents.id, rule.feeConsentId))
-        .limit(1);
-      if (!consent) {
-        gate = "consent_missing";
-      } else if (consent.withdrawnAt) {
-        gate = "consent_withdrawn";
-      } else if (
-        consent.consentExpiryDate &&
-        new Date(consent.consentExpiryDate).getTime() <= accrualDate.getTime()
-      ) {
-        gate = "consent_expired";
-      } else if (consent.renewalStatus !== "active") {
-        // Task #92 step 6 — renewal_status gate. Mirrors the upstream
-        // guard in adviser-access.ts/execution-gate.ts so accrual cannot
-        // happen against a consent that is mid-renewal or otherwise non-active.
-        gate = "consent_renewal_inactive";
+      // (a) Underlying consent — Task #307 lifts the four consent gates into
+      // the shared assertConsentValidForExecution helper so this loop, the
+      // deduction-approve chokepoint and the rule-resume admin action all
+      // produce the same gateReason vocabulary against the same definition.
+      const consentCheck = await assertConsentValidForExecution(rule.feeConsentId, {
+        executor: tx,
+        now: accrualDate,
+      });
+      if (!consentCheck.ok) {
+        gate = consentCheck.reason;
       }
 
       // (b) Adviser-client link still active.

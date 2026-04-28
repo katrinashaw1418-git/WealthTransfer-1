@@ -122,6 +122,10 @@ import {
   getObjectStream,
   statObject,
 } from "./services/object-storage";
+// Task #307 — single helper for adviser-route audit rows. New code uses
+// recordAdviserAudit (req-aware, fail-closed); legacy callsites still use
+// the local audit() wrapper which itself delegates to writeAuditLog.
+import { recordAdviserAudit, getRequestIp } from "./services/audit-helpers";
 // Task #148 — shared multer factory that enforces a maximum file size and a
 // strict mime allow-list, returning 400 BEFORE any bytes are handed off to
 // uploadClientDocument(). Replaces the route-local multer config.
@@ -141,7 +145,20 @@ function readClientIdQuery(req: Request): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// Local audit-log helper (fire-and-forget, never throws into the route).
+// Task #307 — Local audit-log helper, now a thin compatibility wrapper that
+// delegates to the canonical writeAuditLog() so:
+//   1. Adviser audit rows have the same { before, after, ...extra } metadata
+//      shape as admin / client routes (a regulator querying on action
+//      gets a consistent payload regardless of which surface wrote it).
+//   2. Any insert failure is observed via the operator-alert + counter
+//      surface inside writeAuditLog (was previously SILENTLY DROPPED).
+//      We still swallow the re-throw HERE so the surrounding route can
+//      respond to the caller — the alert is the observability surface.
+//
+// NEW code should call recordAdviserAudit() directly. This wrapper exists
+// to keep the existing dozen-or-so callsites in this file working without a
+// signature break, and because the legacy callsites pass a single jsonb
+// blob as `metadata` (no before/after split), which we forward as `extra`.
 // ---------------------------------------------------------------------------
 async function audit(
   userId: number,
@@ -152,16 +169,21 @@ async function audit(
   ipAddress: string | null,
 ): Promise<void> {
   try {
-    await db.insert(auditLogs).values({
+    await writeAuditLog({
       userId,
       action,
       entityType,
       entityId,
-      metadata: metadata as any,
+      extra:
+        metadata && typeof metadata === "object"
+          ? (metadata as Record<string, unknown>)
+          : { metadata },
       ipAddress,
     });
   } catch {
-    // Audit failures must never break the response
+    // writeAuditLog has already paged the operator + bumped the audit-write-
+    // failure counter. Swallow here so the route response succeeds — the
+    // dropped row is visible in the admin "audit-log write failures" tile.
   }
 }
 
@@ -565,6 +587,24 @@ export function registerAdviserRoutes(app: Express): void {
     adviserRoute(async (req, auth) => {
       const parsed = createInstructionSchema.safeParse(req.body);
       if (!parsed.success) {
+        // Task #307 — write a `.blocked` audit row so the trail captures
+        // the gate working, not just successful events. Reason carries the
+        // first zod issue so an auditor can see exactly which field failed
+        // without parsing the message.
+        await recordAdviserAudit({
+          req,
+          userId: auth.userId,
+          action: "adviser_instruction_created.blocked",
+          entityType: "investment_instruction",
+          entityId: null,
+          extra: {
+            reason: "validation_failed",
+            issues: parsed.error.issues.map((i) => ({
+              path: i.path.join("."),
+              message: i.message,
+            })),
+          },
+        }).catch(() => {});
         throw Object.assign(
           new Error(
             "Invalid instruction payload: " +
@@ -614,6 +654,21 @@ export function registerAdviserRoutes(app: Express): void {
     adviserRoute(async (req, auth) => {
       const parsed = createTaskSchema.safeParse(req.body);
       if (!parsed.success) {
+        // Task #307 — `.blocked` audit on validation failure.
+        await recordAdviserAudit({
+          req,
+          userId: auth.userId,
+          action: "adviser_task_created.blocked",
+          entityType: "adviser_task",
+          entityId: null,
+          extra: {
+            reason: "validation_failed",
+            issues: parsed.error.issues.map((i) => ({
+              path: i.path.join("."),
+              message: i.message,
+            })),
+          },
+        }).catch(() => {});
         throw Object.assign(
           new Error("Invalid task payload: " + parsed.error.issues.map((i) => i.message).join("; ")),
           { status: 400 },
@@ -633,10 +688,33 @@ export function registerAdviserRoutes(app: Express): void {
     adviserRoute(async (req, auth) => {
       const taskId = parseInt(req.params.id, 10);
       if (!Number.isFinite(taskId)) {
+        await recordAdviserAudit({
+          req,
+          userId: auth.userId,
+          action: "adviser_task_updated.blocked",
+          entityType: "adviser_task",
+          entityId: req.params.id ?? null,
+          extra: { reason: "invalid_task_id" },
+        }).catch(() => {});
         throw Object.assign(new Error("Invalid task id"), { status: 400 });
       }
       const parsed = updateTaskSchema.safeParse(req.body);
       if (!parsed.success) {
+        // Task #307 — `.blocked` audit on validation failure.
+        await recordAdviserAudit({
+          req,
+          userId: auth.userId,
+          action: "adviser_task_updated.blocked",
+          entityType: "adviser_task",
+          entityId: String(taskId),
+          extra: {
+            reason: "validation_failed",
+            issues: parsed.error.issues.map((i) => ({
+              path: i.path.join("."),
+              message: i.message,
+            })),
+          },
+        }).catch(() => {});
         throw Object.assign(
           new Error("Invalid task patch: " + parsed.error.issues.map((i) => i.message).join("; ")),
           { status: 400 },
@@ -644,6 +722,17 @@ export function registerAdviserRoutes(app: Express): void {
       }
       const updated = await updateAdviserTask(auth.userId, taskId, parsed.data);
       if (!updated) {
+        // Task #307 — adviser tried to mutate a task that isn't theirs (or
+        // doesn't exist). Capture the attempt so the trail shows the
+        // permission gate working.
+        await recordAdviserAudit({
+          req,
+          userId: auth.userId,
+          action: "adviser_task_updated.blocked",
+          entityType: "adviser_task",
+          entityId: String(taskId),
+          extra: { reason: "not_found_or_not_owned" },
+        }).catch(() => {});
         throw Object.assign(new Error("Task not found or not yours"), { status: 404 });
       }
       await audit(auth.userId, "adviser_task_updated", "adviser_task", String(taskId), parsed.data, (req as Request).ip || null);
@@ -685,6 +774,21 @@ export function registerAdviserRoutes(app: Express): void {
     adviserRoute(async (req, auth) => {
       const parsed = createReportSchema.safeParse(req.body);
       if (!parsed.success) {
+        // Task #307 — `.blocked` audit on validation failure.
+        await recordAdviserAudit({
+          req,
+          userId: auth.userId,
+          action: "adviser_report_requested.blocked",
+          entityType: "report_request",
+          entityId: null,
+          extra: {
+            reason: "validation_failed",
+            issues: parsed.error.issues.map((i) => ({
+              path: i.path.join("."),
+              message: i.message,
+            })),
+          },
+        }).catch(() => {});
         throw Object.assign(
           new Error("Invalid report payload: " + parsed.error.issues.map((i) => i.message).join("; ")),
           { status: 400 },

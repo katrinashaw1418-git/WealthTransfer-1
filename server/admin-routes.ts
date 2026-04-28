@@ -5044,6 +5044,291 @@ export function registerAdminRoutes(app: Express): void {
     }),
   );
 
+  // Task #307 — Resume / activate a paused (or draft) fee rule. Mirror of the
+  // pause endpoint above, with a runtime consent integrity gate so an
+  // operator cannot un-pause a rule whose underlying consent has been
+  // withdrawn / expired / moved out of `active` while the rule was paused.
+  // On gate failure: 409 + structured `code: <reason>` body and a
+  // `.blocked` audit row. On success: status flips to 'active', pause
+  // markers are cleared, and a `fee_rule_activated` audit row is written.
+  app.post(
+    "/api/admin/fee-rules/:id/activate",
+    adminRoute(async (req, auth) => {
+      const ruleId = Number(req.params.id);
+      if (!Number.isInteger(ruleId) || ruleId <= 0) {
+        throw Object.assign(new Error("Invalid rule id"), { status: 400 });
+      }
+      const [beforeRow] = await db
+        .select()
+        .from(adviserFeeRules)
+        .where(eq(adviserFeeRules.id, ruleId))
+        .limit(1);
+      if (!beforeRow) {
+        throw Object.assign(new Error("Fee rule not found"), { status: 404 });
+      }
+      // Terminal states (superseded, expired) are not resumable — those are
+      // legal end-states. Only paused / draft can move back to active.
+      if (beforeRow.status !== "paused" && beforeRow.status !== "draft") {
+        throw Object.assign(
+          new Error(
+            `Cannot activate a rule in status '${beforeRow.status}'. Only paused/draft rules can be activated.`,
+          ),
+          { status: 409, body: { code: "rule_not_resumable", currentStatus: beforeRow.status } },
+        );
+      }
+
+      // Runtime consent integrity gate — same ladder as the accrual job and
+      // the deduction-approve route. Single source of truth lives in
+      // server/services/consent-integrity.ts.
+      const { assertConsentValidForExecution } = await import(
+        "./services/consent-integrity"
+      );
+      const gate = await assertConsentValidForExecution(beforeRow.feeConsentId);
+      if (!gate.ok) {
+        await writeAuditLog({
+          userId: auth.userId,
+          action: "fee_rule_activate.blocked",
+          entityType: "adviser_fee_rule",
+          entityId: String(ruleId),
+          before: {
+            status: beforeRow.status,
+            pausedAt: beforeRow.pausedAt,
+            pausedReason: beforeRow.pausedReason,
+          },
+          after: null,
+          extra: {
+            reason: gate.reason,
+            consentId: beforeRow.feeConsentId,
+          },
+          ipAddress: req.ip ?? null,
+        });
+        throw Object.assign(
+          new Error(
+            `Cannot activate rule — consent integrity gate failed: ${gate.reason}`,
+          ),
+          {
+            status: 409,
+            body: {
+              code: gate.reason,
+              reason: gate.reason,
+              consentId: beforeRow.feeConsentId,
+              ruleId,
+            },
+          },
+        );
+      }
+
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(adviserFeeRules)
+          .set({
+            status: "active",
+            pausedAt: null,
+            pausedReason: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(adviserFeeRules.id, ruleId))
+          .returning();
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: "fee_rule_activated",
+          entityType: "adviser_fee_rule",
+          entityId: String(ruleId),
+          before: {
+            status: beforeRow.status,
+            pausedAt: beforeRow.pausedAt,
+            pausedReason: beforeRow.pausedReason,
+          },
+          after: {
+            status: row.status,
+            pausedAt: row.pausedAt,
+            pausedReason: row.pausedReason,
+          },
+          extra: { fromStatus: beforeRow.status },
+          ipAddress: req.ip ?? null,
+        });
+        return row;
+      });
+      return updated;
+    }),
+  );
+
+  // Task #307 — Parameter-drift survey endpoint. Returns the rows where
+  // adviser_fee_rules.amount has drifted from the linked feeConsents.amount
+  // (the $150-vs-$495 class of bug). Read-only — operators decide per-row
+  // how to resolve. The shared service-layer + DB-trigger guard installed
+  // by Task #307 prevents new drift; this endpoint surfaces the legacy
+  // gap so it can be cleaned up by hand without auto-rewriting history.
+  app.get(
+    "/api/admin/fee-rules/parameter-drift",
+    adminRoute(async () => {
+      // SQL-side filter: only non-terminal rules (active/paused/draft) whose
+      // consent is non-`calculation_method` and whose monetary parameter
+      // doesn't equate. We compare in SQL so the comparison happens at the
+      // DB's numeric precision — exactly the same engine the trigger uses.
+      const rows = await db.execute(sql`
+        SELECT
+          r.id              AS rule_id,
+          r.fee_consent_id  AS fee_consent_id,
+          r.client_user_id  AS client_user_id,
+          r.adviser_user_id AS adviser_user_id,
+          r.fee_type        AS fee_type,
+          r.account_number  AS account_number,
+          r.amount_type     AS rule_amount_type,
+          r.fixed_amount    AS rule_fixed_amount,
+          r.rate_bps        AS rule_rate_bps,
+          c.amount_type     AS consent_amount_type,
+          c.amount          AS consent_amount,
+          r.status          AS rule_status
+        FROM adviser_fee_rules r
+        JOIN fee_consents c ON c.id = r.fee_consent_id
+        WHERE r.status IN ('active', 'paused', 'draft')
+          AND c.amount_type <> 'calculation_method'
+          AND (
+            r.amount_type <> c.amount_type
+            OR (
+              r.amount_type = 'fixed'
+              AND (r.fixed_amount IS NULL OR c.amount IS NULL OR r.fixed_amount <> c.amount)
+            )
+            OR (
+              r.amount_type = 'percentage'
+              AND (r.rate_bps IS NULL OR c.amount IS NULL OR ROUND(r.rate_bps::numeric / 100, 4) <> c.amount)
+            )
+          )
+        ORDER BY r.id ASC
+      `);
+      const items = (rows.rows ?? []).map((r: any) => ({
+        ruleId: Number(r.rule_id),
+        feeConsentId: Number(r.fee_consent_id),
+        clientUserId: Number(r.client_user_id),
+        adviserUserId: Number(r.adviser_user_id),
+        feeType: r.fee_type,
+        accountNumber: r.account_number,
+        ruleAmountType: r.rule_amount_type,
+        ruleFixedAmount: r.rule_fixed_amount,
+        ruleRateBps: r.rule_rate_bps == null ? null : Number(r.rule_rate_bps),
+        consentAmountType: r.consent_amount_type,
+        consentAmount: r.consent_amount,
+        ruleStatus: r.rule_status,
+      }));
+      return { count: items.length, items };
+    }),
+  );
+
+  // Task #307 — Compliance Snapshot. Single-shot read that returns the
+  // full provenance chain for one deduction:
+  //   { deduction, accrual (representative), rule, consent, advice,
+  //     auditEvents }
+  // All linked rows are as-of-now (no point-in-time replay yet — that's a
+  // later task). Used by the future audit-log read screen and by ad-hoc
+  // ASIC enquiries. Read-only, admin-only, no UI in this task.
+  app.get(
+    "/api/admin/compliance-snapshot/deduction/:id",
+    adminRoute(async (req) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid deduction id"), { status: 400 });
+      }
+      const [deduction] = await db
+        .select()
+        .from(adviserFeeDeductions)
+        .where(eq(adviserFeeDeductions.id, id))
+        .limit(1);
+      if (!deduction) {
+        throw Object.assign(new Error("Deduction not found"), { status: 404 });
+      }
+
+      // Walk to the rule via the first accrual id on the deduction. All
+      // accruals in a batch share the same rule (Task #294), so the first
+      // one is representative.
+      const accrualIdsRaw = deduction.accrualIds;
+      const accrualIds: number[] = Array.isArray(accrualIdsRaw)
+        ? (accrualIdsRaw as unknown[]).filter(
+            (v): v is number => typeof v === "number" && Number.isFinite(v),
+          )
+        : [];
+      let accrual: any = null;
+      let rule: any = null;
+      let consent: any = null;
+      let advice: any = null;
+      if (accrualIds.length > 0) {
+        const [a] = await db
+          .select()
+          .from(adviserFeeAccruals)
+          .where(eq(adviserFeeAccruals.id, accrualIds[0]))
+          .limit(1);
+        accrual = a ?? null;
+        if (accrual) {
+          const [r] = await db
+            .select()
+            .from(adviserFeeRules)
+            .where(eq(adviserFeeRules.id, accrual.feeRuleId))
+            .limit(1);
+          rule = r ?? null;
+          if (rule) {
+            const [c] = await db
+              .select()
+              .from(feeConsents)
+              .where(eq(feeConsents.id, rule.feeConsentId))
+              .limit(1);
+            consent = c ?? null;
+            if (consent) {
+              const [adv] = await db
+                .select()
+                .from(adviceRecords)
+                .where(eq(adviceRecords.id, consent.adviceRecordId))
+                .limit(1);
+              advice = adv ?? null;
+            }
+          }
+        }
+      }
+
+      // Audit events for this deduction (id-keyed entityType lookup). We
+      // also include rule + consent audit rows so the regulator sees the
+      // full provenance chain in one response — they are typically the
+      // deciding rows in an ASIC enquiry.
+      const eventClauses: any[] = [
+        and(
+          eq(auditLogs.entityType, "adviser_fee_deduction"),
+          eq(auditLogs.entityId, String(id)),
+        ),
+      ];
+      if (rule) {
+        eventClauses.push(
+          and(
+            eq(auditLogs.entityType, "adviser_fee_rule"),
+            eq(auditLogs.entityId, String(rule.id)),
+          ),
+        );
+      }
+      if (consent) {
+        eventClauses.push(
+          and(
+            eq(auditLogs.entityType, "fee_consent"),
+            eq(auditLogs.entityId, String(consent.id)),
+          ),
+        );
+      }
+      const auditEvents = await db
+        .select()
+        .from(auditLogs)
+        .where(or(...eventClauses) as any)
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(200);
+
+      return {
+        deduction,
+        accrual,
+        rule,
+        consent,
+        advice,
+        auditEvents,
+      };
+    }),
+  );
+
   app.post(
     "/api/admin/fee-accruals/run",
     adminRoute(async (req, auth) => {
@@ -5407,6 +5692,76 @@ export function registerAdminRoutes(app: Express): void {
             failureReason: beforeRow.failureReason,
           }
         : null;
+
+      // Task #307 — runtime consent integrity gate. The accrual job's
+      // gate ladder runs at accrual time, but a consent can be withdrawn,
+      // expire, or move out of `active` between accrual and approval. If
+      // we let the settle path run anyway, an admin click could move
+      // money against a consent that no longer exists. Re-run the same
+      // ladder here using the shared helper so the chokepoint is gated
+      // by exactly the same definition as the accrual loop. Block with a
+      // 409 + structured `code` reason; write a `.blocked` audit row so
+      // the trail captures the gate working.
+      let consentGateConsentId: number | null = null;
+      let consentGateRuleId: number | null = null;
+      const accrualIdsRaw = beforeRow?.accrualIds;
+      const accrualIds: number[] = Array.isArray(accrualIdsRaw)
+        ? (accrualIdsRaw as unknown[]).filter(
+            (v): v is number => typeof v === "number" && Number.isFinite(v),
+          )
+        : [];
+      if (accrualIds.length > 0) {
+        const [firstAccrual] = await db
+          .select({ feeRuleId: adviserFeeAccruals.feeRuleId })
+          .from(adviserFeeAccruals)
+          .where(eq(adviserFeeAccruals.id, accrualIds[0]))
+          .limit(1);
+        if (firstAccrual) {
+          consentGateRuleId = firstAccrual.feeRuleId;
+          const [rule] = await db
+            .select({ feeConsentId: adviserFeeRules.feeConsentId })
+            .from(adviserFeeRules)
+            .where(eq(adviserFeeRules.id, firstAccrual.feeRuleId))
+            .limit(1);
+          consentGateConsentId = rule?.feeConsentId ?? null;
+        }
+      }
+      if (consentGateConsentId !== null) {
+        const { assertConsentValidForExecution } = await import(
+          "./services/consent-integrity"
+        );
+        const gate = await assertConsentValidForExecution(consentGateConsentId);
+        if (!gate.ok) {
+          await writeAuditLog({
+            userId: auth.userId,
+            action: "deduction.approve.blocked",
+            entityType: "adviser_fee_deduction",
+            entityId: String(id),
+            before: beforeSnapshot,
+            after: null,
+            extra: {
+              reason: gate.reason,
+              consentId: consentGateConsentId,
+              ruleId: consentGateRuleId,
+            },
+            ipAddress: req.ip ?? null,
+          });
+          throw Object.assign(
+            new Error(
+              `Cannot approve deduction — consent integrity gate failed: ${gate.reason}`,
+            ),
+            {
+              status: 409,
+              body: {
+                code: gate.reason,
+                reason: gate.reason,
+                consentId: consentGateConsentId,
+                ruleId: consentGateRuleId,
+              },
+            },
+          );
+        }
+      }
 
       let settled;
       try {

@@ -12,7 +12,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Table,
   TableBody,
@@ -23,7 +22,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Link } from "wouter";
-import { ShieldAlert, HandCoins, Undo2, ExternalLink, Search, X } from "lucide-react";
+import { HandCoins, Undo2, ExternalLink, Search, X } from "lucide-react";
 // Task #204 — single canonical source for the IF status string so the
 // adviser badge cannot drift from the server/admin/client predicates.
 import { INSUFFICIENT_FUNDS_STATUS } from "@/lib/insufficient-funds";
@@ -503,22 +502,10 @@ export default function AdviserFeesPage() {
         <h1 className="text-2xl font-semibold">Your fee rules</h1>
       </div>
 
-      {/* Task #294 — Gate-A messaging. Until Gate-B unlocks, no deduction
-          movement is real. Replace the "Settlement is now live" banner with
-          the Gate-A copy so advisers don't believe their wallet has been
-          credited. The page-level surface remains adviser-facing copy
-          ("Your share / Licensee share") even though the underlying
-          mechanism is the platform's deduction execution. */}
-      <Alert variant="default" data-testid="alert-gate-a">
-        <ShieldAlert className="h-4 w-4" />
-        <AlertTitle>Deduction execution is currently disabled</AlertTitle>
-        <AlertDescription>
-          Fee rules are created and managed by the licensee. When deduction
-          execution is enabled, deductions in <strong>Settled</strong> status
-          will represent completed fund movements. Until then, all deductions
-          shown here are accounting-only — no money has moved to your wallet.
-        </AlertDescription>
-      </Alert>
+      {/* Task #307 — page-local Gate-A banner removed. The exact same copy
+          is now rendered shell-level by <DeductionExecutionBanner /> in
+          AdviserLayout so it appears on every adviser page (not just this
+          one) and a future page can never forget to surface it. */}
 
       <Tabs defaultValue="rules">
         <TabsList>

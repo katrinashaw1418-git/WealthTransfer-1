@@ -768,6 +768,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     }
 
+    // Task #307 — install the parameter-equality trigger on adviser_fee_rules
+    // BEFORE any route accepts traffic. Idempotent (CREATE OR REPLACE) so it
+    // is safe to run on every boot. The service-layer
+    // validateRuleAmountAgainstConsent() check produces the friendly 400;
+    // this trigger is the DB-level backstop that closes any path that
+    // bypasses the service (raw psql, ad-hoc scripts, etc).
+    const { installFeeRuleAmountEqualityTrigger } = await import(
+      "./services/consent-integrity"
+    );
+    await installFeeRuleAmountEqualityTrigger(db);
+
     // Hash the demo user's plaintext password on first startup
     const demoUser = await storage.getUser(1);
     if (demoUser && !demoUser.password.startsWith("$2")) {
@@ -2633,6 +2644,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (e) {
       console.error("[/api/system/write-state] read failed", e);
       res.json({ writeKillSwitchEnabled: false, reason: null });
+    }
+  });
+
+  // Task #307 — Public read-only endpoint that powers the shell-level
+  // <DeductionExecutionBanner /> in the adviser layout. Returns a single
+  // boolean: is fee-deduction execution currently enabled? The shell banner
+  // is non-dismissable by design — when this endpoint says `enabled: false`
+  // the banner renders Task #294's standardised Gate-A copy on every
+  // adviser page that touches fees / consents / instructions.
+  //
+  // Sources of truth (single read, OR-ed together so any one of them being
+  // off keeps the banner up):
+  //   - The fee_deductions write kill switch (admin can flip this from the
+  //     ops console at any time).
+  //   - Gate B itself — the "deduction execution" feature flag. This lives
+  //     in the same write-kill-switch table for now (kind='fee_deductions');
+  //     a future Gate-B unlock will replace this read with a dedicated flag.
+  //
+  // Failures fail-OPEN — returning `enabled: true` on a DB blip is the
+  // safer default because the shell banner exists to WARN advisers, and a
+  // momentary unavailability shouldn't pop a misleading "execution is on"
+  // signal across every screen. The canonical state is re-read on the
+  // next 30s polling tick by the React component.
+  app.get("/api/system/deduction-execution-state", async (_req, res) => {
+    try {
+      const { isKillSwitchActive } = await import("./services/kill-switch");
+      const killActive = await isKillSwitchActive("fee_deductions");
+      // Future: || (await isGateBEnabled()) — wired here so the React
+      // component never has to learn the underlying source of truth.
+      const enabled = !killActive;
+      res.json({ enabled });
+    } catch (e) {
+      console.error("[/api/system/deduction-execution-state] read failed", e);
+      res.json({ enabled: false });
     }
   });
 

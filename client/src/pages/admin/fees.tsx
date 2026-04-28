@@ -540,6 +540,49 @@ function bpsLabel(bps: number) {
   return `${(bps / 100).toFixed(2)}%`;
 }
 
+// Task #307 — surfaces the GET /api/admin/fee-rules/parameter-drift result
+// as a non-dismissable banner above the active-rules card. Hidden when the
+// survey is empty so a clean state shows nothing. Polled on the same 30s
+// cadence as the other shell-level signals so an operator notices a fresh
+// drift case without a hard refresh.
+type ParameterDriftSurvey = {
+  count: number;
+  items: Array<{
+    ruleId: number;
+    feeConsentId: number;
+    clientUserId: number;
+    ruleStatus: string;
+  }>;
+};
+function ParameterDriftBanner() {
+  const { data } = useQuery<ParameterDriftSurvey>({
+    queryKey: ["/api/admin/fee-rules/parameter-drift"],
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
+  });
+  if (!data || data.count === 0) return null;
+  // Cap the inline rule-id list so a runaway survey doesn't blow up the
+  // banner — the count always tells the full story.
+  const preview = data.items.slice(0, 8).map((i) => `#${i.ruleId}`).join(", ");
+  const more = data.count > 8 ? `, +${data.count - 8} more` : "";
+  return (
+    <Alert variant="destructive" data-testid="banner-parameter-drift">
+      <AlertTriangle className="h-4 w-4" />
+      <AlertTitle>
+        {data.count} fee rule{data.count === 1 ? "" : "s"} drifted from
+        consent
+      </AlertTitle>
+      <AlertDescription>
+        The amount on these rules no longer matches the anchored consent
+        and will be paused on the next consent reconcile sweep. Review and
+        re-issue the rule from the consent record. Rules: {preview}
+        {more}.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function userLabel(
   users: UsersMap | undefined,
   userId: number | null | undefined,
@@ -2066,6 +2109,14 @@ export default function AdminFeesPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Task #307 — parameter drift indicator. Reads
+              /api/admin/fee-rules/parameter-drift; if any rule's amount
+              has drifted from its anchored consent (e.g. consent renewed
+              with a new rate but rule never re-issued), surface a non-
+              dismissable banner here so an operator notices BEFORE the
+              next accrual cycle silently uses the wrong number. */}
+          <ParameterDriftBanner />
 
           {/* Task #294 — Active rules card. Server-side filtered to
               status ∈ {active,draft} via its own query so the card has a
