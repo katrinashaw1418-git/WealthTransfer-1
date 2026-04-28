@@ -13,7 +13,10 @@ import {
   adviserClients,
   adviserProfiles,
   auditLogs,
+  ledgerPostings,
+  wallets,
   type ReportRequest,
+  type ReportSourceMix,
 } from "@shared/schema";
 import { getUserCurrencyBalance } from "./ledger";
 import {
@@ -171,6 +174,121 @@ function fmtDateTimeUtc(d: Date): string {
   // can correlate it against ledger entries (which are also UTC).
   const iso = d.toISOString();
   return iso.replace("T", " ").replace(/\.\d+Z$/, " UTC");
+}
+
+// ---------------------------------------------------------------------------
+// Task #369 — per-balance ledger-vs-snapshot source attribution.
+//
+// Every balance figure rendered on a client report PDF must carry a visible
+// label that tells the reader (and an auditor) whether the number was
+// computed from the ledger ("Balance as at ledger") or derived from a
+// snapshot ("Balance estimated from snapshot"). Without that label, an
+// auditor cannot tell whether a number is reconciled or merely estimated,
+// which defeats the point of having a ledger.
+//
+// We treat the ledger as the authoritative source for cash balances per
+// currency; the wallets table is the snapshot fallback. A given currency
+// is considered "ledger-incomplete" for THIS user's window when there is
+// at least one settled/completed transaction touching that currency in
+// the period that has NO row in `ledger_postings` (i.e. no posting
+// receipt exists for it). That is the same incompleteness signal the
+// posting-receipt invariant cron uses for the system-wide check, applied
+// per (user, currency) here.
+//
+// Holdings (per-product invested amount + current value) come from the
+// `user_investments` snapshot table; the ledger does not track NAV, so
+// these are inherently snapshot-derived and labelled accordingly. The
+// label is what gives the auditor visibility into THAT fact too.
+// ---------------------------------------------------------------------------
+
+// Stable user-facing label strings — kept module-scoped (and exported) so
+// renderer code, regression tests, and any future audit endpoint can refer
+// to the SAME source-of-truth strings instead of duplicating the wording.
+export const LEDGER_LABEL = "Balance as at ledger";
+export const SNAPSHOT_LABEL = "Balance estimated from snapshot";
+export const FOOTER_LABEL_FULL_LEDGER =
+  "Source check: every balance on this report is anchored to the ledger.";
+export const FOOTER_LABEL_PARTIAL =
+  "Source check: this report contains balances estimated from snapshot data because the ledger is incomplete for the period.";
+
+export function sourceLabel(source: "ledger" | "snapshot"): string {
+  return source === "ledger" ? LEDGER_LABEL : SNAPSHOT_LABEL;
+}
+
+// Per-currency snapshot fallback value for cash. Reads from the legacy
+// `wallets` cache table, which is exactly the snapshot the rest of the
+// platform falls back to when the ledger is unavailable. Returns "0" when
+// the user has no wallet row for that currency yet — matching the ledger
+// path's behaviour (`getUserCurrencyBalance` returns "0" for an empty
+// account, so the two sources agree on the empty case and the snapshot
+// fallback is only meaningfully different when there's a real wallet
+// number to surface).
+export async function getWalletSnapshotBalance(
+  userId: number,
+  currency: string,
+): Promise<string> {
+  const [row] = await db
+    .select({ balance: wallets.balance })
+    .from(wallets)
+    .where(and(eq(wallets.userId, userId), eq(wallets.currency, currency.toUpperCase())))
+    .limit(1);
+  return row?.balance ?? "0";
+}
+
+// Returns true when at least one settled/completed transaction in the
+// window for this user touches `currency` but has no posting receipt.
+// "Touches the currency" means either fromCurrency or toCurrency matches,
+// which covers single-currency moves (e.g. AUD deposit) and FX legs
+// (which post both an AUD and a USD entry from one transaction).
+//
+// When `periodFrom`/`periodTo` are null (older queued rows without a
+// window), we evaluate against all-time transactions for the user — the
+// same scope the existing PDF data slices use in that case.
+export async function isCashLedgerIncompleteForUserCurrency(
+  userId: number,
+  currency: string,
+  periodFrom: Date | null,
+  periodToExclusive: Date | null,
+): Promise<boolean> {
+  const cur = currency.toUpperCase();
+  const conds: any[] = [
+    eq(transactions.userId, userId),
+    inArray(transactions.status, ["completed", "settled"]),
+    or(eq(transactions.fromCurrency, cur), eq(transactions.toCurrency, cur))!,
+    isNull(ledgerPostings.transactionId),
+  ];
+  if (periodFrom) conds.push(gte(transactions.createdAt, periodFrom));
+  if (periodToExclusive) conds.push(lt(transactions.createdAt, periodToExclusive));
+  const [row] = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .leftJoin(ledgerPostings, eq(ledgerPostings.transactionId, transactions.id))
+    .where(and(...conds))
+    .limit(1);
+  return Boolean(row);
+}
+
+// Compute the per-balance source mix for a freshly-resolved data slice.
+// Pure function over its inputs (the per-currency incompleteness probe is
+// passed in as `cashIncomplete` rather than re-queried here) so the test
+// for the "fully ledger-backed" vs "partial fallback" split can drive the
+// renderer without standing up a transactions+ledger fixture.
+export function deriveSourceMix(opts: {
+  cashAudIncomplete: boolean;
+  cashUsdIncomplete: boolean;
+  // Currently always true: the ledger does not track product NAV, so
+  // per-holding invested + current value can only come from the
+  // user_investments snapshot. Threaded through the function (rather than
+  // hard-coded inside) so a future ledger-tracked-holdings extension is a
+  // one-line change here without touching the renderer.
+  holdingsHaveLedgerSource: boolean;
+}): ReportSourceMix {
+  const cashAud: "ledger" | "snapshot" = opts.cashAudIncomplete ? "snapshot" : "ledger";
+  const cashUsd: "ledger" | "snapshot" = opts.cashUsdIncomplete ? "snapshot" : "ledger";
+  const holdings: "ledger" | "snapshot" = opts.holdingsHaveLedgerSource ? "ledger" : "snapshot";
+  const fullyLedgerBacked =
+    cashAud === "ledger" && cashUsd === "ledger" && holdings === "ledger";
+  return { cashAud, cashUsd, holdings, fullyLedgerBacked };
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +856,16 @@ export async function regenerateReport(
       // adviser hasn't sent yet" stays clearly DRAFT-marked until the
       // adviser explicitly raises a fresh non-draft request.
       isDraft: head.isDraft ?? false,
+      // Task #369 — the new row inherits the source mix of the chain
+      // head it supersedes. The brief explicitly requires that
+      // regenerating an existing request produces an identical source
+      // mix; copying the mix forward (and having the generator honour
+      // an already-set mix on the row) is what makes that contract
+      // hold even if data has shifted between the two generation runs.
+      // NULL on legacy heads with no recorded mix — the generator will
+      // simply derive a fresh mix in that case, which is the safest
+      // possible upgrade path.
+      sourceMix: head.sourceMix ?? null,
       // The new row supersedes the CURRENT head, not the row whose id was
       // passed in — that way the chain stays a clean linked list ordered
       // by versionNumber.
@@ -951,13 +1079,64 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
         })()
       : [];
 
-    // Cash balances are LEDGER-DERIVED (per Session 12 requirement). The
-    // ledger is the single source of truth for cash; product current value
-    // continues to come from `userInvestments` (product NAV is its own truth).
-    // Cash totals are point-in-time and not window-scoped — the brief calls
-    // for window-filtered transactions/holdings/fees only.
-    const cashAud = wantsHoldings ? await getUserCurrencyBalance(row.clientUserId, "AUD") : "0";
-    const cashUsd = wantsHoldings ? await getUserCurrencyBalance(row.clientUserId, "USD") : "0";
+    // Cash balances are LEDGER-FIRST (per Session 12 requirement) with an
+    // explicit snapshot fallback (Task #369). For each currency we probe
+    // the ledger-completeness invariant for THIS user's window: if any
+    // settled transaction touching the currency in the period lacks a
+    // posting receipt, the ledger is "incomplete" and we fall back to the
+    // wallets snapshot for that currency. The chosen source per currency
+    // is recorded in `sourceMix` and rendered as a visible label next to
+    // the number on the PDF so an auditor never has to guess whether a
+    // figure is reconciled or estimated.
+    //
+    // Cash totals are point-in-time and not window-scoped — the brief
+    // still calls for window-filtered transactions/holdings/fees only.
+    // The incompleteness probe IS window-scoped because that matches what
+    // the report claims to cover; an unposted transaction outside the
+    // period does not affect the ledger-vs-snapshot decision for this PDF.
+    let cashAud = "0";
+    let cashUsd = "0";
+    let cashAudIncomplete = false;
+    let cashUsdIncomplete = false;
+    if (wantsHoldings) {
+      cashAudIncomplete = await isCashLedgerIncompleteForUserCurrency(
+        row.clientUserId,
+        "AUD",
+        periodFrom,
+        periodToExclusive,
+      );
+      cashUsdIncomplete = await isCashLedgerIncompleteForUserCurrency(
+        row.clientUserId,
+        "USD",
+        periodFrom,
+        periodToExclusive,
+      );
+      cashAud = cashAudIncomplete
+        ? await getWalletSnapshotBalance(row.clientUserId, "AUD")
+        : await getUserCurrencyBalance(row.clientUserId, "AUD");
+      cashUsd = cashUsdIncomplete
+        ? await getWalletSnapshotBalance(row.clientUserId, "USD")
+        : await getUserCurrencyBalance(row.clientUserId, "USD");
+    }
+
+    // Task #369 — derive (or reuse) the per-balance source mix. Holdings
+    // are inherently snapshot-derived today (the ledger doesn't track
+    // product NAV). The `holdingsHaveLedgerSource: false` here is the
+    // single line to flip if the platform later adds ledger-tracked
+    // holdings.
+    //
+    // If the row already carries a sourceMix (regenerateReport copies it
+    // forward; an idempotent re-run of the same row also re-uses it) we
+    // honour that mix instead of recomputing — that is what makes the
+    // "regenerating an existing request uses the same source mix"
+    // contract from the brief deterministic across re-runs.
+    const sourceMix: ReportSourceMix =
+      row.sourceMix ??
+      deriveSourceMix({
+        cashAudIncomplete,
+        cashUsdIncomplete,
+        holdingsHaveLedgerSource: false,
+      });
 
     const txns = wantsTxns
       ? await (() => {
@@ -1051,6 +1230,7 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       cashUsd,
       txns,
       fees,
+      sourceMix,
     });
 
     const expiresAt = new Date(generatedAt.getTime() + EXPIRY_DAYS * 86_400_000);
@@ -1066,6 +1246,11 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
         expiresAt,
         downloadLinkExpiresAt,
         failureReason: null,
+        // Task #369 — persist the per-balance source mix on the row so an
+        // auditor can answer "is this report fully ledger-backed?" without
+        // re-opening the PDF, and so regenerateReport can copy it forward
+        // to keep a regenerated version identical to the original.
+        sourceMix,
       })
       .where(eq(reportRequests.id, reportId));
 
@@ -1142,6 +1327,10 @@ interface RenderInput {
     consentExpiryDate: Date | null;
     renewalStatus: string;
   }>;
+  // Task #369 — per-balance authoritative-source mix. Drives the inline
+  // "Balance as at ledger" / "Balance estimated from snapshot" labels and
+  // the footer summary line on the disclosure page.
+  sourceMix: ReportSourceMix;
 }
 
 const REPORT_TYPE_LABEL: Record<string, string> = {
@@ -1214,7 +1403,7 @@ async function renderPdf(filePath: string, data: RenderInput): Promise<void> {
       drawTxnsSection(doc, data);
     }
 
-    drawDisclosurePage(doc);
+    drawDisclosurePage(doc, data);
 
     // Per-page header + footer + watermark. Drawn AFTER content so the
     // bufferedPageRange is final — adding a page from inside this loop
@@ -1482,15 +1671,33 @@ function drawHoldingsSection(doc: PDFKit.PDFDocument, data: RenderInput): void {
   }
   doc.y = y;
 
-  // Cash subsection (LEDGER-DERIVED)
+  // Task #369 — explicit per-section source label for holdings. The
+  // ledger does not track product NAV today so this is always the
+  // snapshot label, but we render it as a discoverable line (instead of
+  // hard-coding wording) so the moment a future ledger-tracked-holdings
+  // change flips the source mix the label updates with no extra work.
+  if (data.holdings.length > 0) {
+    doc.fillColor("#64748b").fontSize(8).font("Helvetica-Oblique")
+      .text(sourceLabel(data.sourceMix.holdings), startX, doc.y);
+    doc.moveDown(0.2);
+  }
+
+  // Cash subsection — each currency carries its own ledger-vs-snapshot
+  // label so an auditor can see at a glance which figure was reconciled
+  // and which was estimated. The two currencies are independent: it is
+  // legitimate for AUD to be ledger-backed while USD has fallen back to
+  // the wallet snapshot for the period (or vice versa).
   doc.moveDown(0.6);
   doc.fillColor("#0f172a").fontSize(11).font("Helvetica-Bold").text("Cash balances");
-  doc.fillColor("#64748b").fontSize(8).font("Helvetica-Oblique")
-    .text("Source: derived from ledger entries (sum of credits − debits).");
   doc.moveDown(0.3);
   doc.fillColor("#0f172a").fontSize(10).font("Helvetica");
   doc.text(`AUD: ${fmtMoney(data.cashAud, "AUD")}`);
+  doc.fillColor("#64748b").fontSize(8).font("Helvetica-Oblique")
+    .text(sourceLabel(data.sourceMix.cashAud));
+  doc.fillColor("#0f172a").fontSize(10).font("Helvetica");
   doc.text(`USD: ${fmtMoney(data.cashUsd, "USD")}`);
+  doc.fillColor("#64748b").fontSize(8).font("Helvetica-Oblique")
+    .text(sourceLabel(data.sourceMix.cashUsd));
   doc.moveDown(0.5);
 }
 
@@ -1607,7 +1814,11 @@ function drawTxnsSection(doc: PDFKit.PDFDocument, data: RenderInput): void {
 // finalised statement. In production, where every env var is populated,
 // that paragraph short-circuits to nothing and the page reads as the
 // licensee's clean, final disclosure.
-function drawDisclosurePage(doc: PDFKit.PDFDocument): void {
+//
+// Task #369 — the page additionally renders an explicit per-balance
+// source-mix footer (ledger vs snapshot) using `data.sourceMix`. That is
+// why this signature now takes the full `RenderInput`.
+function drawDisclosurePage(doc: PDFKit.PDFDocument, data: RenderInput): void {
   doc.addPage();
   doc.fillColor("#0f172a").fontSize(13).font("Helvetica-Bold").text("Important disclosures");
   doc.moveDown(0.4);
@@ -1629,7 +1840,7 @@ function drawDisclosurePage(doc: PDFKit.PDFDocument): void {
     "",
     "This report is general information only. It does not take into account your personal objectives, financial situation or needs. Before acting on any of the information in this report you should consider its appropriateness having regard to those matters and, where appropriate, obtain personal financial advice from a licensed adviser. You should also obtain and consider the relevant Product Disclosure Statement and Target Market Determination for any financial product before making a decision about that product.",
     "",
-    "Cash balances shown in this report are derived directly from the platform's ledger (sum of credits minus debits per currency). Invested-product current values reflect the latest unit price recorded against each product and may not match real-time custodian valuations. Past performance is not a reliable indicator of future performance.",
+    "Cash balances on this report are normally derived from the platform's ledger (sum of credits minus debits per currency). When the ledger is incomplete for the report period — for example, a settled transaction has no posting receipt yet — the affected balance falls back to the wallet snapshot and is labelled \"Balance estimated from snapshot\" next to the figure. Invested-product current values come from the latest unit price recorded against each product and may not match real-time custodian valuations; these are always labelled as snapshot-derived. Past performance is not a reliable indicator of future performance.",
     "",
     "Fee consents listed in this report record the authorisations you have given for fees to be deducted under Division 2 of Part 7.7A of the Corporations Act. Fee deductions, where they have been processed, appear in the Transactions section of this report.",
     "",
@@ -1639,4 +1850,25 @@ function drawDisclosurePage(doc: PDFKit.PDFDocument): void {
     if (l === "") doc.moveDown(0.4);
     else doc.text(l, { align: "justify" });
   });
+
+  // Task #369 — explicit footer summary line. The brief requires a
+  // single human-readable sentence that tells the auditor whether the
+  // report is fully ledger-backed or whether ANY balance had to fall
+  // back to a snapshot. The label is colour-coded (green = clean,
+  // amber = mixed) without relying on colour alone (the wording itself
+  // distinguishes the two states).
+  doc.moveDown(0.8);
+  const footerColor = data.sourceMix.fullyLedgerBacked ? "#15803d" : "#b45309";
+  const footerLabel = data.sourceMix.fullyLedgerBacked
+    ? FOOTER_LABEL_FULL_LEDGER
+    : FOOTER_LABEL_PARTIAL;
+  doc.fillColor(footerColor).fontSize(9).font("Helvetica-Bold").text(footerLabel, { align: "left" });
+  // Per-balance breakdown, so even on the partial-fallback case the
+  // auditor can immediately see WHICH balance fell back without flipping
+  // back to the holdings page.
+  doc.moveDown(0.2);
+  doc.fillColor("#475569").fontSize(8).font("Helvetica");
+  doc.text(`  • Cash AUD: ${sourceLabel(data.sourceMix.cashAud)}`);
+  doc.text(`  • Cash USD: ${sourceLabel(data.sourceMix.cashUsd)}`);
+  doc.text(`  • Invested products: ${sourceLabel(data.sourceMix.holdings)}`);
 }

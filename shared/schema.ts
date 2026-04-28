@@ -1878,6 +1878,22 @@ export const reportRequests = pgTable("report_requests", {
   // statement. Defaults to false so existing non-draft behaviour is
   // preserved for every legacy row and every request that omits the flag.
   isDraft: boolean("is_draft").notNull().default(false),
+  // Task #369 — per-balance authoritative-source mix recorded by the
+  // generator at PDF write time. Each balance figure rendered on the PDF
+  // is sourced either from the ledger (`"ledger"`) or from a snapshot
+  // table (`"snapshot"`). Persisted so the SAME PDF can be regenerated
+  // identically (regenerateReport copies this forward) and so the source
+  // mix is queryable for audit. NULL on legacy rows that predate the
+  // column. The `fullyLedgerBacked` flag is the single boolean an
+  // auditor looks at to know whether any snapshot fallback was used —
+  // it is derived (NOT independent) and equals `true` iff every other
+  // entry on the row is `"ledger"`.
+  sourceMix: jsonb("source_mix").$type<{
+    cashAud: "ledger" | "snapshot";
+    cashUsd: "ledger" | "snapshot";
+    holdings: "ledger" | "snapshot";
+    fullyLedgerBacked: boolean;
+  }>(),
 }, (table) => ({
   // "show me all my report requests" / "show me all reports for this client"
   adviserCreatedIdx: index("report_requests_adviser_created_idx").on(table.adviserUserId, table.requestedAt),
@@ -1914,9 +1930,19 @@ export const insertReportRequestSchema = createInsertSchema(reportRequests).omit
   readyNotifiedAt: true,
   failedNotifiedAt: true,
   expiringSoonNotifiedAt: true,
+  // Task #369 — sourceMix is stamped by the generator after data slices are
+  // resolved (or copied forward by regenerateReport). It must never be
+  // accepted from inbound HTTP payloads — letting a caller pre-supply the
+  // mix would defeat the audit-trail guarantee that the label on the PDF
+  // reflects what the generator actually read.
+  sourceMix: true,
 });
 export type ReportRequest = typeof reportRequests.$inferSelect;
 export type InsertReportRequest = z.infer<typeof insertReportRequestSchema>;
+// Task #369 — convenience alias re-exported by server/services/reports.ts
+// so consumers (PDF renderer, route handlers, tests) can refer to a single
+// canonical type instead of redeclaring the union shape.
+export type ReportSourceMix = NonNullable<ReportRequest["sourceMix"]>;
 
 // ===========================================================================
 // Session 19 — admin_review_notes

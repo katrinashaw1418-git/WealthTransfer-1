@@ -21,19 +21,27 @@ import { db } from "../db";
 import {
   adviserClients,
   auditLogs,
+  ledgerPostings,
   reportRequests,
+  transactions,
   users,
+  wallets,
 } from "@shared/schema";
 import {
   DUPLICATE_GUARD_WINDOW_MS,
+  deriveSourceMix,
   findDuplicateRecentReport,
+  generateReportPdf,
+  isCashLedgerIncompleteForUserCurrency,
   isDraftWatermarkEnabled,
   isLicenseeDisclosurePending,
+  LEDGER_LABEL,
   notifyAdviserReportFailed,
   notifyAdviserReportReady,
   regenerateReport,
   runReportExpiringSoonReminder,
   runReportJobSweeper,
+  SNAPSHOT_LABEL,
   STALE_REPORT_JOB_FAILURE_REASON,
   STALE_REPORT_JOB_TIMEOUT_MS,
   SWEEPER_STUCK_AFTER_MS,
@@ -134,7 +142,32 @@ afterAll(async () => {
         eq(adviserClients.clientUserId, clientUserId),
       ),
     );
-  await db.delete(users).where(inArray(users.id, [adviserUserId, clientUserId]));
+  // Task #369 — the new sourceMix tests insert per-client transactions and
+  // wallet rows. Any leftover transactions row holds a FK back to
+  // users(id) and would break the legacy users delete below, so clear
+  // them (and their postings) before tearing down the user rows.
+  const txIds = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(inArray(transactions.userId, [adviserUserId, clientUserId]));
+  if (txIds.length > 0) {
+    const ids = txIds.map((t) => t.id);
+    await db.delete(ledgerPostings).where(inArray(ledgerPostings.transactionId, ids));
+    await db.delete(transactions).where(inArray(transactions.id, ids));
+  }
+  await db
+    .delete(wallets)
+    .where(inArray(wallets.userId, [adviserUserId, clientUserId]));
+  // The user delete may still fail if other unrelated dev-DB rows hold a
+  // FK back to one of these test users (e.g. portfolio_snapshots from a
+  // separate suite). That is the same hazard the per-suite cleanup
+  // elsewhere in this file documents — swallow it so a stray FK from
+  // outside this suite does not mask real test failures above.
+  try {
+    await db.delete(users).where(inArray(users.id, [adviserUserId, clientUserId]));
+  } catch {
+    // best-effort teardown; users rows are harmless to leave behind.
+  }
 });
 
 describe("runReportJobSweeper", () => {
@@ -858,5 +891,370 @@ describe("isDraftWatermarkEnabled", () => {
       else process.env[NODE_ENV_KEY] = v;
       expect(isDraftWatermarkEnabled()).toBe(true);
     }
+  });
+});
+
+// ===========================================================================
+// Task #369 — ledger-vs-snapshot source attribution on report PDFs
+// ---------------------------------------------------------------------------
+// Locks in the contract that:
+//   1. The pure deriveSourceMix() helper maps the four input booleans to
+//      the persisted shape correctly, including the "fullyLedgerBacked"
+//      derived flag.
+//   2. isCashLedgerIncompleteForUserCurrency() flags a settled transaction
+//      that touches the currency in the period AND has no posting receipt,
+//      and ignores transactions that are posted (or out of window).
+//   3. generateReportPdf stamps sourceMix on the row:
+//        - fully ledger-backed when every settled in-window transaction
+//          has a posting receipt
+//        - cashUsd="snapshot" with cashAud="ledger" when only USD has an
+//          unposted in-window transaction (partial fallback)
+//   4. regenerateReport copies sourceMix forward from the chain head, and
+//      a re-generation of the new row honours that mix instead of
+//      recomputing — so the regenerated PDF carries the SAME mix as the
+//      original even if the ledger has shifted in between.
+// ===========================================================================
+
+// Helper: insert a settled transaction in a chosen currency at a chosen
+// timestamp. Returns the transaction id so the caller can decide whether
+// to pair it with a ledger_postings receipt or leave it unposted.
+async function insertSettledTxn(opts: {
+  userId: number;
+  currency: string;
+  createdAt: Date;
+  amount?: string;
+}): Promise<number> {
+  const [tx] = await db
+    .insert(transactions)
+    .values({
+      userId: opts.userId,
+      type: "deposit",
+      fromCurrency: null,
+      toCurrency: opts.currency,
+      amount: opts.amount ?? "100.00000000",
+      fee: "0.00000000",
+      exchangeRate: null,
+      status: "completed",
+      settlementStatus: "internal_only",
+      description: "Task #369 reports source-mix test fixture",
+      createdAt: opts.createdAt,
+    })
+    .returning({ id: transactions.id });
+  return tx.id;
+}
+
+// Helper: best-effort upsert of a wallet snapshot row. The wallets table
+// has a unique (userId, currency) index so we use insert/onConflictDoUpdate
+// to keep the test idempotent across re-runs against the dev DB.
+async function upsertWallet(
+  userId: number,
+  currency: string,
+  balance: string,
+): Promise<void> {
+  await db
+    .insert(wallets)
+    .values({
+      userId,
+      currency,
+      balance,
+      availableBalance: balance,
+      walletType: "fiat",
+    })
+    .onConflictDoUpdate({
+      target: [wallets.userId, wallets.currency],
+      set: { balance, availableBalance: balance },
+    });
+}
+
+// Helper: clear all transactions, postings, and wallets we created for the
+// shared test client so each Task #369 test starts from a clean per-client
+// data slice. We scope by clientUserId so this never touches another
+// developer's fixtures in the dev DB.
+async function clearTask369Fixtures(): Promise<void> {
+  if (clientUserId === undefined) return;
+  // Postings reference transactionId; remove them via the user's tx ids.
+  const txIds = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(eq(transactions.userId, clientUserId));
+  if (txIds.length > 0) {
+    const ids = txIds.map((t) => t.id);
+    await db.delete(ledgerPostings).where(inArray(ledgerPostings.transactionId, ids));
+    await db.delete(transactions).where(inArray(transactions.id, ids));
+  }
+  await db.delete(wallets).where(eq(wallets.userId, clientUserId));
+}
+
+describe("deriveSourceMix (pure)", () => {
+  it("returns all-ledger + fullyLedgerBacked=true when no source is incomplete", () => {
+    // Holdings are ledger-backed in this hypothetical (today they always
+    // go through the snapshot path; the helper still has to handle the
+    // future case where a ledger-tracked-holdings extension flips this).
+    const mix = deriveSourceMix({
+      cashAudIncomplete: false,
+      cashUsdIncomplete: false,
+      holdingsHaveLedgerSource: true,
+    });
+    expect(mix).toEqual({
+      cashAud: "ledger",
+      cashUsd: "ledger",
+      holdings: "ledger",
+      fullyLedgerBacked: true,
+    });
+  });
+
+  it("returns snapshot for the affected currency only and clears fullyLedgerBacked", () => {
+    const mix = deriveSourceMix({
+      cashAudIncomplete: false,
+      cashUsdIncomplete: true,
+      holdingsHaveLedgerSource: false,
+    });
+    expect(mix.cashAud).toBe("ledger");
+    expect(mix.cashUsd).toBe("snapshot");
+    // Today holdings are always snapshot — that alone clears the flag.
+    expect(mix.holdings).toBe("snapshot");
+    expect(mix.fullyLedgerBacked).toBe(false);
+  });
+
+  it("clears fullyLedgerBacked the moment ANY single source is non-ledger", () => {
+    // Even if both currencies are clean, snapshot-derived holdings
+    // (the production reality today) is enough to flip the flag.
+    const mix = deriveSourceMix({
+      cashAudIncomplete: false,
+      cashUsdIncomplete: false,
+      holdingsHaveLedgerSource: false,
+    });
+    expect(mix.fullyLedgerBacked).toBe(false);
+    expect(mix.holdings).toBe("snapshot");
+  });
+});
+
+describe("isCashLedgerIncompleteForUserCurrency", () => {
+  it("returns true when an in-window settled txn touching the currency lacks a posting receipt", async () => {
+    await clearTask369Fixtures();
+    const periodFrom = new Date("2026-04-01T00:00:00.000Z");
+    const periodToExclusive = new Date("2026-05-01T00:00:00.000Z");
+    await insertSettledTxn({
+      userId: clientUserId,
+      currency: "USD",
+      createdAt: new Date("2026-04-15T10:00:00.000Z"),
+    });
+    // No ledger_postings row inserted -> ledger is incomplete for USD.
+    const incomplete = await isCashLedgerIncompleteForUserCurrency(
+      clientUserId,
+      "USD",
+      periodFrom,
+      periodToExclusive,
+    );
+    expect(incomplete).toBe(true);
+  });
+
+  it("returns false when every in-window settled txn for the currency has a posting receipt", async () => {
+    await clearTask369Fixtures();
+    const periodFrom = new Date("2026-04-01T00:00:00.000Z");
+    const periodToExclusive = new Date("2026-05-01T00:00:00.000Z");
+    const txId = await insertSettledTxn({
+      userId: clientUserId,
+      currency: "AUD",
+      createdAt: new Date("2026-04-10T10:00:00.000Z"),
+    });
+    await db.insert(ledgerPostings).values({ transactionId: txId });
+    const incomplete = await isCashLedgerIncompleteForUserCurrency(
+      clientUserId,
+      "AUD",
+      periodFrom,
+      periodToExclusive,
+    );
+    expect(incomplete).toBe(false);
+  });
+
+  it("ignores unposted txns that fall OUTSIDE the window", async () => {
+    await clearTask369Fixtures();
+    const periodFrom = new Date("2026-04-01T00:00:00.000Z");
+    const periodToExclusive = new Date("2026-05-01T00:00:00.000Z");
+    // Out-of-window unposted txn — should not affect the report's window.
+    await insertSettledTxn({
+      userId: clientUserId,
+      currency: "USD",
+      createdAt: new Date("2026-03-15T10:00:00.000Z"),
+    });
+    const incomplete = await isCashLedgerIncompleteForUserCurrency(
+      clientUserId,
+      "USD",
+      periodFrom,
+      periodToExclusive,
+    );
+    expect(incomplete).toBe(false);
+  });
+});
+
+describe("generateReportPdf — sourceMix persistence (Task #369)", () => {
+  it("fully-ledger case: every in-window cash txn has a posting receipt -> sourceMix.fullyLedgerBacked is false ONLY because holdings are snapshot today", async () => {
+    await clearReportRows();
+    await clearTask369Fixtures();
+    // Two in-window txns, one per currency, BOTH posted. The cash side
+    // is fully reconciled to the ledger; the only thing that prevents
+    // fullyLedgerBacked from being true is that holdings remain
+    // snapshot-derived (the ledger does not track NAV).
+    const audId = await insertSettledTxn({
+      userId: clientUserId,
+      currency: "AUD",
+      createdAt: new Date("2026-04-10T00:00:00.000Z"),
+    });
+    const usdId = await insertSettledTxn({
+      userId: clientUserId,
+      currency: "USD",
+      createdAt: new Date("2026-04-12T00:00:00.000Z"),
+    });
+    await db.insert(ledgerPostings).values({ transactionId: audId });
+    await db.insert(ledgerPostings).values({ transactionId: usdId });
+
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+        periodFrom: "2026-04-01",
+        periodTo: "2026-04-30",
+      })
+      .returning();
+
+    const result = await generateReportPdf(row.id);
+    expect(result.status).toBe("ready");
+
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    expect(after.sourceMix).toBeTruthy();
+    expect(after.sourceMix!.cashAud).toBe("ledger");
+    expect(after.sourceMix!.cashUsd).toBe("ledger");
+    // Holdings are snapshot today (no ledger NAV), so the overall flag
+    // is false even when both currencies are reconciled.
+    expect(after.sourceMix!.holdings).toBe("snapshot");
+    expect(after.sourceMix!.fullyLedgerBacked).toBe(false);
+  });
+
+  it("partial-fallback case: USD has an unposted in-window txn -> cashUsd flips to snapshot, AUD stays ledger", async () => {
+    await clearReportRows();
+    await clearTask369Fixtures();
+    // AUD txn is posted; USD txn is unposted. The renderer must fall
+    // back to the wallets snapshot for USD only and label the figure
+    // accordingly.
+    const audId = await insertSettledTxn({
+      userId: clientUserId,
+      currency: "AUD",
+      createdAt: new Date("2026-04-10T00:00:00.000Z"),
+    });
+    await db.insert(ledgerPostings).values({ transactionId: audId });
+    await insertSettledTxn({
+      userId: clientUserId,
+      currency: "USD",
+      createdAt: new Date("2026-04-12T00:00:00.000Z"),
+    });
+    // Snapshot fallback value the report should now read.
+    await upsertWallet(clientUserId, "USD", "777.00000000");
+
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+        periodFrom: "2026-04-01",
+        periodTo: "2026-04-30",
+      })
+      .returning();
+
+    const result = await generateReportPdf(row.id);
+    expect(result.status).toBe("ready");
+
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    expect(after.sourceMix).toBeTruthy();
+    expect(after.sourceMix!.cashAud).toBe("ledger");
+    expect(after.sourceMix!.cashUsd).toBe("snapshot");
+    expect(after.sourceMix!.fullyLedgerBacked).toBe(false);
+  });
+
+  it("regeneration case: regenerateReport copies sourceMix forward, and the regenerated PDF honours that mix instead of recomputing", async () => {
+    await clearReportRows();
+    await clearTask369Fixtures();
+    // Set up a v1 with a stamped, deliberately-mixed sourceMix. Going
+    // through the full generator path is the simplest way to do that:
+    // start with a partial-fallback fixture (USD unposted), generate v1,
+    // then DROP the fallback condition (post the USD txn) before
+    // regenerating. Without the copy-forward contract, v2 would
+    // recompute fresh and silently flip USD back to "ledger" — which
+    // would defeat the audit-trail guarantee.
+    const audId = await insertSettledTxn({
+      userId: clientUserId,
+      currency: "AUD",
+      createdAt: new Date("2026-04-10T00:00:00.000Z"),
+    });
+    await db.insert(ledgerPostings).values({ transactionId: audId });
+    const usdId = await insertSettledTxn({
+      userId: clientUserId,
+      currency: "USD",
+      createdAt: new Date("2026-04-12T00:00:00.000Z"),
+    });
+    await upsertWallet(clientUserId, "USD", "1.00000000");
+
+    const [v1Row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+        periodFrom: "2026-04-01",
+        periodTo: "2026-04-30",
+      })
+      .returning();
+    const v1Result = await generateReportPdf(v1Row.id);
+    expect(v1Result.status).toBe("ready");
+    const [v1After] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, v1Row.id));
+    expect(v1After.sourceMix!.cashUsd).toBe("snapshot");
+
+    // Now reconcile the ledger by adding the missing posting. A FRESH
+    // generator run would compute cashUsd="ledger" — but we want
+    // regeneration to preserve the ORIGINAL mix.
+    await db.insert(ledgerPostings).values({ transactionId: usdId });
+
+    const v2Row = await regenerateReport(adviserUserId, v1Row.id);
+    // Copy-forward at insert time.
+    expect(v2Row.sourceMix).toEqual(v1After.sourceMix);
+
+    const v2Result = await generateReportPdf(v2Row.id);
+    expect(v2Result.status).toBe("ready");
+
+    const [v2After] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, v2Row.id));
+    // Honoured at generation time — same mix as v1 even though the
+    // underlying data has shifted to a fully-ledger state.
+    expect(v2After.sourceMix).toEqual(v1After.sourceMix);
+    expect(v2After.sourceMix!.cashUsd).toBe("snapshot");
+  });
+
+  it("exposes stable label strings used by the renderer", () => {
+    // Belt-and-braces guard: the per-balance labels and footer wording
+    // are part of the audit contract — a copy-edit must not silently
+    // change them. Asserting the literal strings here makes any future
+    // wording change an explicit, reviewed event.
+    expect(LEDGER_LABEL).toBe("Balance as at ledger");
+    expect(SNAPSHOT_LABEL).toBe("Balance estimated from snapshot");
   });
 });
