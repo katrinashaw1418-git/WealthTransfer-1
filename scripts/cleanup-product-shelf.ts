@@ -43,7 +43,28 @@
  */
 import { db } from "../server/db";
 import { investmentProducts, userInvestments } from "../shared/schema";
+import {
+  PRODUCT_CATEGORY_LABELS,
+  type KnownProductCategory,
+} from "../shared/product-categories";
 import { and, eq, inArray, not } from "drizzle-orm";
+
+const CANONICAL_CATEGORIES = Object.keys(PRODUCT_CATEGORY_LABELS);
+
+// Operator-curated mapping from a historical / invalid `category` string to
+// the canonical category it should be re-labelled to. Used by
+// `removeInvalidCategoryRows()` for rows that have user_investments references
+// (and therefore can't be deleted without breaking historical holdings).
+//
+// Empty by default: every entry must be approved by whoever owns product
+// data, because the script otherwise has no safe way to guess the intended
+// category. If the script encounters a referenced row whose invalid category
+// is not in this map, it throws so an operator must explicitly extend it
+// rather than silently leave bad data behind.
+const INVALID_CATEGORY_MIGRATIONS: Record<string, KnownProductCategory> = {
+  // Example (do not enable without owner sign-off):
+  // x: "cash_deposit",
+};
 
 type ProductPatch = Pick<
   typeof investmentProducts.$inferInsert,
@@ -303,14 +324,23 @@ const canonical: ProductPatch[] = [
 
 const canonicalNames = canonical.map((p) => p.name);
 
-async function removeInRange825(): Promise<void> {
+async function removeInvalidCategoryRows(): Promise<void> {
+  // Catches every product whose `category` is outside the canonical set
+  // defined in shared/product-categories.ts. Historically this was just the
+  // `InRange825` test fixture (category "x"); generalising it picks up any
+  // future drift (e.g. inactive `DraftProduct` rows) without needing another
+  // patch to this script.
   const matches = await db
-    .select({ id: investmentProducts.id, name: investmentProducts.name })
+    .select({
+      id: investmentProducts.id,
+      name: investmentProducts.name,
+      category: investmentProducts.category,
+    })
     .from(investmentProducts)
-    .where(eq(investmentProducts.name, "InRange825"));
+    .where(not(inArray(investmentProducts.category, CANONICAL_CATEGORIES)));
 
   if (matches.length === 0) {
-    console.log("  [skip] InRange825 not present");
+    console.log("  [skip] no products with invalid categories");
     return;
   }
 
@@ -322,16 +352,55 @@ async function removeInRange825(): Promise<void> {
       .limit(1);
 
     if (refs.length > 0) {
+      // Cannot delete — historical user_investments depend on this product id.
+      // Re-categorise to the operator-approved canonical category and
+      // deactivate so it disappears from the active shelf without leaving an
+      // invalid `category` value in the database.
+      const target = INVALID_CATEGORY_MIGRATIONS[m.category];
+      if (!target) {
+        throw new Error(
+          `Cannot clean up product id=${m.id} ("${m.name}") with invalid category "${m.category}": ` +
+            `it has user_investments references and no entry exists in INVALID_CATEGORY_MIGRATIONS. ` +
+            `Add { "${m.category}": "<canonical_category>" } to that map (with owner sign-off) and re-run.`,
+        );
+      }
       await db
         .update(investmentProducts)
-        .set({ isActive: false })
+        .set({ category: target, isActive: false })
         .where(eq(investmentProducts.id, m.id));
-      console.log(`  [deactivate] InRange825 (id=${m.id}) — has user_investments references`);
+      console.log(
+        `  [recategorise+deactivate] ${m.name} (id=${m.id}, "${m.category}" -> "${target}") — has user_investments references; cannot delete`,
+      );
     } else {
       await db.delete(investmentProducts).where(eq(investmentProducts.id, m.id));
-      console.log(`  [delete    ] InRange825 (id=${m.id})`);
+      console.log(
+        `  [delete    ] ${m.name} (id=${m.id}, category="${m.category}")`,
+      );
     }
   }
+}
+
+async function assertNoInvalidCategoriesRemain(): Promise<void> {
+  const remaining = await db
+    .select({
+      id: investmentProducts.id,
+      name: investmentProducts.name,
+      category: investmentProducts.category,
+    })
+    .from(investmentProducts)
+    .where(not(inArray(investmentProducts.category, CANONICAL_CATEGORIES)));
+
+  if (remaining.length > 0) {
+    for (const r of remaining) {
+      console.error(
+        `  [FAIL] ${r.name} (id=${r.id}) still has invalid category "${r.category}"`,
+      );
+    }
+    throw new Error(
+      `Cleanup verification failed: ${remaining.length} product(s) still have non-canonical categories.`,
+    );
+  }
+  console.log("  [ok] no products with invalid categories remain");
 }
 
 async function deactivateLegacyExtras(): Promise<void> {
@@ -403,14 +472,19 @@ async function upsertCanonical(): Promise<void> {
 }
 
 async function main() {
-  console.log("Cleanup: removing InRange825 (test data, not in seed files)");
-  await removeInRange825();
+  console.log(
+    "Cleanup: removing rows with non-canonical categories (e.g. test fixtures like InRange825 / DraftProduct)",
+  );
+  await removeInvalidCategoryRows();
 
   console.log("\nCleanup: deactivating legacy active products outside the canonical 14");
   await deactivateLegacyExtras();
 
   console.log("\nCleanup: normalising the canonical 14 products");
   await upsertCanonical();
+
+  console.log("\nCleanup: verifying no rows with invalid categories remain");
+  await assertNoInvalidCategoriesRemain();
 
   const finalActive = await db
     .select({ id: investmentProducts.id, name: investmentProducts.name })
