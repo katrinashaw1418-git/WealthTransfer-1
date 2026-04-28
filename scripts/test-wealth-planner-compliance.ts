@@ -104,7 +104,6 @@ import {
   uploadClientDocument,
   getClientDocumentForOwner,
   createClientObjective,
-  createClientDocument,
 } from "../server/services/wealth-planner";
 import {
   getObjectBytes,
@@ -147,6 +146,7 @@ const CANONICAL_ORDER: string[] = [
   "11. review_pending blocks objective/document/transition writes; notes still allowed",
   "12. client-document upload+download round-trip via real object storage with cross-client gate",
   "13. blocked-write audit row recorded by the gate for every gated child write",
+  "14. legacy storage-key client-document POST stays retired",
 ];
 const results = new Map<string, TestResult>();
 
@@ -716,17 +716,29 @@ async function test5_crudWritesAuditRows(opts: {
   });
   await postObj(r1.req, r1.res);
 
-  // POST document.
-  const postDoc = captured.get("POST /api/adviser/client-documents")!;
+  // POST document upload — Task #381 retired the legacy JSON POST that
+  // accepted a caller-supplied storageKey. The multipart `/upload` route is
+  // now the only adviser entry point. The captured handler is the trailing
+  // adviserRoute() wrapper (multer is the first handler in the chain), so
+  // we hand it a synthetic req.file the way the route already documents
+  // for verification scripts that bypass multer.
+  const postDoc = captured.get("POST /api/adviser/client-documents/upload")!;
+  const docBytes = Buffer.from("WPC test 5 upload bytes\n", "utf8");
   const r2 = makeMockReqRes({
     token,
     body: {
       clientId: opts.clientUserId,
       documentType: "fact_find",
-      fileName: "fact-find-2026.pdf",
-      storageKey: "wpc-storage-key-A",
+      fileName: "fact-find-2026.txt",
     },
   });
+  (r2.req as any).file = {
+    buffer: docBytes,
+    mimetype: "text/plain",
+    originalname: "fact-find-2026.txt",
+    size: docBytes.length,
+    detectedMimeType: "text/plain",
+  };
   await postDoc(r2.req, r2.res);
 
   // GET document list — must produce a read audit row.
@@ -1382,18 +1394,31 @@ async function test11_reviewPendingLock(opts: {
     });
     await postObj(r1.req, r1.res);
 
-    // ---- BLOCKED: document POST (with adviceRecordId) ----
-    const postDoc = captured.get("POST /api/adviser/client-documents")!;
+    // ---- BLOCKED: document upload POST (with adviceRecordId) ----
+    // Task #381: legacy JSON POST is gone; the multipart `/upload` route is
+    // the only adviser entry point. The gate inside `uploadClientDocument`
+    // throws 423 with reason='record_locked_under_review' before any bytes
+    // touch object storage, so the leakage assertion below still holds.
+    const postDoc = captured.get(
+      "POST /api/adviser/client-documents/upload",
+    )!;
+    const lockedDocBytes = Buffer.from("locked under review test 11", "utf8");
     r2 = makeMockReqRes({
       token,
       body: {
         clientId: opts.clientUserId,
         adviceRecordId: opts.adviceRecordId,
         documentType: "fact_find",
-        fileName: "locked-under-review.pdf",
-        storageKey: "wpc-locked-under-review-key",
+        fileName: "locked-under-review.txt",
       },
     });
+    (r2.req as any).file = {
+      buffer: lockedDocBytes,
+      mimetype: "text/plain",
+      originalname: "locked-under-review.txt",
+      size: lockedDocBytes.length,
+      detectedMimeType: "text/plain",
+    };
     await postDoc(r2.req, r2.res);
 
     // ---- BLOCKED: transition POST (issued) ----
@@ -1524,8 +1549,12 @@ async function test12_uploadDownloadRoundTrip(opts: {
       {
         clientId: opts.clientUserId,
         documentType: "fact_find",
-        fileName: "wpc-round-trip.bin",
-        mimeType: "application/octet-stream",
+        // Task #117 added a magic-byte/declared-mime sniff that requires the
+        // declared mime to live in the supported allow-list — the previous
+        // fixture's `application/octet-stream` is not on the list, so the
+        // upload now uses `text/plain` (matches the printable test bytes).
+        fileName: "wpc-round-trip.txt",
+        mimeType: "text/plain",
       },
       testBytes,
     );
@@ -1664,13 +1693,16 @@ async function test12_uploadDownloadRoundTrip(opts: {
 //   - metadata.after  === null
 //   - metadata.reason === 'record_locked_under_review'
 //   - metadata.attemptedAction in {'client_objective.create',
-//                                 'client_document.create',
 //                                 'client_document.upload'}
 //   - metadata.adviceRecordStatus === 'review_pending'
 //
-// Audit-row count must be exactly 3 — one per gated call site. Snapshotting
-// the max id BEFORE flipping status ensures we only count rows produced by
-// THIS test, not historical or test-11 rows.
+// Snapshotting the max id BEFORE flipping status ensures we only count rows
+// produced by THIS test, not historical or test-11 rows.
+//
+// Task #381 — `client_document.create` is no longer in the gated set: the
+// legacy JSON POST and its `createClientDocument` service have been retired,
+// leaving `client_document.upload` (the multipart `/upload` route +
+// `uploadClientDocument` service) as the only document-write surface.
 // ---------------------------------------------------------------------------
 async function test13_blockedWriteAuditRow(opts: {
   adviserUserId: number;
@@ -1706,12 +1738,14 @@ async function test13_blockedWriteAuditRow(opts: {
     status?: number;
     reason?: string;
   };
-  // Five probes: TWO route-level (the production HTTP path that an adviser
-  // actually hits) plus THREE service-level (defence in depth — guarantees
-  // that any future caller of these services, route or otherwise, is also
-  // gated and audited). The route-level probes specifically guard against
-  // a regression where someone re-introduces a route-layer pre-check that
-  // throws BEFORE the audited service-level gate runs.
+  // Four probes: TWO route-level (the production HTTP path that an adviser
+  // actually hits — objective + document upload) plus TWO service-level
+  // (defence in depth — guarantees that any future caller of these services,
+  // route or otherwise, is also gated and audited). The route-level probes
+  // specifically guard against a regression where someone re-introduces a
+  // route-layer pre-check that throws BEFORE the audited service-level gate
+  // runs. Task #381 dropped the legacy `client_document.create` probes
+  // alongside the route + service that emitted them.
   const probes: Probe[] = [
     {
       label: "route.objective",
@@ -1719,18 +1753,13 @@ async function test13_blockedWriteAuditRow(opts: {
       fired: false,
     },
     {
-      label: "route.document.create",
-      expectedAction: "client_document.create",
+      label: "route.document.upload",
+      expectedAction: "client_document.upload",
       fired: false,
     },
     {
       label: "service.objective",
       expectedAction: "client_objective.create",
-      fired: false,
-    },
-    {
-      label: "service.document.create",
-      expectedAction: "client_document.create",
       fired: false,
     },
     {
@@ -1772,18 +1801,33 @@ async function test13_blockedWriteAuditRow(opts: {
       ? ((r1.result.body as any).reason as string)
       : undefined;
 
-  // Probe 2 — POST /api/adviser/client-documents (route level)
-  const routeDoc = captured.get("POST /api/adviser/client-documents")!;
+  // Probe 2 — POST /api/adviser/client-documents/upload (route level)
+  // Task #381 — the legacy JSON POST that supplied a caller-controlled
+  // storageKey is gone; the multipart `/upload` route is the only adviser
+  // entry point. The captured handler is the trailing adviserRoute()
+  // wrapper (multer is the first middleware in the chain), so we hand it a
+  // synthetic req.file the way the route documents for verification scripts
+  // that bypass multer.
+  const routeDoc = captured.get(
+    "POST /api/adviser/client-documents/upload",
+  )!;
+  const routeDocBytes = Buffer.from("test13 route upload bytes", "utf8");
   const r2 = makeMockReqRes({
     token: routeToken,
     body: {
       clientId: opts.clientUserId,
       adviceRecordId: opts.adviceRecordId,
       documentType: "fact_find",
-      fileName: "test13-route.pdf",
-      storageKey: "wpc-test13-route-key",
+      fileName: "test13-route.txt",
     },
   });
+  (r2.req as any).file = {
+    buffer: routeDocBytes,
+    mimetype: "text/plain",
+    originalname: "test13-route.txt",
+    size: routeDocBytes.length,
+    detectedMimeType: "text/plain",
+  };
   await routeDoc(r2.req, r2.res);
   probes[1].fired = r2.result.statusCode !== 200;
   probes[1].status = r2.result.statusCode;
@@ -1806,22 +1850,8 @@ async function test13_blockedWriteAuditRow(opts: {
     probes[2].reason = typeof err?.reason === "string" ? err.reason : undefined;
   }
 
-  // Probe 4 — createClientDocument (service level, no route)
-  try {
-    await createClientDocument(opts.adviserUserId, {
-      clientId: opts.clientUserId,
-      adviceRecordId: opts.adviceRecordId,
-      documentType: "fact_find",
-      fileName: "test13-create.pdf",
-      storageKey: "wpc-test13-create-key",
-    });
-  } catch (err: any) {
-    probes[3].fired = true;
-    probes[3].status = typeof err?.status === "number" ? err.status : undefined;
-    probes[3].reason = typeof err?.reason === "string" ? err.reason : undefined;
-  }
-
-  // Probe 5 — uploadClientDocument (no JSON route; service is the contract)
+  // Probe 4 — uploadClientDocument (service level — the only document
+  // creation surface after Task #381 retired the legacy createClientDocument).
   try {
     await uploadClientDocument(
       opts.adviserUserId,
@@ -1829,14 +1859,15 @@ async function test13_blockedWriteAuditRow(opts: {
         clientId: opts.clientUserId,
         adviceRecordId: opts.adviceRecordId,
         documentType: "fact_find",
-        fileName: "test13-upload.bin",
+        fileName: "test13-upload.txt",
+        mimeType: "text/plain",
       },
       Buffer.from("test13 upload bytes", "utf8"),
     );
   } catch (err: any) {
-    probes[4].fired = true;
-    probes[4].status = typeof err?.status === "number" ? err.status : undefined;
-    probes[4].reason = typeof err?.reason === "string" ? err.reason : undefined;
+    probes[3].fired = true;
+    probes[3].status = typeof err?.status === "number" ? err.status : undefined;
+    probes[3].reason = typeof err?.reason === "string" ? err.reason : undefined;
   }
 
   } finally {
@@ -1876,9 +1907,8 @@ async function test13_blockedWriteAuditRow(opts: {
     (p) => p.fired && p.status === 423 && p.reason === "record_locked_under_review",
   );
 
-  // Three unique attemptedAction values across five probes (route + service
-  // for objective and document.create both report the same attemptedAction;
-  // upload only has a service caller).
+  // Two unique attemptedAction values across four probes (route + service
+  // for objective and document.upload both report the same attemptedAction).
   const expectedActions = new Set(probes.map((p) => p.expectedAction));
   const seenActions = new Set<string>();
   // Also tally per-action counts so we can prove the route-level rows
@@ -1903,26 +1933,64 @@ async function test13_blockedWriteAuditRow(opts: {
     seenActions.add(a);
     actionCounts.set(a, (actionCounts.get(a) ?? 0) + 1);
   }
-  // 5 rows: 2 × objective.create (route + service), 2 × document.create
-  // (route + service), 1 × document.upload (service only).
-  const countOk = rows.length === 5;
+  // 4 rows: 2 × objective.create (route + service), 2 × document.upload
+  // (route + service). Task #381 retired the legacy document.create
+  // surface so neither probe nor audit row exists for it any more.
+  const countOk = rows.length === 4;
   const coverageOk =
     seenActions.size === expectedActions.size &&
     Array.from(expectedActions).every((a) => seenActions.has(a));
   const perActionOk =
     (actionCounts.get("client_objective.create") ?? 0) === 2 &&
-    (actionCounts.get("client_document.create") ?? 0) === 2 &&
-    (actionCounts.get("client_document.upload") ?? 0) === 1;
+    (actionCounts.get("client_document.upload") ?? 0) === 2;
 
   if (allThrew && countOk && shapeOk && coverageOk && perActionOk) {
     pass(
       NAME,
-      `5/5 probes (2 route + 3 service) threw 423 with reason='record_locked_under_review'; 5 audit rows written with action='advice_record.write_blocked', entityId='${opts.adviceRecordId}', userId=${opts.adviserUserId}, before/after=null, adviceRecordStatus='review_pending'; per-action counts = {client_objective.create:2, client_document.create:2, client_document.upload:1}`,
+      `4/4 probes (2 route + 2 service) threw 423 with reason='record_locked_under_review'; 4 audit rows written with action='advice_record.write_blocked', entityId='${opts.adviceRecordId}', userId=${opts.adviserUserId}, before/after=null, adviceRecordStatus='review_pending'; per-action counts = {client_objective.create:2, client_document.upload:2}`,
     );
   } else {
     fail(
       NAME,
-      `allThrew=${allThrew} (${probes.map((p) => `${p.label}:fired=${p.fired},status=${p.status},reason=${p.reason}`).join(" | ")}); auditRowCount=${rows.length} (expected=5); shapeOk=${shapeOk}; coverageOk=${coverageOk} (seen={${Array.from(seenActions).sort().join(", ")}}, expected={${Array.from(expectedActions).sort().join(", ")}}); perActionOk=${perActionOk} (counts={${Array.from(actionCounts.entries()).map(([a, n]) => `${a}:${n}`).join(", ")}})`,
+      `allThrew=${allThrew} (${probes.map((p) => `${p.label}:fired=${p.fired},status=${p.status},reason=${p.reason}`).join(" | ")}); auditRowCount=${rows.length} (expected=4); shapeOk=${shapeOk}; coverageOk=${coverageOk} (seen={${Array.from(seenActions).sort().join(", ")}}, expected={${Array.from(expectedActions).sort().join(", ")}}); perActionOk=${perActionOk} (counts={${Array.from(actionCounts.entries()).map(([a, n]) => `${a}:${n}`).join(", ")}})`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 — Task #381 retirement guard.
+//
+// `POST /api/adviser/client-documents` (the legacy JSON route that accepted a
+// caller-supplied `storageKey`) was a real abuse surface — any leaked adviser
+// token could bind a client_documents row to an arbitrary bucket key and
+// trick the download path. The route, the matching `createClientDocument`
+// service helper, and its `CreateClientDocumentInput` type were all retired
+// in Task #381. The multipart `POST /api/adviser/client-documents/upload`
+// route (which computes the storageKey itself from the bytes) is now the
+// only document creation surface.
+//
+// This test is the regression seal: if a future change accidentally
+// re-registers the JSON route (whether literally `POST
+// /api/adviser/client-documents` or a body-takes-storageKey variant),
+// capturedKeys will contain it again and this assertion will fail. The
+// `/upload` route MUST stay registered or the production write path is
+// broken — both halves are checked together to catch either drift.
+// ---------------------------------------------------------------------------
+function test14_legacyStorageKeyPostRetired(): void {
+  const NAME = "14. legacy storage-key client-document POST stays retired";
+  const legacyKey = "POST /api/adviser/client-documents";
+  const uploadKey = "POST /api/adviser/client-documents/upload";
+  const legacyAbsent = !capturedKeys.has(legacyKey);
+  const uploadPresent = capturedKeys.has(uploadKey);
+  if (legacyAbsent && uploadPresent) {
+    pass(
+      NAME,
+      `legacy '${legacyKey}' is not registered; '${uploadKey}' (the only adviser-side document-create surface) IS registered`,
+    );
+  } else {
+    fail(
+      NAME,
+      `legacyAbsent=${legacyAbsent} (legacy route '${legacyKey}' should NOT be registered), uploadPresent=${uploadPresent} (upload route '${uploadKey}' MUST stay registered)`,
     );
   }
 }
@@ -2153,6 +2221,14 @@ async function main(): Promise<void> {
     clientUserId,
     adviceRecordId,
   });
+
+  // Test 14 — Task #381: regression seal that the legacy storage-key POST
+  // route stays retired AND the multipart upload route stays registered.
+  // Pure capturedKeys check, no DB writes, no fixture state needed — runs
+  // last because it only depends on registerRoutes() having been called
+  // at the top of main(), which captured every adviser route into
+  // capturedKeys.
+  test14_legacyStorageKeyPostRetired();
 
   // ---- Post-suite invariant: every planner-suite fixture advice record
   // (every adviceRecords row owned by a __wpc_test_* client — see the

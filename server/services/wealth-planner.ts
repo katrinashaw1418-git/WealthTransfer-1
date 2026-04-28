@@ -404,62 +404,13 @@ export const CLIENT_DOCUMENT_TYPES = [
 ] as const;
 export type ClientDocumentType = (typeof CLIENT_DOCUMENT_TYPES)[number];
 
-export interface CreateClientDocumentInput {
-  clientId: number;
-  adviceRecordId?: number | null;
-  documentType: ClientDocumentType;
-  fileName: string;
-  storageKey: string;
-  mimeType?: string | null;
-  fileSizeBytes?: number | null;
-  description?: string | null;
-}
-
-export async function createClientDocument(
-  adviserUserId: number,
-  input: CreateClientDocumentInput,
-): Promise<ClientDocument> {
-  await assertAdviserClientLink(adviserUserId, input.clientId);
-
-  if (input.adviceRecordId != null) {
-    const [advice] = await db
-      .select({ id: adviceRecords.id, clientId: adviceRecords.clientId })
-      .from(adviceRecords)
-      .where(eq(adviceRecords.id, input.adviceRecordId))
-      .limit(1);
-    if (!advice || advice.clientId !== input.clientId) {
-      throw Object.assign(new Error("Advice record not valid for this client"), {
-        status: 400,
-      });
-    }
-    // Task #96 — when a document is being attached to a specific advice
-    // record (e.g. a fact-find or risk questionnaire that supports a plan
-    // currently under review), respect the same write lock as objectives.
-    // Documents uploaded WITHOUT an adviceRecordId are general client
-    // documents and are not gated.
-    // Task #108 — record an audit row when this gate blocks a write.
-    await requireAdviceRecordWritable(input.adviceRecordId, db, {
-      actorUserId: adviserUserId,
-      attemptedAction: "client_document.create",
-    });
-  }
-
-  const [row] = await db
-    .insert(clientDocuments)
-    .values({
-      clientId: input.clientId,
-      adviceRecordId: input.adviceRecordId ?? null,
-      documentType: input.documentType,
-      fileName: input.fileName,
-      storageKey: input.storageKey,
-      mimeType: input.mimeType ?? null,
-      fileSizeBytes: input.fileSizeBytes ?? null,
-      description: input.description ?? null,
-      uploadedByUserId: adviserUserId,
-    })
-    .returning();
-  return row;
-}
+// Task #381 — `createClientDocument` (the legacy "trust the caller's
+// storageKey" path) has been removed. Every production caller has been on
+// `uploadClientDocument` since Task #99, and the test fixtures that used to
+// round-trip through the legacy JSON POST now call `uploadClientDocument`
+// directly. The route, the type, and this function were the three pieces
+// of the trust-the-caller surface; with all three gone there is no way for
+// a future caller to bind an arbitrary storage key to a client document.
 
 export async function listClientDocumentsForAdviser(
   adviserUserId: number,
@@ -486,21 +437,21 @@ export async function listClientDocumentsForClient(
 // ---------------------------------------------------------------------------
 // Task #99 — real backend wiring for client documents
 // ---------------------------------------------------------------------------
-// `uploadClientDocument` is the "real" creation path. It:
+// `uploadClientDocument` is the only creation path for client documents
+// (Task #381 retired the legacy JSON-POST shortcut). It:
 //   1. validates the adviser↔client link (assertAdviserClientLink),
 //   2. enforces the review-pending lock when the upload is pinned to an
-//      advice record (Task #96 contract — symmetrical to the JSON POST),
+//      advice record (Task #96 contract),
 //   3. validates that the supplied advice record belongs to the supplied
 //      client (defence against an adviser pinning a doc to another adviser's
 //      record they happen to know the id of),
-//   4. writes bytes to object storage and computes the storageKey ITSELF
-//      (the caller does not get to pick a key — that closes the trust gap
-//      called out in Task #99: the legacy POST trusted whatever string the
-//      adviser sent),
+//   4. writes bytes to object storage and computes the storageKey ITSELF —
+//      the caller does not get to pick a key. This closes the trust gap
+//      that the now-retired `createClientDocument`/legacy POST had: that
+//      path persisted whatever string the adviser sent, which a leaked
+//      adviser token could have used to bind a client document row to an
+//      arbitrary bucket object.
 //   5. inserts the row with the computed key + measured byte length.
-//
-// The legacy `createClientDocument` path is preserved for back-compat but
-// any new caller MUST use this function.
 // ---------------------------------------------------------------------------
 export interface UploadClientDocumentInput {
   clientId: number;

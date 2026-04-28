@@ -1,5 +1,24 @@
 # Wealth Management Platform
 
+## Recent Changes (April 2026) — Task #381: Retire the legacy storage-key client-document POST
+
+The JSON `POST /api/adviser/client-documents` route (the one that let the caller pick its own `storageKey`) has been removed. No UI surface called it after Task #115 moved the adviser dialog onto the multipart `POST /api/adviser/client-documents/upload` path; leaving it alive let any future caller (including a leaked adviser token) bind a client_document row to an arbitrary bucket key and abuse the download path. The matching `createClientDocument(...)` service function in `server/services/wealth-planner.ts` (and its `CreateClientDocumentInput` type) were removed alongside the route — those three pieces were the trust-the-caller-storageKey surface.
+
+The multipart `/upload` route + `uploadClientDocument(...)` (which computes the storageKey itself from the bytes) is now the only client-document creation surface. The `client_document.create` audit-log shape is unchanged — it is still emitted from the `/upload` handler with the same `(action, entityType, entityId, metadata)` fields plus the upload-only `uploaded: true` / `sizeBytes` / `mimeType` / `detectedMimeType` extras Task #148 / #161 added.
+
+**Verification** (`scripts/test-wealth-planner-compliance.ts`):
+- Test 5 (adviser CRUD audit rows) now drives the upload route directly with a synthetic `req.file` (the route already documented this multer-bypass path for verification scripts).
+- Test 11 (review-pending lock) drives the upload route the same way; the `requireAdviceRecordWritable` gate inside `uploadClientDocument` still throws 423 with `reason='record_locked_under_review'` before bytes touch object storage, so the leakage assertion still holds.
+- Test 13 (blocked-write audit row per gated child write) was rebalanced from 5 probes (2 × objective.create, 2 × document.create, 1 × document.upload) to 4 probes (2 × objective.create, 2 × document.upload). The legacy `client_document.create` probes are gone with the surface that emitted them.
+- Test 14 (NEW — Task #381 regression seal) asserts `POST /api/adviser/client-documents` is NOT in `capturedKeys` AND `POST /api/adviser/client-documents/upload` IS still in `capturedKeys`. Catches both directions of accidental drift — re-introducing the legacy storage-key route, or accidentally retiring the upload route too.
+- Suite passes 14/14 end-to-end.
+- Drive-by fix: test 12 (upload+download round-trip) was already broken on the baseline branch — its fixture declared `application/octet-stream`, which is not on the Task #117 sniffer allow-list. Switched to `text/plain` (matches the printable test bytes) so the suite can run end-to-end again.
+
+**Files**:
+- `server/adviser-routes.ts` — legacy POST handler + `createClientDocument` import removed.
+- `server/services/wealth-planner.ts` — `createClientDocument` + `CreateClientDocumentInput` removed; uploadClientDocument preamble updated.
+- `scripts/test-wealth-planner-compliance.ts` — test 5 / 11 / 13 migrated to the upload route + service; test 12 mime fixture fixed.
+
 ## Recent Changes (April 2026) — Task #323: Run the fee-rule consent backfill in production before enabling the daily reconcile cron
 
 Task #294 added `accountNumber`, `effectiveDate`, and the supersede pointers to `adviser_fee_rules`, plus the partial unique index `adviser_fee_rules_supersede_uniq` on `(clientUserId, feeType, accountNumber) WHERE status IN ('draft','active','paused')`. The new `createFeeRule` path satisfies the index for new rules, but pre-#294 rows have NULL values and may include accidental duplicates that would block any future `createFeeRule` on the same tuple. The shipped backfill `scripts/backfill-fee-rule-consent-state.ts` is idempotent — its three passes (1: copy `accountNumber` from the joined `feeConsents` row; 2: copy `effectiveDate` from `createdAt`; 3: collapse duplicate tuples in the active set into a supersede chain with one `fee_rule_superseded` audit row per loser tagged `extra.backfill=true`) all guard with `WHERE` clauses that turn a converged DB into a no-op.

@@ -80,7 +80,6 @@ import {
   CLIENT_DOCUMENT_TYPES,
   createClientObjective,
   listClientObjectivesForAdviser,
-  createClientDocument,
   uploadClientDocument,
   listClientDocumentsForAdviser,
   createAdviserNote,
@@ -1771,50 +1770,20 @@ export function registerAdviserRoutes(app: Express): void {
   );
 
   // ---- client documents ----
-  const createDocumentSchema = z.object({
-    clientId: z.number().int().positive(),
-    adviceRecordId: z.number().int().positive().optional().nullable(),
-    documentType: z.enum(CLIENT_DOCUMENT_TYPES),
-    fileName: z.string().min(1).max(500),
-    storageKey: z.string().min(1).max(2000),
-    mimeType: z.string().max(200).optional().nullable(),
-    fileSizeBytes: z.number().int().nonnegative().optional().nullable(),
-    description: z.string().max(2000).optional().nullable(),
-  });
-
-  app.post(
-    "/api/adviser/client-documents",
-    adviserRoute(async (req, auth) => {
-      const parsed = createDocumentSchema.safeParse(req.body);
-      if (!parsed.success) {
-        throw Object.assign(new Error("Invalid document payload"), { status: 400 });
-      }
-      // Task #96 — when a document is being attached to a specific advice
-      // record, that record must not be under compliance review. Documents
-      // uploaded with no adviceRecordId (general client file storage) are
-      // not gated, since they aren't part of the artefact under review.
-      // Task #108 — gate now lives inside createClientDocument() and writes
-      // a blocked-write audit row before throwing; route-level pre-check
-      // removed for the same reason as the objective route above.
-      const row = await createClientDocument(auth.userId, parsed.data);
-      audit(
-        auth.userId,
-        "client_document.create",
-        "client_document",
-        String(row.id),
-        { clientId: row.clientId, documentType: row.documentType },
-        req.ip ?? null,
-      );
-      return row;
-    }),
-  );
-
+  // Task #381 — the legacy JSON POST /api/adviser/client-documents (which
+  // accepted a caller-supplied `storageKey`) has been retired. No UI surface
+  // ever called it after Task #115 moved the adviser dialog onto the proper
+  // multipart `/upload` route below, and leaving a route alive that lets a
+  // caller bind an arbitrary storage key to a client document is a security
+  // smell (a leaked adviser token could register a key pointing at an
+  // unrelated bucket object and trick the download path). The verification
+  // script now exercises `uploadClientDocument()` directly for the tests
+  // that previously round-tripped through the legacy route.
+  //
   // Task #99 — real upload route. Streams a multipart/form-data file via
   // multer (in-memory, capped at MAX_UPLOAD_BYTES, default 25 MiB) and
   // routes it through uploadClientDocument(), which computes the storageKey
-  // itself instead of trusting the caller. The legacy POST above is kept for
-  // back-compat with the existing test fixtures that supply a synthetic
-  // storageKey.
+  // itself instead of trusting the caller.
   //
   // Task #148 — size + mime allow-list enforcement is delegated to the
   // shared `buildUploadMiddleware` factory so the rejection contract (400
