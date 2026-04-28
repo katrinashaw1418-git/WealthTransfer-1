@@ -49,6 +49,10 @@ import {
   riskProfileLabel,
   type KnownRiskProfile,
 } from "@shared/risk-profiles";
+import {
+  PRODUCT_CATEGORY_VALUES,
+  PRODUCT_CATEGORY_LABELS,
+} from "@shared/product-categories";
 
 interface InvestmentProduct {
   id: number;
@@ -76,7 +80,9 @@ interface InvestmentProduct {
 
 const createProductSchema = z.object({
   name: z.string().min(1).max(200),
-  category: z.string().min(1).max(100),
+  // Constrained to the canonical category enum so the form UI cannot submit a
+  // value the server-side validator (Task #341) would reject.
+  category: z.enum(PRODUCT_CATEGORY_VALUES),
   subCategory: z.string().min(1).max(100),
   investmentStrategy: z.string().min(1).max(500),
   targetNetIrr: z.string().min(1).max(50),
@@ -125,7 +131,9 @@ export default function AdminProducts() {
     resolver: zodResolver(createProductSchema),
     defaultValues: {
       name: "",
-      category: "",
+      // Default to the first canonical category so the dropdown always renders
+      // a valid selection; admin must still pick the right one before saving.
+      category: PRODUCT_CATEGORY_VALUES[0],
       subCategory: "",
       investmentStrategy: "",
       targetNetIrr: "",
@@ -322,13 +330,20 @@ export default function AdminProducts() {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Category</FormLabel>
-                      <FormControl>
-                        <Input
-                          placeholder="real_estate, corporate_credit…"
-                          {...field}
-                          data-testid="input-product-category"
-                        />
-                      </FormControl>
+                      <Select onValueChange={field.onChange} value={field.value}>
+                        <FormControl>
+                          <SelectTrigger data-testid="select-product-category">
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {PRODUCT_CATEGORY_VALUES.map((value) => (
+                            <SelectItem key={value} value={value}>
+                              {PRODUCT_CATEGORY_LABELS[value]}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <FormMessage />
                     </FormItem>
                   )}
