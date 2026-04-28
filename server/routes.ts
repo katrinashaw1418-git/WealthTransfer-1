@@ -63,8 +63,7 @@ import {
 import {
   DEFAULT_REBALANCING_BENCHMARK,
   computeRebalancingGap,
-  resolveBenchmarkForRiskTolerance,
-  resolveBenchmarkForRiskProfileRow,
+  resolvePerClientBenchmark,
 } from "./config/rebalancing-benchmark";
 
 // ---------------------------------------------------------------------------
@@ -2308,13 +2307,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const totals = await calculatePortfolioTotalsAtDate(userId, new Date());
       const { fiatValue, cryptoValue, stablecoinValue, investmentValue, totalValue } = totals;
 
-      // Task #338 — surface the illustrative rebalancing benchmark alongside
-      // the live allocation so the portfolio page can render actual-vs-target
-      // bars without re-deriving the targets on the client. Targets are
-      // returned as percentages (0–100) for easy display alongside the
-      // existing `percentage` fields. The note is included verbatim so the
-      // client UI can reproduce the same disclaimer the AI flow uses.
-      const benchmark = DEFAULT_REBALANCING_BENCHMARK;
+      // Task #338 — surface the rebalancing benchmark alongside the live
+      // allocation so the portfolio page can render actual-vs-target bars
+      // without re-deriving the targets on the client. Targets are returned
+      // as percentages (0–100) for easy display alongside the existing
+      // `percentage` fields. The note is included verbatim so the client UI
+      // can reproduce the same disclaimer the AI flow uses.
+      //
+      // Task #388 — pick the benchmark per-client rather than serving the
+      // shared equal-weight default to everyone. We delegate to
+      // `resolvePerClientBenchmark` so this route, the real-metrics route,
+      // and the AI-recommendations route all resolve the same benchmark
+      // for a given user — never disagreeing on what the target is. A
+      // personalised target must still be set by an adviser in a
+      // Statement of Advice.
+      const [latestRiskProfile] = await db
+        .select({ allocation: riskProfiles.allocation })
+        .from(riskProfiles)
+        .where(eq(riskProfiles.clientId, userId))
+        .orderBy(desc(riskProfiles.createdAt))
+        .limit(1);
+      const benchmark = resolvePerClientBenchmark(latestRiskProfile);
       res.json({
         fiat:       { value: fiatValue,        percentage: totalValue > 0 ? (fiatValue        / totalValue) * 100 : 0 },
         crypto:     { value: cryptoValue,       percentage: totalValue > 0 ? (cryptoValue      / totalValue) * 100 : 0 },
@@ -2396,9 +2409,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .where(eq(riskProfiles.clientId, userId))
         .orderBy(desc(riskProfiles.createdAt))
         .limit(1);
-      const rebalancingBenchmark = latestRiskProfile
-        ? resolveBenchmarkForRiskProfileRow(latestRiskProfile)
-        : DEFAULT_REBALANCING_BENCHMARK;
+      const rebalancingBenchmark = resolvePerClientBenchmark(latestRiskProfile);
       const rebalancingGap = computeRebalancingGap(alloc, rebalancingBenchmark) * 100;
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;
@@ -2857,11 +2868,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // ILLUSTRATIVE math metric only — NOT a personal target. A personalised target
       // is set by an adviser in a Statement of Advice. The response surfaces
       // `rebalancingBenchmarkType` so callers can present it honestly to the user.
-      // We prefer the client's latest recorded risk-profile allocation when one
-      // exists (so this route tells the same story as `/api/portfolio/real-metrics`),
-      // and only fall back to the per-request `riskTolerance` band when there is
-      // no profile on file. Missing/invalid `riskTolerance` then falls back to
-      // equal-weight inside `resolveBenchmarkForRiskTolerance`.
+      //
+      // Task #388 — delegate to the shared `resolvePerClientBenchmark` helper so
+      // this route, `/api/portfolio/allocation`, and `/api/portfolio/real-metrics`
+      // all return the same benchmark for a given user. The per-request
+      // `riskTolerance` body field is still consumed below for the rule-based
+      // recommendation logic, but it is no longer used to pick the benchmark —
+      // doing so previously meant a profile-less user could see a different
+      // target on the AI page than on their portfolio page.
       const allocationFractions = {
         fiat:       currentAllocation.fiat       / 100,
         crypto:     currentAllocation.crypto     / 100,
@@ -2877,11 +2891,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .where(eq(riskProfiles.clientId, userId))
         .orderBy(desc(riskProfiles.createdAt))
         .limit(1);
-      const rebalancingBenchmark = latestRiskProfile
-        ? resolveBenchmarkForRiskProfileRow(latestRiskProfile)
-        : resolveBenchmarkForRiskTolerance(
-            typeof riskTolerance === "number" ? riskTolerance : Number(riskTolerance),
-          );
+      const rebalancingBenchmark = resolvePerClientBenchmark(latestRiskProfile);
       const rebalancingGap = computeRebalancingGap(allocationFractions, rebalancingBenchmark);
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;

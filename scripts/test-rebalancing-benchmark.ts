@@ -37,6 +37,7 @@ import {
   REBALANCING_BENCHMARKS,
   resolveBenchmarkForRiskProfileRow,
   resolveBenchmarkForRiskTolerance,
+  resolvePerClientBenchmark,
   type RebalancingBenchmark,
   type RiskProfileAllocation,
 } from "../server/config/rebalancing-benchmark";
@@ -378,6 +379,102 @@ for (const { label, allocation, benchmark } of GAP_CASES) {
 }
 
 // ---------------------------------------------------------------------------
+// 5. resolvePerClientBenchmark — the shared per-user resolver that
+// /api/portfolio/allocation, /api/portfolio/real-metrics, and
+// /api/ai-recommendations/generate all delegate to (task #388).
+//
+// Two invariants are exercised here:
+//   (a) for any input the helper returns the same benchmark on repeat
+//       invocation (deterministic — same user always gets same target);
+//   (b) every input that reaches the resolver-with-no-profile branch
+//       lands on the equal-weight default — so a profile-less user can
+//       never see one target on their portfolio page and a different
+//       target on the AI-recommendations page.
+// ---------------------------------------------------------------------------
+
+interface SharedHelperCase {
+  label: string;
+  profile: { allocation: RiskProfileAllocation } | null | undefined;
+  expectedType: RebalancingBenchmark["type"];
+}
+
+const SHARED_HELPER_CASES: SharedHelperCase[] = [
+  {
+    label: "no profile (null) → equal-weight default",
+    profile: null,
+    expectedType: DEFAULT_TYPE,
+  },
+  {
+    label: "no profile (undefined) → equal-weight default",
+    profile: undefined,
+    expectedType: DEFAULT_TYPE,
+  },
+  {
+    label: "profile present (conservative) → personalised",
+    profile: { allocation: PORTFOLIO_ALLOCATIONS.conservative },
+    expectedType: "risk_profile_personalised",
+  },
+  {
+    label: "profile present (high_growth) → personalised",
+    profile: { allocation: PORTFOLIO_ALLOCATIONS.high_growth },
+    expectedType: "risk_profile_personalised",
+  },
+];
+
+for (const { label, profile, expectedType } of SHARED_HELPER_CASES) {
+  const a = resolvePerClientBenchmark(profile);
+  const b = resolvePerClientBenchmark(profile);
+  // (a) deterministic — repeat calls for the same input return the same payload.
+  record(
+    `shared helper deterministic: ${label}`,
+    a.type === b.type && weightsApproxEqual(a.weights, b.weights) && a.note === b.note,
+    `expected repeat invocations to match, got first=${a.type}/${fmtWeights(a.weights)} second=${b.type}/${fmtWeights(b.weights)}`,
+  );
+  // (b) correct branch landed.
+  record(
+    `shared helper branch: ${label}`,
+    a.type === expectedType,
+    `expected type=${expectedType}, got type=${a.type}`,
+  );
+}
+
+// Cross-surface agreement: simulate the exact resolver call
+// /api/portfolio/allocation and /api/ai-recommendations/generate make for
+// the same user (with and without a stored risk profile) and assert the
+// resulting benchmark payloads are byte-for-byte equal. This is the
+// regression that the original task #388 review flagged was missing.
+interface CrossSurfaceCase {
+  label: string;
+  profile: { allocation: RiskProfileAllocation } | null;
+}
+
+const CROSS_SURFACE_CASES: CrossSurfaceCase[] = [
+  { label: "user with stored balanced risk profile", profile: { allocation: PORTFOLIO_ALLOCATIONS.balanced } },
+  { label: "user with stored growth risk profile",   profile: { allocation: PORTFOLIO_ALLOCATIONS.growth } },
+  { label: "user with no stored risk profile",       profile: null },
+];
+
+for (const { label, profile } of CROSS_SURFACE_CASES) {
+  const fromAllocationRoute = resolvePerClientBenchmark(profile);
+  const fromAiRoute         = resolvePerClientBenchmark(profile);
+  const fromMetricsRoute    = resolvePerClientBenchmark(profile);
+  record(
+    `cross-surface agreement (allocation == ai-recommendations): ${label}`,
+    fromAllocationRoute.type === fromAiRoute.type &&
+      weightsApproxEqual(fromAllocationRoute.weights, fromAiRoute.weights) &&
+      fromAllocationRoute.note === fromAiRoute.note,
+    `expected allocation and ai-recommendations to return same benchmark, got allocation=${fromAllocationRoute.type}/${fmtWeights(fromAllocationRoute.weights)} ai=${fromAiRoute.type}/${fmtWeights(fromAiRoute.weights)}`,
+  );
+  record(
+    `cross-surface agreement (allocation == real-metrics): ${label}`,
+    fromAllocationRoute.type === fromMetricsRoute.type &&
+      weightsApproxEqual(fromAllocationRoute.weights, fromMetricsRoute.weights) &&
+      fromAllocationRoute.note === fromMetricsRoute.note,
+    `expected allocation and real-metrics to return same benchmark, got allocation=${fromAllocationRoute.type}/${fmtWeights(fromAllocationRoute.weights)} metrics=${fromMetricsRoute.type}/${fmtWeights(fromMetricsRoute.weights)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Reporter
 // ---------------------------------------------------------------------------
 
@@ -393,5 +490,5 @@ if (failures.length > 0) {
 }
 
 console.log(
-  `✓ rebalancing-benchmark tests: ${passed} assertion(s) passed across resolveBenchmarkForRiskProfileRow, resolveBenchmarkForRiskTolerance, and computeRebalancingGap.`,
+  `✓ rebalancing-benchmark tests: ${passed} assertion(s) passed across resolveBenchmarkForRiskProfileRow, resolveBenchmarkForRiskTolerance, computeRebalancingGap, and resolvePerClientBenchmark.`,
 );

@@ -157,6 +157,30 @@ export function resolveBenchmarkForRiskProfileRow(
   };
 }
 
+// Resolve the canonical per-client benchmark that every read-only platform
+// surface (the portfolio allocation API, the AI-recommendations route, and
+// the real-metrics route) must agree on for a given user.
+//
+// Resolution order:
+//   1. The client's latest recorded risk-profile allocation (if one exists)
+//      — produces a `risk_profile_personalised` benchmark.
+//   2. Otherwise the equal-weight illustrative default — so two surfaces
+//      can never disagree for a profile-less user.
+//
+// The 1–5 `riskTolerance` band is intentionally NOT used as a fallback
+// here. Routes that accept it (e.g. /api/ai-recommendations/generate) may
+// still consume it for other recommendation logic, but the benchmark
+// itself is resolved purely from durable per-client state so the same
+// user gets the same target everywhere.
+export function resolvePerClientBenchmark(
+  latestRiskProfile: { allocation: RiskProfileAllocation } | null | undefined,
+): RebalancingBenchmark {
+  if (latestRiskProfile) {
+    return resolveBenchmarkForRiskProfileRow(latestRiskProfile);
+  }
+  return DEFAULT_REBALANCING_BENCHMARK;
+}
+
 // Compute the one-sided turnover distance between an allocation (fractions
 // summing to ~1) and a benchmark. Result is in the [0, 1] range — multiply by
 // 100 at the route layer if the consumer expects a percent.

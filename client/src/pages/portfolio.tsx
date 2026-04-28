@@ -348,11 +348,18 @@ export default function Portfolio() {
               <div className="mt-6 pt-6 border-t border-gray-100" data-testid="allocation-vs-target">
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-sm font-semibold text-gray-900">Allocation vs benchmark</h4>
-                  <span className="text-xs text-gray-500">
+                  <span className="text-xs text-gray-500" data-testid="benchmark-subtitle">
                     {/* Build the subtitle from the live benchmark payload so a
                         future risk-banded benchmark (e.g. 30/15/20/35) doesn't
-                        leave the label silently misreporting the targets. */}
-                    Illustrative ·{' '}
+                        leave the label silently misreporting the targets.
+                        Task #388 — the prefix reflects which benchmark the
+                        server resolved for this client (personalised when a
+                        risk profile is on file, illustrative otherwise) so
+                        the label never silently misrepresents the source. */}
+                    {allocation.benchmark.type === 'risk_profile_personalised'
+                      ? 'Risk profile'
+                      : 'Illustrative'}
+                    {' · '}
                     {[
                       allocation.benchmark.targets.fiat,
                       allocation.benchmark.targets.crypto,
