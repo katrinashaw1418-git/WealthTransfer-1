@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { Clock, X, Copy } from "lucide-react";
+import { Clock, X, Copy, ShieldAlert } from "lucide-react";
+import { Link } from "wouter";
+import { useQuery } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import WealthOverview from "@/components/dashboard/wealth-overview";
 import PortfolioChart from "@/components/dashboard/portfolio-chart";
@@ -8,8 +10,73 @@ import AiAdvisoryPanel from "@/components/dashboard/ai-advisory-panel";
 import CurrencyBalances from "@/components/dashboard/currency-balances";
 import TransactionHistory from "@/components/dashboard/transaction-history";
 import { InsufficientFundsBanner } from "@/components/insufficient-funds-banner";
+import { Button } from "@/components/ui/button";
 import { usePortfolio } from "@/hooks/use-portfolio";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getQueryFn } from "@/lib/queryClient";
+import type { ComplianceOverview } from "@shared/schema";
+
+// Task #493 — investor dashboard alignment.
+// Renders a top-of-page KYC nudge banner whenever the client's compliance
+// overview shows any outstanding step (action_required, in_progress,
+// review, or rejected via progress.actionRequired/underReview > 0). Hidden
+// when the user is fully verified, when the query 401s (non-investor), or
+// while the overview is loading. The CTA links straight to /compliance.
+// Existing dashboard banners (insufficient funds, application pending) are
+// preserved unchanged.
+function KycNudgeBanner() {
+  // Use the explicit returnNull-on-401 fetcher so non-investor sessions
+  // (advisers/admins or unauthenticated previews) silently render no
+  // banner instead of being redirected to /login by the global default.
+  const { data, isLoading, isError } = useQuery<ComplianceOverview | null>({
+    queryKey: ["/api/compliance/overview"],
+    queryFn: getQueryFn<ComplianceOverview | null>({ on401: "returnNull" }),
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  if (isLoading || isError || !data) return null;
+
+  const outstanding = data.progress.actionRequired + data.progress.underReview;
+  if (outstanding <= 0) return null;
+
+  const headline =
+    data.progress.actionRequired > 0
+      ? "Action required to complete your KYC"
+      : "Your verification is under review";
+  const description =
+    data.progress.actionRequired > 0
+      ? `${data.progress.actionRequired} step${data.progress.actionRequired === 1 ? "" : "s"} need your attention before your account is fully verified.`
+      : `${data.progress.underReview} step${data.progress.underReview === 1 ? "" : "s"} are with AMAX compliance. We'll notify you as soon as the review completes.`;
+
+  return (
+    <div
+      className="bg-amber-50 border border-amber-300 rounded-lg p-4 flex items-start gap-4"
+      data-testid="banner-kyc-nudge"
+    >
+      <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+        <ShieldAlert className="w-5 h-5 text-amber-700" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="font-semibold text-amber-900">{headline}</p>
+        <p className="text-sm text-amber-800 mt-1">{description}</p>
+        <p className="text-xs text-amber-700/80 mt-2">
+          Verification progress: {data.progress.percent}% complete · {data.classification.currentTierLabel}
+        </p>
+      </div>
+      <div className="flex-shrink-0">
+        <Button
+          asChild
+          size="sm"
+          className="bg-amber-700 hover:bg-amber-800 text-white"
+          data-testid="button-kyc-nudge-cta"
+        >
+          <Link href="/compliance">Open KYC centre</Link>
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 interface ApplicationRecord {
   referenceId: string;
@@ -98,6 +165,13 @@ export default function Dashboard() {
           for non-clients (the query 401s and stays silent). The banner
           uses its compact one-liner variant on the dashboard so the page
           chrome stays focused. */}
+      {/* Task #493 — top-of-dashboard KYC nudge. Renders only when the
+         compliance overview has outstanding steps; non-investors and
+         fully-verified clients see nothing. Sits above existing banners
+         so the verification call-to-action is the first thing a client
+         sees on entering the dashboard. */}
+      <KycNudgeBanner />
+
       <InsufficientFundsBanner compact />
 
       {application && (

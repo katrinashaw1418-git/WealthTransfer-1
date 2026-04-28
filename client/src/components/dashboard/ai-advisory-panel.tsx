@@ -124,6 +124,22 @@ export default function AiAdvisoryPanel() {
         </div>
       </CardHeader>
       <CardContent>
+        {/* Task #493 — execution-disabled strip rendered at the top of the
+           dashboard's market-insights card so the platform-wide block is the
+           first thing a client sees on the panel, mirroring the strip that
+           lives at the top of the standalone Market Insights page. The
+           gray "general in nature" footer below the recommendations is
+           preserved separately (preservation rule). Copy and condition
+           are unchanged. */}
+        <div
+          className="mb-4 bg-red-50 border border-red-300 rounded-lg p-3"
+          data-testid="banner-execution-disabled-dashboard"
+        >
+          <p className="font-semibold text-red-900 text-sm mb-0.5">Execution disabled</p>
+          <p className="text-xs text-red-800">
+            Acting on any AI-generated insight is currently disabled platform-wide. Execution will only be authorised after a licensed adviser issues a Statement of Advice (SOA), you accept the advice in writing, and a valid Designated Benefits Funded Ongoing Fee (DBFO) consent is recorded. Until then, any "apply" action will be rejected by the platform.
+          </p>
+        </div>
         <div className="space-y-4">
           {recommendations?.map((recommendation: any) => {
             const Icon = getRecommendationIcon(recommendation.type);

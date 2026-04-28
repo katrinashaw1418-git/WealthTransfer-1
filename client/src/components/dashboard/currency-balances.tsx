@@ -1,7 +1,8 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useWallets } from "@/hooks/use-portfolio";
+import { useWallets, usePortfolio } from "@/hooks/use-portfolio";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Briefcase, Bitcoin } from "lucide-react";
 
 const currencyConfig = {
   USD: { name: "US Dollar", symbol: "$", color: "bg-green-500" },
@@ -39,6 +40,12 @@ function formatLastSynced(ts?: string | null): string {
 
 export default function CurrencyBalances() {
   const { data: wallets, isLoading, error } = useWallets();
+  // Task #493 — investor dashboard alignment. Add two summary rows above the
+  // per-currency wallet rows: "Investment funds" (sum of structured products)
+  // and "Liquid crypto" (sum of BTC/ETH spot exposure). Sourced from the
+  // existing /api/portfolio aggregation so we don't duplicate any business
+  // logic. The per-currency wallet rows below are preserved unchanged.
+  const { data: portfolio } = usePortfolio();
 
   if (isLoading) {
     return (
@@ -90,6 +97,12 @@ export default function CurrencyBalances() {
     );
   }
 
+  const investmentValue = portfolio ? parseFloat((portfolio as any).investmentValue || "0") : 0;
+  const cryptoValue = portfolio ? parseFloat((portfolio as any).cryptoValue || "0") : 0;
+  const totalValue = portfolio ? parseFloat((portfolio as any).totalValue || "0") : 0;
+  const investmentPct = totalValue > 0 ? (investmentValue / totalValue) * 100 : 0;
+  const cryptoPct = totalValue > 0 ? (cryptoValue / totalValue) * 100 : 0;
+
   return (
     <Card>
       <CardHeader>
@@ -97,6 +110,59 @@ export default function CurrencyBalances() {
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
+          {/* Task #493 — additive summary rows. Rendered above the
+             per-currency wallet rows; do not replace them. Hidden when
+             value is zero so empty accounts don't show meaningless rows. */}
+          {portfolio && investmentValue > 0 && (
+            <div
+              className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+              data-testid="row-investment-funds"
+            >
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-full flex items-center justify-center bg-primary/10">
+                  <Briefcase className="w-4 h-4 text-primary" />
+                </div>
+                <div>
+                  <p className="font-medium text-gray-900">Investment funds</p>
+                  <p className="text-sm text-gray-500">Structured products</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="font-semibold text-gray-900">
+                  ${investmentValue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                </p>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  {investmentPct.toFixed(1)}% of portfolio
+                </p>
+              </div>
+            </div>
+          )}
+
+          {portfolio && cryptoValue > 0 && (
+            <div
+              className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+              data-testid="row-liquid-crypto"
+            >
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-full flex items-center justify-center bg-yellow-500">
+                  <Bitcoin className="w-4 h-4 text-white" />
+                </div>
+                <div>
+                  <p className="font-medium text-gray-900">Liquid crypto</p>
+                  <p className="text-sm text-gray-500">BTC, ETH spot exposure</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="font-semibold text-gray-900">
+                  ${cryptoValue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                </p>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  {cryptoPct.toFixed(1)}% of portfolio
+                </p>
+              </div>
+            </div>
+          )}
+
           {wallets.map((wallet: any) => {
             const config = currencyConfig[wallet.currency as keyof typeof currencyConfig];
             const balance = parseFloat(wallet.balance);
@@ -126,15 +192,30 @@ export default function CurrencyBalances() {
                       : `${config?.symbol || '$'}${balance.toLocaleString()}`
                     }
                   </p>
-                  {/* Task #22 / Task #337 — balance-source affordance.
-                     Happy path surfaces "Last synced <ts>" using the
-                     wallet row's updatedAt (rewritten on every cache
-                     refresh from the ledger). The destructive
-                     "Reconciliation pending" wording is reserved for
-                     genuine drift so it doesn't scare clients in the
-                     normal case. Mirrors the wording on the Wallets page. */}
-                  <div className="mt-1 flex justify-end">
-                    {wallet.hasDrift ? (
+                  {/* Task #22 / Task #337 / Task #493 — balance-source affordance.
+                     Always lead with the sync timestamp ("Last synced …") so
+                     clients see the freshness signal first. When `hasDrift`
+                     is true the row also keeps the explicit destructive
+                     "Reconciliation pending" badge (preservation rule) and
+                     suffixes the line with "Custodian refresh pending" so
+                     the timestamp is contextualised rather than replaced. */}
+                  <div className="mt-1 flex flex-col items-end gap-0.5">
+                    <span
+                      className="text-[10px] text-muted-foreground"
+                      data-testid={`tag-balance-source-${wallet.currency}`}
+                      title={wallet.updatedAt ? new Date(wallet.updatedAt).toLocaleString() : undefined}
+                    >
+                      Last synced {formatLastSynced(wallet.updatedAt)}
+                      {wallet.hasDrift && (
+                        <span
+                          className="ml-1 text-amber-700"
+                          data-testid={`tag-custodian-refresh-pending-${wallet.currency}`}
+                        >
+                          · Custodian refresh pending
+                        </span>
+                      )}
+                    </span>
+                    {wallet.hasDrift && (
                       <Badge
                         variant="destructive"
                         className="text-[10px] px-1.5 py-0 leading-tight font-normal"
@@ -142,14 +223,6 @@ export default function CurrencyBalances() {
                       >
                         Reconciliation pending
                       </Badge>
-                    ) : (
-                      <span
-                        className="text-[10px] text-muted-foreground"
-                        data-testid={`tag-balance-source-${wallet.currency}`}
-                        title={wallet.updatedAt ? new Date(wallet.updatedAt).toLocaleString() : undefined}
-                      >
-                        Last synced {formatLastSynced(wallet.updatedAt)}
-                      </span>
                     )}
                   </div>
                 </div>

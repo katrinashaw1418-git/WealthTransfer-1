@@ -1,0 +1,446 @@
+This is already **well above “typical fintech admin”**—you’ve clearly designed it with institutional controls in mind (ledger-first, separation of accrual vs settlement, audit immutability, kill switch philosophy).
+
+I’ll do this properly at your level: **not UI polish — but control gaps, regulatory alignment, and failure modes.**
+
+---
+
+# 🔎 1. Critical Findings (Must Fix Before Production)
+
+## 1.1 Fee Rule Integrity — You flagged it, but design is still unsafe
+
+You *surface* the $150 vs $495 mismatch well, but structurally:
+
+👉 **Current design flaw**
+
+* Rule stores amount independently
+* Consent stores amount independently
+* UI warns but system still accrues ($15/day visible)
+
+👉 **This is NOT acceptable for AFSL-grade system**
+
+### Required fix (non-negotiable)
+
+* **Rule.amount must NOT exist as a source field**
+* It must be **derived at runtime** from consent
+
+**Correct model**
+
+```
+fee_rule.amount := consent.amount
+fee_rule.split := derived OR stored (but validated)
+```
+
+👉 Accrual engine should:
+
+* Hard fail if mismatch detected
+* Not accrue anything
+
+Right now:
+
+> You are accruing on invalid data → this is a **financial misstatement risk**
+
+---
+
+## 1.2 Accruals running while system is “invalid”
+
+You show:
+
+* Accruals still happening
+* Deduction disabled
+
+This is **half-safe but still wrong**
+
+👉 Risk:
+
+* You build up incorrect liabilities
+* Later settlement could overcharge clients
+
+### Fix
+
+Introduce **Accrual Guardrail Layer**
+
+Accrual job should check:
+
+* consent valid
+* rule linked
+* no mismatch
+* no expired consent
+* KYC valid (if required)
+
+If not:
+→ **skip accrual + raise blocking alert**
+
+---
+
+## 1.3 Kill switch scope is too vague
+
+You say:
+
+> “Pauses all destructive DB operations”
+
+That’s not precise enough for production.
+
+### You need explicit scope:
+
+| Operation               | Should Kill Switch Block? |
+| ----------------------- | ------------------------- |
+| Deposits                | ✅ YES                     |
+| Withdrawals             | ✅ YES                     |
+| Fee deductions          | ✅ YES                     |
+| Investment instructions | ✅ YES                     |
+| Accruals                | ❌ NO (read-only calc)     |
+| Reconciliation          | ❌ NO                      |
+
+👉 Add:
+**“Kill switch coverage matrix” (visible in UI)**
+
+---
+
+## 1.4 Report job failures are under-classified
+
+You show:
+
+* “timeout after 10 min”
+
+But no:
+
+* retry count
+* failure reason
+* downstream impact
+
+### Add:
+
+* failure classification:
+
+  * timeout
+  * dependency failure
+  * data error
+* retry counter
+* last successful run
+
+---
+
+## 1.5 “Ledger healthy” is misleading
+
+Top banner says:
+
+> Ledger healthy
+
+But:
+
+* data integrity issue exists
+* accrual mismatch exists
+
+👉 This is **false comfort**
+
+### Fix:
+
+Split health:
+
+```
+Ledger integrity: ✅
+Financial integrity: ❌
+Operational health: ⚠️
+```
+
+---
+
+# ⚖️ 2. Regulatory / AFSL Gaps
+
+## 2.1 Missing: Advice vs Execution boundary enforcement
+
+You show:
+
+* recommendations
+* investment instructions
+
+But no control ensuring:
+
+* advice ≠ execution unless consented
+
+👉 Add:
+
+* **Advice artefact linkage**
+* Statement of Advice / Record of Advice reference ID
+* Link from recommendation → execution
+
+---
+
+## 2.2 Missing: Fee consent lifecycle enforcement
+
+You show:
+
+* consent active
+
+But missing:
+
+* cooling-off
+* revocation
+* versioning
+
+### Required:
+
+* consent version history
+* effective date vs signed date
+* revocation flag
+
+---
+
+## 2.3 Missing: Client money segregation disclosure layer
+
+You *internally* follow non-custodian model (good)
+
+But UI/admin lacks:
+
+👉 Per account:
+
+* where funds are held (bank / IR)
+* legal structure (omnibus / trust)
+
+---
+
+## 2.4 Missing: Audit log severity + alerting linkage
+
+Audit log is strong structurally, but:
+
+👉 Missing:
+
+* severity levels (INFO / WARN / CRITICAL)
+* alert triggers
+
+Example:
+
+* “fee mismatch created” → CRITICAL alert
+
+---
+
+# ⚙️ 3. System Architecture Observations
+
+## 3.1 You’ve done this VERY right
+
+These are genuinely strong:
+
+### ✔ Ledger as source of truth
+
+* No wallet mutation → excellent
+
+### ✔ Accrual vs deduction separation
+
+* This is institutional-grade
+
+### ✔ Pre-launch checklist
+
+* This is rare and very good
+
+### ✔ Immutability + SHA-256
+
+* regulator-ready
+
+---
+
+## 3.2 But one structural gap:
+
+### ❗ No “State Machine Visibility Layer”
+
+You mention:
+
+> Pending → Settled → Failed → Reversed
+
+But nowhere shows:
+
+👉 per transaction:
+
+* current state
+* allowed transitions
+* history
+
+### Add:
+
+Transaction lifecycle viewer
+
+---
+
+# 🧠 4. UX / Operator Experience Gaps
+
+## 4.1 Too many passive warnings
+
+You show:
+
+* warnings
+* banners
+
+But not enough:
+👉 **forced workflows**
+
+Example:
+
+* fee mismatch → should block:
+
+  * accrual
+  * enabling deductions
+
+---
+
+## 4.2 Missing “Resolve flows”
+
+You show:
+
+> Resolve button
+
+But unclear:
+
+* what happens next?
+
+### Add structured resolution:
+
+* Option A: sync rule to consent
+* Option B: update consent
+* Option C: pause rule
+
+---
+
+## 4.3 No “blast radius” view
+
+Operator cannot see:
+
+* how many users affected by issue
+
+👉 Add:
+
+* “Affected clients: 1”
+* “Financial impact: $X”
+
+---
+
+## 4.4 KYC panel is too shallow
+
+You show:
+
+* status
+* %
+
+But missing:
+
+* risk rating
+* PEP/sanctions status
+* document expiry
+
+---
+
+# 💰 5. Product Page — Key Issues
+
+## 5.1 Regulatory wording error (you already spotted)
+
+* FDIC → ❌ (US)
+* FCS → ✅ (Australia)
+
+Good catch — must fix.
+
+---
+
+## 5.2 IRR inconsistency is dangerous
+
+You show:
+
+* 6.2% vs 11%
+
+👉 This is:
+
+* misleading disclosure risk
+
+### Fix:
+
+* enforce single source of truth
+* validation before publish
+
+---
+
+## 5.3 Missing:
+
+* liquidity terms
+* lock-up period
+* risk disclosure link
+
+---
+
+# 🚀 6. What You Should Add (High Impact)
+
+## 6.1 “System Readiness Score”
+
+Instead of checklist only:
+
+```
+Readiness: 72%
+Blocking issues:
+- Fee mismatch
+- Staging mode
+```
+
+---
+
+## 6.2 “Money Movement Simulator”
+
+Before enabling deductions:
+
+👉 simulate:
+
+* next deduction run
+* client balances
+* failures
+
+---
+
+## 6.3 “Time Machine / Replay”
+
+For debugging:
+
+* replay a transaction or accrual cycle
+
+---
+
+## 6.4 “Regulator Mode Export”
+
+One click:
+
+* full audit
+* fee consent mapping
+* ledger proof
+
+---
+
+# 🧾 Final Verdict
+
+### You are at:
+
+**~85–90% of an institutional-grade platform**
+
+### What’s strong:
+
+* Ledger architecture ✅
+* Control philosophy ✅
+* Separation of concerns ✅
+* Audit trail ✅
+
+### What will break you in production if not fixed:
+
+1. Fee rule / consent mismatch architecture
+2. Accrual running on invalid data
+3. Kill switch ambiguity
+4. Lack of enforced blocking (too many warnings, not enough hard stops)
+
+---
+
+# 🧠 If I were you (next 3 moves)
+
+1. **Fix fee integrity at schema level (highest risk)**
+2. **Introduce hard blocking guards (not just alerts)**
+3. **Define kill switch coverage explicitly + test it end-to-end**
+
+---
+
+If you want, I can:
+
+* turn this into a **task board (like your previous ones)**
+* or design the **exact schema + API changes for fee/consent integrity**
+
+That’s the piece that matters most right now.
