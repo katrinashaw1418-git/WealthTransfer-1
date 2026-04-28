@@ -68,6 +68,7 @@ import type { Server } from "http";
 
 import { db } from "./db";
 import {
+  adviceRecords,
   aiRecommendations,
   factFindSnapshots,
   fxRates,
@@ -201,6 +202,9 @@ afterAll(async () => {
   if (testUserId !== undefined) {
     await db.delete(aiRecommendations).where(eq(aiRecommendations.userId, testUserId));
     await db.delete(riskProfiles).where(eq(riskProfiles.clientId, testUserId));
+    // Task #405 — drop any advice records the SoA-target tests inserted so
+    // a re-run does not see stale issued targets driving the benchmark.
+    await db.delete(adviceRecords).where(eq(adviceRecords.clientId, testUserId));
     await db.delete(factFindSnapshots).where(eq(factFindSnapshots.clientId, testUserId));
     await db.delete(wallets).where(eq(wallets.userId, testUserId));
   }
@@ -214,6 +218,10 @@ beforeEach(async () => {
   // need one insert it themselves so the with/without-profile cases cannot
   // bleed across.
   await db.delete(riskProfiles).where(eq(riskProfiles.clientId, testUserId));
+  // Task #405 — also wipe any advice_records the SoA preference tests left
+  // behind so a subsequent risk-profile-only case is not silently shadowed
+  // by a stale issued target.
+  await db.delete(adviceRecords).where(eq(adviceRecords.clientId, testUserId));
   // Wipe any AI recommendations the previous case generated so each test
   // sees a clean slate (the route supersedes existing rows but leaves them
   // in place for audit; we just want predictable storage state).
@@ -347,5 +355,87 @@ describe("portfolio ↔ AI-recs benchmark parity (Task #395)", () => {
         expect(ai.body.rebalancingBenchmarkType).toBe(c.expectedAiType);
       });
     }
+  });
+
+  // ===========================================================================
+  // Task #405 — SoA target preference
+  // ===========================================================================
+  // The resolver order is: SoA target → risk-profile → equal-weight default.
+  // The two cases below pin the override at both ends of the order:
+  //   1. SoA target wins over a recorded risk profile (the SoA's per-bucket
+  //      values, not the band derivation, drive the gap on both routes).
+  //   2. Only `issued`/`accepted` advice records count — a `draft` target
+  //      must not win over the equal-weight default.
+  // ===========================================================================
+  describe("with a Statement-of-Advice target on file (Task #405)", () => {
+    async function seedAdviceWithSoaTarget(opts: {
+      status: "draft" | "issued" | "accepted" | "review_pending" | "superseded" | "declined";
+      target: { fiat: number; crypto: number; stablecoin: number; investment: number } | null;
+    }) {
+      const now = new Date();
+      await db.insert(adviceRecords).values({
+        clientId: testUserId,
+        adviserUserId: testUserId, // self-referential for the test fixture
+        status: opts.status,
+        soaTargetAllocation: opts.target,
+        soaTargetSetAt: opts.target ? now : null,
+        soaTargetSetByUserId: opts.target ? testUserId : null,
+      });
+    }
+
+    it("issued SoA target overrides a recorded risk profile on both endpoints", async () => {
+      // Seed a risk profile with the MIXED allocation (would resolve to a
+      // 50% gap against the 100% AUD wallet) AND an issued SoA target with
+      // {fiat 100, ...} (gap = 0 against the same wallet). If the SoA
+      // target wins, both endpoints must report `soa_personalised` and
+      // gap=0. If the resolver fell back to the risk profile, the gap
+      // would be 50.0 and the type would still say `risk_profile_*`.
+      await db.insert(riskProfiles).values({
+        clientId: testUserId,
+        factFindSnapshotId,
+        behaviouralScore: 30,
+        capacityAdjustment: 0,
+        finalScore: 30,
+        riskBand: "conservative",
+        recommendedPortfolio: "task-405-test",
+        overrideApplied: false,
+        overrideReasons: [],
+        allocation: PERSONALISED_ALLOCATION_MIXED,
+        scoringInputs: { source: "task-405-test" },
+      });
+      await seedAdviceWithSoaTarget({
+        status: "issued",
+        target: { fiat: 100, crypto: 0, stablecoin: 0, investment: 0 },
+      });
+
+      const real = await getRealMetrics();
+      const ai = await postAiRecommendations({
+        riskTolerance: 3,
+        investmentHorizon: "5-10",
+        investmentGoal: "growth",
+      });
+
+      expect(real.status).toBe(200);
+      expect(ai.status).toBe(200);
+      expect(real.body.rebalancingBenchmarkType).toBe("soa_personalised");
+      expect(ai.body.rebalancingBenchmarkType).toBe("soa_personalised");
+      expect(real.body.rebalancingGap).toBe(0);
+      expect(ai.body.rebalancingGap).toBe(0);
+    });
+
+    it("draft SoA target does NOT override the equal-weight default (only issued/accepted count)", async () => {
+      // No risk profile, no live SoA — only a DRAFT target. The resolver
+      // must skip drafts and fall back to the equal-weight illustrative
+      // benchmark. If a draft were honoured by mistake, real-metrics would
+      // report `soa_personalised` instead of `equal_weight_illustrative`.
+      await seedAdviceWithSoaTarget({
+        status: "draft",
+        target: { fiat: 100, crypto: 0, stablecoin: 0, investment: 0 },
+      });
+
+      const real = await getRealMetrics();
+      expect(real.status).toBe(200);
+      expect(real.body.rebalancingBenchmarkType).toBe("equal_weight_illustrative");
+    });
   });
 });

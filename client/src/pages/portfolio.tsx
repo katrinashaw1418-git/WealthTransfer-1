@@ -360,10 +360,17 @@ export default function Portfolio() {
                         Task #388 — the prefix reflects which benchmark the
                         server resolved for this client (personalised when a
                         risk profile is on file, illustrative otherwise) so
-                        the label never silently misrepresents the source. */}
-                    {allocation.benchmark.type === 'risk_profile_personalised'
-                      ? 'Risk profile'
-                      : 'Illustrative'}
+                        the label never silently misrepresents the source.
+                        Task #405 — `soa_personalised` wins over both: it
+                        means an adviser actually set a target inside the
+                        client's Statement of Advice, so the label says so
+                        and the disclaimer copy on the bar set switches
+                        accordingly (the note text comes from the server). */}
+                    {allocation.benchmark.type === 'soa_personalised'
+                      ? 'Statement of Advice'
+                      : allocation.benchmark.type === 'risk_profile_personalised'
+                        ? 'Risk profile'
+                        : 'Illustrative'}
                     {' · '}
                     {[
                       allocation.benchmark.targets.fiat,

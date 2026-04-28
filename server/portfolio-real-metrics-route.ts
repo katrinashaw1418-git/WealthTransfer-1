@@ -36,6 +36,7 @@ import {
   computeRebalancingGap,
   resolvePerClientBenchmark,
 } from "./config/rebalancing-benchmark";
+import { loadLatestSoaTargetAllocation } from "./services/soa-target";
 
 export interface PortfolioTotals {
   fiatValue: number;
@@ -123,19 +124,30 @@ export function registerPortfolioRealMetricsRoute(
         : null;
 
       // Rebalancing gap — one-sided turnover from the configured benchmark [0, 50%].
-      // ILLUSTRATIVE math metric only — NOT a personal target. The benchmark constants
-      // live in `server/config/rebalancing-benchmark.ts` so they can be audited in one
-      // place. We resolve the benchmark from the client's latest recorded risk-profile
-      // allocation when one exists; otherwise we fall back to the equal-weight default
-      // and let the UI surface that fallback explicitly. A personalised target must
-      // still be set by an adviser in a Statement of Advice — neither path is a target.
-      const [latestRiskProfile] = await db
-        .select({ allocation: riskProfiles.allocation })
-        .from(riskProfiles)
-        .where(eq(riskProfiles.clientId, userId))
-        .orderBy(desc(riskProfiles.createdAt))
-        .limit(1);
-      const rebalancingBenchmark = resolvePerClientBenchmark(latestRiskProfile);
+      // The benchmark constants live in `server/config/rebalancing-benchmark.ts`
+      // so they can be audited in one place. We resolve the benchmark in the
+      // following order (Task #405):
+      //   1. The SoA target an adviser set on the client's latest live
+      //      advice record (status in {issued, accepted}) — surfaces as
+      //      `soa_personalised`. THIS one IS a personalised target.
+      //   2. The client's latest recorded risk-profile allocation —
+      //      surfaces as `risk_profile_personalised`, illustrative only.
+      //   3. Equal-weight illustrative default — pure math reference.
+      // Lookups run in parallel because they touch disjoint tables.
+      const [latestRiskProfileRow, latestSoaTarget] = await Promise.all([
+        db
+          .select({ allocation: riskProfiles.allocation })
+          .from(riskProfiles)
+          .where(eq(riskProfiles.clientId, userId))
+          .orderBy(desc(riskProfiles.createdAt))
+          .limit(1),
+        loadLatestSoaTargetAllocation(db, userId),
+      ]);
+      const latestRiskProfile = latestRiskProfileRow[0];
+      const rebalancingBenchmark = resolvePerClientBenchmark(
+        latestRiskProfile,
+        latestSoaTarget,
+      );
       const rebalancingGap = computeRebalancingGap(alloc, rebalancingBenchmark) * 100;
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;

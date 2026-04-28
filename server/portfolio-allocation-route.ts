@@ -36,6 +36,10 @@ import { riskProfiles } from "@shared/schema";
 import { db as defaultDb } from "./db";
 import { requireAuth } from "./auth";
 import { resolvePerClientBenchmark } from "./config/rebalancing-benchmark";
+// Task #405 — single-source-of-truth lookup for the adviser-set SoA target,
+// so this registrar, /api/portfolio/real-metrics, and /api/ai-recommendations
+// /generate cannot drift on which advice records count as "live".
+import { loadLatestSoaTargetAllocation } from "./services/soa-target";
 
 export interface PortfolioAllocationTotals {
   fiatValue: number;
@@ -87,16 +91,23 @@ export function registerPortfolioAllocationRoute(
       // shared equal-weight default to everyone. We delegate to
       // `resolvePerClientBenchmark` so this route, the real-metrics route,
       // and the AI-recommendations route all resolve the same benchmark
-      // for a given user — never disagreeing on what the target is. A
-      // personalised target must still be set by an adviser in a
-      // Statement of Advice.
-      const [latestRiskProfile] = await db
-        .select({ allocation: riskProfiles.allocation })
-        .from(riskProfiles)
-        .where(eq(riskProfiles.clientId, userId))
-        .orderBy(desc(riskProfiles.createdAt))
-        .limit(1);
-      const benchmark = resolvePerClientBenchmark(latestRiskProfile);
+      // for a given user — never disagreeing on what the target is.
+      //
+      // Task #405 — when an adviser has set a target allocation inside a
+      // live SOA (status in {issued, accepted}), prefer that over the
+      // risk-profile-derived benchmark. Both lookups happen in parallel
+      // because they touch disjoint tables and the request is read-only.
+      const [latestRiskProfileRow, latestSoaTarget] = await Promise.all([
+        db
+          .select({ allocation: riskProfiles.allocation })
+          .from(riskProfiles)
+          .where(eq(riskProfiles.clientId, userId))
+          .orderBy(desc(riskProfiles.createdAt))
+          .limit(1),
+        loadLatestSoaTargetAllocation(db, userId),
+      ]);
+      const latestRiskProfile = latestRiskProfileRow[0];
+      const benchmark = resolvePerClientBenchmark(latestRiskProfile, latestSoaTarget);
       res.json({
         fiat:       { value: fiatValue,        percentage: totalValue > 0 ? (fiatValue        / totalValue) * 100 : 0 },
         crypto:     { value: cryptoValue,       percentage: totalValue > 0 ? (cryptoValue      / totalValue) * 100 : 0 },

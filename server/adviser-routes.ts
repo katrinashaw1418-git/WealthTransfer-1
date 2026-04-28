@@ -93,6 +93,9 @@ import {
   // compliance reviewers must be able to add notes on a record under review.
   REVIEW_LOCK_REASON,
 } from "./services/wealth-planner";
+// Task #405 — set/clear the SoA target allocation column on the advice record.
+// Uses the same review-pending guard as other advice-record children.
+import { requireAdviceRecordWritable } from "./services/advice-write-gate";
 import { adviceRecords } from "@shared/schema";
 // Task #95 — standardised audit-log writer (before/after snapshots) for the
 // advice + fee-engine surfaces. Other adviser routes still use the local
@@ -2314,6 +2317,160 @@ export function registerAdviserRoutes(app: Express): void {
       });
 
       return { advice: out.advice, version: out.version };
+    }),
+  );
+
+  // ---------------------------------------------------------------------------
+  // PATCH /api/adviser/advice-records/:id/soa-target  (Task #405)
+  // ---------------------------------------------------------------------------
+  // Lets an adviser record the per-client target allocation on a Statement of
+  // Advice. The four percentages must each be in [0, 100] and sum to ~100
+  // (a ±0.5 tolerance handles trailing-decimal rounding). The body may also
+  // pass `targetAllocation: null` to explicitly clear a previously set
+  // target (useful if an adviser realises the SoA was set on the wrong
+  // record and wants the resolver to fall back to the risk-profile path).
+  //
+  // Storage:
+  //   - `soaTargetAllocation` jsonb (null on clear)
+  //   - `soaTargetSetAt` timestamp (null on clear)
+  //   - `soaTargetSetByUserId` int FK (null on clear)
+  //
+  // Gating:
+  //   - assertAdviserClientLink — adviser must own the client this record
+  //     belongs to (defence in depth even though the URL is :id-scoped).
+  //   - requireAdviceRecordWritable — same review-pending lock used by
+  //     adviser objectives + documents. The 423 envelope carries reason
+  //     `record_locked_under_review` so the UI can render a lock banner.
+  //
+  // Audit:
+  //   - One audit_logs row with action `advice_record.soa_target_set`
+  //     (or `.cleared`) capturing both before/after JSONB so a regulator
+  //     can replay every change to the personalised target without joining
+  //     against advice_record_versions.
+  // ---------------------------------------------------------------------------
+  const allocationPercentSchema = z
+    .number()
+    .min(0, "allocation percentages must be >= 0")
+    .max(100, "allocation percentages must be <= 100");
+  const SOA_TARGET_TOLERANCE = 0.5;
+  const soaTargetSchema = z.object({
+    targetAllocation: z
+      .object({
+        fiat: allocationPercentSchema,
+        crypto: allocationPercentSchema,
+        stablecoin: allocationPercentSchema,
+        investment: allocationPercentSchema,
+      })
+      .nullable()
+      .refine(
+        (v) => {
+          if (v === null) return true;
+          const sum = v.fiat + v.crypto + v.stablecoin + v.investment;
+          return Math.abs(sum - 100) <= SOA_TARGET_TOLERANCE;
+        },
+        {
+          message: `Allocation percentages must sum to 100 (±${SOA_TARGET_TOLERANCE})`,
+        },
+      ),
+  });
+
+  app.patch(
+    "/api/adviser/advice-records/:id/soa-target",
+    adviserRoute(async (req, auth) => {
+      const adviceRecordId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(adviceRecordId) || adviceRecordId <= 0) {
+        throw Object.assign(new Error("Invalid advice record id"), { status: 400 });
+      }
+      const parsed = soaTargetSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw Object.assign(
+          new Error(
+            "Invalid SoA target payload: " +
+              parsed.error.issues.map((i) => i.message).join("; "),
+          ),
+          { status: 400 },
+        );
+      }
+
+      // Pull the prior values BEFORE the writability gate so the audit row
+      // below can record an honest before/after diff. The gate only reads
+      // status; this select gives us the JSONB columns we mutate.
+      const [prior] = await db
+        .select({
+          id: adviceRecords.id,
+          clientId: adviceRecords.clientId,
+          soaTargetAllocation: adviceRecords.soaTargetAllocation,
+          soaTargetSetAt: adviceRecords.soaTargetSetAt,
+          soaTargetSetByUserId: adviceRecords.soaTargetSetByUserId,
+        })
+        .from(adviceRecords)
+        .where(eq(adviceRecords.id, adviceRecordId))
+        .limit(1);
+      if (!prior) {
+        throw Object.assign(new Error("Advice record not found"), { status: 404 });
+      }
+
+      // Defence in depth — the URL says ":id" but the adviser must still
+      // own the client this record belongs to.
+      await assertAdviserClientLink(auth.userId, prior.clientId);
+
+      // Block writes against records under compliance review (423). Audit
+      // the blocked attempt via the standard advice-write-gate hook.
+      await requireAdviceRecordWritable(adviceRecordId, db, {
+        actorUserId: auth.userId,
+        attemptedAction:
+          parsed.data.targetAllocation === null
+            ? "advice_record.soa_target_cleared"
+            : "advice_record.soa_target_set",
+        ipAddress: (req as Request).ip ?? null,
+      });
+
+      const isClear = parsed.data.targetAllocation === null;
+      const now = new Date();
+
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(adviceRecords)
+          .set({
+            soaTargetAllocation: isClear ? null : parsed.data.targetAllocation,
+            soaTargetSetAt: isClear ? null : now,
+            soaTargetSetByUserId: isClear ? null : auth.userId,
+            updatedAt: now,
+          })
+          .where(eq(adviceRecords.id, adviceRecordId))
+          .returning({
+            id: adviceRecords.id,
+            soaTargetAllocation: adviceRecords.soaTargetAllocation,
+            soaTargetSetAt: adviceRecords.soaTargetSetAt,
+            soaTargetSetByUserId: adviceRecords.soaTargetSetByUserId,
+          });
+        await writeAuditLog({
+          executor: tx,
+          userId: auth.userId,
+          action: isClear
+            ? "advice_record.soa_target_cleared"
+            : "advice_record.soa_target_set",
+          entityType: "advice_record",
+          entityId: String(adviceRecordId),
+          before: {
+            soaTargetAllocation: prior.soaTargetAllocation,
+            soaTargetSetAt: prior.soaTargetSetAt,
+            soaTargetSetByUserId: prior.soaTargetSetByUserId,
+          },
+          after: {
+            soaTargetAllocation: row.soaTargetAllocation,
+            soaTargetSetAt: row.soaTargetSetAt,
+            soaTargetSetByUserId: row.soaTargetSetByUserId,
+          },
+          extra: {
+            clientId: prior.clientId,
+          },
+          ipAddress: (req as Request).ip ?? null,
+        });
+        return row;
+      });
+
+      return { advice: updated };
     }),
   );
 }

@@ -49,6 +49,38 @@ unique entityId values guarantee isolation across reruns).
 
 **Files**: `server/admin-routes.ts` (new endpoint), `server/admin-routes-fixture-cleanup-deactivations.test.ts` (new), `client/src/pages/admin/background-jobs.tsx` (panel + query + new lucide icons), `client/src/pages/admin/audit-logs.tsx` (`useSearch`-driven URL params + entityId chip).
 
+## Recent Changes (April 2026) — Task #405: SoA-set portfolio target wins over risk-profile and equal-weight benchmarks
+
+Advisers can now record a per-client 4-bucket target allocation (fiat / crypto / stablecoin / investment) on a Statement of Advice, and that target becomes the canonical benchmark every read-only platform surface compares the live portfolio against.
+
+**Schema** (`shared/schema.ts` → `adviceRecords`):
+- `soaTargetAllocation jsonb` (the four percentages, summing to ~100), `soaTargetSetAt timestamp`, `soaTargetSetByUserId int FK → users.id`. All three nullable so existing draft/issued advice records keep working — null means "no target on this SOA, fall through to the next preference".
+
+**Resolver** (`server/config/rebalancing-benchmark.ts`):
+- New `soa_personalised` benchmark type + `NOTE_SOA_PERSONALISED` copy ("Compared against the personalised target your adviser set in your Statement of Advice.").
+- New pure helpers `resolveBenchmarkForSoaTarget(target)` and updated `resolvePerClientBenchmark(latestRiskProfile, latestSoaTarget?)`. Resolution order is now: **SoA target → risk-profile → equal-weight default**. The 1–5 `riskTolerance` band is still NOT a benchmark fallback (Task #388 contract preserved).
+
+**Lookup helper** (`server/services/soa-target.ts`):
+- `loadLatestSoaTargetAllocation(db, clientUserId)` is the single source of truth for "which SoA target, if any, is live for this client right now". Filters: `status IN (issued, accepted)` (exported as `LIVE_SOA_STATUSES`), `soaTargetAllocation IS NOT NULL`, ordered by `soaTargetSetAt DESC, createdAt DESC`. Drafts, review_pending, declined, and superseded records are explicitly skipped.
+
+**Routes wired**:
+- `GET /api/portfolio/allocation`, `POST /api/ai-recommendations/generate` (both in `server/routes.ts`), and `GET /api/portfolio/real-metrics` (`server/portfolio-real-metrics-route.ts`) all run the SoA lookup + risk-profile lookup in parallel via `Promise.all`, then call `resolvePerClientBenchmark`. The three surfaces can never disagree on which benchmark a given user sees.
+
+**Adviser write surface** (`server/adviser-routes.ts`):
+- New `PATCH /api/adviser/advice-records/:id/soa-target`. Body is `{ targetAllocation: { fiat, crypto, stablecoin, investment } | null }`. Validation: each percentage in [0, 100], sum within ±0.5 of 100. `targetAllocation: null` clears the target (resolver falls back to risk-profile). Gating: `assertAdviserClientLink` (adviser owns the client) + `requireAdviceRecordWritable` (423 with `reason=record_locked_under_review` while the SOA is under compliance review). Audit row uses standard `writeAuditLog` with action `advice_record.soa_target_set` (or `.cleared`) and full before/after JSONB so a regulator can replay every change to the personalised target.
+
+**Frontend** (`client/src/pages/portfolio.tsx`):
+- The "Allocation vs benchmark" subtitle now prefixes "Statement of Advice" when `benchmark.type === 'soa_personalised'` (was: only "Risk profile" / "Illustrative"). The disclaimer copy below the bars already keys off `benchmark.note` so it auto-switches to the SoA-personalised message.
+
+**Tests** (`server/portfolio-benchmark-parity.test.ts`):
+- New "with a Statement-of-Advice target on file" describe block. Two regression-sealing cases:
+  1. An issued SoA target wins over a recorded risk profile on BOTH `/api/portfolio/real-metrics` AND `/api/ai-recommendations/generate` — both report `soa_personalised` with the same gap. Catches resolver-order regressions on either route.
+  2. A `draft` SoA target does NOT count — the resolver falls back to `equal_weight_illustrative`. Catches a future change that accidentally widens `LIVE_SOA_STATUSES` to include drafts.
+- `beforeEach`/`afterAll` extended to wipe `advice_records` for the test user so SoA-preference cases cannot bleed across.
+- Pre-existing 3 "no risk profile → AI recs returns band-derived type" assertions are stale (Task #388 already moved AI recs off the band-derived path); not in scope to repair here.
+
+**Files**: `shared/schema.ts`, `server/config/rebalancing-benchmark.ts`, `server/services/soa-target.ts` (new), `server/portfolio-allocation-route.ts` (Task #406 registrar — added SoA lookup during rebase), `server/routes.ts`, `server/portfolio-real-metrics-route.ts`, `server/adviser-routes.ts`, `client/src/pages/portfolio.tsx`, `server/portfolio-benchmark-parity.test.ts`.
+
 ## Recent Changes (April 2026) — Task #381: Retire the legacy storage-key client-document POST
 
 The JSON `POST /api/adviser/client-documents` route (the one that let the caller pick its own `storageKey`) has been removed. No UI surface called it after Task #115 moved the adviser dialog onto the multipart `POST /api/adviser/client-documents/upload` path; leaving it alive let any future caller (including a leaked adviser token) bind a client_document row to an arbitrary bucket key and abuse the download path. The matching `createClientDocument(...)` service function in `server/services/wealth-planner.ts` (and its `CreateClientDocumentInput` type) were removed alongside the route — those three pieces were the trust-the-caller-storageKey surface.

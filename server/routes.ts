@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { createHash, randomBytes } from "crypto";
 import { z } from "zod";
 import rateLimit, { type Options as RateLimitOptions } from "express-rate-limit";
-import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 import { storage } from "./storage";
 import { db } from "./db";
@@ -26,6 +26,7 @@ import {
   riskAssessmentResponses,
   riskAssessmentAnswersSchema,
   riskAssessmentSubmitSchema,
+  adviceRecords,
   normalizeEmail,
 } from "@shared/schema";
 import { buildComplianceOverview } from "./services/compliance-overview";
@@ -80,6 +81,7 @@ import {
   resolvePerClientBenchmark,
   resolveRecommendationTier,
 } from "./config/rebalancing-benchmark";
+import { loadLatestSoaTargetAllocation } from "./services/soa-target";
 import { registerPortfolioRealMetricsRoute } from "./portfolio-real-metrics-route";
 import { registerPortfolioAllocationRoute } from "./portfolio-allocation-route";
 
@@ -2560,6 +2562,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // `benchmark.targets` payloads (Task #406). Behaviour is preserved
   // byte-for-byte from the previous inline definition — see the registrar
   // file for the full handler comments.
+  //
+  // Task #405 — the registrar internally also runs the SoA target lookup
+  // via `loadLatestSoaTargetAllocation` so an adviser-set target inside a
+  // live SOA wins over the risk-profile-derived benchmark.
   registerPortfolioAllocationRoute(app, {
     db,
     calculatePortfolioTotalsAtDate,
@@ -3100,22 +3106,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // recommendation logic, but it is no longer used to pick the benchmark —
       // doing so previously meant a profile-less user could see a different
       // target on the AI page than on their portfolio page.
+      //
+      // Task #405 — also pull the SoA-set target so the resolver can prefer
+      // it over the risk-profile-derived benchmark when an adviser has
+      // recorded one inside a live SOA. Lookups run in parallel: they touch
+      // disjoint tables and we want the AI page to feel snappy.
       const allocationFractions = {
         fiat:       currentAllocation.fiat       / 100,
         crypto:     currentAllocation.crypto     / 100,
         stablecoin: currentAllocation.stablecoin / 100,
         investment: currentAllocation.investment / 100,
       };
-      const [latestRiskProfile] = await db
-        .select({
-          allocation: riskProfiles.allocation,
-          riskBand: riskProfiles.riskBand,
-        })
-        .from(riskProfiles)
-        .where(eq(riskProfiles.clientId, userId))
-        .orderBy(desc(riskProfiles.createdAt))
-        .limit(1);
-      const rebalancingBenchmark = resolvePerClientBenchmark(latestRiskProfile);
+      const [latestRiskProfileRow, latestSoaTarget] = await Promise.all([
+        db
+          .select({
+            allocation: riskProfiles.allocation,
+            riskBand: riskProfiles.riskBand,
+          })
+          .from(riskProfiles)
+          .where(eq(riskProfiles.clientId, userId))
+          .orderBy(desc(riskProfiles.createdAt))
+          .limit(1),
+        loadLatestSoaTargetAllocation(db, userId),
+      ]);
+      const latestRiskProfile = latestRiskProfileRow[0];
+      const rebalancingBenchmark = resolvePerClientBenchmark(latestRiskProfile, latestSoaTarget);
       const rebalancingGap = computeRebalancingGap(allocationFractions, rebalancingBenchmark);
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;

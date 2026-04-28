@@ -25,7 +25,8 @@ export type RebalancingBenchmarkType =
   | "conservative_illustrative"
   | "moderate_illustrative"
   | "aggressive_illustrative"
-  | "risk_profile_personalised";
+  | "risk_profile_personalised"
+  | "soa_personalised";
 
 export interface RebalancingBenchmark {
   type: RebalancingBenchmarkType;
@@ -46,6 +47,9 @@ const NOTE_RISK_DERIVED =
 
 const NOTE_RISK_PROFILE_PERSONALISED =
   "Compared against the asset-class allocation in your latest recorded risk profile. This is still a math-only reference — a personalised target must be set by your adviser in a Statement of Advice.";
+
+const NOTE_SOA_PERSONALISED =
+  "Compared against the personalised target your adviser set in your Statement of Advice.";
 
 export const REBALANCING_BENCHMARKS: Record<
   RebalancingBenchmarkType,
@@ -79,6 +83,16 @@ export const REBALANCING_BENCHMARKS: Record<
     type: "risk_profile_personalised",
     weights: { fiat: 0.25, crypto: 0.25, stablecoin: 0.25, investment: 0.25 },
     note: NOTE_RISK_PROFILE_PERSONALISED,
+  },
+  // Task #405 — placeholder for the SOA-set personalised type. Actual
+  // weights are computed from the SoA target stored on the adviceRecords
+  // row by `resolveBenchmarkForSoaTarget`. Same caveat as above: this
+  // entry exists for type-system completeness only — callers should never
+  // read these placeholder weights directly.
+  soa_personalised: {
+    type: "soa_personalised",
+    weights: { fiat: 0.25, crypto: 0.25, stablecoin: 0.25, investment: 0.25 },
+    note: NOTE_SOA_PERSONALISED,
   },
 };
 
@@ -292,14 +306,62 @@ export function resolveBenchmarkForRiskProfileRow(
   };
 }
 
+// Shape of the `soaTargetAllocation` JSONB stored on an adviceRecords row.
+// Stored as percentages 0–100 summing to ~100, in the four platform buckets
+// the rebalancing benchmark already works in. The resolver below normalises
+// them to fractions and surfaces a `soa_personalised` benchmark.
+export interface SoaTargetAllocation {
+  fiat: number;
+  crypto: number;
+  stablecoin: number;
+  investment: number;
+}
+
+// Resolve a personalised benchmark from the SoA target an adviser stored
+// against the client's latest live advice record. Returns null when the
+// stored allocation is missing or malformed (all zeroes / non-finite) so the
+// caller can fall through to the next preference (risk-profile, then
+// equal-weight). Returning null rather than the equal-weight default lets
+// `resolvePerClientBenchmark` cleanly express the resolution order without
+// double-checking malformed-input semantics here.
+export function resolveBenchmarkForSoaTarget(
+  target: SoaTargetAllocation | null | undefined,
+): RebalancingBenchmark | null {
+  if (!target) return null;
+
+  const fiat       = Number(target.fiat)       || 0;
+  const crypto     = Number(target.crypto)     || 0;
+  const stablecoin = Number(target.stablecoin) || 0;
+  const investment = Number(target.investment) || 0;
+
+  const total = fiat + crypto + stablecoin + investment;
+  if (!Number.isFinite(total) || total <= 0) return null;
+
+  return {
+    type: "soa_personalised",
+    weights: {
+      fiat:       fiat       / total,
+      crypto:     crypto     / total,
+      stablecoin: stablecoin / total,
+      investment: investment / total,
+    },
+    note: NOTE_SOA_PERSONALISED,
+  };
+}
+
 // Resolve the canonical per-client benchmark that every read-only platform
 // surface (the portfolio allocation API, the AI-recommendations route, and
 // the real-metrics route) must agree on for a given user.
 //
-// Resolution order:
-//   1. The client's latest recorded risk-profile allocation (if one exists)
+// Resolution order (highest preference first):
+//   1. Task #405 — the SoA target an adviser set on the client's latest
+//      *live* advice record (status in {issued, accepted}). Produces a
+//      `soa_personalised` benchmark. The route layer is responsible for
+//      filtering on status before passing the row in here so this helper
+//      stays a pure function of its arguments.
+//   2. The client's latest recorded risk-profile allocation (if one exists)
 //      — produces a `risk_profile_personalised` benchmark.
-//   2. Otherwise the equal-weight illustrative default — so two surfaces
+//   3. Otherwise the equal-weight illustrative default — so two surfaces
 //      can never disagree for a profile-less user.
 //
 // The 1–5 `riskTolerance` band is intentionally NOT used as a fallback
@@ -309,7 +371,10 @@ export function resolveBenchmarkForRiskProfileRow(
 // user gets the same target everywhere.
 export function resolvePerClientBenchmark(
   latestRiskProfile: { allocation: RiskProfileAllocation } | null | undefined,
+  latestSoaTarget?: SoaTargetAllocation | null,
 ): RebalancingBenchmark {
+  const soa = resolveBenchmarkForSoaTarget(latestSoaTarget);
+  if (soa) return soa;
   if (latestRiskProfile) {
     return resolveBenchmarkForRiskProfileRow(latestRiskProfile);
   }

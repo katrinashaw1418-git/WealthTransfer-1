@@ -782,6 +782,29 @@ export const adviceRecords = pgTable("advice_records", {
     crypto: number;
   }>(),
 
+  // Task #405 — adviser-set per-client target allocation surfaced inside the
+  // SOA. Stored as percentages (0–100) summing to ~100, in the same four
+  // platform buckets the rebalancing benchmark works in (fiat / crypto /
+  // stablecoin / investment). When non-null AND the advice record is in a
+  // live status (issued | accepted), this is the canonical "personalised
+  // target" the portfolio page, the AI-recommendations route, and the
+  // real-metrics route must agree on. When null we fall back to the
+  // risk-profile-derived benchmark, then to the equal-weight default — see
+  // `resolvePerClientBenchmark` in server/config/rebalancing-benchmark.ts.
+  // The companion `soaTargetSetAt` / `soaTargetSetByUserId` columns are
+  // captured at write time so the audit trail can show *who* set the target
+  // and *when* without joining audit_logs.
+  soaTargetAllocation: jsonb("soa_target_allocation").$type<{
+    fiat: number;
+    crypto: number;
+    stablecoin: number;
+    investment: number;
+  }>(),
+  soaTargetSetAt: timestamp("soa_target_set_at"),
+  soaTargetSetByUserId: integer("soa_target_set_by_user_id").references(
+    () => users.id,
+  ),
+
   incompleteInfoWarningRequired: boolean("incomplete_info_warning_required")
     .notNull()
     .default(false),
