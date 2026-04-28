@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  RISK_BADGE_VARIANTS,
   RISK_PROFILE_KEYS,
   RISK_PROFILE_LABELS,
   isKnownRiskProfile,
+  riskProfileBadgeVariant,
   riskProfileLabel,
   riskProfileRank,
   toKnownRiskProfile,
@@ -121,6 +123,48 @@ describe("riskProfileRank", () => {
     const tail = RISK_PROFILE_KEYS.length;
     for (const key of RISK_PROFILE_KEYS) {
       expect(riskProfileRank(key)).toBeLessThan(tail);
+    }
+  });
+});
+
+describe("riskProfileBadgeVariant", () => {
+  it("returns the expected variant for each canonical key", () => {
+    expect(riskProfileBadgeVariant("low")).toBe("secondary");
+    expect(riskProfileBadgeVariant("conservative")).toBe("secondary");
+    expect(riskProfileBadgeVariant("moderate")).toBe("outline");
+    expect(riskProfileBadgeVariant("high")).toBe("default");
+    expect(riskProfileBadgeVariant("very_high")).toBe("destructive");
+  });
+
+  it("resolves historical sentence-case forms to the same variant as the canonical key", () => {
+    for (const key of RISK_PROFILE_KEYS) {
+      const label = RISK_PROFILE_LABELS[key];
+      expect(riskProfileBadgeVariant(label)).toBe(riskProfileBadgeVariant(key));
+    }
+    expect(riskProfileBadgeVariant("Low")).toBe("secondary");
+    expect(riskProfileBadgeVariant("Very High")).toBe("destructive");
+  });
+
+  it("falls back to 'outline' for unknown / empty / null / undefined input", () => {
+    expect(riskProfileBadgeVariant("medium")).toBe("outline");
+    expect(riskProfileBadgeVariant("ultra_high")).toBe("outline");
+    expect(riskProfileBadgeVariant("")).toBe("outline");
+    expect(riskProfileBadgeVariant("   ")).toBe("outline");
+    expect(riskProfileBadgeVariant(null)).toBe("outline");
+    expect(riskProfileBadgeVariant(undefined)).toBe("outline");
+  });
+});
+
+describe("RISK_BADGE_VARIANTS", () => {
+  it("has an entry for every KnownRiskProfile key", () => {
+    expect(Object.keys(RISK_BADGE_VARIANTS).sort()).toEqual(
+      [...RISK_PROFILE_KEYS].sort(),
+    );
+  });
+
+  it("defines a defined variant for every canonical key", () => {
+    for (const key of RISK_PROFILE_KEYS) {
+      expect(RISK_BADGE_VARIANTS[key]).toBeDefined();
     }
   });
 });
