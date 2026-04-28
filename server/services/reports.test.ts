@@ -32,7 +32,10 @@ import {
   regenerateReport,
   runReportExpiringSoonReminder,
   runReportJobSweeper,
+  STALE_REPORT_JOB_FAILURE_REASON,
+  STALE_REPORT_JOB_TIMEOUT_MS,
   SWEEPER_STUCK_AFTER_MS,
+  sweepStaleReportJobs,
 } from "./reports";
 import { createReportRequest } from "./adviser-access";
 
@@ -206,6 +209,221 @@ describe("runReportJobSweeper", () => {
     await clearReportRows();
     const summary = await runReportJobSweeper();
     expect(summary.flipped).toBe(0);
+  });
+});
+
+// ===========================================================================
+// Task #298 — sweepStaleReportJobs (per-adviser scoped on-demand sweep).
+// ---------------------------------------------------------------------------
+// Locks the contract for the per-adviser scoped helper invoked by the
+// reports list endpoint (server/adviser-routes.ts) before it returns rows.
+// The cron-based runReportJobSweeper above is global; this one is the
+// "render-time safety net" path and uses a different failure reason
+// (STALE_REPORT_JOB_FAILURE_REASON) so the two surfaces are
+// distinguishable in the audit trail.
+// ===========================================================================
+describe("sweepStaleReportJobs", () => {
+  it("flips a 'requested' row older than the timeout to 'failed' with the documented reason", async () => {
+    await clearReportRows();
+    const stuckRequestedAt = new Date(
+      Date.now() - STALE_REPORT_JOB_TIMEOUT_MS - 60_000,
+    );
+    const [stuck] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+        requestedAt: stuckRequestedAt,
+      })
+      .returning();
+
+    const flipped = await sweepStaleReportJobs(adviserUserId);
+    expect(flipped).toBeGreaterThanOrEqual(1);
+
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, stuck.id));
+    expect(after.status).toBe("failed");
+    expect(after.failureReason).toBe(STALE_REPORT_JOB_FAILURE_REASON);
+  });
+
+  it("also flips a 'generating' row older than the timeout", async () => {
+    await clearReportRows();
+    const stuckRequestedAt = new Date(
+      Date.now() - STALE_REPORT_JOB_TIMEOUT_MS - 60_000,
+    );
+    const [stuck] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "fee_summary",
+        format: "pdf",
+        status: "generating",
+        requestedAt: stuckRequestedAt,
+      })
+      .returning();
+
+    await sweepStaleReportJobs(adviserUserId);
+
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, stuck.id));
+    expect(after.status).toBe("failed");
+    expect(after.failureReason).toBe(STALE_REPORT_JOB_FAILURE_REASON);
+  });
+
+  it("leaves rows inside the timeout window untouched", async () => {
+    await clearReportRows();
+    // Half the timeout — well within the safe window.
+    const freshRequestedAt = new Date(
+      Date.now() - Math.floor(STALE_REPORT_JOB_TIMEOUT_MS / 2),
+    );
+    const [fresh] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "transaction_history",
+        format: "pdf",
+        status: "requested",
+        requestedAt: freshRequestedAt,
+      })
+      .returning();
+
+    const flipped = await sweepStaleReportJobs(adviserUserId);
+    expect(flipped).toBe(0);
+
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, fresh.id));
+    expect(after.status).toBe("requested");
+    expect(after.failureReason).toBeNull();
+  });
+
+  it("never touches terminal rows (ready, failed, expired) even if old", async () => {
+    await clearReportRows();
+    const ancient = new Date(Date.now() - 10 * STALE_REPORT_JOB_TIMEOUT_MS);
+
+    const [readyRow] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "ready",
+        requestedAt: ancient,
+        downloadUrl: "/api/adviser/reports/0/download",
+      })
+      .returning();
+    const [failedRow] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "fee_summary",
+        format: "pdf",
+        status: "failed",
+        failureReason: "prior reason",
+        requestedAt: ancient,
+      })
+      .returning();
+    const [expiredRow] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "transaction_history",
+        format: "pdf",
+        status: "expired",
+        requestedAt: ancient,
+      })
+      .returning();
+
+    const flipped = await sweepStaleReportJobs(adviserUserId);
+    expect(flipped).toBe(0);
+
+    const [readyAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, readyRow.id));
+    expect(readyAfter.status).toBe("ready");
+    // Documented reason must NOT have been overwritten on a terminal row.
+    expect(readyAfter.failureReason).toBeNull();
+
+    const [failedAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, failedRow.id));
+    expect(failedAfter.status).toBe("failed");
+    // The original failureReason is preserved — the sweep did not rewrite it.
+    expect(failedAfter.failureReason).toBe("prior reason");
+
+    const [expiredAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, expiredRow.id));
+    expect(expiredAfter.status).toBe("expired");
+  });
+
+  it("is scoped to the calling adviser — does not flip another adviser's stuck rows", async () => {
+    await clearReportRows();
+    const stuckRequestedAt = new Date(
+      Date.now() - STALE_REPORT_JOB_TIMEOUT_MS - 60_000,
+    );
+    // Use a stable username + onConflictDoUpdate so re-runs of this file
+    // don't accumulate adviser rows. We deliberately do NOT delete this
+    // user in cleanup: other tables in the dev DB carry FKs back to
+    // users(id) (e.g. portfolio_snapshots) that make a teardown DELETE
+    // fragile across schema evolutions. The report row is cleaned by
+    // the explicit delete below; the adviser row is harmless to leave.
+    const [otherAdviser] = await db
+      .insert(users)
+      .values({
+        username: `__reports_test_other_adviser__`,
+        email: "reports-test-other-adviser@example.com",
+        password: "not-a-real-password",
+        firstName: "Other",
+        lastName: "Adviser",
+        role: "adviser",
+      })
+      .onConflictDoUpdate({
+        target: users.username,
+        set: { role: "adviser" },
+      })
+      .returning();
+
+    const [otherStuck] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId: otherAdviser.id,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+        requestedAt: stuckRequestedAt,
+      })
+      .returning();
+
+    const flipped = await sweepStaleReportJobs(adviserUserId);
+    expect(flipped).toBe(0);
+
+    const [otherAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, otherStuck.id));
+    expect(otherAfter.status).toBe("requested");
+
+    // Cleanup just the report row owned by the other adviser — the user
+    // row is intentionally left in place (see comment above on FKs).
+    await db.delete(reportRequests).where(eq(reportRequests.id, otherStuck.id));
   });
 });
 
