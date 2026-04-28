@@ -36,3 +36,21 @@ BEGIN
   END IF;
 END$$;
 SQL
+
+# Task #356 — auto-trigger the portfolio-snapshot re-anchor whenever the
+# valuation code path or the inline FX seed has changed since the last
+# successful run.
+#
+# Task #351 added `scripts/refresh-portfolio-snapshots-aud.ts` and a
+# runbook describing when to invoke it (after any FX-routing or
+# valuation-rule change). That left a human in the loop, and forgetting
+# the step makes the dashboard's monthly P&L card and Performance by
+# Period chart show a misleading ~30-day spike. The runner below hashes
+# `server/services/portfolio-valuation.ts` plus the inline
+# `const missingRates = [...]` FX seed in `server/routes.ts`, compares
+# the fingerprint against `_post_merge_state`, and re-runs the refresh
+# script with `--apply` only when the fingerprint changes. The summary
+# line ("rewrote N snapshot row(s) across M user(s)") lands in the
+# deploy log so the operator can see exactly how much data was rewritten
+# without having to grep the script's per-user output.
+npx tsx scripts/post-merge-portfolio-snapshot-reanchor.ts

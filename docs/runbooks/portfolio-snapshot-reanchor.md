@@ -36,6 +36,21 @@ are real performance, not a measurement artefact.
 
 ## 2. How to run
 
+> **Heads-up — usually you don't need to.** Since Task #356, the
+> post-merge step (`scripts/post-merge.sh`) hashes
+> `server/services/portfolio-valuation.ts` together with the inline
+> `const missingRates = [...]` FX seed in `server/routes.ts` and
+> auto-runs `scripts/refresh-portfolio-snapshots-aud.ts --apply` whenever
+> that fingerprint changes between deploys. The fingerprint is recorded
+> in the `_post_merge_state` table so the same content is never
+> re-anchored twice. Look for a line in the deploy log like:
+>
+> ```
+> [post-merge:snapshot-reanchor] DONE — rewrote 1234 snapshot row(s) across 56 user(s); fingerprint <hex> recorded
+> ```
+>
+> See section 5 below for when you'd still want to invoke it manually.
+
 The script lives at `scripts/refresh-portfolio-snapshots-aud.ts` and
 defaults to dry-run.
 
@@ -92,3 +107,39 @@ result.
 3. Note the run in the deploy ticket alongside the change that
    triggered it (e.g. "Task #336 shipped + ran
    `refresh-portfolio-snapshots-aud --apply` to re-anchor 30 days").
+   When the post-merge runner did the work for you (Task #356), the
+   deploy log line is the audit trail — you don't need to add a manual
+   note as well.
+
+---
+
+## 5. When the auto-trigger isn't enough
+
+`scripts/post-merge-portfolio-snapshot-reanchor.ts` only fingerprints
+the two inputs that the dashboard's monthly comparison can be
+artificially perturbed by:
+
+1. `server/services/portfolio-valuation.ts` (the `convertToAud` and
+   `calculatePortfolioTotalsAtDate` helpers).
+2. The inline `const missingRates = [...]` FX seed in
+   `server/routes.ts`.
+
+Run the script manually (per section 2) when:
+
+* You changed a valuation input that lives **outside** those two
+  files — for example a new currency added to
+  `shared/schema.ts`'s currency union, a price-feed cutover that
+  changes which `fx_rates` row is selected, or a backfill helper that
+  rewrites historical wallet balances.
+* You need a **wider window** than the default 30 days. The
+  auto-trigger always uses the script's defaults; pass `--days N`
+  yourself if the affected period is longer.
+* You need to **target a single user** for spot-checking. The
+  auto-trigger runs across every user; use `--user-id N` to scope.
+* You suspect the auto-trigger was **suppressed in error** — e.g. the
+  `_post_merge_state` row already records the current fingerprint but
+  you have evidence the snapshot cache is wrong. In that case, delete
+  the offending row (`DELETE FROM _post_merge_state WHERE key LIKE
+  'task_356_snapshot_reanchor:%'`) before the next deploy, or just run
+  the script manually and let the next post-merge pass record the
+  fingerprint.
