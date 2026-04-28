@@ -1,0 +1,199 @@
+Here is the full verified cross-check, page by page, with updated advice.
+
+Adviser Portal — Full Verification & Updated Advice
+
+1. Dashboard
+Spec says: Add ready reports, pending jobs, fee consents expiring, active rules, pending deductions, failed jobs. Add compliance banner.
+Verified against live screen: KPI cards are present (linked clients, open tasks, fee consents ≤30d, pending reports). Workflow priority section exists. Client book snapshot present.
+What the spec misses or needs updating:
+The compliance banner must be architecturally non-dismissable — not a toast, not a closeable alert. It should be a persistent strip hardcoded to display whenever deduction_execution_enabled = false. The spec does not state this explicitly. Add it.
+The KPI row needs a severity hierarchy, not just a list. Left to right: healthy counts (clients, active rules) → attention items (consents expiring, pending reports) → exception counts (failed jobs). Failed jobs card should show a red badge when count > 0 and link directly to the audit log filtered by result = failed.
+Priority order adjustment: The spec puts dashboard polish at step 7. Move the compliance banner to step 1 alongside duplicate consent fixes — it is a regulatory statement, not a UI improvement.
+
+2. Clients Page
+Spec says: Add client reference, relationship status, linked adviser/licensee, last activity, quick actions. Fix #1 → name/email.
+Verified against live screen: Client correctly shows as "Wise User / wiseinvestor@amaxglobal.com.au". KYC, tier, portfolio value, and active consent count are present.
+What the spec misses or needs updating:
+The spec lists quick actions as text. They should be icon buttons with tooltips to keep row height compact. If you use text links, you will need a wider actions column that breaks the table layout at scale.
+The spec does not mention what happens when a client has zero active consents — this should trigger an amber warning badge on the row, not just show "0", because an adviser cannot charge fees without an active consent. Surface the gap at the list level, not buried in the client detail.
+New addition not in spec: Add a "Consent gap" flag column — amber if no active consent, red if consent expired. This lets an adviser see at a glance which clients are unbillable before they try to run a deduction.
+
+3. Client Detail Page
+Spec says: 10 tabs. Summary cards for consent, rule, report, deductions.
+Verified: This page does not yet exist in the live build. The spec is correct in structure but 10 tabs at the top level is too many.
+Updated advice: Consolidate to 5 primary tabs:
+
+Overview · Portfolio · Activity · Compliance · Documents
+
+The Compliance tab contains sub-navigation: Fee Consents / Fee Rules / Accruals / Deductions / Audit Log. This keeps the top nav clean while all compliance data remains accessible. The spec should be updated to reflect this two-tier structure.
+The summary cards on the Overview tab should include a consent integrity indicator — green if consent active and not expiring, amber if expiring within 30 days, red if expired or absent. This single card tells an adviser the fee charging status of the client at a glance.
+
+4. Reports Page
+Spec says: Fix #1 → name/email. Prevent duplicates. Mark stale jobs as failed. Only show Download when ready. Add columns and actions.
+Verified against live screen: Client shows as #1 throughout — fix not yet applied. Two reports stuck as "requested" (4:44pm and 7:41pm) while newer versions completed. Five reports show ready. Duplicate full statements and fee summaries present.
+What the spec misses or needs updating:
+The spec does not define the timeout threshold for auto-failing stuck jobs. Define it explicitly: if a job remains in "requested" or "generating" for more than 10 minutes without a status update, auto-transition to "failed" and surface a retry button. This must be a background job, not a frontend-only display change.
+The spec does not address report versioning. When an adviser regenerates a report, the new version should not create an orphaned row — it should be linked as v2 of the original request. The table should show "v2 (latest)" with a collapsed history link.
+The download link expiry must be enforced server-side (suggest 7 days). An expired link must return a graceful message, not a 404. The spec mentions "download expiry" as a column but does not specify server-side enforcement — add this explicitly.
+The generated PDF itself must include: client full name, account number, adviser name, AFSL number, generation date, and platform name in the header/footer. The spec covers the UI but not the PDF content — this gap needs to be closed before any report is sent to a client.
+
+5. Request Report Modal
+Spec says: Add date range (from/to), period presets, format (PDF/CSV), notes. Validation: client required, date range required, end after start, block duplicates.
+Verified: Current modal has client selector, report type, and notes. Date range and format selector are absent.
+What the spec misses or needs updating:
+The spec does not address what "block duplicate requests" means precisely. Define it: a duplicate is a request for the same client + report type + overlapping period within the last 30 minutes. Requests for different periods are not duplicates even if the type matches. Without this precision, the duplicate check will either be too aggressive (blocking legitimate re-requests) or too loose (allowing true duplicates).
+Add a period preset default of "Last month" pre-selected — this is the most common use case for ongoing service fee clients and reduces adviser friction.
+
+6. Report Details Page / Drawer
+Spec says: Full metadata panel. Timeline (Requested → Queued → Generating → Ready → Downloaded → Expired/Failed). Actions: Download, Regenerate, Cancel, Expire link, Audit log.
+Verified: This view does not yet exist. Spec is correct.
+What the spec misses or needs updating:
+The timeline is the most valuable element on this page and the spec under-specifies it. Each stage should show: timestamp, actor (who triggered it, or "system" for automated transitions), and duration between stages. This is what makes the timeline useful for debugging stuck jobs and for audit purposes.
+The "Expire link" action should require a reason field — this creates an audit record and prevents accidental or unexplained link expiry.
+
+7. Fee Consents Page (DBFO)
+Spec says: Prevent duplicates. New requests → Pending signature (not auto-consented). Display reference day. Full column set. Full status set. Actions column.
+Verified against live screen: Both records show "Consented" immediately — not Pending signature. Actions column is blank. Reference day not shown. Two active consents for same client/fee.
+Critical issue not in spec: The $495/month consent records and $150/month fee rules are inconsistent. This may mean the rules were created manually at a different amount rather than derived from the consent. The system must enforce that a rule's amount cannot differ from its source consent. Add this as a database constraint and a UI validation rule.
+What the spec misses or needs updating:
+Services covered field is absent from both the spec column list and the current request form. Under RG175.319, the fee disclosure must specify what services the ongoing fee covers. Add a mandatory "Services covered" field (free text or template selector) to the request form and display it as a column in the consent table.
+The renewal window (60 days before → 150 days after reference day) should be displayed as two dates, not just the expiry. Show: "Renewal open: 26 Feb 2026 — Renewal closes: 24 Oct 2026". Advisers need to know when they can send the renewal, not just when the current consent dies.
+The superseded consent must remain visible in a collapsed "Consent history" section — never deleted. Audit records depend on the full chain being intact.
+
+8. Request Fee Consent Modal
+Spec says: Linked advice record mandatory. Block duplicates. Block send without client. Add consent preview. Display renewal window. Add disclaimer.
+Verified: Current modal does not enforce advice record as mandatory. No preview step.
+Updated advice: The consent request should be a stepped wizard, not a single-screen form, because it carries compliance weight:
+Step 1 — Select client + advice record (both mandatory before proceeding)
+Step 2 — Configure fee (type, amount, frequency, services covered)
+Step 3 — Preview exactly what the client will receive
+Step 4 — Confirm send
+The preview step is the most important. The adviser must see the exact document the client will sign before it is dispatched. This prevents errors and creates a pre-send audit record. The spec mentions "consent preview" but does not specify it as a mandatory blocking step — it should be.
+
+9. Fee Rules Page
+Spec says: One active rule per client/account/fee type. Replace "paused" with "superseded". Split active/inactive sections. Fix settlement messaging. Full column set including consent linkage. Actions column.
+Verified against live screen: Settlement messaging is wrong ("Deductions in Settled status have moved real funds" — contradicts disabled controls). Rule #2 shows "paused" not "superseded". No consent ID, expiry, or status visible. No actions column. Amount discrepancy ($150 vs $495) present.
+What the spec misses or needs updating:
+The spec lists "Pause / Resume" as actions. This needs clarification. "Pause" should only be available to the licensee for operational reasons (e.g. account under review) and should be temporary and logged. "Resume" should only be available if the underlying consent is still valid. "Supersede" is a one-way action — no resume is possible. The spec does not distinguish these clearly enough. Define the state machine explicitly:
+Active → Paused (reversible, licensee-only, requires reason) → Active
+Active → Superseded (permanent, one-way, triggers new rule creation)
+Active or Paused → Expired (automatic, triggered by consent expiry)
+The adviser split column must show dollar amounts, not just percentages: "$120/month (80%) | Licensee: $30/month (20%)". Percentage alone is insufficient for settlement reconciliation.
+
+10. Accruals Page
+Spec says: Full column set. Status set. Show no money moved at accrual stage.
+Verified: This page exists in the tab structure. Columns not verified in detail from the provided screens.
+What the spec misses or needs updating:
+The "no money moved at accrual stage" disclaimer needs to be prominent — not a footer note. It should appear as a banner at the top of the accruals tab, equivalent in prominence to the deduction controls disclaimer on the fee rules page. Accruals that look like money movements will cause client confusion and adviser liability.
+Add a "Convert to deduction" action that is only available when: consent is active, rule is active, accrual status is "Approved", and deduction controls are enabled. If any condition is not met, the button is disabled with a tooltip explaining why.
+
+11. Deductions Page
+Spec says: Full column set including Consent ID. Status set (Pending approval through Reversed). Block deductions on expired/revoked/superseded consent.
+Verified: Not fully visible in provided screens.
+What the spec misses or needs updating:
+The spec does not address what happens to deductions that are in "Processing" or "Approved" status when a consent is subsequently revoked. The system must: immediately flag these deductions, block settlement, and require manual licensee review. Add this as an explicit system rule — not just a UI display change.
+"Settled" status must only be applied by the system after confirmed fund movement, never manually. The spec implies this but does not state it as a hard rule. Make it explicit in the agent task.
+"Reversed" deductions must generate a credit entry in the ledger and an audit event. The spec lists "Reversed" as a status but does not specify what happens downstream.
+
+12. Documents Page
+Spec says: Categories (reports, consents, advice records, statements, disclosure docs). Columns (client, type, filename, created, expiry, status). Actions (download, preview, expire, audit log).
+Verified: Not visible in provided screens — appears not yet built.
+What the spec misses or needs updating:
+Documents must carry watermarks when downloaded — minimum: client name, adviser name, generation date, "Confidential — not for distribution" on advice records and statements. The spec covers the UI but not the document content requirements.
+Add a "Send to client" action distinct from "Download". Sending to the client creates an audit record with timestamp, delivery method, and recipient. Downloading is an adviser-side action only.
+
+13. Audit Log Page
+Spec says: Filters (client, adviser, module, event type, date range). Columns (time, actor, role, client, event, object, IP, result). Must-log events listed.
+Verified: Not visible in provided screens — appears not yet built.
+What the spec misses or needs updating:
+The spec does not mention retention period. Under Corporations Act s912G, records must be retained for 7 years. Add this as a system requirement: audit log records are immutable and cannot be deleted by any user role, including admin. Retention policy must be documented.
+Add a "Export" function that produces a tamper-evident CSV or PDF of the filtered log for regulatory submissions. This is what ASIC will ask for if they ever review the platform.
+The spec lists IP address as a column. Add user agent and session ID as well — these are needed for security incident investigation, not just compliance.
+
+Updated Priority Order
+The spec's priority order is mostly correct with three adjustments:
+1. Fix duplicate consents + rules — unchanged, correct
+2. Add audit log infrastructure — move from step 5 to step 2. Every fix you make after this point needs to be captured in the audit log from day one. Building audit logging after the other fixes means you have no record of those fixes being applied.
+3. Link fee rules to consent — unchanged, step 3
+4. Resolve $150 vs $495 amount discrepancy — not in spec's priority list at all. Add it as step 4. This is a data integrity issue that will block reconciliation and undermine trust in the entire fee management system.
+5. Fix report duplicates + stuck jobs — move to step 5
+6. Report date range + metadata — step 6
+7. Client detail tabs — step 7
+8. Final UI polish + status clarity — step 8
+
+One Issue the Spec Still Does Not Address
+There is no defined consent integrity check that runs before any fee-related action. Before an accrual is created, before a deduction is approved, before a rule is activated — the system must perform a live check: is the linked consent currently valid (signed, not expired, not revoked, not superseded)? This check must be performed at execution time, not just at record creation time. A consent that was valid when the rule was created may have expired or been revoked since. The spec covers consent linkage in the UI but does not specify this runtime gate. Add it as an explicit system rule across accruals, deductions, and rule activation.
+
+Bottom line on the spec: It is comprehensive and structurally sound. The gaps are: services covered field on consents, renewal window as open/close dates, consent integrity runtime gate, amount consistency enforcement, report PDF content requirements, document watermarking, audit log retention and export, and the $150 vs $495 data discrepancy. Fix those and the spec becomes ASIC-defensible and production-ready.You said: show me design page by pageshow me design page by pageApr 27Claude responded: I'll build each page as a full interactive mockup.I'll build each page as a full interactive mockup. Starting with the first four pages — then continuing with the rest.
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetPage 2 — Clients list:
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetPage 3 — Client detail (two-tier tabs):
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetPage 4 — Reports:
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetPage 5 — Fee Consents (DBFO):
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetPage 6 — Fee Rules:
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetPages 7–8 — Request consent modal + Audit log:
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetPage 8 — Audit log:
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.25s;
+    animation-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+VvisualizeVvisualize show_widgetThat covers all 8 key pages. Here's a summary of the design decisions embedded in every mockup:
+Consistent across all pages:
+
+Status badges follow strict colour semantics — green = healthy end-state, blue = in-progress, amber = attention needed, red = blocked/failed, grey = archived/inactive. Never green on a record that needs action.
+Every table uses table-layout: fixed with truncation — no horizontal overflow on data-heavy screens.
+The compliance notice strip (no money moved, deductions disabled) appears on every fee-related screen as a non-dismissable info bar.
+
+Key design decisions by page:
+
+Dashboard: KPI cards ordered by severity left-to-right. Persistent navy compliance banner at top.
+Clients: Consent gap flag built into the table — amber/red at the row level, not buried in detail.
+Client detail: 5 primary tabs, Compliance tab holds all fee/audit sub-navigation. Consent integrity card on overview.
+Reports: Failed rows get a left red border accent. Download button disabled (greyed) for non-ready rows. v1/v2 versioning shown inline.
+Fee consents: Superseded rows visually muted (50% opacity, secondary background). Renewal window shown as two dates, not just expiry. Services covered column added.
+Fee rules: Active and superseded rules in separate sections. Consent chip on each rule row shows consent ID, status, and expiry inline. Dollar splits shown alongside percentages.
+Consent wizard: 4-step flow with step indicator. Preview step (step 3) is a mandatory blocking gate before send.
+Audit log: Colour-coded event pills by module. Immutable retention note at bottom. Export CSV button present.
