@@ -42,7 +42,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Package } from "lucide-react";
+import { Plus, Package, Pencil } from "lucide-react";
 import {
   RISK_PROFILE_KEYS,
   RISK_PROFILE_LABELS,
@@ -123,34 +123,107 @@ function fmtMoney(s: string): string {
   }).format(n);
 }
 
+// Default form values used when opening the dialog in "create" mode.
+const EMPTY_PRODUCT_VALUES: CreateProductValues = {
+  name: "",
+  // Default to the first canonical category so the dropdown always renders
+  // a valid selection; admin must still pick the right one before saving.
+  category: PRODUCT_CATEGORY_VALUES[0],
+  subCategory: "",
+  investmentStrategy: "",
+  targetNetIrr: "",
+  term: "",
+  structure: "",
+  distributions: "",
+  liquidity: "",
+  minimumInvestment: "",
+  riskProfile: "moderate",
+  returnType: "blended",
+  returnMethod: "fixed_annual_compound",
+  annualReturn: "",
+  isActive: true,
+  isPublished: true,
+};
+
+// The narrow enum unions used by the form. Kept inline (not exported) so the
+// coercion helpers below can do typed `includes` checks without escaping the
+// type system via `as any` casts.
+const RETURN_TYPE_VALUES = ["income", "capital_gains", "blended"] as const;
+type ReturnTypeValue = (typeof RETURN_TYPE_VALUES)[number];
+const RETURN_METHOD_VALUES = ["fixed_annual_compound", "fixed_annual_simple"] as const;
+type ReturnMethodValue = (typeof RETURN_METHOD_VALUES)[number];
+type ProductCategoryValue = (typeof PRODUCT_CATEGORY_VALUES)[number];
+
+function isProductCategory(value: string): value is ProductCategoryValue {
+  return (PRODUCT_CATEGORY_VALUES as readonly string[]).includes(value);
+}
+function isRiskProfile(value: string): value is KnownRiskProfile {
+  return (RISK_PROFILE_KEYS as readonly string[]).includes(value);
+}
+function isReturnType(value: string): value is ReturnTypeValue {
+  return (RETURN_TYPE_VALUES as readonly string[]).includes(value);
+}
+function isReturnMethod(value: string): value is ReturnMethodValue {
+  return (RETURN_METHOD_VALUES as readonly string[]).includes(value);
+}
+
+// Coerce a server-shaped product row into the form value shape. The form
+// schema is strict about category / risk / return enums and treats
+// annualReturn as a string, so null becomes "" for the input. The typed
+// guards above narrow each enum-ish field without any `as any` escapes.
+function productToFormValues(p: InvestmentProduct): CreateProductValues {
+  return {
+    name: p.name,
+    category: isProductCategory(p.category) ? p.category : PRODUCT_CATEGORY_VALUES[0],
+    subCategory: p.subCategory,
+    investmentStrategy: p.investmentStrategy,
+    targetNetIrr: p.targetNetIrr,
+    term: p.term,
+    structure: p.structure,
+    distributions: p.distributions,
+    liquidity: p.liquidity,
+    minimumInvestment: p.minimumInvestment,
+    riskProfile: isRiskProfile(p.riskProfile) ? p.riskProfile : "moderate",
+    returnType: isReturnType(p.returnType) ? p.returnType : "blended",
+    returnMethod: isReturnMethod(p.returnMethod) ? p.returnMethod : "fixed_annual_compound",
+    annualReturn: p.annualReturn ?? "",
+    isActive: p.isActive,
+    isPublished: p.isPublished,
+  };
+}
+
 export default function AdminProducts() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
+  // When set, the dialog is in "edit" mode targeting this product's id.
+  // null means the dialog (when open) is creating a new product.
+  const [editingId, setEditingId] = useState<number | null>(null);
   const { data, isLoading } = useQuery<InvestmentProduct[]>({ queryKey: ["/api/admin/products"] });
 
   const form = useForm<CreateProductValues>({
     resolver: zodResolver(createProductSchema),
-    defaultValues: {
-      name: "",
-      // Default to the first canonical category so the dropdown always renders
-      // a valid selection; admin must still pick the right one before saving.
-      category: PRODUCT_CATEGORY_VALUES[0],
-      subCategory: "",
-      investmentStrategy: "",
-      targetNetIrr: "",
-      term: "",
-      structure: "",
-      distributions: "",
-      liquidity: "",
-      minimumInvestment: "",
-      riskProfile: "moderate",
-      returnType: "blended",
-      returnMethod: "fixed_annual_compound",
-      annualReturn: "",
-      isActive: true,
-      isPublished: true,
-    },
+    defaultValues: EMPTY_PRODUCT_VALUES,
   });
+
+  const openCreateDialog = () => {
+    setEditingId(null);
+    form.reset(EMPTY_PRODUCT_VALUES);
+    setOpen(true);
+  };
+
+  const openEditDialog = (product: InvestmentProduct) => {
+    setEditingId(product.id);
+    form.reset(productToFormValues(product));
+    setOpen(true);
+  };
+
+  const handleOpenChange = (next: boolean) => {
+    setOpen(next);
+    if (!next) {
+      setEditingId(null);
+      form.reset(EMPTY_PRODUCT_VALUES);
+    }
+  };
 
   const createMut = useMutation({
     mutationFn: async (values: CreateProductValues) => {
@@ -160,13 +233,58 @@ export default function AdminProducts() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/products"] });
       toast({ title: "Product created" });
-      setOpen(false);
-      form.reset();
+      handleOpenChange(false);
     },
     onError: (err: Error) => {
       toast({ title: "Create failed", description: err.message, variant: "destructive" });
     },
   });
+
+  // Edit-mode submit. Only the fields the admin actually changed are sent so
+  // we don't accidentally rewrite values they never touched (and so the audit
+  // log entry on the server reflects the real diff). The PATCH handler
+  // already accepts the full editable field set partially.
+  const updateMut = useMutation({
+    mutationFn: async (vars: { id: number; changes: Partial<CreateProductValues> }) => {
+      const res = await apiRequest("PATCH", `/api/admin/products/${vars.id}`, vars.changes);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/products"] });
+      toast({ title: "Product updated" });
+      handleOpenChange(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Update failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const submitDialog = (values: CreateProductValues) => {
+    if (editingId === null) {
+      createMut.mutate(values);
+      return;
+    }
+    // Build the patch from react-hook-form's dirtyFields map so we only PATCH
+    // fields the admin actually changed. If nothing changed, just close.
+    // Each per-key copy is wrapped in a generic helper so the value type is
+    // preserved end-to-end and no `as any` escape is needed.
+    const dirty = form.formState.dirtyFields as Partial<Record<keyof CreateProductValues, boolean>>;
+    const changes: Partial<CreateProductValues> = {};
+    function copyIfDirty<K extends keyof CreateProductValues>(key: K) {
+      if (dirty[key]) {
+        changes[key] = values[key];
+      }
+    }
+    (Object.keys(values) as (keyof CreateProductValues)[]).forEach((key) => copyIfDirty(key));
+    if (Object.keys(changes).length === 0) {
+      toast({ title: "No changes to save" });
+      handleOpenChange(false);
+      return;
+    }
+    updateMut.mutate({ id: editingId, changes });
+  };
+
+  const isSubmitting = createMut.isPending || updateMut.isPending;
 
   const toggleMut = useMutation({
     mutationFn: async (vars: { id: number; isActive: boolean }) => {
@@ -215,7 +333,7 @@ export default function AdminProducts() {
             Catalogue of products available to advisers when constructing client portfolios.
           </p>
         </div>
-        <Button onClick={() => setOpen(true)} data-testid="button-new-product">
+        <Button onClick={openCreateDialog} data-testid="button-new-product">
           <Plus className="h-4 w-4 mr-1" />
           New product
         </Button>
@@ -247,6 +365,7 @@ export default function AdminProducts() {
                   <TableHead>Term</TableHead>
                   <TableHead>Visibility</TableHead>
                   <TableHead className="text-right">Active</TableHead>
+                  <TableHead className="text-right">Edit</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -290,6 +409,17 @@ export default function AdminProducts() {
                         data-testid={`switch-product-active-${p.id}`}
                       />
                     </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openEditDialog(p)}
+                        data-testid={`button-edit-product-${p.id}`}
+                      >
+                        <Pencil className="h-4 w-4 mr-1" />
+                        Edit
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -298,17 +428,21 @@ export default function AdminProducts() {
         </CardContent>
       </Card>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>New investment product</DialogTitle>
+            <DialogTitle data-testid="text-product-dialog-title">
+              {editingId === null ? "New investment product" : "Edit investment product"}
+            </DialogTitle>
             <DialogDescription>
-              Adds the product to the catalogue. Only active products are shown to advisers.
+              {editingId === null
+                ? "Adds the product to the catalogue. Only active products are shown to advisers."
+                : "Update the product details. Only fields you change will be saved."}
             </DialogDescription>
           </DialogHeader>
           <Form {...form}>
             <form
-              onSubmit={form.handleSubmit((v) => createMut.mutate(v))}
+              onSubmit={form.handleSubmit(submitDialog)}
               className="space-y-3 max-h-[70vh] overflow-y-auto pr-1"
             >
               <FormField
@@ -571,11 +705,17 @@ export default function AdminProducts() {
                 )}
               />
               <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+                <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={createMut.isPending} data-testid="button-submit-product">
-                  {createMut.isPending ? "Creating…" : "Create product"}
+                <Button type="submit" disabled={isSubmitting} data-testid="button-submit-product">
+                  {editingId === null
+                    ? createMut.isPending
+                      ? "Creating…"
+                      : "Create product"
+                    : updateMut.isPending
+                      ? "Saving…"
+                      : "Save changes"}
                 </Button>
               </DialogFooter>
             </form>
