@@ -53,7 +53,11 @@ export type WatermarkPurpose =
   | "fee_consent_request_download"
   | "consent_pdf_download"
   | "wealth_planner_export"
-  | "signed_document_download";
+  | "signed_document_download"
+  // Task #495 — client-initiated account-activity PDF export. Same forensic
+  // attribution contract as the other download surfaces, but the actor is
+  // the client themselves rather than an adviser.
+  | "account_activity_export";
 
 export interface WatermarkContext {
   clientName: string;

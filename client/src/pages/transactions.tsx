@@ -100,6 +100,57 @@ function defaultExportRange(): { from: string; to: string } {
   return { from: fmt(from), to: fmt(today) };
 }
 
+// =============================================================================
+// Task #495 — Period preset helpers (FY / YTD / Custom).
+// -----------------------------------------------------------------------------
+// The Australian fiscal year runs 1 July → 30 June; FY{startYear}-{endYY}
+// is the locked filename slug (e.g. FY2025-26 covers 1 Jul 2025 → 30 Jun
+// 2026). The Custom preset re-uses the existing `<input type="date">`
+// fields so its filename pattern stays the legacy `slugifyForFilename`
+// shape per the preservation rule.
+// =============================================================================
+
+export type PeriodPreset = "this-fy" | "last-fy" | "ytd" | "custom";
+
+function fmtIso(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function currentFyStart(now: Date): number {
+  const month = now.getUTCMonth() + 1;
+  const year = now.getUTCFullYear();
+  return month >= 7 ? year : year - 1;
+}
+
+export function resolvePeriod(
+  preset: Exclude<PeriodPreset, "custom">,
+  now: Date,
+): { from: string; to: string; slug: string; label: string } {
+  if (preset === "ytd") {
+    const year = now.getUTCFullYear();
+    const fromDate = new Date(Date.UTC(year, 0, 1));
+    return {
+      from: fmtIso(fromDate),
+      to: fmtIso(now),
+      slug: `YTD-${year}`,
+      label: `YTD ${year}`,
+    };
+  }
+  const startYear =
+    preset === "this-fy" ? currentFyStart(now) : currentFyStart(now) - 1;
+  const fromDate = new Date(Date.UTC(startYear, 6, 1)); // 1 July
+  const toDate = new Date(Date.UTC(startYear + 1, 5, 30)); // 30 June
+  // Cap the "this FY" upper bound at today so we don't request future data.
+  const effectiveTo = preset === "this-fy" && toDate > now ? now : toDate;
+  const endYY = String(startYear + 1).slice(-2);
+  return {
+    from: fmtIso(fromDate),
+    to: fmtIso(effectiveTo),
+    slug: `FY${startYear}-${endYY}`,
+    label: `FY ${startYear}–${endYY}`,
+  };
+}
+
 function filenameFromContentDisposition(
   header: string | null,
   fallback: string,
@@ -126,6 +177,12 @@ export default function Transactions() {
   const defaultRange = useMemo(defaultExportRange, []);
   const [exportFrom, setExportFrom] = useState<string>(defaultRange.from);
   const [exportTo, setExportTo] = useState<string>(defaultRange.to);
+  // Task #495 — period preset & format. The default is "This FY" + PDF
+  // because that's the regulator-friendly client-statement pattern. The
+  // legacy 90-day custom range is still reachable by switching to
+  // "Custom" so the existing CSV-only flow keeps working unchanged.
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>("this-fy");
+  const [exportFormat, setExportFormat] = useState<"pdf" | "csv">("pdf");
   const { user } = useAuth();
   const { toast } = useToast();
   const { data: transactions, isLoading, error } = useTransactions();
@@ -148,8 +205,33 @@ export default function Transactions() {
   // the full ledger from the database. Filename comes from the response's
   // Content-Disposition so it stays in lock-step with the server.
   const [exportInProgress, setExportInProgress] = useState(false);
+  // Resolve the active window from the chosen preset so both `handleExport`
+  // and the popover UI agree on what gets requested. For Custom we fall
+  // back to the existing date inputs (and skip the periodSlug so the
+  // legacy CSV filename pattern is preserved per the Task #495
+  // preservation rule).
+  const resolvedWindow = useMemo<{
+    from: string;
+    to: string;
+    slug: string | null;
+    label: string;
+  }>(() => {
+    if (periodPreset === "custom") {
+      return {
+        from: exportFrom,
+        to: exportTo,
+        slug: null,
+        label: `${exportFrom} – ${exportTo}`,
+      };
+    }
+    const r = resolvePeriod(periodPreset, new Date());
+    return { from: r.from, to: r.to, slug: r.slug, label: r.label };
+  }, [periodPreset, exportFrom, exportTo]);
+
   const handleExport = async () => {
-    if (!exportFrom || !exportTo) {
+    const winFrom = resolvedWindow.from;
+    const winTo = resolvedWindow.to;
+    if (!winFrom || !winTo) {
       toast({
         title: "Pick a date range",
         description: "Both a from-date and a to-date are required.",
@@ -157,8 +239,8 @@ export default function Transactions() {
       });
       return;
     }
-    const fromMs = new Date(`${exportFrom}T00:00:00`).getTime();
-    const toMs = new Date(`${exportTo}T23:59:59.999`).getTime();
+    const fromMs = new Date(`${winFrom}T00:00:00`).getTime();
+    const toMs = new Date(`${winTo}T23:59:59.999`).getTime();
     if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) {
       toast({
         title: "Invalid date",
@@ -176,20 +258,48 @@ export default function Transactions() {
       return;
     }
 
+    // PDF requires a periodSlug (the new endpoint enforces it via Zod);
+    // when the user picks Custom + PDF we synthesise a from→to slug so
+    // the deterministic filename pattern still applies. CSV keeps the
+    // legacy filename when no slug is supplied.
+    const periodSlugForRequest =
+      resolvedWindow.slug ??
+      (exportFormat === "pdf" ? `${winFrom}_to_${winTo}` : null);
+
     const fallbackSlug = slugifyForFilename(
       user?.username ?? user?.email ?? null,
     );
-    const fallbackFilename = `account-activity_${fallbackSlug}_${exportFrom}_${exportTo}.csv`;
+    const fallbackFilename =
+      exportFormat === "pdf"
+        ? `AMAX-account-activity-${periodSlugForRequest ?? "period"}.pdf`
+        : periodSlugForRequest
+          ? `AMAX-account-activity-${periodSlugForRequest}.csv`
+          : `account-activity_${fallbackSlug}_${winFrom}_${winTo}.csv`;
 
     setExportInProgress(true);
     try {
-      const params = new URLSearchParams({
-        from: exportFrom,
-        to: exportTo,
-      });
-      const res = await apiFetch(
-        `/api/transactions/export?${params.toString()}`,
-      );
+      const params = new URLSearchParams({ from: winFrom, to: winTo });
+      if (periodSlugForRequest) {
+        params.set("periodSlug", periodSlugForRequest);
+      }
+      if (exportFormat === "pdf") {
+        params.set("periodLabel", resolvedWindow.label);
+      }
+      const endpoint =
+        exportFormat === "pdf"
+          ? "/api/transactions/export.pdf"
+          : "/api/transactions/export";
+      const res = await apiFetch(`${endpoint}?${params.toString()}`);
+      if (!res.ok) {
+        let message = "Could not download your statement.";
+        try {
+          const body = await res.json();
+          if (body?.error) message = body.error;
+        } catch {
+          /* response wasn't JSON */
+        }
+        throw new Error(message);
+      }
       const blob = await res.blob();
       const filename = filenameFromContentDisposition(
         res.headers.get("Content-Disposition"),

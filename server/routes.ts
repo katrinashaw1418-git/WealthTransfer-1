@@ -2773,6 +2773,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const transactionExportQuerySchema = z.object({
     from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "from must be YYYY-MM-DD"),
     to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "to must be YYYY-MM-DD"),
+    // Task #495 — optional preset slug supplied by the new FY/YTD selector
+    // on the client. When present, the response Content-Disposition uses
+    // the deterministic `AMAX-account-activity-{periodSlug}.csv` shape so
+    // a downloaded file is unambiguous about the window it covers. When
+    // absent (e.g. the legacy custom-range CSV path), the existing
+    // `account-activity_<user>_<from>_<to>.csv` filename is preserved
+    // so existing scripts/integrations keep working unchanged.
+    periodSlug: z
+      .string()
+      .regex(/^[A-Za-z0-9._-]{1,64}$/, "periodSlug invalid")
+      .optional(),
   });
 
   function csvCell(value: unknown): string {
@@ -2820,7 +2831,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         details: parsed.error.flatten().fieldErrors,
       });
     }
-    const { from, to } = parsed.data;
+    const { from, to, periodSlug } = parsed.data;
 
     // Inclusive window: `to` is bumped to end-of-day. Round-trip the
     // parsed date back to YYYY-MM-DD and require an exact match so JS's
@@ -2848,7 +2859,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch {
       userSlug = "user";
     }
-    const filename = `account-activity_${userSlug}_${from}_${to}.csv`;
+    // Task #495 — when the new FY/YTD selector supplies a periodSlug, switch
+    // to the deterministic `AMAX-account-activity-{periodSlug}.csv` shape
+    // that matches the new PDF endpoint. The legacy custom-range filename
+    // is preserved for callers that omit the slug.
+    const filename = periodSlug
+      ? `AMAX-account-activity-${periodSlug.replace(/[^A-Za-z0-9._-]/g, "")}.csv`
+      : `account-activity_${userSlug}_${from}_${to}.csv`;
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -3016,6 +3033,187 @@ export async function registerRoutes(app: Express): Promise<Server> {
       "user",
       String(userId),
       meta,
+      req.ip || null,
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task #495 — Account-activity PDF export.
+  // ---------------------------------------------------------------------------
+  // Companion to /api/transactions/export. Renders the same window as a
+  // PDF that carries the AMAX licensee header strip, the brand watermark,
+  // and (added at the response surface) the per-recipient forensic
+  // watermark — same contract every other downloadable PDF on the platform
+  // already uses. The CSV endpoint is the canonical "give me everything"
+  // export; the PDF is capped at ACCOUNT_ACTIVITY_PDF_MAX_ROWS rows so a
+  // pathological window cannot exhaust server memory (pdfkit holds the
+  // whole document in RAM until end()).
+  // ---------------------------------------------------------------------------
+  const transactionPdfExportQuerySchema = z.object({
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "from must be YYYY-MM-DD"),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "to must be YYYY-MM-DD"),
+    periodSlug: z
+      .string()
+      .regex(/^[A-Za-z0-9._-]{1,64}$/, "periodSlug invalid"),
+    periodLabel: z.string().min(1).max(80).optional(),
+  });
+
+  app.get("/api/transactions/export.pdf", async (req, res) => {
+    let userId: number;
+    try {
+      ({ userId } = requireAuth(req));
+    } catch (error: any) {
+      if (error?.status) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const parsed = transactionPdfExportQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: "Invalid query",
+        details: parsed.error.flatten().fieldErrors,
+      });
+    }
+    const { from, to, periodSlug, periodLabel } = parsed.data;
+
+    const parseStrictUtcDate = (s: string): Date | null => {
+      const d = new Date(`${s}T00:00:00.000Z`);
+      if (!Number.isFinite(d.getTime())) return null;
+      if (d.toISOString().slice(0, 10) !== s) return null;
+      return d;
+    };
+    const fromDate = parseStrictUtcDate(from);
+    const toBaseDate = parseStrictUtcDate(to);
+    if (!fromDate || !toBaseDate) {
+      return res.status(400).json({ error: "Could not parse date range" });
+    }
+    const toDate = new Date(toBaseDate.getTime() + 24 * 60 * 60 * 1000 - 1);
+    if (fromDate.getTime() > toDate.getTime()) {
+      return res.status(400).json({ error: "from must be on or before to" });
+    }
+
+    // Lazy-import the PDF builder + watermark surface so a typo or load
+    // failure in those modules can't prevent the server from booting —
+    // the route returns 500 with a clear message if construction throws.
+    let buildAccountActivityPdf:
+      | typeof import("./services/account-activity-pdf").buildAccountActivityPdf
+      | null = null;
+    let buildAccountActivityFilename:
+      | typeof import("./services/account-activity-pdf").buildAccountActivityFilename
+      | null = null;
+    let applyDocumentWatermark:
+      | typeof import("./services/document-watermark").applyDocumentWatermark
+      | null = null;
+    try {
+      const accountActivityModule = await import(
+        "./services/account-activity-pdf"
+      );
+      buildAccountActivityPdf = accountActivityModule.buildAccountActivityPdf;
+      buildAccountActivityFilename =
+        accountActivityModule.buildAccountActivityFilename;
+      const watermarkModule = await import(
+        "./services/document-watermark"
+      );
+      applyDocumentWatermark = watermarkModule.applyDocumentWatermark;
+    } catch (err) {
+      console.error(
+        "[transactions/export.pdf] failed to load PDF helpers",
+        err,
+      );
+      return res
+        .status(500)
+        .json({ error: "PDF export is temporarily unavailable" });
+    }
+
+    const generatedAt = new Date();
+
+    let pdfResult: Awaited<
+      ReturnType<typeof buildAccountActivityPdf>
+    >;
+    try {
+      pdfResult = await buildAccountActivityPdf({
+        userId,
+        fromDate,
+        toDate,
+        periodLabel: periodLabel ?? periodSlug,
+        generatedAt,
+      });
+    } catch (err) {
+      console.error("[transactions/export.pdf] build failed", err);
+      // Audit-log the failure so the operator surface stays consistent
+      // with the CSV export's outcome row.
+      await writeAuditLog(
+        userId,
+        "account_activity_pdf_export_failed",
+        "user",
+        String(userId),
+        {
+          from,
+          to,
+          periodSlug,
+          errorMessage: (err as Error)?.message?.slice(0, 500) ?? null,
+        },
+        req.ip || null,
+      );
+      return res.status(500).json({ error: "Failed to build PDF" });
+    }
+
+    let watermarked: Buffer;
+    try {
+      watermarked = await applyDocumentWatermark(pdfResult.buffer, {
+        clientName: pdfResult.clientName,
+        adviserName: pdfResult.adviserName,
+        downloadedAtUtc: generatedAt,
+        purpose: "account_activity_export",
+      });
+    } catch (err) {
+      console.error("[transactions/export.pdf] watermark failed", err);
+      await writeAuditLog(
+        userId,
+        "account_activity_pdf_export_failed",
+        "user",
+        String(userId),
+        {
+          from,
+          to,
+          periodSlug,
+          stage: "watermark",
+          errorMessage: (err as Error)?.message?.slice(0, 500) ?? null,
+        },
+        req.ip || null,
+      );
+      return res.status(500).json({ error: "Failed to watermark PDF" });
+    }
+
+    const filename = buildAccountActivityFilename(periodSlug, "pdf");
+    const sha = createHash("sha256").update(watermarked).digest("hex");
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`,
+    );
+    res.setHeader("Content-Length", String(watermarked.length));
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).end(watermarked);
+
+    await writeAuditLog(
+      userId,
+      "account_activity_pdf_exported",
+      "user",
+      String(userId),
+      {
+        from,
+        to,
+        periodSlug,
+        filename,
+        rowCount: pdfResult.rowCount,
+        truncated: pdfResult.truncated,
+        byteCount: watermarked.length,
+        contentSha256: sha,
+      },
       req.ip || null,
     );
   });

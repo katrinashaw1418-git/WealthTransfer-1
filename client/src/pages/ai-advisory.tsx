@@ -64,25 +64,11 @@ export default function AiAdvisory() {
         </p>
       </div>
 
+      {/* Task #495 — design tile order: Realised CAGR → Portfolio health
+          (HHI) → Risk score (self-assessed). The existing INSIGHTS tile is
+          preserved as an additional fourth tile in the same row, per the
+          preservation rule. */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="p-5">
-            <p className="text-xs font-medium text-gray-500 uppercase">RISK SCORE</p>
-            <p className="text-2xl font-bold">{riskScore} / 100</p>
-            <p className="text-sm text-gray-500">{getRiskLabel(riskScore)} — self-assessed</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-5">
-            <p className="text-xs font-medium text-gray-500 uppercase">PORTFOLIO HEALTH</p>
-            <p className="text-2xl font-bold" data-testid="text-portfolio-health">
-              {portfolioHealth == null ? "—" : `${portfolioHealth} / 100`}
-            </p>
-            <p className="text-sm text-gray-500">
-              {portfolioHealth == null ? "No data yet" : "HHI diversification score"}
-            </p>
-          </CardContent>
-        </Card>
         <Card>
           <CardContent className="p-5">
             <p className="text-xs font-medium text-gray-500 uppercase">REALISED CAGR</p>
@@ -106,6 +92,25 @@ export default function AiAdvisory() {
         </Card>
         <Card>
           <CardContent className="p-5">
+            <p className="text-xs font-medium text-gray-500 uppercase">PORTFOLIO HEALTH (HHI)</p>
+            <p className="text-2xl font-bold" data-testid="text-portfolio-health">
+              {portfolioHealth == null ? "—" : `${portfolioHealth} / 100`}
+            </p>
+            <p className="text-sm text-gray-500">
+              {portfolioHealth == null ? "No data yet" : "Lower = more diversified"}
+            </p>
+          </CardContent>
+        </Card>
+        <Card data-testid="card-risk-score">
+          <CardContent className="p-5">
+            <p className="text-xs font-medium text-gray-500 uppercase">RISK SCORE (SELF-ASSESSED)</p>
+            <p className="text-2xl font-bold">{riskScore} / 100</p>
+            <p className="text-sm text-gray-500">{getRiskLabel(riskScore)}</p>
+            <p className="text-xs text-amber-700 mt-1">Self-assessed only — not verified</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-5">
             <p className="text-xs font-medium text-gray-500 uppercase">INSIGHTS</p>
             <p className="text-2xl font-bold" data-testid="text-insight-count">
               {insightCount == null ? "—" : insightCount}
@@ -119,6 +124,19 @@ export default function AiAdvisory() {
             </p>
           </CardContent>
         </Card>
+      </div>
+
+      {/* Task #495 — amber risk-score warning panel. Sits immediately below
+          the metric strip and uses the verbatim copy required by the
+          design. The general-information amber notice further down is
+          preserved per the preservation rule. */}
+      <div
+        className="bg-amber-50 border border-amber-300 rounded-lg p-4"
+        data-testid="banner-risk-score-warning"
+      >
+        <p className="text-sm text-amber-900">
+          Risk score is self-assessed and has not been verified by a licensed adviser. It cannot be used as the basis for personal financial advice. Your full risk profile will be established when your adviser completes your fact-find.
+        </p>
       </div>
 
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
@@ -164,7 +182,13 @@ export default function AiAdvisory() {
           <CardContent className="p-6 space-y-4">
             <div>
               <p className="font-semibold text-gray-900">General market insights</p>
-              <p className="text-sm text-gray-500">AI-generated — general information only</p>
+              {/* Task #495 — design subtitle. The previous AI-generated
+                  caption is preserved on the next line per the
+                  preservation rule. */}
+              <p className="text-sm text-gray-500">
+                Sample insights only — personalised insights appear after SOA is issued
+              </p>
+              <p className="text-xs text-gray-400 mt-0.5">AI-generated — general information only</p>
             </div>
 
             <InsightCard
@@ -179,6 +203,16 @@ export default function AiAdvisory() {
               title="Medium-term horizons — general context"
               text="A 5–10 year horizon is often associated with moderate growth blended with defensive assets. Appropriate mix depends on individual circumstances."
             />
+
+            {/* Task #495 — repeat the "general only" disclaimer at the
+                foot of the card so a printed/forwarded screenshot still
+                carries the warning. */}
+            <p
+              className="text-xs text-gray-500 pt-2 border-t border-gray-100"
+              data-testid="text-general-insights-footer"
+            >
+              These are general market commentary examples and do not reflect your portfolio. Personalised insights appear after your adviser issues a Statement of Advice.
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -366,15 +400,35 @@ export default function AiAdvisory() {
         </Button>
       </div>
 
-      <Card>
+      <Card data-testid="card-soa-list">
         <CardContent className="p-6 space-y-4">
-          <p className="font-semibold text-gray-900">Statements of Advice</p>
-          <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center">
-            <p className="text-sm font-medium text-gray-700">No Statements of Advice on record</p>
-            <p className="mt-1 text-xs text-gray-500">
-              Your adviser will list any issued or pending SOAs here once they have been generated and
-              recorded against your file. Nothing is displayed here until then.
-            </p>
+          <div>
+            <p className="font-semibold text-gray-900">Statements of Advice</p>
+            {/* Task #495 — design subtitle. */}
+            <p className="text-sm text-gray-500">Issued by your licensed adviser</p>
+          </div>
+          <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center space-y-3">
+            <div>
+              <p className="text-sm font-medium text-gray-700">No Statements of Advice on record</p>
+              {/* Task #495 — design empty-state copy. The original
+                  preservation-rule copy is kept on the line below so a
+                  reader still sees the long-form explanation. */}
+              <p className="mt-1 text-xs text-gray-500">
+                Your adviser will list any issued or pending SOAs here. All personalised investment recommendations require a current SOA.
+              </p>
+              <p className="mt-2 text-xs text-gray-400">
+                Your adviser will list any issued or pending SOAs here once they have been generated and
+                recorded against your file. Nothing is displayed here until then.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-blue-300 text-blue-700"
+              data-testid="button-request-soa"
+            >
+              Request an SOA <ExternalLink className="w-3 h-3 ml-1" />
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -386,9 +440,21 @@ export default function AiAdvisory() {
 function InsightCard({ title, text }: { title: string; text: string }) {
   return (
     <div className="border rounded-lg p-4 space-y-2">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <p className="font-medium text-gray-900 text-sm">{title}</p>
-        <Badge variant="outline" className="text-xs">General</Badge>
+        {/* Task #495 — additive "General only" pill (the existing
+            "General" badge stays adjacent so we don't drop the original
+            label). */}
+        <div className="flex items-center gap-1.5">
+          <Badge variant="outline" className="text-xs">General</Badge>
+          <Badge
+            variant="outline"
+            className="text-xs border-amber-300 text-amber-800 bg-amber-50"
+            data-testid="badge-general-only"
+          >
+            General only
+          </Badge>
+        </div>
       </div>
       <p className="text-sm text-gray-600">{text}</p>
       <div className="flex gap-2 pt-1">
