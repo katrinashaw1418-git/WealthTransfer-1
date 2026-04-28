@@ -354,3 +354,321 @@ export async function sendInsufficientFundsEmail(args: {
     return { sent: false, error: msg };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Adviser report notifications (Task #344)
+//
+// Three short transactional emails close the lifecycle loop on adviser
+// report requests:
+//
+//   1. sendReportReadyEmail        — fired the moment the PDF flips to ready
+//   2. sendReportFailedEmail       — fired on generation/sweeper failure
+//   3. sendReportExpiringSoonEmail — one-shot reminder ~24h before expiresAt
+//                                    for any still-undownloaded `ready` row
+//
+// Each returns a structured result rather than throwing so the caller can
+// stamp its debounce column (e.g. report_requests.readyNotifiedAt) and
+// keep iterating across remaining rows even if one address bounces.
+//
+// When SMTP is not configured (dev / preview) we log a one-line summary and
+// return `{ sent: false }` — the caller still updates its tracking column so
+// the audit trail records "notification was attempted (logs only)" and we
+// don't re-page on every cron tick.
+// ---------------------------------------------------------------------------
+
+function reportTypeLabel(reportType: string): string {
+  return reportType.replace(/_/g, " ");
+}
+
+function reportDeepLink(reportId: number, baseUrl?: string | null): string {
+  // Path-only fallback when no public base URL is configured. The path is
+  // recognised by the adviser SPA which scrolls/highlights the matching
+  // row (existing /adviser/reports route).
+  const path = `/adviser/reports?report=${reportId}`;
+  const base = (baseUrl ?? process.env.APP_BASE_URL ?? "").replace(/\/$/, "");
+  return base ? `${base}${path}` : path;
+}
+
+function fmtExpiry(expiresAt: Date): string {
+  try {
+    return expiresAt.toLocaleString("en-AU", {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: "Australia/Sydney",
+    }) + " (Sydney)";
+  } catch {
+    return expiresAt.toISOString();
+  }
+}
+
+export async function sendReportReadyEmail(args: {
+  to: string;
+  firstName: string;
+  reportId: number;
+  reportType: string;
+  clientName: string;
+  expiresAt: Date | null;
+  baseUrl?: string | null;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { to, firstName, reportId, reportType, clientName, expiresAt, baseUrl } = args;
+  const link = reportDeepLink(reportId, baseUrl);
+  const typeLabel = reportTypeLabel(reportType);
+  const expiryLine = expiresAt
+    ? `The PDF stays available until ${fmtExpiry(expiresAt)}.`
+    : `The PDF will remain available for the standard retention window.`;
+
+  if (!emailConfigured) {
+    console.log(
+      `[email] Report-ready notice NOT sent to ${to} — SMTP not configured ` +
+        `(report #${reportId}, type=${reportType}, client=${clientName})`,
+    );
+    return {
+      sent: false,
+      error: "SMTP not configured (GMAIL_USER / GMAIL_APP_PASSWORD missing)",
+    };
+  }
+
+  const transport = createTransport()!;
+  try {
+    await transport.sendMail({
+      from: FROM_HEADER,
+      replyTo: REPLY_TO,
+      to,
+      subject: `Report ready: ${typeLabel} for ${clientName}`,
+      html: `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 20px">
+    <tr><td align="center">
+      <table width="540" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:16px;border:1px solid #334155;overflow:hidden">
+        <tr><td style="padding:32px 40px 0;text-align:center">
+          <span style="font-size:22px;font-weight:700;color:#fff;letter-spacing:2px">AMAX WEALTH</span>
+        </td></tr>
+        <tr><td style="padding:24px 40px">
+          <h1 style="color:#fff;font-size:20px;font-weight:700;margin:0 0 12px">Your report is ready</h1>
+          <p style="color:#94a3b8;font-size:15px;line-height:1.6;margin:0 0 20px">
+            Hi ${firstName}, the <strong style="color:#e2e8f0">${typeLabel}</strong> report you requested for
+            <strong style="color:#e2e8f0">${clientName}</strong> has finished generating and is ready to download.
+          </p>
+          <div style="text-align:center;margin:0 0 24px">
+            <a href="${link}" style="display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 32px;border-radius:10px">
+              Open report →
+            </a>
+          </div>
+          <p style="color:#94a3b8;font-size:13px;margin:0 0 8px">${expiryLine}</p>
+          <p style="color:#64748b;font-size:12px;margin:0">Reference: report #${reportId}</p>
+        </td></tr>
+        <tr><td style="padding:20px 40px;border-top:1px solid #334155;text-align:center">
+          <p style="color:#475569;font-size:11px;margin:0">
+            AMAX GLOBAL Pty Ltd &nbsp;·&nbsp; ABN 54 690 827 608 &nbsp;·&nbsp; AUSTRAC Registered<br>
+            Level 2, 8-12 King Street, Rockdale NSW 2216 &nbsp;·&nbsp; +61 2 8320 1908
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+      text:
+        `Hi ${firstName},\n\n` +
+        `Your ${typeLabel} report for ${clientName} is ready to download.\n\n` +
+        `Open it here: ${link}\n\n` +
+        `${expiryLine}\n\n` +
+        `Reference: report #${reportId}\n\n` +
+        `AMAX GLOBAL Pty Ltd`,
+    });
+    return { sent: true };
+  } catch (err: any) {
+    const msg = err?.message || String(err) || "SMTP send failed";
+    console.error(
+      `[email] Report-ready SMTP send FAILED for ${to} (report #${reportId}):`,
+      msg,
+    );
+    return { sent: false, error: msg };
+  }
+}
+
+export async function sendReportFailedEmail(args: {
+  to: string;
+  firstName: string;
+  reportId: number;
+  reportType: string;
+  clientName: string;
+  failureReason: string;
+  baseUrl?: string | null;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { to, firstName, reportId, reportType, clientName, failureReason, baseUrl } = args;
+  const link = reportDeepLink(reportId, baseUrl);
+  const typeLabel = reportTypeLabel(reportType);
+  const reason = (failureReason || "unknown error").slice(0, 500);
+
+  if (!emailConfigured) {
+    console.log(
+      `[email] Report-failed notice NOT sent to ${to} — SMTP not configured ` +
+        `(report #${reportId}, type=${reportType}, client=${clientName}, reason=${reason})`,
+    );
+    return {
+      sent: false,
+      error: "SMTP not configured (GMAIL_USER / GMAIL_APP_PASSWORD missing)",
+    };
+  }
+
+  const transport = createTransport()!;
+  try {
+    await transport.sendMail({
+      from: FROM_HEADER,
+      replyTo: REPLY_TO,
+      to,
+      subject: `Report failed: ${typeLabel} for ${clientName}`,
+      html: `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 20px">
+    <tr><td align="center">
+      <table width="540" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:16px;border:1px solid #334155;overflow:hidden">
+        <tr><td style="padding:32px 40px 0;text-align:center">
+          <span style="font-size:22px;font-weight:700;color:#fff;letter-spacing:2px">AMAX WEALTH</span>
+        </td></tr>
+        <tr><td style="padding:24px 40px">
+          <h1 style="color:#fff;font-size:20px;font-weight:700;margin:0 0 12px">Your report didn't generate</h1>
+          <p style="color:#94a3b8;font-size:15px;line-height:1.6;margin:0 0 16px">
+            Hi ${firstName}, we tried to generate your <strong style="color:#e2e8f0">${typeLabel}</strong> report for
+            <strong style="color:#e2e8f0">${clientName}</strong> but the job did not complete.
+          </p>
+          <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;border:1px solid #334155;border-radius:12px;margin:0 0 24px">
+            <tr><td style="padding:16px 20px">
+              <span style="color:#fb923c;font-size:12px;text-transform:uppercase;letter-spacing:1px">Reason</span><br>
+              <span style="color:#fb923c;font-size:14px;font-weight:600">${reason}</span>
+            </td></tr>
+          </table>
+          <div style="text-align:center;margin:0 0 24px">
+            <a href="${link}" style="display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 32px;border-radius:10px">
+              Open Reports →
+            </a>
+          </div>
+          <p style="color:#94a3b8;font-size:13px;margin:0 0 8px">
+            You can retry generation from the Reports page.
+          </p>
+          <p style="color:#64748b;font-size:12px;margin:0">Reference: report #${reportId}</p>
+        </td></tr>
+        <tr><td style="padding:20px 40px;border-top:1px solid #334155;text-align:center">
+          <p style="color:#475569;font-size:11px;margin:0">
+            AMAX GLOBAL Pty Ltd &nbsp;·&nbsp; ABN 54 690 827 608 &nbsp;·&nbsp; AUSTRAC Registered<br>
+            Level 2, 8-12 King Street, Rockdale NSW 2216 &nbsp;·&nbsp; +61 2 8320 1908
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+      text:
+        `Hi ${firstName},\n\n` +
+        `Your ${typeLabel} report for ${clientName} did not generate.\n\n` +
+        `Reason: ${reason}\n\n` +
+        `Open the Reports page to retry: ${link}\n\n` +
+        `Reference: report #${reportId}\n\n` +
+        `AMAX GLOBAL Pty Ltd`,
+    });
+    return { sent: true };
+  } catch (err: any) {
+    const msg = err?.message || String(err) || "SMTP send failed";
+    console.error(
+      `[email] Report-failed SMTP send FAILED for ${to} (report #${reportId}):`,
+      msg,
+    );
+    return { sent: false, error: msg };
+  }
+}
+
+export async function sendReportExpiringSoonEmail(args: {
+  to: string;
+  firstName: string;
+  reportId: number;
+  reportType: string;
+  clientName: string;
+  expiresAt: Date;
+  baseUrl?: string | null;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { to, firstName, reportId, reportType, clientName, expiresAt, baseUrl } = args;
+  const link = reportDeepLink(reportId, baseUrl);
+  const typeLabel = reportTypeLabel(reportType);
+  const expiryStr = fmtExpiry(expiresAt);
+
+  if (!emailConfigured) {
+    console.log(
+      `[email] Report-expiring-soon notice NOT sent to ${to} — SMTP not configured ` +
+        `(report #${reportId}, type=${reportType}, client=${clientName}, expiresAt=${expiresAt.toISOString()})`,
+    );
+    return {
+      sent: false,
+      error: "SMTP not configured (GMAIL_USER / GMAIL_APP_PASSWORD missing)",
+    };
+  }
+
+  const transport = createTransport()!;
+  try {
+    await transport.sendMail({
+      from: FROM_HEADER,
+      replyTo: REPLY_TO,
+      to,
+      subject: `Report expiring soon: ${typeLabel} for ${clientName}`,
+      html: `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 20px">
+    <tr><td align="center">
+      <table width="540" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:16px;border:1px solid #334155;overflow:hidden">
+        <tr><td style="padding:32px 40px 0;text-align:center">
+          <span style="font-size:22px;font-weight:700;color:#fff;letter-spacing:2px">AMAX WEALTH</span>
+        </td></tr>
+        <tr><td style="padding:24px 40px">
+          <h1 style="color:#fff;font-size:20px;font-weight:700;margin:0 0 12px">Your report expires in 24 hours</h1>
+          <p style="color:#94a3b8;font-size:15px;line-height:1.6;margin:0 0 20px">
+            Hi ${firstName}, the <strong style="color:#e2e8f0">${typeLabel}</strong> report you generated for
+            <strong style="color:#e2e8f0">${clientName}</strong> hasn't been downloaded yet and will be removed
+            on <strong style="color:#e2e8f0">${expiryStr}</strong>. Download it now if you still need it —
+            you can always regenerate later.
+          </p>
+          <div style="text-align:center;margin:0 0 24px">
+            <a href="${link}" style="display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 32px;border-radius:10px">
+              Download report →
+            </a>
+          </div>
+          <p style="color:#64748b;font-size:12px;margin:0">Reference: report #${reportId}</p>
+        </td></tr>
+        <tr><td style="padding:20px 40px;border-top:1px solid #334155;text-align:center">
+          <p style="color:#475569;font-size:11px;margin:0">
+            AMAX GLOBAL Pty Ltd &nbsp;·&nbsp; ABN 54 690 827 608 &nbsp;·&nbsp; AUSTRAC Registered<br>
+            Level 2, 8-12 King Street, Rockdale NSW 2216 &nbsp;·&nbsp; +61 2 8320 1908
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+      text:
+        `Hi ${firstName},\n\n` +
+        `Your ${typeLabel} report for ${clientName} hasn't been downloaded yet and ` +
+        `will expire on ${expiryStr}.\n\n` +
+        `Download it here: ${link}\n\n` +
+        `Reference: report #${reportId}\n\n` +
+        `AMAX GLOBAL Pty Ltd`,
+    });
+    return { sent: true };
+  } catch (err: any) {
+    const msg = err?.message || String(err) || "SMTP send failed";
+    console.error(
+      `[email] Report-expiring-soon SMTP send FAILED for ${to} (report #${reportId}):`,
+      msg,
+    );
+    return { sent: false, error: msg };
+  }
+}

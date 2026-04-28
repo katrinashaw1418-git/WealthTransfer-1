@@ -16,6 +16,11 @@ import {
   type ReportRequest,
 } from "@shared/schema";
 import { getUserCurrencyBalance } from "./ledger";
+import {
+  sendReportReadyEmail,
+  sendReportFailedEmail,
+  sendReportExpiringSoonEmail,
+} from "../email";
 // Task #318 — watermarking moved to the download surface (server/adviser-routes.ts
 // report download). Generation now produces an unmarked PDF on disk; the route
 // applies the per-download watermark just before streaming the response so
@@ -218,6 +223,285 @@ export async function runReportAutoExpire(opts?: {
   };
 }
 
+// ===========================================================================
+// Task #344 — Adviser report notifications.
+// ---------------------------------------------------------------------------
+// Three close-the-loop notifications:
+//   1. Ready          — sent inline when generateReportPdf flips a row to ready
+//   2. Failed         — sent inline when generation OR the sweeper flips a
+//                       row to failed
+//   3. Expiring soon  — sent by an hourly cron ~24h before expiresAt for any
+//                       still-undownloaded ready row
+//
+// All three:
+//   - debounce off a per-status `*NotifiedAt` column on report_requests so
+//     re-running the cron / re-flipping a row never re-emails the adviser.
+//   - stamp the column even on SMTP failure so a transient bounce can't
+//     turn into a re-page loop on every tick.
+//   - never throw — a notification outage must not break PDF generation
+//     or the sweeper's status-flip work, which are the canonical signals
+//     for the UI.
+// ===========================================================================
+
+const EXPIRING_SOON_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+interface AdviserAndClientForNotify {
+  adviserEmail: string | null;
+  adviserFirstName: string | null;
+  clientName: string;
+}
+
+async function loadAdviserAndClientForNotify(
+  adviserUserId: number,
+  clientUserId: number,
+): Promise<AdviserAndClientForNotify | null> {
+  const [adviser] = await db
+    .select({
+      email: users.email,
+      firstName: users.firstName,
+    })
+    .from(users)
+    .where(eq(users.id, adviserUserId))
+    .limit(1);
+  if (!adviser) return null;
+
+  const [client] = await db
+    .select({
+      firstName: users.firstName,
+      lastName: users.lastName,
+      email: users.email,
+    })
+    .from(users)
+    .where(eq(users.id, clientUserId))
+    .limit(1);
+
+  const clientName =
+    (client?.firstName || client?.lastName)
+      ? `${client?.firstName ?? ""} ${client?.lastName ?? ""}`.trim()
+      : (client?.email ?? `client #${clientUserId}`);
+
+  return {
+    adviserEmail: adviser.email ?? null,
+    adviserFirstName: adviser.firstName ?? null,
+    clientName,
+  };
+}
+
+/**
+ * Notify the adviser their report is ready. Idempotent on
+ * `readyNotifiedAt` — a second call for the same row is a no-op.
+ * Never throws; logs and returns on any error.
+ */
+export async function notifyAdviserReportReady(reportId: number): Promise<{
+  attempted: boolean;
+  sent: boolean;
+  error?: string;
+}> {
+  try {
+    const [row] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, reportId))
+      .limit(1);
+    if (!row) return { attempted: false, sent: false, error: "report not found" };
+    if (row.status !== "ready") {
+      return { attempted: false, sent: false, error: `status=${row.status}` };
+    }
+    if (row.readyNotifiedAt) {
+      return { attempted: false, sent: false, error: "already notified" };
+    }
+    const ctx = await loadAdviserAndClientForNotify(row.adviserUserId, row.clientUserId);
+    if (!ctx?.adviserEmail) {
+      // Stamp anyway so we don't loop trying to notify an adviser without
+      // an email — but log the gap so an operator can fix the user record.
+      await db
+        .update(reportRequests)
+        .set({ readyNotifiedAt: new Date() })
+        .where(eq(reportRequests.id, reportId));
+      console.warn(
+        `[reports/notify] adviser #${row.adviserUserId} has no email; ready notify skipped for report #${reportId}`,
+      );
+      return { attempted: true, sent: false, error: "no adviser email" };
+    }
+    const dispatch = await sendReportReadyEmail({
+      to: ctx.adviserEmail,
+      firstName: ctx.adviserFirstName || "there",
+      reportId: row.id,
+      reportType: row.reportType,
+      clientName: ctx.clientName,
+      expiresAt: row.expiresAt,
+    });
+    await db
+      .update(reportRequests)
+      .set({ readyNotifiedAt: new Date() })
+      .where(eq(reportRequests.id, reportId));
+    return { attempted: true, sent: dispatch.sent, error: dispatch.error };
+  } catch (err) {
+    console.error(
+      `[reports/notify] notifyAdviserReportReady failed for #${reportId}:`,
+      (err as Error)?.message ?? err,
+    );
+    return { attempted: false, sent: false, error: (err as Error)?.message };
+  }
+}
+
+/**
+ * Notify the adviser their report failed. Idempotent on
+ * `failedNotifiedAt`.
+ */
+export async function notifyAdviserReportFailed(reportId: number): Promise<{
+  attempted: boolean;
+  sent: boolean;
+  error?: string;
+}> {
+  try {
+    const [row] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, reportId))
+      .limit(1);
+    if (!row) return { attempted: false, sent: false, error: "report not found" };
+    if (row.status !== "failed") {
+      return { attempted: false, sent: false, error: `status=${row.status}` };
+    }
+    if (row.failedNotifiedAt) {
+      return { attempted: false, sent: false, error: "already notified" };
+    }
+    const ctx = await loadAdviserAndClientForNotify(row.adviserUserId, row.clientUserId);
+    if (!ctx?.adviserEmail) {
+      await db
+        .update(reportRequests)
+        .set({ failedNotifiedAt: new Date() })
+        .where(eq(reportRequests.id, reportId));
+      console.warn(
+        `[reports/notify] adviser #${row.adviserUserId} has no email; failed notify skipped for report #${reportId}`,
+      );
+      return { attempted: true, sent: false, error: "no adviser email" };
+    }
+    const dispatch = await sendReportFailedEmail({
+      to: ctx.adviserEmail,
+      firstName: ctx.adviserFirstName || "there",
+      reportId: row.id,
+      reportType: row.reportType,
+      clientName: ctx.clientName,
+      failureReason: row.failureReason ?? "unknown error",
+    });
+    await db
+      .update(reportRequests)
+      .set({ failedNotifiedAt: new Date() })
+      .where(eq(reportRequests.id, reportId));
+    return { attempted: true, sent: dispatch.sent, error: dispatch.error };
+  } catch (err) {
+    console.error(
+      `[reports/notify] notifyAdviserReportFailed failed for #${reportId}:`,
+      (err as Error)?.message ?? err,
+    );
+    return { attempted: false, sent: false, error: (err as Error)?.message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task #344 — Expiring-soon reminder cron. Hourly. Selects ready rows that:
+//   - have not been downloaded yet (firstDownloadedAt IS NULL)
+//   - have not already received this reminder (expiringSoonNotifiedAt IS NULL)
+//   - have an expiresAt in the future, within EXPIRING_SOON_WINDOW_MS
+// ---------------------------------------------------------------------------
+export interface ReportExpiringSoonReminderSummary {
+  scanned: number;
+  notified: number;
+  skipped: number;
+  notifiedIds: number[];
+}
+
+export async function runReportExpiringSoonReminder(opts?: {
+  now?: Date;
+  windowMs?: number;
+}): Promise<ReportExpiringSoonReminderSummary> {
+  const now = opts?.now ?? new Date();
+  const windowMs = opts?.windowMs ?? EXPIRING_SOON_WINDOW_MS;
+  const windowEnd = new Date(now.getTime() + windowMs);
+
+  const due = await db
+    .select({
+      id: reportRequests.id,
+      adviserUserId: reportRequests.adviserUserId,
+      clientUserId: reportRequests.clientUserId,
+      reportType: reportRequests.reportType,
+      expiresAt: reportRequests.expiresAt,
+    })
+    .from(reportRequests)
+    .where(
+      and(
+        eq(reportRequests.status, "ready"),
+        isNull(reportRequests.firstDownloadedAt),
+        isNull(reportRequests.expiringSoonNotifiedAt),
+        gte(reportRequests.expiresAt, now),
+        lt(reportRequests.expiresAt, windowEnd),
+      ),
+    );
+
+  const notifiedIds: number[] = [];
+  let skipped = 0;
+  for (const row of due) {
+    if (!row.expiresAt) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      const ctx = await loadAdviserAndClientForNotify(row.adviserUserId, row.clientUserId);
+      if (!ctx?.adviserEmail) {
+        // Stamp so we don't keep retrying for an adviser without an email.
+        await db
+          .update(reportRequests)
+          .set({ expiringSoonNotifiedAt: new Date() })
+          .where(eq(reportRequests.id, row.id));
+        console.warn(
+          `[report-expiring-soon] adviser #${row.adviserUserId} has no email; reminder skipped for report #${row.id}`,
+        );
+        skipped += 1;
+        continue;
+      }
+      await sendReportExpiringSoonEmail({
+        to: ctx.adviserEmail,
+        firstName: ctx.adviserFirstName || "there",
+        reportId: row.id,
+        reportType: row.reportType,
+        clientName: ctx.clientName,
+        expiresAt: row.expiresAt,
+      });
+      await db
+        .update(reportRequests)
+        .set({ expiringSoonNotifiedAt: new Date() })
+        .where(eq(reportRequests.id, row.id));
+      notifiedIds.push(row.id);
+    } catch (err) {
+      // Same debounce-on-failure stance as the inline notifiers: stamp so
+      // a transient bounce doesn't re-page on every hourly tick. The
+      // failure has already been logged inside the email helper.
+      try {
+        await db
+          .update(reportRequests)
+          .set({ expiringSoonNotifiedAt: new Date() })
+          .where(eq(reportRequests.id, row.id));
+      } catch {
+        // best-effort
+      }
+      console.error(
+        `[report-expiring-soon] failed to notify for #${row.id}:`,
+        (err as Error)?.message ?? err,
+      );
+      skipped += 1;
+    }
+  }
+
+  return {
+    scanned: due.length,
+    notified: notifiedIds.length,
+    skipped,
+    notifiedIds,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Task #315 — Sweeper. Forces stuck rows into a terminal `failed` state so
 // the UI can surface a Retry button instead of the row sitting at
@@ -302,6 +586,18 @@ export async function runReportJobSweeper(opts?: {
       );
     }
     flippedIds.push(row.id);
+
+    // Task #344 — close the loop on the adviser. Best-effort, never throws,
+    // idempotent on failedNotifiedAt. Awaited so the sweeper summary
+    // reflects the real outbound side-effects of this tick.
+    try {
+      await notifyAdviserReportFailed(row.id);
+    } catch (err) {
+      console.error(
+        `[report-sweeper] notify-failed crashed for #${row.id}:`,
+        (err as Error)?.message ?? err,
+      );
+    }
   }
 
   return {
@@ -504,6 +800,10 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       .update(reportRequests)
       .set({ status: "failed", failureReason })
       .where(eq(reportRequests.id, reportId));
+    // Task #344 — close the loop on the adviser even when the failure
+    // is the entitlement check (most likely cause: link deactivated
+    // between request and generation). Best-effort.
+    void notifyAdviserReportFailed(reportId);
     return { status: "failed", failureReason };
   }
 
@@ -696,6 +996,11 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       })
       .where(eq(reportRequests.id, reportId));
 
+    // Task #344 — fire the "report ready" email. Idempotent on
+    // readyNotifiedAt and never throws, so a notification outage cannot
+    // mask the canonical status flip just committed above.
+    void notifyAdviserReportReady(reportId);
+
     return { status: "ready", downloadUrl, filePath };
   } catch (err) {
     const failureReason = err instanceof Error ? err.message : "Unknown generation error";
@@ -704,6 +1009,8 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       .update(reportRequests)
       .set({ status: "failed", failureReason })
       .where(eq(reportRequests.id, reportId));
+    // Task #344 — close the loop on a generation failure. Best-effort.
+    void notifyAdviserReportFailed(reportId);
     return { status: "failed", failureReason };
   }
 }

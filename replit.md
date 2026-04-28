@@ -1,5 +1,15 @@
 # Wealth Management Platform
 
+## Recent Changes (April 2026) — Task #344: Email advisers when a report is ready or has failed
+
+The adviser report request lifecycle now closes the loop on the adviser's inbox without changing the existing UI surfaces. Three short transactional emails (`server/email.ts`):
+
+1. **Ready** — fired inline from `generateReportPdf` the moment the row flips to `ready`. The email carries a deep-link to `/adviser/reports?report=:id` (using `APP_BASE_URL` if set, path-only otherwise) and the expiry instant.
+2. **Failed** — fired inline from `generateReportPdf` (catch + the inactive-link guard) AND from `runReportJobSweeper` after each `sweeper_timeout` flip. Carries `failureReason`.
+3. **Expiring soon** — a new hourly cron `runReportExpiringSoonReminder` (registered in `server/index.ts`, catalogued as `report-expiring-soon` in `KNOWN_BACKGROUND_JOBS`, disabled with `REPORT_EXPIRING_SOON_DISABLED=1`) sweeps still-undownloaded `ready` rows whose `expiresAt` lands inside the next 24h and emits a one-shot reminder.
+
+Idempotency lives in three new `report_requests` columns: `readyNotifiedAt`, `failedNotifiedAt`, `expiringSoonNotifiedAt`. Each is stamped on first send AND on SMTP failure, so a transient bounce can't turn into a re-page loop on every cron tick. A fourth column, `firstDownloadedAt`, is set by the adviser download route via a conditional `UPDATE … WHERE firstDownloadedAt IS NULL` so the reminder cron can skip rows the adviser has already collected. SMTP-not-configured (test/dev) returns `{ sent: false }` and still stamps — the audit trail records "notification was attempted (logs only)". Tests in `server/services/reports.test.ts` lock in stamping, idempotency, and the expiring-soon row-selection contract.
+
 ## Recent Changes (April 2026) — Task #163: Alert security on repeated rate-limiter trips
 
 The login / forgot-password / reset-password limiters now record every 429 to the existing `audit_logs` security table and, when an offender crosses the configured threshold inside the configured window, page an operator through the existing alert pipeline. A real credential-stuffing or token-fuzzing run was previously invisible — it tripped the limiter over and over and we kept no record.

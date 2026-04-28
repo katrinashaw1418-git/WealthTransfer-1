@@ -155,6 +155,16 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
       "Per-minute sweep that flips report_requests rows stuck in 'requested' or 'generating' for >10 minutes to 'failed' (failureReason='sweeper_timeout') so the UI can offer Retry. Audit row written per flip.",
   },
   {
+    // Task #344 — hourly reminder for any still-undownloaded `ready` report
+    // whose expiresAt is inside the next 24h. Idempotent on
+    // report_requests.expiringSoonNotifiedAt so re-running the cron never
+    // re-emails the adviser. Disable with REPORT_EXPIRING_SOON_DISABLED=1.
+    name: "report-expiring-soon",
+    label: "Report expiring-soon reminder",
+    description:
+      "Hourly sweep that emails the adviser a one-shot reminder for any 'ready' report still undownloaded and within 24h of expiresAt. Stamps report_requests.expiringSoonNotifiedAt for idempotency.",
+  },
+  {
     // Task #347 — daily sweep that deactivates fixture-pattern
     // adviser_clients rows pointing at real (non-fixture) advisers, so the
     // read-time fixture filter in `server/services/adviser-access.ts` can

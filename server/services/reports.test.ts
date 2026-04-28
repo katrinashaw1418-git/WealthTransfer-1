@@ -27,7 +27,10 @@ import {
 import {
   DUPLICATE_GUARD_WINDOW_MS,
   findDuplicateRecentReport,
+  notifyAdviserReportFailed,
+  notifyAdviserReportReady,
   regenerateReport,
+  runReportExpiringSoonReminder,
   runReportJobSweeper,
   SWEEPER_STUCK_AFTER_MS,
 } from "./reports";
@@ -346,5 +349,213 @@ describe("findDuplicateRecentReport (boundary check)", () => {
       reportType: "fee_summary",
     });
     expect(r).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Task #344 — Adviser report notifications
+//
+// The test environment has SMTP unconfigured, so the email helpers return
+// `{ sent: false, error: 'SMTP not configured ...' }`. These tests assert
+// the *bookkeeping* contract that holds regardless of SMTP outcome:
+//   - the corresponding `*NotifiedAt` column is stamped, even on SMTP miss,
+//     so a transient failure can't turn into a re-page loop on every cron tick
+//   - re-running the notifier is a no-op (idempotency)
+//   - the expiring-soon cron's row selection only catches still-undownloaded
+//     `ready` rows whose expiresAt is inside the next 24h
+// ===========================================================================
+describe("notifyAdviserReportReady", () => {
+  it("stamps readyNotifiedAt the first time and is a no-op the second time", async () => {
+    await clearReportRows();
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt: new Date(),
+        expiresAt: new Date(Date.now() + 7 * 86_400_000),
+      })
+      .returning();
+
+    const first = await notifyAdviserReportReady(row.id);
+    expect(first.attempted).toBe(true);
+
+    const [after1] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    expect(after1.readyNotifiedAt).not.toBeNull();
+    const stampedAt = after1.readyNotifiedAt as Date;
+
+    const second = await notifyAdviserReportReady(row.id);
+    expect(second.attempted).toBe(false);
+    expect(second.error).toBe("already notified");
+
+    const [after2] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    expect((after2.readyNotifiedAt as Date).getTime()).toBe(stampedAt.getTime());
+  });
+
+  it("refuses to notify when the row is not in ready status", async () => {
+    await clearReportRows();
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "fee_summary",
+        format: "pdf",
+        status: "requested",
+      })
+      .returning();
+    const r = await notifyAdviserReportReady(row.id);
+    expect(r.attempted).toBe(false);
+    expect(r.error).toContain("status=");
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    expect(after.readyNotifiedAt).toBeNull();
+  });
+});
+
+describe("notifyAdviserReportFailed", () => {
+  it("stamps failedNotifiedAt and is idempotent", async () => {
+    await clearReportRows();
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "failed",
+        failureReason: "sweeper_timeout",
+      })
+      .returning();
+
+    const first = await notifyAdviserReportFailed(row.id);
+    expect(first.attempted).toBe(true);
+
+    const [after1] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    expect(after1.failedNotifiedAt).not.toBeNull();
+
+    const second = await notifyAdviserReportFailed(row.id);
+    expect(second.attempted).toBe(false);
+    expect(second.error).toBe("already notified");
+  });
+});
+
+describe("runReportExpiringSoonReminder", () => {
+  it("only notifies undownloaded ready rows whose expiresAt lands inside the 24h window", async () => {
+    await clearReportRows();
+    const now = new Date();
+    const inside = new Date(now.getTime() + 6 * 60 * 60 * 1000); // +6h: due
+    const outside = new Date(now.getTime() + 48 * 60 * 60 * 1000); // +48h: too far away
+    const past = new Date(now.getTime() - 60 * 1000); // already expired
+    const generatedAt = new Date(now.getTime() - 60_000);
+
+    // Row #1 — eligible (ready, undownloaded, within 24h)
+    const [eligible] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt,
+        expiresAt: inside,
+      })
+      .returning();
+
+    // Row #2 — already downloaded, must be skipped
+    const [downloaded] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "fee_summary",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt,
+        expiresAt: inside,
+        firstDownloadedAt: now,
+      })
+      .returning();
+
+    // Row #3 — outside 24h window, must be skipped
+    const [farAway] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "annual_statement",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt,
+        expiresAt: outside,
+      })
+      .returning();
+
+    // Row #4 — already expired, must be skipped
+    const [expiredRow] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "kyc_summary",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt,
+        expiresAt: past,
+      })
+      .returning();
+
+    // Row #5 — already received the reminder, must be skipped
+    const [alreadyNotified] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "tax_summary",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt,
+        expiresAt: inside,
+        expiringSoonNotifiedAt: now,
+      })
+      .returning();
+
+    const r = await runReportExpiringSoonReminder({ now });
+    expect(r.notifiedIds).toContain(eligible.id);
+    expect(r.notifiedIds).not.toContain(downloaded.id);
+    expect(r.notifiedIds).not.toContain(farAway.id);
+    expect(r.notifiedIds).not.toContain(expiredRow.id);
+    expect(r.notifiedIds).not.toContain(alreadyNotified.id);
+
+    const [stamped] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, eligible.id));
+    expect(stamped.expiringSoonNotifiedAt).not.toBeNull();
+
+    // Re-running is a zero-row no-op for the already-notified row.
+    const second = await runReportExpiringSoonReminder({ now });
+    expect(second.notifiedIds).not.toContain(eligible.id);
   });
 });

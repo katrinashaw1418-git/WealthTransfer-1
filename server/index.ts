@@ -1001,6 +1001,50 @@ app.use((req, res, next) => {
   }
 
   // -------------------------------------------------------------------------
+  // Task #344 — Hourly expiring-soon reminder cron.
+  //
+  // For every still-undownloaded `ready` report whose expiresAt is inside
+  // the next 24 hours, emit a one-shot reminder email to the adviser.
+  // Idempotent on report_requests.expiringSoonNotifiedAt.
+  //
+  // Disable in dev with REPORT_EXPIRING_SOON_DISABLED=1.
+  // -------------------------------------------------------------------------
+  if (
+    process.env.REPORT_EXPIRING_SOON_DISABLED &&
+    /^(1|true|yes|on)$/i.test(process.env.REPORT_EXPIRING_SOON_DISABLED)
+  ) {
+    console.log(
+      "[report-expiring-soon] REPORT_EXPIRING_SOON_DISABLED is set; the hourly expiring-soon reminder is NOT registered.",
+    );
+  } else {
+    const { runReportExpiringSoonReminder } = await import("./services/reports");
+    const runReportExpiringSoonCron = async () => {
+      try {
+        await withBackgroundJobRunRecord("report-expiring-soon", async () => {
+          // Stamps a notification column — honour the global write kill
+          // switch the same way the auto-expire cron does.
+          const ks = await assertWritesAllowed("report-expiring-soon");
+          if (!ks.allowed) {
+            return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+          }
+          const r = await runReportExpiringSoonReminder();
+          return r.notified > 0
+            ? `Reminded ${r.notified} adviser(s) of expiring report(s): [${r.notifiedIds.join(", ")}], skipped=${r.skipped}`
+            : `No reports inside the 24h reminder window (scanned ${r.scanned}).`;
+        });
+      } catch (e) {
+        console.error("[report-expiring-soon] cron error", e);
+      }
+    };
+    // First run after 120s — let the auto-expire cron fire first so a row
+    // that just expired is already gone before we look for it.
+    setTimeout(() => {
+      void runReportExpiringSoonCron();
+      setInterval(runReportExpiringSoonCron, 60 * 60 * 1000);
+    }, 120 * 1000);
+  }
+
+  // -------------------------------------------------------------------------
   // Task #347 — Daily fixture-pattern adviser_clients cleanup.
   //
   // The adviser-access read filter (Task #308) hides fixture-pattern client

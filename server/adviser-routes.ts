@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, sql, inArray, isNull } from "drizzle-orm";
 import { db } from "./db";
 import {
   auditLogs,
@@ -887,6 +887,27 @@ export function registerAdviserRoutes(app: Express): void {
         res.setHeader("X-Content-Type-Options", "nosniff");
         res.setHeader("Content-Length", String(watermarked.length));
         res.end(watermarked);
+
+        // Task #344 — stamp first-download timestamp so the expiring-soon
+        // reminder cron skips this row. Conditional UPDATE so subsequent
+        // downloads don't overwrite the original download instant. Best-
+        // effort: a failure here must not affect the response we just sent.
+        try {
+          await db
+            .update(reportRequests)
+            .set({ firstDownloadedAt: downloadedAtUtc })
+            .where(
+              and(
+                eq(reportRequests.id, id),
+                isNull(reportRequests.firstDownloadedAt),
+              ),
+            );
+        } catch (stampErr) {
+          console.error(
+            `[reports] failed to stamp firstDownloadedAt for #${id}:`,
+            (stampErr as Error)?.message ?? stampErr,
+          );
+        }
       } catch (error: any) {
         handleError(res, error, "Report download failed");
       }

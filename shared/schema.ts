@@ -1738,6 +1738,19 @@ export const reportRequests = pgTable("report_requests", {
   // generation success. The download endpoint returns 410 + structured
   // body once this passes, and the row is flipped to status='expired_link'.
   downloadLinkExpiresAt: timestamp("download_link_expires_at"),
+  // Task #344 — first time the adviser actually streamed the PDF. Stamped
+  // by the download endpoint (only on the first hit) so the
+  // expiring-soon reminder cron can skip rows that have already been
+  // collected. Subsequent downloads do NOT bump this column — it is
+  // strictly the "did the adviser ever pick this up?" signal.
+  firstDownloadedAt: timestamp("first_downloaded_at"),
+  // Task #344 — adviser-notification debounce stamps. Each is set the
+  // first time the corresponding email is dispatched (or the first time
+  // dispatch is ATTEMPTED — failures still stamp so a flaky SMTP run
+  // cannot spam the adviser on the next tick). Nullable; never reset.
+  readyNotifiedAt: timestamp("ready_notified_at"),
+  failedNotifiedAt: timestamp("failed_notified_at"),
+  expiringSoonNotifiedAt: timestamp("expiring_soon_notified_at"),
 }, (table) => ({
   // "show me all my report requests" / "show me all reports for this client"
   adviserCreatedIdx: index("report_requests_adviser_created_idx").on(table.adviserUserId, table.requestedAt),
@@ -1769,6 +1782,11 @@ export const insertReportRequestSchema = createInsertSchema(reportRequests).omit
   supersedesReportId: true,
   versionNumber: true,
   downloadLinkExpiresAt: true,
+  // Task #344 — server-controlled bookkeeping; cannot be supplied by the caller.
+  firstDownloadedAt: true,
+  readyNotifiedAt: true,
+  failedNotifiedAt: true,
+  expiringSoonNotifiedAt: true,
 });
 export type ReportRequest = typeof reportRequests.$inferSelect;
 export type InsertReportRequest = z.infer<typeof insertReportRequestSchema>;
