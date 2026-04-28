@@ -76,11 +76,28 @@ function CurrencyInitial({ currency }: { currency: string }) {
   );
 }
 
-// Task #22 — small balance-source affordance.
-// `Source: Ledger` (muted) when the cached wallet balance agrees with the
-// ledger sum; `Reconciliation pending` (destructive) when drift was
-// detected. The badge is informational only — it does NOT block any
-// action. Same wording pattern reused on the dashboard wallet list.
+// Task #22 / Task #337 — small balance-source affordance.
+// In the happy path (cached wallet balance agrees with the ledger sum) we
+// surface "Last synced <timestamp>" using the wallet row's last-update
+// timestamp, which is rewritten every time the cache is refreshed from the
+// ledger. The destructive "Reconciliation pending" wording is reserved for
+// real drift so it doesn't scare clients in the normal case. Same wording
+// pattern is reused on the dashboard wallet list.
+function formatLastSynced(ts?: string | null): string {
+  if (!ts) return "just now";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "just now";
+  const diffMs = Date.now() - d.getTime();
+  const diffMin = Math.round(diffMs / 60000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.round(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
 function BalanceSourceTag({ wallet }: { wallet: any }) {
   if (wallet?.hasDrift) {
     return (
@@ -97,8 +114,9 @@ function BalanceSourceTag({ wallet }: { wallet: any }) {
     <span
       className="text-[10px] text-muted-foreground"
       data-testid={`tag-balance-source-${wallet?.currency}`}
+      title={wallet?.updatedAt ? new Date(wallet.updatedAt).toLocaleString() : undefined}
     >
-      Source: Ledger
+      Last synced {formatLastSynced(wallet?.updatedAt)}
     </span>
   );
 }

@@ -51,6 +51,18 @@ export default function AiAdvisory() {
         <p className="text-gray-500 text-sm">AI-generated general information — not personal financial product advice</p>
       </div>
 
+      {/* Task #337 — the "Execution disabled" banner needs to be the first
+          thing a client sees on entering Market Insights, not buried below
+          the metric cards and the amber general-information notice. Moving
+          it here makes the platform-wide block obvious before the user
+          starts reading any AI-generated commentary. */}
+      <div className="bg-red-50 border border-red-300 rounded-lg p-4" data-testid="banner-execution-disabled">
+        <p className="font-semibold text-red-900 mb-1">Execution disabled</p>
+        <p className="text-sm text-red-800">
+          Acting on any AI-generated insight is currently disabled platform-wide. Execution will only be authorised after a licensed adviser issues a Statement of Advice (SOA), you accept the advice in writing, and a valid Designated Benefits Funded Ongoing Fee (DBFO) consent is recorded. Until then, any "apply" action will be rejected by the platform.
+        </p>
+      </div>
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card>
           <CardContent className="p-5">
@@ -112,13 +124,6 @@ export default function AiAdvisory() {
         <p className="font-semibold text-gray-900 mb-1">General information only — not personal financial product advice</p>
         <p className="text-sm text-gray-600">
           AI-generated insights below are general market commentary. They do not take into account your personal financial situation. To receive personal advice, request a Statement of Advice from your adviser.
-        </p>
-      </div>
-
-      <div className="bg-red-50 border border-red-300 rounded-lg p-4">
-        <p className="font-semibold text-red-900 mb-1">Execution disabled</p>
-        <p className="text-sm text-red-800">
-          Acting on any AI-generated insight is currently disabled platform-wide. Execution will only be authorised after a licensed adviser issues a Statement of Advice (SOA), you accept the advice in writing, and a valid Designated Benefits Funded Ongoing Fee (DBFO) consent is recorded. Until then, any "apply" action will be rejected by the platform.
         </p>
       </div>
 

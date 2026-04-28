@@ -1,4 +1,7 @@
+import { useMemo } from "react";
 import { useLocation } from "wouter";
+import { useQuery } from "@tanstack/react-query";
+import { apiFetch } from "@/lib/queryClient";
 import { useAuth } from "@/contexts/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -21,9 +24,71 @@ import {
 } from "lucide-react";
 import darkBlueLogo from "@assets/AMAX_LOGO_BLUE_1776427512999.jpg";
 
+// Task #337 — landing page used to hard-code the "featured" product list
+// (Real Estate Equity Fund / Corporate Credit Fund / Bitcoin Tracker
+// Fund), and the Corporate Credit IRR drifted to 6.2% while the seeded
+// product on the shelf and the detail page quoted 10–12%. We now bind
+// the same three featured slots to the live `/api/investment-products`
+// response so every surface (landing, product shelf, detail page) reads
+// the IRR, term, minimum and risk profile from one source.
+type LandingProduct = {
+  name: string;
+  category: string;
+  irr: string | null;
+  term: string;
+  min: string;
+  risk: "Low" | "Medium" | "High";
+};
+
+const LANDING_FEATURED_NAMES: ReadonlyArray<string> = [
+  "Real Estate Equity Fund",
+  "Cash Flow-Based Corporate Credit Fund",
+  "Bitcoin Tracker Fund",
+];
+
+const RISK_LABEL: Record<string, "Low" | "Medium" | "High"> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+};
+
+function deriveLandingProduct(p: any): LandingProduct {
+  const min = parseFloat(p?.minimumInvestment ?? "0");
+  return {
+    name: p?.name ?? "",
+    // Collapse the long shelf names so the landing card stays scannable
+    // while still pointing at the same underlying fund.
+    category: p?.category === "corporate_credit" ? "Corporate Credit"
+      : p?.category === "real_estate" ? "Real Estate"
+      : p?.category === "digital_assets" ? "Digital Assets"
+      : (p?.category ?? "Investment"),
+    irr: p?.targetNetIrr ? `Target IRR ${p.targetNetIrr} (indicative)` : null,
+    term: p?.term ?? "—",
+    min: Number.isFinite(min) && min > 0 ? `$${min.toLocaleString()}` : "—",
+    risk: RISK_LABEL[(p?.riskProfile ?? "").toLowerCase()] ?? "Medium",
+  };
+}
+
 export default function Landing() {
   const [, navigate] = useLocation();
   const { isAuthenticated } = useAuth();
+
+  // Only verified investors see specific product details (s761G/s761GA),
+  // so we mirror that gate on the data fetch. Public visitors see the
+  // gated card and never trigger the request.
+  const { data: apiProducts } = useQuery<any[]>({
+    queryKey: ["/api/investment-products"],
+    queryFn: async () => (await apiFetch("/api/investment-products")).json(),
+    enabled: isAuthenticated,
+  });
+
+  const featuredProducts: LandingProduct[] = useMemo(() => {
+    if (!apiProducts) return [];
+    return LANDING_FEATURED_NAMES
+      .map((name) => apiProducts.find((p) => p?.name === name))
+      .filter(Boolean)
+      .map(deriveLandingProduct);
+  }, [apiProducts]);
 
   return (
     <div className="min-h-screen bg-white">
@@ -379,11 +444,7 @@ export default function Landing() {
           </div>
           {isAuthenticated ? (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {[
-                { name: "Real Estate Equity Fund", category: "Real Estate", irr: "Target IRR 8.5% p.a. (indicative)", term: "24 months", min: "$250,000", risk: "Medium" },
-                { name: "Corporate Credit Fund", category: "Corporate Credit", irr: "Target IRR 6.2% p.a. (indicative)", term: "18 months", min: "$25,000", risk: "Low" },
-                { name: "Bitcoin Tracker Fund", category: "Digital Assets", irr: null, term: "12 months", min: "$25,000", risk: "High" },
-              ].map((product) => (
+              {featuredProducts.map((product) => (
                 <Card key={product.name} className="border shadow-sm hover:shadow-md transition-shadow">
                   <CardContent className="p-6">
                     <div className="flex items-center justify-between mb-4">

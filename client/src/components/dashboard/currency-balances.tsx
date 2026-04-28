@@ -19,6 +19,24 @@ const currencyConfig = {
 
 const fiatCurrencies = ['USD', 'AUD', 'CAD', 'EUR', 'GBP', 'HKD', 'SGD'];
 
+// Task #337 — render the wallet row's updatedAt as a friendly relative
+// timestamp ("just now", "3m ago", "2h ago", "Apr 28") so the happy-path
+// "Last synced …" affordance reads naturally.
+function formatLastSynced(ts?: string | null): string {
+  if (!ts) return "just now";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "just now";
+  const diffMs = Date.now() - d.getTime();
+  const diffMin = Math.round(diffMs / 60000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.round(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
 export default function CurrencyBalances() {
   const { data: wallets, isLoading, error } = useWallets();
 
@@ -108,8 +126,13 @@ export default function CurrencyBalances() {
                       : `${config?.symbol || '$'}${balance.toLocaleString()}`
                     }
                   </p>
-                  {/* Task #22 — balance-source affordance.
-                     Mirrors the wording used on the Wallets page. */}
+                  {/* Task #22 / Task #337 — balance-source affordance.
+                     Happy path surfaces "Last synced <ts>" using the
+                     wallet row's updatedAt (rewritten on every cache
+                     refresh from the ledger). The destructive
+                     "Reconciliation pending" wording is reserved for
+                     genuine drift so it doesn't scare clients in the
+                     normal case. Mirrors the wording on the Wallets page. */}
                   <div className="mt-1 flex justify-end">
                     {wallet.hasDrift ? (
                       <Badge
@@ -123,8 +146,9 @@ export default function CurrencyBalances() {
                       <span
                         className="text-[10px] text-muted-foreground"
                         data-testid={`tag-balance-source-${wallet.currency}`}
+                        title={wallet.updatedAt ? new Date(wallet.updatedAt).toLocaleString() : undefined}
                       >
-                        Source: Ledger
+                        Last synced {formatLastSynced(wallet.updatedAt)}
                       </span>
                     )}
                   </div>

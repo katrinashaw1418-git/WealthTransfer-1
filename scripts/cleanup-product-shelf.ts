@@ -14,8 +14,9 @@
  *   3. Updates the canonical 14 products in place with the normalised
  *      formatting (canonical lowercase risk_profile keys from
  *      `shared/risk-profiles.ts` — "low"/"moderate"/"high"/"very_high",
- *      en-dash ranges with p.a., short distribution labels, FCS instead of
- *      FDIC, Bitcoin "Market-linked" label, etc.).
+ *      en-dash ranges with p.a., short distribution labels, FCS-protected
+ *      (Australian Financial Claims Scheme — never FDIC, that's the US
+ *      scheme), Bitcoin "Market-linked" label, etc.).
  *   4. Normalises the `risk_profile` column on every other row to one of the
  *      canonical lowercase keys. Historical seed data wrote sentence-case
  *      values like "Very High", which silently broke the investments-page

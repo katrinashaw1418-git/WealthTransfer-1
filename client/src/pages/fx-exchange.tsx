@@ -12,6 +12,16 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { ArrowRightLeft, TrendingUp, TrendingDown, Wallet } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 const currencies = [
   { code: "USD", name: "US Dollar", flag: "🇺🇸" },
@@ -30,6 +40,7 @@ export default function FxExchange() {
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("CAD");
   const [amount, setAmount] = useState("10000");
+  const [showAfslHandoff, setShowAfslHandoff] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   
@@ -71,6 +82,12 @@ export default function FxExchange() {
     },
   });
 
+  // Task #337 — FX execution hands the conversion off to AMAX Global
+  // (AUSTRAC-registered DCE / remittance), which is outside the AFSL
+  // held by AMAX Wealth. Investors must explicitly acknowledge the
+  // handoff before we send the request, so we open an interstitial
+  // AlertDialog and only fire the mutation after the user confirms.
+  // Cancel returns them to this page with no API call made.
   const handleExchange = () => {
     if (!amount || parseFloat(amount) <= 0) {
       toast({
@@ -80,10 +97,12 @@ export default function FxExchange() {
       });
       return;
     }
+    setShowAfslHandoff(true);
+  };
 
-    console.log("handleExchange called with:", { fromCurrency, toCurrency, amount });
-    console.log("Starting exchange mutation...");
-    
+  const confirmAfslHandoff = () => {
+    setShowAfslHandoff(false);
+    console.log("handleExchange confirmed with:", { fromCurrency, toCurrency, amount });
     exchangeMutation.mutate({
       fromCurrency,
       toCurrency,
@@ -215,9 +234,38 @@ export default function FxExchange() {
                 className="w-full mt-6" 
                 onClick={handleExchange}
                 disabled={exchangeMutation.isPending || rateLoading}
+                data-testid="button-fx-proceed"
               >
                 {exchangeMutation.isPending ? "Processing..." : "Proceed via AMAX Global"}
               </Button>
+
+              <AlertDialog open={showAfslHandoff} onOpenChange={setShowAfslHandoff}>
+                <AlertDialogContent data-testid="dialog-afsl-handoff">
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>You are leaving AMAX Wealth's AFSL coverage</AlertDialogTitle>
+                    <AlertDialogDescription className="space-y-2">
+                      <span className="block">
+                        This conversion is executed by <strong>AMAX Global Pty Ltd</strong> (ABN 54 690 827 608),
+                        an AUSTRAC-registered remittance service provider and Digital Currency Exchange.
+                        AMAX Global operates outside the AFSL held by <strong>AMAX Wealth Pty Ltd</strong>,
+                        so the personal-advice protections that apply on the rest of this portal do not extend
+                        to the FX execution itself.
+                      </span>
+                      <span className="block">
+                        By continuing, you confirm you understand the handoff and are instructing AMAX Global
+                        to execute the conversion on a non-advised basis. You can cancel to return without
+                        any conversion being submitted.
+                      </span>
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel data-testid="button-afsl-handoff-cancel">Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={confirmAfslHandoff} data-testid="button-afsl-handoff-confirm">
+                      Continue to AMAX Global
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </CardContent>
           </Card>
         </div>

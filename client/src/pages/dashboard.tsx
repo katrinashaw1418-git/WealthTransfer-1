@@ -8,11 +8,58 @@ import AiAdvisoryPanel from "@/components/dashboard/ai-advisory-panel";
 import CurrencyBalances from "@/components/dashboard/currency-balances";
 import TransactionHistory from "@/components/dashboard/transaction-history";
 import { InsufficientFundsBanner } from "@/components/insufficient-funds-banner";
+import { usePortfolio } from "@/hooks/use-portfolio";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface ApplicationRecord {
   referenceId: string;
   submittedAt: string;
   bannerDismissed: boolean;
+}
+
+// Task #337 — the dashboard footer total used to render "$0.00M" because
+// it wasn't bound to the same source as the WealthOverview "Total
+// Portfolio Value" card. We now reuse the shared `usePortfolio()` hook
+// so the footer shows the same fiat + crypto + stablecoin + investment
+// aggregation, formatted consistently. The hook's loading and error
+// states are surfaced rather than masked, so the footer can never silently
+// fall back to the old $0.00M placeholder.
+function DashboardWealthFooter() {
+  const { data: portfolio, isLoading, error } = usePortfolio();
+
+  const formatTotal = (raw: string | undefined): string => {
+    const v = parseFloat(raw ?? "");
+    if (!Number.isFinite(v)) return "—";
+    if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
+    return `$${v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  };
+
+  return (
+    <footer
+      className="rounded-lg border border-gray-200 bg-gray-50 px-5 py-4 flex flex-wrap items-center justify-between gap-3"
+      data-testid="dashboard-footer-total"
+    >
+      <div className="space-y-0.5">
+        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total wealth on platform</p>
+        <p className="text-[11px] text-gray-500">
+          Aggregated across cash, digital assets and structured investments — same source as the portfolio overview card above.
+        </p>
+      </div>
+      <div className="text-right">
+        {isLoading ? (
+          <Skeleton className="h-7 w-32" />
+        ) : error || !portfolio ? (
+          <span className="text-sm text-destructive" data-testid="dashboard-footer-total-error">
+            Unable to load total
+          </span>
+        ) : (
+          <p className="text-2xl font-bold text-gray-900" data-testid="dashboard-footer-total-value">
+            {formatTotal(portfolio.totalValue)}
+          </p>
+        )}
+      </div>
+    </footer>
+  );
 }
 
 export default function Dashboard() {
@@ -101,6 +148,10 @@ export default function Dashboard() {
 
       {/* Transaction History */}
       <TransactionHistory />
+
+      {/* Dashboard footer total — bound to the same aggregation as the
+          WealthOverview "Total Portfolio Value" card. */}
+      <DashboardWealthFooter />
     </div>
   );
 }
