@@ -1475,9 +1475,17 @@ export function registerAdminRoutes(app: Express): void {
           firstName: users.firstName,
           lastName: users.lastName,
           createdAt: users.createdAt,
+          // Drizzle renders `${users.id}` as the bare column name `"id"`,
+          // which inside this correlated subquery resolves to
+          // `adviser_clients.id` (the only table in scope) rather than the
+          // outer `users.id`. The WHERE clause then silently degrades to
+          // `adviser_clients.adviser_user_id = adviser_clients.id` and the
+          // count is essentially always 0. Pin the outer reference
+          // explicitly — same fix as Tasks #342 and #372 on the fee-consents
+          // subqueries.
           activeClients: sql<number>`(
             SELECT COUNT(*)::int FROM ${adviserClients}
-            WHERE ${adviserClients.adviserUserId} = ${users.id}
+            WHERE ${adviserClients.adviserUserId} = ${sql.raw('"users"."id"')}
               AND ${adviserClients.isActive} = true
           )`,
         })

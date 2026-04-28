@@ -702,10 +702,20 @@ export async function getAdviserClientAdviceRecords(
   clientUserId: number,
 ) {
   await assertAdviserClientLink(adviserUserId, clientUserId);
+  // Drizzle renders the inline outer references `${adviceRecords.id}` and
+  // `${adviceRecords.clientId}` as the bare column names `"id"` and
+  // `"client_id"`. Inside this correlated subquery they would resolve to
+  // `advice_acknowledgements.id` / `advice_acknowledgements.client_id`
+  // (the only table in scope) rather than the outer `advice_records`
+  // columns, so EXISTS would silently degrade to "any ack row whose
+  // advice_record_id equals its own id" (essentially never true). Pin the
+  // outer references explicitly — same fix as the admin /advisers
+  // `activeClients` projection (Task #379) and the fee-consents
+  // back-pointers (Task #342 / Task #372).
   const ackedRecordExpr = sql<boolean>`EXISTS (
     SELECT 1 FROM ${adviceAcknowledgements}
-    WHERE ${adviceAcknowledgements.adviceRecordId} = ${adviceRecords.id}
-      AND ${adviceAcknowledgements.clientId} = ${adviceRecords.clientId}
+    WHERE ${adviceAcknowledgements.adviceRecordId} = ${sql.raw('"advice_records"."id"')}
+      AND ${adviceAcknowledgements.clientId} = ${sql.raw('"advice_records"."client_id"')}
   )`;
   return db
     .select({
