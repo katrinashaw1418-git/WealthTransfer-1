@@ -1000,6 +1000,69 @@ app.use((req, res, next) => {
     }, 90 * 1000);
   }
 
+  // -------------------------------------------------------------------------
+  // Task #347 — Daily fixture-pattern adviser_clients cleanup.
+  //
+  // The adviser-access read filter (Task #308) hides fixture-pattern client
+  // accounts from any adviser surface, but the contaminating rows still sit
+  // in `adviser_clients` and any future surface added without going through
+  // the filter could re-leak them. This cron flips the offending rows to
+  // `is_active=false` (with one audit row per (adviserUserId, clientUserId)
+  // pair) so the read-time filter becomes a defence-in-depth backstop
+  // instead of the primary line of defence.
+  //
+  // Idempotent: re-running on a clean DB is a zero-row no-op. Disable in
+  // dev shells with FIXTURE_ADVISER_CLIENTS_CLEANUP_DISABLED=1. Staggered
+  // 660s after boot so it lands after the existing daily crons.
+  // -------------------------------------------------------------------------
+  if (
+    process.env.FIXTURE_ADVISER_CLIENTS_CLEANUP_DISABLED &&
+    /^(1|true|yes|on)$/i.test(
+      process.env.FIXTURE_ADVISER_CLIENTS_CLEANUP_DISABLED,
+    )
+  ) {
+    console.log(
+      "[fixture-adviser-clients-cleanup] FIXTURE_ADVISER_CLIENTS_CLEANUP_DISABLED is set; the daily cleanup cron is NOT registered.",
+    );
+  } else {
+    const {
+      deactivateFixtureAdviserClientLinks,
+      formatDeactivateSummary,
+    } = await import("./services/fixture-adviser-clients-cleanup");
+    const runFixtureAdviserClientsCleanupCron = async () => {
+      try {
+        await withBackgroundJobRunRecord(
+          "fixture-adviser-clients-cleanup",
+          async () => {
+            const ks = await assertWritesAllowed(
+              "fixture-adviser-clients-cleanup",
+            );
+            if (!ks.allowed) {
+              return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+            }
+            const summary = await deactivateFixtureAdviserClientLinks({
+              dryRun: false,
+              trigger: "cron:fixture-adviser-clients-cleanup",
+            });
+            const line = formatDeactivateSummary(summary);
+            log(`[fixture-adviser-clients-cleanup] completed: ${line}`);
+            return line;
+          },
+        );
+      } catch (e) {
+        console.error("[fixture-adviser-clients-cleanup] cron error", e);
+      }
+    };
+
+    setTimeout(() => {
+      void runFixtureAdviserClientsCleanupCron();
+      setInterval(
+        runFixtureAdviserClientsCleanupCron,
+        24 * 60 * 60 * 1000,
+      );
+    }, 660 * 1000);
+  }
+
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.

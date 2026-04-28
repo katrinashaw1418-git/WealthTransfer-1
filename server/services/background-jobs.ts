@@ -155,6 +155,17 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
       "Per-minute sweep that flips report_requests rows stuck in 'requested' or 'generating' for >10 minutes to 'failed' (failureReason='sweeper_timeout') so the UI can offer Retry. Audit row written per flip.",
   },
   {
+    // Task #347 — daily sweep that deactivates fixture-pattern
+    // adviser_clients rows pointing at real (non-fixture) advisers, so the
+    // read-time fixture filter in `server/services/adviser-access.ts` can
+    // become a defence-in-depth backstop instead of the primary line of
+    // defence. One audit row per (adviserUserId, clientUserId) link.
+    name: "fixture-adviser-clients-cleanup",
+    label: "Fixture adviser_clients cleanup",
+    description:
+      "Daily sweep that flips active adviser_clients rows whose client email matches a known fixture pattern (and whose adviser does NOT) to is_active=false, with one audit row per deactivated (adviser, client) link.",
+  },
+  {
     name: "nightly-go-no-go",
     label: "Nightly launch readiness gate",
     description:
