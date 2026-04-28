@@ -5,6 +5,11 @@ import { Badge } from "@/components/ui/badge";
 import { usePortfolio, useWallets, useUserInvestments, usePortfolioAllocation } from "@/hooks/use-portfolio";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line } from 'recharts';
+import {
+  Tooltip as UiTooltip,
+  TooltipContent as UiTooltipContent,
+  TooltipTrigger as UiTooltipTrigger,
+} from "@/components/ui/tooltip";
 import { TrendingUp, TrendingDown, DollarSign, Bitcoin, PieChart as PieChartIcon, Target, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/queryClient";
@@ -643,12 +648,28 @@ export default function Portfolio() {
                                         <span className="text-gray-400 mx-1.5">·</span>
                                         Invested ${invested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                         <span className="text-gray-400 mx-1.5">·</span>
-                                        <span
-                                          className="text-gray-400"
-                                          data-testid={`lot-share-${productKey}-${lotIdx}`}
-                                        >
-                                          {sharePct}% of position
-                                        </span>
+                                        <UiTooltip>
+                                          <UiTooltipTrigger asChild>
+                                            <button
+                                              type="button"
+                                              className="text-gray-400 underline decoration-dotted decoration-gray-300 underline-offset-2 cursor-help focus:outline-none focus:ring-1 focus:ring-gray-400 rounded-sm"
+                                              data-testid={`lot-share-${productKey}-${lotIdx}`}
+                                              onClick={(e) => e.stopPropagation()}
+                                            >
+                                              {sharePct}% of position
+                                            </button>
+                                          </UiTooltipTrigger>
+                                          <UiTooltipContent
+                                            side="top"
+                                            className="max-w-xs text-xs"
+                                            data-testid={`lot-share-tooltip-${productKey}-${lotIdx}`}
+                                          >
+                                            Share of this product's total invested capital — $
+                                            {invested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                            {' of $'}
+                                            {lotsInvestedSum.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                          </UiTooltipContent>
+                                        </UiTooltip>
                                       </div>
                                       <div className="flex items-center gap-3">
                                         <span className="text-gray-700">
