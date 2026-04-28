@@ -103,7 +103,55 @@ export type GateReason =
   | "consent_renewal_inactive"
   | "link_inactive"
   | "rule_paused"
+  | "rule_superseded"
+  | "rule_expired"
+  | "rule_draft"
   | "splits_invalid";
+
+// ---------------------------------------------------------------------------
+// Task #325 — Gate B per-rule status guard.
+// Thrown by `settleApprovedDeduction` when at least one rule that contributed
+// accruals to the deduction is no longer in 'active' status (typically because
+// reconcileRuleConsentState paused it for consent_withdrawn or expired it).
+// Carries the offending rule's id, current status, and a stable gateReason
+// string so the catch block can record both an audit row and a clear
+// failureReason without re-fetching. The 409 status mirrors the
+// "deduction in unexpected state" siblings already raised by this function.
+// ---------------------------------------------------------------------------
+export class RuleNotActiveError extends Error {
+  readonly status = 409;
+  readonly ruleId: number;
+  readonly ruleStatus: string;
+  readonly gateReason: GateReason;
+  constructor(ruleId: number, ruleStatus: string, gateReason: GateReason) {
+    super(
+      `Cannot settle deduction: contributing rule #${ruleId} is in status ` +
+        `'${ruleStatus}' (gateReason='${gateReason}')`,
+    );
+    this.name = "RuleNotActiveError";
+    this.ruleId = ruleId;
+    this.ruleStatus = ruleStatus;
+    this.gateReason = gateReason;
+  }
+}
+
+function ruleStatusToGateReason(status: string): GateReason {
+  switch (status) {
+    case "paused":
+      return "rule_paused";
+    case "superseded":
+      return "rule_superseded";
+    case "expired":
+      return "rule_expired";
+    case "draft":
+      return "rule_draft";
+    default:
+      // Defensive: any unknown non-active status collapses to rule_paused so
+      // the gate still blocks (and the audit trail still carries a value the
+      // admin UI knows how to render).
+      return "rule_paused";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -893,6 +941,66 @@ export async function settleApprovedDeduction(opts: {
         );
       }
 
+      // ---------------------------------------------------------------
+      // Task #325 — Gate B: per-rule status guard.
+      //
+      // A deduction is rolled up from one or more `adviserFeeAccruals`
+      // rows; each accrual carries a `feeRuleId` pointing back at the
+      // rule that produced it. Between the moment the deduction was
+      // generated and the moment we are now trying to settle it, the
+      // upstream `reconcileRuleConsentState` cron (Task #294) — or an
+      // admin pressing "Pause" — may have flipped one of those rules
+      // out of 'active' (paused for consent_withdrawn, expired, or
+      // superseded). Posting the wallet/ledger triple anyway would be
+      // exactly the "real money charged on a rule whose consent was
+      // withdrawn" failure this gate exists to prevent.
+      //
+      // We therefore look up every distinct rule referenced by this
+      // deduction's accruals and refuse if any one of them is no longer
+      // active. Throwing inside the tx means the transactions row, the
+      // ledger pair, and the wallet cache refresh are all rolled back;
+      // the catch block below records the gate hit in the audit log
+      // and writes a clear failureReason on the deduction so admins
+      // can see *why* settlement was refused without grepping logs.
+      //
+      // The check is positioned BEFORE the insufficient-funds check so
+      // that a paused rule + zero balance produces a `gateReason` audit
+      // line rather than an `InsufficientFundsError` — the rule status
+      // is the more informative failure mode for an operator.
+      // ---------------------------------------------------------------
+      const accrualIdsRaw =
+        (deduction.accrualIds as number[] | null) ?? [];
+      if (accrualIdsRaw.length > 0) {
+        const accrualRows = await tx
+          .select({
+            id: adviserFeeAccruals.id,
+            feeRuleId: adviserFeeAccruals.feeRuleId,
+          })
+          .from(adviserFeeAccruals)
+          .where(inArray(adviserFeeAccruals.id, accrualIdsRaw));
+        const ruleIds = Array.from(
+          new Set(accrualRows.map((a) => a.feeRuleId)),
+        );
+        if (ruleIds.length > 0) {
+          const contributingRules = await tx
+            .select({
+              id: adviserFeeRules.id,
+              status: adviserFeeRules.status,
+            })
+            .from(adviserFeeRules)
+            .where(inArray(adviserFeeRules.id, ruleIds));
+          for (const r of contributingRules) {
+            if (r.status !== "active") {
+              throw new RuleNotActiveError(
+                r.id,
+                r.status,
+                ruleStatusToGateReason(r.status),
+              );
+            }
+          }
+        }
+      }
+
       // Sanity: nothing to post.
       const total = Number(deduction.totalAccrued);
       const adviserShare = Number(deduction.adviserShareAmount);
@@ -1122,6 +1230,36 @@ export async function settleApprovedDeduction(opts: {
         );
     } catch {
       // ignore — primary error is what matters
+    }
+    // Task #325 — Gate B: when the gate refused settlement, persist a
+    // dedicated audit row so the regulator trail records the gate hit
+    // (with its gateReason) independently of the generic
+    // `fee_deduction_settle_failed` row the HTTP route layer writes. The
+    // audit insert lives OUTSIDE the rolled-back transaction so the row
+    // survives the rollback. Best-effort — if the audit write itself
+    // fails, the operator-alert path inside writeAuditLog still pages,
+    // and we still re-throw the original gate error below.
+    if (err instanceof RuleNotActiveError) {
+      try {
+        await writeAuditLog({
+          userId: opts.approverUserId,
+          action: "fee_deduction_gate_blocked",
+          entityType: "adviser_fee_deduction",
+          entityId: String(opts.deductionId),
+          before: null,
+          after: null,
+          extra: {
+            gateReason: err.gateReason,
+            ruleId: err.ruleId,
+            ruleStatus: err.ruleStatus,
+            gate: "B",
+            approverUserId: opts.approverUserId,
+            errorMessage: message,
+          },
+        });
+      } catch {
+        // ignore — primary error is what matters
+      }
     }
     throw err;
   }
