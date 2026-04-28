@@ -43,7 +43,7 @@ import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 // render stale "still held" notification metadata for a settled-formerly-IF row.
 import { projectDeductionForApiContract } from "../shared/fee-deduction-status";
 import {
-  generateReportPdf,
+  enqueueReportJob,
   REPORTS_DIR,
   sweepStaleReportJobs,
 } from "./services/reports";
@@ -769,35 +769,14 @@ export function registerAdviserRoutes(app: Express): void {
         isDraft: report.isDraft === true,
       }, (req as Request).ip || null);
 
-      // Generate the PDF synchronously. Datasets are small (one client, ≤100
-      // transactions) so an inline await keeps the implementation simple and
-      // means the row returned to the UI is already in its terminal state.
-      const result = await generateReportPdf(report.id);
-      if (result.status === "ready") {
-        await audit(auth.userId, "adviser_report_generated", "report_request", String(report.id), {
-          clientUserId: report.clientUserId,
-          reportType: report.reportType,
-          downloadUrl: result.downloadUrl,
-          periodFrom: report.periodFrom,
-          periodTo: report.periodTo,
-        }, (req as Request).ip || null);
-      } else {
-        await audit(auth.userId, "adviser_report_failed", "report_request", String(report.id), {
-          clientUserId: report.clientUserId,
-          reportType: report.reportType,
-          failureReason: result.failureReason,
-          periodFrom: report.periodFrom,
-          periodTo: report.periodTo,
-        }, (req as Request).ip || null);
-      }
-
-      // Re-read the row so the UI gets the final status / downloadUrl / etc.
-      const [final] = await db
-        .select()
-        .from(reportRequests)
-        .where(eq(reportRequests.id, report.id))
-        .limit(1);
-      return final;
+      // Task #332 — fire-and-forget enqueue. The HTTP socket is released
+      // immediately with the row in 'requested' state; the in-process
+      // worker (drained both by the route's setImmediate and by the
+      // periodic tick in server/index.ts) picks the row up out-of-band
+      // and flips it to 'ready' / 'failed'. The bell-icon notification
+      // path is the canonical signal to the UI when generation completes.
+      enqueueReportJob(report.id);
+      return report;
     }),
   );
 
@@ -951,10 +930,10 @@ export function registerAdviserRoutes(app: Express): void {
   // -------------------------------------------------------------------------
   // Task #299 — Cancel. Only succeeds when the report is still in flight
   // (status='requested' or 'generating'). Flips the row to 'cancelled' and
-  // writes an audit row so the lifecycle is reviewable. The PDF generator
-  // currently runs inline so 'generating' is a transient sliver of the
-  // request lifecycle, but cancelling it still makes sense for the long-
-  // term shape (a future async worker would honour the status flip).
+  // writes an audit row so the lifecycle is reviewable. As of Task #332 the
+  // PDF generator runs in a background worker, so 'generating' is now a
+  // visible window during which an adviser can realistically cancel; the
+  // worker checks the row's current status before flipping to ready/failed.
   // -------------------------------------------------------------------------
   app.post(
     "/api/adviser/reports/:id/cancel",
@@ -1065,8 +1044,10 @@ export function registerAdviserRoutes(app: Express): void {
 
   // -------------------------------------------------------------------------
   // Task #315 — Regenerate. Inserts a new row pointing back at the supplied
-  // original via supersedesReportId, then runs the PDF generator inline so
-  // the response carries the new row in its terminal state.
+  // original via supersedesReportId. As of Task #332 the response returns
+  // immediately with the new row in 'requested' state and the PDF render
+  // is handed to the background worker (enqueueReportJob); the existing
+  // notifications path tells the UI when the new attempt is ready.
   //
   // Bypasses the duplicate guard (regeneration IS deliberately a duplicate);
   // the chain itself is the audit record so a recovering operator can see
@@ -1094,42 +1075,10 @@ export function registerAdviserRoutes(app: Express): void {
         },
         (req as Request).ip || null,
       );
-      const result = await generateReportPdf(next.id);
-      if (result.status === "ready") {
-        await audit(
-          auth.userId,
-          "adviser_report_generated",
-          "report_request",
-          String(next.id),
-          {
-            clientUserId: next.clientUserId,
-            reportType: next.reportType,
-            downloadUrl: result.downloadUrl,
-            versionNumber: next.versionNumber,
-          },
-          (req as Request).ip || null,
-        );
-      } else {
-        await audit(
-          auth.userId,
-          "adviser_report_failed",
-          "report_request",
-          String(next.id),
-          {
-            clientUserId: next.clientUserId,
-            reportType: next.reportType,
-            failureReason: result.failureReason,
-            versionNumber: next.versionNumber,
-          },
-          (req as Request).ip || null,
-        );
-      }
-      const [final] = await db
-        .select()
-        .from(reportRequests)
-        .where(eq(reportRequests.id, next.id))
-        .limit(1);
-      return final;
+      // Task #332 — fire-and-forget enqueue. The new chain head is
+      // returned in 'requested' state; the worker takes it from there.
+      enqueueReportJob(next.id);
+      return next;
     }),
   );
 

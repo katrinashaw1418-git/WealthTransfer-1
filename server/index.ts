@@ -1105,6 +1105,57 @@ app.use((req, res, next) => {
   }
 
   // -------------------------------------------------------------------------
+  // Task #332 — Report worker tick. Drains 'requested' rows out of the
+  // queue out-of-band so POST /api/adviser/reports (and the regenerate /
+  // admin-retry siblings) can return the row immediately without waiting
+  // for the PDF to render. The route handlers also fire a setImmediate
+  // enqueueReportJob() so the common case is sub-second pickup; this
+  // periodic tick is the safety net that catches any 'requested' row
+  // that the in-process enqueue missed (process restart between insert
+  // and setImmediate, etc.). The 10-minute sweeper above is a further
+  // belt-and-braces for rows whose worker died mid-flight.
+  //
+  // Disable in dev shells with REPORT_WORKER_DISABLED=1.
+  // -------------------------------------------------------------------------
+  if (
+    process.env.REPORT_WORKER_DISABLED &&
+    /^(1|true|yes|on)$/i.test(process.env.REPORT_WORKER_DISABLED)
+  ) {
+    console.log(
+      "[report-worker] REPORT_WORKER_DISABLED is set; the periodic worker tick is NOT registered.",
+    );
+  } else {
+    const { runReportJobWorkerTick } = await import("./services/reports");
+    const runReportWorkerCron = async () => {
+      try {
+        await withBackgroundJobRunRecord("report-worker", async () => {
+          // Worker writes PDFs and flips status — honour the global write
+          // kill switch the same way the auto-expire / expiring-soon
+          // crons do.
+          const ks = await assertWritesAllowed("report-worker");
+          if (!ks.allowed) {
+            return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+          }
+          const r = await runReportJobWorkerTick();
+          return r.processed > 0
+            ? `Generated ${r.processed} report(s): [${r.processedIds.join(", ")}]`
+            : `No queued reports.`;
+        });
+      } catch (e) {
+        console.error("[report-worker] cron error", e);
+      }
+    };
+    // Tick every 5 seconds so any 'requested' row missed by the
+    // setImmediate path is picked up well within the 10-minute sweeper
+    // window. First run after 15s lets the boot finish before we reach
+    // for the queue.
+    setTimeout(() => {
+      void runReportWorkerCron();
+      setInterval(runReportWorkerCron, 5 * 1000);
+    }, 15 * 1000);
+  }
+
+  // -------------------------------------------------------------------------
   // Task #299 — Report auto-expire. Hourly job that flips ready rows whose
   // expiresAt is past to 'expired', deletes the on-disk PDF, and writes an
   // adviser_report_expired audit row. The download endpoint keeps its

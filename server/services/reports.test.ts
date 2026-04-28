@@ -28,8 +28,9 @@ import {
   wallets,
 } from "@shared/schema";
 import {
-  DUPLICATE_GUARD_WINDOW_MS,
   deriveSourceMix,
+  DUPLICATE_GUARD_WINDOW_MS,
+  enqueueReportJob,
   findDuplicateRecentReport,
   generateReportPdf,
   isCashLedgerIncompleteForUserCurrency,
@@ -41,6 +42,7 @@ import {
   regenerateReport,
   runReportExpiringSoonReminder,
   runReportJobSweeper,
+  runReportJobWorkerTick,
   SNAPSHOT_LABEL,
   STALE_REPORT_JOB_FAILURE_REASON,
   STALE_REPORT_JOB_TIMEOUT_MS,
@@ -705,6 +707,208 @@ describe("notifyAdviserReportFailed", () => {
     const second = await notifyAdviserReportFailed(row.id);
     expect(second.attempted).toBe(false);
     expect(second.error).toBe("already notified");
+  });
+});
+
+// ===========================================================================
+// Task #332 — Background worker for PDF generation.
+//
+// Locks in the contract that the worker:
+//   - Picks up rows in 'requested' state and runs them through the
+//     existing generateReportPdf path (so the row ends up in 'ready' or
+//     'failed' state and the existing notification path still fires).
+//   - Atomically claims rows so two workers cannot both run the same id.
+//   - The setImmediate fire-and-forget enqueueReportJob() also drives
+//     a 'requested' row to a terminal state.
+// ===========================================================================
+describe("runReportJobWorkerTick", () => {
+  it("drains a 'requested' row into a terminal state", async () => {
+    await clearReportRows();
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+      })
+      .returning();
+
+    const summary = await runReportJobWorkerTick();
+    expect(summary.processedIds).toContain(row.id);
+
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    // generateReportPdf flips the row to 'ready' on success or 'failed'
+    // on any exception inside its try/catch. Either outcome means the
+    // row is no longer sitting in 'requested' / 'generating' — which is
+    // the contract this worker is responsible for.
+    expect(["ready", "failed"]).toContain(after.status);
+    expect(after.status).not.toBe("requested");
+    expect(after.status).not.toBe("generating");
+  });
+
+  it("returns processed=0 when no rows are queued", async () => {
+    await clearReportRows();
+    const summary = await runReportJobWorkerTick();
+    expect(summary.processed).toBe(0);
+    expect(summary.processedIds).toEqual([]);
+  });
+
+  it("does not touch rows already in 'generating' / 'ready' / 'failed'", async () => {
+    await clearReportRows();
+    const [generating] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "fee_summary",
+        format: "pdf",
+        status: "generating",
+      })
+      .returning();
+    const [ready] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "transaction_history",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt: new Date(),
+        expiresAt: new Date(Date.now() + 7 * 86_400_000),
+      })
+      .returning();
+
+    const summary = await runReportJobWorkerTick();
+    expect(summary.processedIds).not.toContain(generating.id);
+    expect(summary.processedIds).not.toContain(ready.id);
+
+    const [generatingAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, generating.id));
+    expect(generatingAfter.status).toBe("generating");
+    const [readyAfter] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, ready.id));
+    expect(readyAfter.status).toBe("ready");
+  });
+
+  it("respects the maxJobs budget", async () => {
+    await clearReportRows();
+    for (let i = 0; i < 3; i++) {
+      await db.insert(reportRequests).values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+      });
+    }
+    const summary = await runReportJobWorkerTick({ maxJobs: 2 });
+    expect(summary.processed).toBe(2);
+  });
+
+  it("writes a system audit row tagged report.worker_generated or report.worker_failed", async () => {
+    await clearReportRows();
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "fee_summary",
+        format: "pdf",
+        status: "requested",
+      })
+      .returning();
+
+    await runReportJobWorkerTick();
+
+    const audits = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          inArray(auditLogs.action, [
+            "report.worker_generated",
+            "report.worker_failed",
+          ]),
+          eq(auditLogs.entityType, "report_request"),
+          eq(auditLogs.entityId, String(row.id)),
+        ),
+      )
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(1);
+    expect(audits.length).toBe(1);
+    expect(audits[0].userId).toBeNull();
+  });
+});
+
+describe("enqueueReportJob (fire-and-forget)", () => {
+  it("drains a 'requested' row asynchronously after setImmediate", async () => {
+    await clearReportRows();
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "requested",
+      })
+      .returning();
+
+    // Synchronous return — the route handler must not be blocked.
+    enqueueReportJob(row.id);
+
+    // Wait a few ticks for the setImmediate path to claim and run.
+    // The DB calls inside generateReportPdf settle on a few promise
+    // turns, so we poll up to ~1.5s for the row to leave 'requested'.
+    const deadline = Date.now() + 2000;
+    let after: typeof row | undefined;
+    while (Date.now() < deadline) {
+      [after] = await db
+        .select()
+        .from(reportRequests)
+        .where(eq(reportRequests.id, row.id));
+      if (after && after.status !== "requested" && after.status !== "generating") break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(after).toBeDefined();
+    expect(["ready", "failed"]).toContain(after!.status);
+  });
+
+  it("is a no-op when the row was already claimed (status != 'requested')", async () => {
+    await clearReportRows();
+    // Row that is already in 'ready' state — enqueue must not flip it.
+    const [row] = await db
+      .insert(reportRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        reportType: "portfolio_summary",
+        format: "pdf",
+        status: "ready",
+        downloadUrl: "/api/adviser/reports/0/download",
+        generatedAt: new Date(),
+        expiresAt: new Date(Date.now() + 7 * 86_400_000),
+      })
+      .returning();
+
+    enqueueReportJob(row.id);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const [after] = await db
+      .select()
+      .from(reportRequests)
+      .where(eq(reportRequests.id, row.id));
+    expect(after.status).toBe("ready");
   });
 });
 

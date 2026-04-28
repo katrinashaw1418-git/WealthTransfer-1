@@ -813,6 +813,187 @@ export async function findDuplicateRecentReport(opts: {
   return existing ?? null;
 }
 
+// ===========================================================================
+// Task #332 — Background worker for PDF generation.
+// ---------------------------------------------------------------------------
+// The adviser POST /api/adviser/reports endpoint (and the regenerate / admin
+// retry siblings) used to call generateReportPdf() inline. For deep
+// portfolios that meant the HTTP socket was held for several seconds while
+// the PDF rendered. We now insert the row in 'requested' state, return it
+// immediately, and let an in-process worker drain the queue out-of-band.
+// The bell-icon notifications path is the canonical signal to the UI when
+// a row flips to 'ready' or 'failed'.
+//
+// Two layers of safety on top of the in-memory queue:
+//   1. The route's enqueueReportJob() schedules a setImmediate fire-and-
+//      forget claim of the just-inserted id. Common case: sub-second start.
+//   2. server/index.ts registers runReportJobWorkerTick() on a short
+//      interval to drain any 'requested' row that the fire-and-forget
+//      missed (process restart between insert and tick, etc.).
+//   3. The existing 10-minute sweeper (runReportJobSweeper) remains the
+//      ultimate safety net for a worker that crashed mid-flight.
+//
+// Atomic claim: every transition from 'requested' → 'generating' goes
+// through a status-conditional UPDATE so two workers racing on the same
+// id can never both run generateReportPdf — the second one's UPDATE
+// returns zero rows and the worker drops the job.
+// ===========================================================================
+
+// Per-process budget for one tick. Keeps a single bursty backlog from
+// monopolising one event-loop iteration when the tick fires; the next
+// tick (a few seconds later) will continue to drain.
+const DEFAULT_WORKER_MAX_JOBS_PER_TICK = 5;
+
+// Tracks ids the current process is actively running so the per-tick loop
+// and a concurrent setImmediate don't both try to claim the same id.
+// Strictly an in-process optimisation — the DB-level claim is the
+// authoritative guard against double-execution.
+const inFlightReportJobs = new Set<number>();
+
+/**
+ * Atomically transition a specific report row from 'requested' to
+ * 'generating'. Returns true iff this caller is the one that won the race
+ * (the row was in 'requested' state at the moment of the UPDATE and is
+ * now 'generating'). Returns false if the row was missing, already
+ * generating, ready, failed, expired, etc.
+ */
+async function claimReportJob(reportId: number): Promise<boolean> {
+  const claimed = await db
+    .update(reportRequests)
+    .set({ status: "generating" })
+    .where(
+      and(
+        eq(reportRequests.id, reportId),
+        eq(reportRequests.status, "requested"),
+      ),
+    )
+    .returning({ id: reportRequests.id });
+  return claimed.length > 0;
+}
+
+/**
+ * Pick the oldest 'requested' row (FIFO by requestedAt) and claim it for
+ * this worker. Returns null when the queue is empty or the candidate was
+ * snapped up by another worker between SELECT and UPDATE (the next loop
+ * iteration will try again).
+ */
+async function claimNextReportJob(): Promise<number | null> {
+  const [candidate] = await db
+    .select({ id: reportRequests.id })
+    .from(reportRequests)
+    .where(eq(reportRequests.status, "requested"))
+    .orderBy(asc(reportRequests.requestedAt))
+    .limit(1);
+  if (!candidate) return null;
+  const claimed = await claimReportJob(candidate.id);
+  return claimed ? candidate.id : null;
+}
+
+/**
+ * Run one report generation under the in-flight guard. Catches every
+ * thrown error so a single failure cannot poison the worker loop —
+ * generateReportPdf already flips the row to 'failed' on any exception
+ * inside its try/catch, and writes a system audit row for the outcome
+ * so the lifecycle stays reviewable.
+ */
+async function runReportJobUnderGuard(reportId: number): Promise<void> {
+  inFlightReportJobs.add(reportId);
+  try {
+    const result = await generateReportPdf(reportId);
+    try {
+      await db.insert(auditLogs).values({
+        userId: null,
+        action:
+          result.status === "ready"
+            ? "report.worker_generated"
+            : "report.worker_failed",
+        entityType: "report_request",
+        entityId: String(reportId),
+        metadata:
+          result.status === "ready"
+            ? { downloadUrl: result.downloadUrl }
+            : { failureReason: result.failureReason },
+        ipAddress: null,
+      });
+    } catch (auditErr) {
+      console.error(
+        `[report-worker] failed to write audit row for #${reportId}:`,
+        (auditErr as Error)?.message ?? auditErr,
+      );
+    }
+  } catch (err) {
+    // generateReportPdf is supposed to swallow its own errors and return
+    // a tagged result, but defensive belt-and-braces — log loudly and let
+    // the sweeper catch the row if its status is still 'generating'.
+    console.error(
+      `[report-worker] generateReportPdf threw for #${reportId}:`,
+      (err as Error)?.message ?? err,
+    );
+  } finally {
+    inFlightReportJobs.delete(reportId);
+  }
+}
+
+export interface ReportWorkerSummary {
+  processed: number;
+  processedIds: number[];
+}
+
+/**
+ * Drain up to maxJobs 'requested' rows. Called on a short interval from
+ * server/index.ts as the safety-net path (the route's setImmediate is
+ * the fast path). Stops as soon as the queue is empty so an idle tick
+ * does no work.
+ */
+export async function runReportJobWorkerTick(opts?: {
+  maxJobs?: number;
+}): Promise<ReportWorkerSummary> {
+  const max = opts?.maxJobs ?? DEFAULT_WORKER_MAX_JOBS_PER_TICK;
+  const processedIds: number[] = [];
+  for (let i = 0; i < max; i++) {
+    const id = await claimNextReportJob();
+    if (id === null) break;
+    await runReportJobUnderGuard(id);
+    processedIds.push(id);
+  }
+  return { processed: processedIds.length, processedIds };
+}
+
+/**
+ * Fire-and-forget enqueue called from the route handler immediately after
+ * the row is inserted. Returns synchronously so the HTTP response can
+ * flush in 'requested' state without waiting for the PDF.
+ *
+ * setImmediate (rather than setTimeout 0) so the response is on the wire
+ * before we reach for the DB. The actual claim is atomic, so racing with
+ * the worker tick on the same id is safe — only one side will end up
+ * running generateReportPdf.
+ */
+export function enqueueReportJob(reportId: number): void {
+  setImmediate(() => {
+    void (async () => {
+      // Skip if the worker tick already grabbed this id between insert
+      // and setImmediate firing — the DB claim below would also catch
+      // this, but the in-memory check saves a round-trip in the hot path.
+      if (inFlightReportJobs.has(reportId)) return;
+      try {
+        const claimed = await claimReportJob(reportId);
+        if (!claimed) {
+          // Either status changed (cancelled, etc.) or another worker
+          // (the periodic tick) won the race. Nothing to do.
+          return;
+        }
+        await runReportJobUnderGuard(reportId);
+      } catch (err) {
+        console.error(
+          `[report-worker] enqueueReportJob failed for #${reportId}:`,
+          (err as Error)?.message ?? err,
+        );
+      }
+    })();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Task #315 — Regenerate. Writes a fresh row with versionNumber++ and a
 // supersedesReportId pointer back at the original. Original row is left

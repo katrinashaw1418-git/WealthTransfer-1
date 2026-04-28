@@ -3673,9 +3673,11 @@ export function registerAdminRoutes(app: Express): void {
 
   // -------------------------------------------------------------------------
   // Task #315 — POST /api/admin/reports/:id/retry
-  // Inserts a fresh job (versionNumber + 1, supersedesReportId = id), then
-  // generates the PDF inline. Does NOT mutate the failed row — the chain
-  // itself is the audit trail.
+  // Inserts a fresh job (versionNumber + 1, supersedesReportId = id) and,
+  // as of Task #332, hands the PDF render to the background worker via
+  // enqueueReportJob; the response carries the freshly inserted row in
+  // 'requested' state so the UI can show progress immediately. Does NOT
+  // mutate the failed row — the chain itself is the audit trail.
   // -------------------------------------------------------------------------
   app.post(
     "/api/admin/reports/:id/retry",
@@ -3695,7 +3697,7 @@ export function registerAdminRoutes(app: Express): void {
       // Admin retry impersonates the original adviser (admin is acting on
       // their behalf so the new row's adviserUserId stays unchanged and
       // ownership semantics on download still hold).
-      const { regenerateReport, generateReportPdf } = await import("./services/reports");
+      const { regenerateReport, enqueueReportJob } = await import("./services/reports");
       const next = await regenerateReport(orig.adviserUserId, id);
       await writeAuditLog({
         userId: auth.userId,
@@ -3711,13 +3713,13 @@ export function registerAdminRoutes(app: Express): void {
         },
         ipAddress: req.ip || null,
       });
-      await generateReportPdf(next.id);
-      const [final] = await db
-        .select()
-        .from(reportRequests)
-        .where(eq(reportRequests.id, next.id))
-        .limit(1);
-      return final;
+      // Task #332 — fire-and-forget enqueue so the admin retry response
+      // returns immediately. The in-process worker (drained by the route's
+      // setImmediate and by the periodic tick in server/index.ts) flips
+      // the row to ready/failed; the existing 10-minute sweeper remains
+      // the safety net for a worker that crashes mid-flight.
+      enqueueReportJob(next.id);
+      return next;
     }),
   );
 

@@ -155,6 +155,19 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
       "Per-minute sweep that flips report_requests rows stuck in 'requested' or 'generating' for >10 minutes to 'failed' (failureReason='sweeper_timeout') so the UI can offer Retry. Audit row written per flip.",
   },
   {
+    // Task #332 — every-5-second drain of 'requested' report rows so
+    // POST /api/adviser/reports (and the regenerate / admin-retry
+    // siblings) can return immediately without waiting for the PDF
+    // render. Common case: the route's setImmediate enqueue beats the
+    // tick to it; this cron is the safety net for rows missed between
+    // insert and setImmediate (e.g. process restart). The 10-minute
+    // sweeper above remains the ultimate safety net for crashed workers.
+    name: "report-worker",
+    label: "Report PDF worker tick",
+    description:
+      "Per-5-second drain of report_requests rows in 'requested' state. Atomically claims each row and runs generateReportPdf out-of-band so adviser POST /api/adviser/reports returns immediately. Disable with REPORT_WORKER_DISABLED=1.",
+  },
+  {
     // Task #344 — hourly reminder for any still-undownloaded `ready` report
     // whose expiresAt is inside the next 24h. Idempotent on
     // report_requests.expiringSoonNotifiedAt so re-running the cron never
