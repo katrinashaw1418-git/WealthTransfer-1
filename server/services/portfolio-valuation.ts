@@ -153,12 +153,14 @@ export interface InvestmentTotals {
   hasUnpricedAssets: boolean;
   items: Array<{
     id: number;
+    investmentId: number;
     productId: number;
     productName: string;
     category: string;
     annualReturn: string;
     returnMethod: string;
     investedAmount: number;
+    investmentDate: Date;
     currentValue: number | null;
     returnAmount: number;
     returnPercentage: number;
@@ -190,6 +192,7 @@ export async function calculateInvestmentTotalsAtDate(
     if (perf.currentValue === null) hasUnpricedAssets = true;
     items.push({
       id: inv.id,
+      investmentId: inv.id,
       productId: product.id,
       productName: product.name,
       category: product.category,
@@ -197,6 +200,7 @@ export async function calculateInvestmentTotalsAtDate(
         product.annualReturn ?? getAnnualReturnFallback(product.category, product.name).toString(),
       returnMethod: product.returnMethod ?? "fixed_annual_compound",
       investedAmount,
+      investmentDate,
       currentValue: perf.currentValue,
       returnAmount: perf.returnAmount,
       returnPercentage: perf.returnPercentage,

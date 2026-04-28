@@ -3872,12 +3872,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         categoryMap[item.category].value += item.currentValue ?? 0;
         const existing = categoryMap[item.category].productMap.get(item.productId);
         const lot = {
-          investmentId: (item as any).investmentId,
+          investmentId: item.investmentId,
           investedAmount: item.investedAmount,
           currentValue: item.currentValue,
           returnAmount: item.returnAmount,
           returnPercentage: item.returnPercentage,
-          investmentDate: (item as any).investmentDate,
+          investmentDate: item.investmentDate,
         };
         if (existing) {
           existing.value += item.currentValue ?? 0;

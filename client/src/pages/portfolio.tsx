@@ -1,10 +1,11 @@
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { usePortfolio, useWallets, useUserInvestments, usePortfolioAllocation } from "@/hooks/use-portfolio";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line } from 'recharts';
-import { TrendingUp, TrendingDown, DollarSign, Bitcoin, PieChart as PieChartIcon, Target, RefreshCw } from "lucide-react";
+import { TrendingUp, TrendingDown, DollarSign, Bitcoin, PieChart as PieChartIcon, Target, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/queryClient";
 
@@ -24,6 +25,7 @@ const getCategoryColor = (categoryName: string) => {
 
 export default function Portfolio() {
   const queryClient = useQueryClient();
+  const [expandedProductKey, setExpandedProductKey] = useState<string | null>(null);
 
   const { data: portfolio, isLoading: portfolioLoading } = usePortfolio();
   const { data: wallets, isLoading: walletsLoading } = useWallets();
@@ -406,22 +408,101 @@ export default function Portfolio() {
                 <div key={category.name} className="space-y-2">
                   <h5 className="font-medium text-sm text-gray-700 uppercase tracking-wide">{category.name}</h5>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {category.products.map((product: any, idx: number) => (
-                      <div 
-                        key={idx} 
-                        className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
-                        onClick={() => window.location.href = '/investments'}
-                      >
-                        <div className="flex items-center space-x-3">
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: getCategoryColor(category.name) }}></div>
-                          <span className="text-sm font-medium">{product.name}</span>
+                    {category.products.map((product: any, idx: number) => {
+                      const productKey = `${category.name}-${product.productId ?? idx}`;
+                      const isExpanded = expandedProductKey === productKey;
+                      const lots: any[] = Array.isArray(product.lots) ? product.lots : [];
+                      const hasMultipleLots = lots.length > 1;
+                      return (
+                        <div
+                          key={productKey}
+                          className="bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                          data-testid={`product-row-${productKey}`}
+                        >
+                          <div className="flex items-center justify-between p-3">
+                            <div className="flex items-center space-x-3 min-w-0 flex-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExpandedProductKey(isExpanded ? null : productKey);
+                                }}
+                                disabled={lots.length === 0}
+                                aria-expanded={isExpanded}
+                                aria-label={isExpanded ? "Hide lots" : "Show lots"}
+                                className="p-0.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:hover:bg-transparent"
+                                data-testid={`toggle-lots-${productKey}`}
+                              >
+                                {isExpanded ? (
+                                  <ChevronDown className="h-4 w-4 text-gray-600" />
+                                ) : (
+                                  <ChevronRight className="h-4 w-4 text-gray-600" />
+                                )}
+                              </button>
+                              <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: getCategoryColor(category.name) }}></div>
+                              <button
+                                type="button"
+                                onClick={() => (window.location.href = '/investments')}
+                                className="text-sm font-medium text-left truncate hover:underline"
+                              >
+                                {product.name}
+                              </button>
+                              {hasMultipleLots && (
+                                <Badge variant="secondary" className="text-xs">
+                                  {lots.length} lots
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="text-right pl-2">
+                              <div className="text-sm font-semibold">${(product.value / 1000).toFixed(0)}K</div>
+                              <div className="text-xs text-gray-500">{product.percentage.toFixed(1)}%</div>
+                            </div>
+                          </div>
+                          {isExpanded && lots.length > 0 && (
+                            <div className="px-3 pb-3" data-testid={`lots-list-${productKey}`}>
+                              <div className="border-t border-gray-200 pt-2 space-y-1.5">
+                                {lots.map((lot: any, lotIdx: number) => {
+                                  const invested = Number(lot.investedAmount ?? 0);
+                                  const current = Number(lot.currentValue ?? 0);
+                                  const returnPct = Number(lot.returnPercentage ?? 0);
+                                  const dateStr = lot.investmentDate
+                                    ? new Date(lot.investmentDate).toLocaleDateString(undefined, {
+                                        year: 'numeric',
+                                        month: 'short',
+                                        day: 'numeric',
+                                      })
+                                    : '—';
+                                  return (
+                                    <div
+                                      key={lot.investmentId ?? lotIdx}
+                                      className="flex items-center justify-between text-xs bg-white rounded px-2 py-1.5"
+                                      data-testid={`lot-row-${productKey}-${lotIdx}`}
+                                    >
+                                      <div className="text-gray-600">
+                                        <span className="font-medium text-gray-800">{dateStr}</span>
+                                        <span className="text-gray-400 mx-1.5">·</span>
+                                        Invested ${invested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                      </div>
+                                      <div className="flex items-center gap-3">
+                                        <span className="text-gray-700">
+                                          ${current.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                        </span>
+                                        <span
+                                          className={`font-medium tabular-nums ${returnPct >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                                        >
+                                          {returnPct >= 0 ? '+' : ''}
+                                          {returnPct.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
                         </div>
-                        <div className="text-right">
-                          <div className="text-sm font-semibold">${(product.value / 1000).toFixed(0)}K</div>
-                          <div className="text-xs text-gray-500">{product.percentage.toFixed(1)}%</div>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               ))}
