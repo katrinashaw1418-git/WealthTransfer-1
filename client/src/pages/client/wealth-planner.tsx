@@ -17,7 +17,26 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Target, FileText, FileBadge, ExternalLink } from "lucide-react";
+import {
+  Target,
+  FileText,
+  FileBadge,
+  ExternalLink,
+  Lock,
+  ShieldAlert,
+} from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+
+// Task #318 — same s912G policy text the adviser surface and the DELETE
+// route quote. Surfaced here so a client browsing their own documents
+// understands why nothing is removable.
+const RETENTION_POLICY_TEXT =
+  "Documents are retained for 7 years from creation per Corporations Act s912G. Deletion is locked while the retention window is active.";
 
 interface ClientObjective {
   id: number;
@@ -42,6 +61,19 @@ interface ClientDocument {
   fileSizeBytes: number | null;
   description: string | null;
   uploadedAt: string | null;
+  // Task #318 — retention metadata. Same fields the adviser surface
+  // consumes; the client never sees a Delete button (so no per-row
+  // disabling is required) but they DO see the "Retention until" column
+  // and the Lock chip so the policy is transparent.
+  retentionUntil: string | null;
+  deletionLocked: boolean;
+}
+
+function isRetentionActive(retentionUntil: string | null | undefined): boolean {
+  if (!retentionUntil) return false;
+  const t = new Date(retentionUntil).getTime();
+  if (!Number.isFinite(t)) return false;
+  return t > Date.now();
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -199,6 +231,16 @@ export default function ClientWealthPlanner() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {/* Task #318 — retention disclosure shown above the documents
+                  list so the client understands why nothing is deletable
+                  and how long their fact-finds will be retained. */}
+              <div
+                className="rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800 mb-3 flex items-start gap-2"
+                data-testid="strip-retention-policy"
+              >
+                <ShieldAlert className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <span>{RETENTION_POLICY_TEXT}</span>
+              </div>
               {documents.isLoading ? (
                 <Skeleton className="h-24 w-full" />
               ) : documents.isError ? (
@@ -214,56 +256,90 @@ export default function ClientWealthPlanner() {
                   and statements here.
                 </p>
               ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>File</TableHead>
-                      <TableHead>Type</TableHead>
-                      <TableHead>Advice</TableHead>
-                      <TableHead>Size</TableHead>
-                      <TableHead>Uploaded</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {(documents.data?.items ?? []).map((d) => (
-                      <TableRow
-                        key={d.id}
-                        data-testid={`row-client-document-${d.id}`}
-                      >
-                        <TableCell className="text-sm">
-                          <div className="font-medium">{d.fileName}</div>
-                          {d.description ? (
-                            <div className="text-xs text-gray-500 mt-1">
-                              {d.description}
-                            </div>
-                          ) : null}
-                        </TableCell>
-                        <TableCell className="text-sm capitalize">
-                          {d.documentType.replace(/_/g, " ")}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {d.adviceRecordId ? (
-                            <Link
-                              href={`/client/advice/${d.adviceRecordId}`}
-                              className="text-sky-600 hover:underline inline-flex items-center gap-1"
-                            >
-                              #{d.adviceRecordId}
-                              <ExternalLink className="h-3 w-3" />
-                            </Link>
-                          ) : (
-                            "—"
-                          )}
-                        </TableCell>
-                        <TableCell className="text-sm tabular-nums">
-                          {formatBytes(d.fileSizeBytes)}
-                        </TableCell>
-                        <TableCell className="text-sm text-gray-500">
-                          {formatDate(d.uploadedAt)}
-                        </TableCell>
+                <TooltipProvider delayDuration={150}>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>File</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>Advice</TableHead>
+                        <TableHead>Size</TableHead>
+                        <TableHead>Uploaded</TableHead>
+                        <TableHead>Retention until</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {(documents.data?.items ?? []).map((d) => {
+                        const locked =
+                          d.deletionLocked || isRetentionActive(d.retentionUntil);
+                        return (
+                          <TableRow
+                            key={d.id}
+                            data-testid={`row-client-document-${d.id}`}
+                          >
+                            <TableCell className="text-sm">
+                              <div className="font-medium">{d.fileName}</div>
+                              {d.description ? (
+                                <div className="text-xs text-gray-500 mt-1">
+                                  {d.description}
+                                </div>
+                              ) : null}
+                            </TableCell>
+                            <TableCell className="text-sm capitalize">
+                              {d.documentType.replace(/_/g, " ")}
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              {d.adviceRecordId ? (
+                                <Link
+                                  href={`/client/advice/${d.adviceRecordId}`}
+                                  className="text-sky-600 hover:underline inline-flex items-center gap-1"
+                                >
+                                  #{d.adviceRecordId}
+                                  <ExternalLink className="h-3 w-3" />
+                                </Link>
+                              ) : (
+                                "—"
+                              )}
+                            </TableCell>
+                            <TableCell className="text-sm tabular-nums">
+                              {formatBytes(d.fileSizeBytes)}
+                            </TableCell>
+                            <TableCell className="text-sm text-gray-500">
+                              {formatDate(d.uploadedAt)}
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className="text-gray-700"
+                                  data-testid={`text-retention-until-${d.id}`}
+                                >
+                                  {formatDate(d.retentionUntil)}
+                                </span>
+                                {locked ? (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Badge
+                                        variant="secondary"
+                                        className="flex items-center gap-1 cursor-help"
+                                        data-testid={`badge-document-locked-${d.id}`}
+                                      >
+                                        <Lock className="h-3 w-3" />
+                                        Locked
+                                      </Badge>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-xs">
+                                      {RETENTION_POLICY_TEXT}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                ) : null}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TooltipProvider>
               )}
             </CardContent>
           </Card>

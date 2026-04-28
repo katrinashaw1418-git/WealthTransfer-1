@@ -16,6 +16,11 @@ import {
   type ReportRequest,
 } from "@shared/schema";
 import { getUserCurrencyBalance } from "./ledger";
+// Task #318 — watermarking moved to the download surface (server/adviser-routes.ts
+// report download). Generation now produces an unmarked PDF on disk; the route
+// applies the per-download watermark just before streaming the response so
+// every download is forensically distinguishable. We deliberately do NOT
+// import applyDocumentWatermark here.
 
 export const REPORTS_DIR = path.resolve(process.cwd(), ".local/reports");
 const EXPIRY_DAYS = 30;
@@ -418,9 +423,10 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       throw new Error("Client user not found");
     }
 
-    // Load adviser identity for the PDF header. Both the user row (for the
-    // human-readable name) and the adviser_profiles row (for AFSL #) — the
-    // join is two cheap point reads, not a large analytic query.
+    // Task #298 — load adviser identity for the PDF header. Both the user
+    // row (for the human-readable name) and the adviser_profiles row (for
+    // AFSL #) — the join is two cheap point reads, not a large analytic
+    // query. Required by the per-page header drawn in renderPdf.
     const [adviserUser] = await db
       .select()
       .from(users)
@@ -431,6 +437,7 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       .from(adviserProfiles)
       .where(eq(adviserProfiles.userId, row.adviserUserId))
       .limit(1);
+
 
     const wantsHoldings = row.reportType === "portfolio_summary" || row.reportType === "full_statement";
     const wantsTxns = row.reportType === "transaction_history" || row.reportType === "full_statement";
@@ -535,6 +542,11 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
 
     // ---- Render PDF ----------------------------------------------------------
     const generatedAt = new Date();
+    // Task #318 (rework) — the PDF is generated WITHOUT the confidential
+    // watermark. The watermark (with its forensic per-download timestamp +
+    // purpose) is applied by each download route on every request via
+    // `applyDocumentWatermark()`. See server/adviser-routes.ts,
+    // server/client-routes.ts, server/admin-routes.ts download handlers.
     const filePath = path.join(REPORTS_DIR, `${reportId}.pdf`);
     await renderPdf(filePath, {
       reportId,
@@ -705,9 +717,6 @@ async function renderPdf(filePath: string, data: RenderInput): Promise<void> {
     }
     doc.moveDown(0.6);
 
-    // Draft watermark on the cover page only.
-    drawDraftWatermark(doc);
-
     // Sections
     if (data.holdings.length > 0 || data.cashAud !== "0" || data.cashUsd !== "0") {
       drawHoldingsSection(doc, data);
@@ -800,18 +809,10 @@ function drawPageFooter(
   doc.restore();
 }
 
-function drawDraftWatermark(doc: PDFKit.PDFDocument): void {
-  // Light diagonal "DRAFT" across the page background of page 1.
-  // Subsequent pages get the footer line; the bold watermark stays on cover.
-  doc.save();
-  doc.fillColor("#e2e8f0").fontSize(80).font("Helvetica-Bold");
-  doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
-  doc.text("DRAFT", 0, doc.page.height / 2 - 40, {
-    width: doc.page.width,
-    align: "center",
-  });
-  doc.restore();
-}
+// Task #318 (rework) — `drawDraftWatermark` was removed. The DRAFT overlay was
+// superseded by the per-download `applyDocumentWatermark()` watermark applied
+// on every download surface (adviser/client/admin), which carries forensic
+// per-request attribution (downloaded-at + purpose).
 
 function sectionHeading(doc: PDFKit.PDFDocument, title: string): void {
   if (doc.y > doc.page.height - 180) doc.addPage();

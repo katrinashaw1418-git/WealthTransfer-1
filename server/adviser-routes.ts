@@ -31,6 +31,9 @@ import {
   adviserFeeRules,
   adviserFeeAccruals,
   adviserFeeDeductions,
+  // Task #318 — needed by the DELETE endpoint to evaluate retentionUntil /
+  // deletionLocked directly on the row.
+  clientDocuments,
 } from "@shared/schema";
 import { storage } from "./storage";
 import { requireAuth, requireRole } from "./auth";
@@ -92,6 +95,12 @@ import { adviceRecords } from "@shared/schema";
 // audit() helper below; only fee-consent + advice-record paths have been
 // migrated.
 import { writeAuditLog } from "./services/audit";
+import {
+  evaluateRetentionLock,
+  RETENTION_POLICY_TEXT,
+} from "./services/document-retention";
+import { applyDocumentWatermark } from "./services/document-watermark";
+import { resolveWatermarkNames } from "./services/watermark-context";
 // Task #148 — shared multer factory that enforces a maximum file size and a
 // strict mime allow-list, returning 400 BEFORE any bytes are handed off to
 // uploadClientDocument(). Replaces the route-local multer config.
@@ -160,6 +169,13 @@ function handleError(res: any, error: any, fallbackMessage: string) {
     // Previous versions without a follow-up GET.
     if (error.existingReport && typeof error.existingReport === "object") {
       body.existingReport = error.existingReport;
+    }
+    // Task #318 — surface a structured `extra` payload (e.g. the retentionUntil
+    // ISO string + policy text on a 423 Locked response) so the UI can render
+    // a tooltip without parsing the human-readable error string. The shape
+    // is opaque to handleError; routes set whatever fields the UI needs.
+    if (error.extra && typeof error.extra === "object") {
+      body.extra = error.extra;
     }
     return res.status(error.status).json(body);
   }
@@ -829,9 +845,33 @@ export function registerAdviserRoutes(app: Express): void {
           return res.status(404).json({ error: "Report file missing on disk" });
         }
 
-        await audit(auth.userId, "adviser_report_downloaded", "report_request", String(id), {
+        // Task #318 — apply the per-download confidential watermark. The
+        // PDF on disk is unmarked; we read it into memory, watermark every
+        // page with the request instant + purpose, and stream the
+        // transformed buffer. Two downloads of the same report produce
+        // two distinguishable PDFs (different timestamp), giving the
+        // regulator surface forensic traceability if a leak is reported.
+        const downloadedAtUtc = new Date();
+        const names = await resolveWatermarkNames(row.clientUserId, row.adviserUserId);
+        const original = await fs.promises.readFile(filePath);
+        const watermarked = await applyDocumentWatermark(original, {
+          clientName: names.clientName,
+          adviserName: names.adviserName,
+          downloadedAtUtc,
+          purpose: "report_download",
+        });
+
+        // Task #318 — every PDF the platform serves to a regulated party
+        // gets the SAME audit action name (`document.download`) so the
+        // regulator surface can answer "who pulled what and when" with one
+        // query. The report-specific shape stays in the metadata payload.
+        await audit(auth.userId, "document.download", "report_request", String(id), {
           clientUserId: row.clientUserId,
+          documentId: id,
+          documentKind: "adviser_report",
           reportType: row.reportType,
+          purpose: "report_download",
+          downloadedAtUtc: downloadedAtUtc.toISOString(),
         }, req.ip || null);
 
         res.setHeader("Content-Type", "application/pdf");
@@ -844,7 +884,8 @@ export function registerAdviserRoutes(app: Express): void {
         res.setHeader("Cache-Control", "no-store, private, max-age=0, must-revalidate");
         res.setHeader("Pragma", "no-cache");
         res.setHeader("X-Content-Type-Options", "nosniff");
-        fs.createReadStream(filePath).pipe(res);
+        res.setHeader("Content-Length", String(watermarked.length));
+        res.end(watermarked);
       } catch (error: any) {
         handleError(res, error, "Report download failed");
       }
@@ -1678,6 +1719,111 @@ export function registerAdviserRoutes(app: Express): void {
         req.ip ?? null,
       );
       return { items };
+    }),
+  );
+
+  // ---------------------------------------------------------------------------
+  // Task #318 — DELETE /api/adviser/client-documents/:id
+  // ---------------------------------------------------------------------------
+  // Documents are retained for 7 years from creation per Corporations Act
+  // s912G. The schema already carries `deletion_locked` (defaults true) and
+  // `retention_until` (defaults to now() — the trigger that pushes it to
+  // now()+7y is a future migration). Until that trigger lands the boolean
+  // alone is sufficient to enforce the contract: an adviser CANNOT delete a
+  // document while the lock is set OR while the retention window is still
+  // open. Both checks short-circuit with HTTP 423 Locked + a structured
+  // body so the UI can render the lock chip + tooltip.
+  //
+  // The audit row is emitted both for the successful delete (NOT WIRED YET
+  // because no document is currently delete-eligible) and for blocked
+  // attempts (`document.delete.blocked`) so a regulator can see when an
+  // adviser tried to delete a still-retained file.
+  // ---------------------------------------------------------------------------
+  app.delete(
+    "/api/adviser/client-documents/:id",
+    adviserRoute(async (req, auth) => {
+      const documentId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(documentId) || documentId <= 0) {
+        throw Object.assign(new Error("Invalid document id"), { status: 400 });
+      }
+
+      // Load the row directly (cross-checking the adviser-client link below).
+      // We deliberately do NOT use a service helper here so the route owns
+      // the lock evaluation in one place.
+      const [row] = await db
+        .select()
+        .from(clientDocuments)
+        .where(eq(clientDocuments.id, documentId))
+        .limit(1);
+      if (!row) {
+        throw Object.assign(new Error("Document not found"), { status: 404 });
+      }
+      // Cross-tenant defence — the adviser must own the client this document
+      // belongs to. Throws 403 if the link is missing/inactive.
+      await assertAdviserClientLink(auth.userId, row.clientId);
+
+      // Centralised lock evaluation — see server/services/document-retention.ts
+      // for the contract (locked when deletion_locked=true OR retention_until
+      // > now). Keeping the eval in one place lets the unit test cover both
+      // legs without double-mocking the route.
+      const lock = evaluateRetentionLock({
+        retentionUntil: row.retentionUntil,
+        deletionLocked: row.deletionLocked,
+      });
+
+      if (lock.locked) {
+        // Audit the blocked attempt so the regulator surface can see who
+        // tried to delete a retained file.
+        await audit(
+          auth.userId,
+          "document.delete.blocked",
+          "client_document",
+          String(documentId),
+          {
+            clientUserId: row.clientId,
+            documentId,
+            reason: lock.reason,
+            deletionLocked: lock.deletionLocked,
+            retentionUntil: lock.retentionUntil,
+          },
+          req.ip ?? null,
+        );
+        throw Object.assign(
+          new Error(
+            "Document is retained and cannot be deleted while the retention window is active.",
+          ),
+          {
+            status: 423,
+            reason: lock.reason,
+            extra: {
+              documentId,
+              deletionLocked: lock.deletionLocked,
+              retentionUntil: lock.retentionUntil,
+              policy: RETENTION_POLICY_TEXT,
+            },
+          },
+        );
+      }
+
+      // Lock cleared — proceed with the delete. (No production document is
+      // currently lock-cleared because `deletionLocked` defaults to true;
+      // this branch exists for the future "expired retention" sweeper.)
+      await db
+        .delete(clientDocuments)
+        .where(eq(clientDocuments.id, documentId));
+      await audit(
+        auth.userId,
+        "document.delete",
+        "client_document",
+        String(documentId),
+        {
+          clientUserId: row.clientId,
+          documentId,
+          documentKind: "client_document",
+        },
+        req.ip ?? null,
+      );
+      return { ok: true, documentId };
     }),
   );
 

@@ -54,7 +54,9 @@ import {
   getClientDocumentForOwner,
   requireAcknowledgedAdvice,
 } from "./services/wealth-planner";
-import { getObjectStream, statObject } from "./services/object-storage";
+import { getObjectBytes, getObjectStream, statObject } from "./services/object-storage";
+import { applyDocumentWatermark } from "./services/document-watermark";
+import { resolveWatermarkNames } from "./services/watermark-context";
 import { adviceRecords } from "@shared/schema";
 // Task #95 — standardised audit-log writer (before/after snapshots) for the
 // advice + fee-engine surfaces. The local audit() helper below is still
@@ -964,15 +966,6 @@ export function registerClientRoutes(app: Express): void {
         return res.status(404).json({ error: "Document file missing in storage" });
       }
 
-      audit(
-        auth.userId,
-        "client_document.download",
-        "client_document",
-        String(row.id),
-        { actor: "client", sizeBytes: head.sizeBytes },
-        req.ip ?? null,
-      );
-
       // Task #117 — harden the response headers against MIME-sniffing-based
       // XSS. Two complementary controls:
       //
@@ -1000,9 +993,65 @@ export function registerClientRoutes(app: Express): void {
       const safeContentType = SAFE_INLINE_MIME_TYPES.has(storedMime)
         ? storedMime
         : "application/octet-stream";
+
+      // Task #318 — for PDF downloads, post-process the stored bytes through
+      // the confidential watermark before streaming. Non-PDF downloads
+      // (images, etc.) pass through unchanged. The watermark carries the
+      // exact request instant + the canonical purpose label so a leaked
+      // PDF is forensically attributable to the (client, download instant)
+      // pair, not just to the upload event.
+      const downloadedAtUtc = new Date();
+      let payload: Buffer | null = null;
+      let payloadLength = head.sizeBytes;
+      if (storedMime === "application/pdf") {
+        const original = await getObjectBytes(row.storageKey);
+        const names = await resolveWatermarkNames(row.clientId, null);
+        payload = await applyDocumentWatermark(original, {
+          clientName: names.clientName,
+          adviserName: names.adviserName,
+          downloadedAtUtc,
+          purpose: "client_document_download",
+        });
+        payloadLength = payload.length;
+      }
+
+      // Task #318 — emit the unified `document.download` audit row alongside
+      // the legacy `client_document.download` event. The unified action lets
+      // the regulator surface answer "who pulled what" with a single query
+      // across reports + uploaded documents; the legacy action stays so the
+      // existing audit dashboards keep working unchanged.
+      audit(
+        auth.userId,
+        "client_document.download",
+        "client_document",
+        String(row.id),
+        { actor: "client", sizeBytes: head.sizeBytes },
+        req.ip ?? null,
+      );
+      audit(
+        auth.userId,
+        "document.download",
+        "client_document",
+        String(row.id),
+        {
+          actor: "client",
+          clientUserId: auth.userId,
+          documentId: row.id,
+          documentKind: "client_document",
+          purpose:
+            storedMime === "application/pdf"
+              ? "client_document_download"
+              : "client_document_download_passthrough",
+          downloadedAtUtc: downloadedAtUtc.toISOString(),
+          sizeBytes: head.sizeBytes,
+          watermarked: storedMime === "application/pdf",
+        },
+        req.ip ?? null,
+      );
+
       res.setHeader("Content-Type", safeContentType);
       res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Content-Length", String(head.sizeBytes));
+      res.setHeader("Content-Length", String(payloadLength));
       // Quote the filename and strip CR/LF so a hostile filename cannot
       // inject extra response headers.
       const safeName = (row.fileName ?? "download.bin").replace(/[\r\n"]/g, "_");
@@ -1010,6 +1059,13 @@ export function registerClientRoutes(app: Express): void {
         "Content-Disposition",
         `attachment; filename="${safeName}"`,
       );
+
+      if (payload !== null) {
+        // Watermarked PDF — small enough to send in one shot.
+        res.end(payload);
+        return;
+      }
+
       const stream = getObjectStream(row.storageKey);
       stream.on("error", (err) => {
         console.error("[client-routes] document stream error:", err);

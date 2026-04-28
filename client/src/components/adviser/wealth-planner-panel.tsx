@@ -63,8 +63,42 @@ import {
   FileText,
   AlertCircle,
   Lock,
+  ShieldAlert,
+  Trash2,
 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
+
+// Task #318 — policy text quoted on every documents surface so the regulator
+// disclosure stays synchronised with the server-side enforcement (the DELETE
+// route returns 423 with the same wording in `extra.policy`).
+const RETENTION_POLICY_TEXT =
+  "Documents are retained for 7 years from creation per Corporations Act s912G. Deletion is locked while the retention window is active.";
+
+function formatRetentionUntil(value: string | null | undefined): string {
+  if (!value) return "—";
+  try {
+    return new Date(value).toLocaleDateString("en-AU", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return "—";
+  }
+}
+
+function isRetentionActive(retentionUntil: string | null | undefined): boolean {
+  if (!retentionUntil) return false;
+  const t = new Date(retentionUntil).getTime();
+  if (!Number.isFinite(t)) return false;
+  return t > Date.now();
+}
 
 // =============================================================================
 // Task #107 — Lock indicator UI for advisers
@@ -185,6 +219,12 @@ interface ClientDocument {
   description: string | null;
   uploadedByUserId: number;
   uploadedAt: string | null;
+  // Task #318 — retention surfacing. The schema already populates these
+  // fields (defaults: deletionLocked=true, retentionUntil=now()) so the UI
+  // can render the lock chip + "retention until" column today even though
+  // the now()+7y trigger is still a future migration.
+  retentionUntil: string | null;
+  deletionLocked: boolean;
 }
 
 interface AdviserNote {
@@ -1241,6 +1281,17 @@ export function WealthPlannerPanel({ clientId, adviceRecords }: WealthPlannerPan
               </Button>
             </CardHeader>
             <CardContent>
+              {/* Task #318 — retention policy strip. Surfaces the same s912G
+                  policy text that the DELETE route returns inside its 423
+                  body, so the adviser sees the rule before they try the
+                  Delete button (which is also disabled per row when locked). */}
+              <div
+                className="rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800 mb-3 flex items-start gap-2"
+                data-testid="strip-retention-policy"
+              >
+                <ShieldAlert className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <span>{RETENTION_POLICY_TEXT}</span>
+              </div>
               {documents.isLoading ? (
                 <Skeleton className="h-24 w-full" />
               ) : documents.isError ? (
@@ -1255,49 +1306,103 @@ export function WealthPlannerPanel({ clientId, adviceRecords }: WealthPlannerPan
                   No documents on file.
                 </p>
               ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>File</TableHead>
-                      <TableHead>Type</TableHead>
-                      <TableHead>Advice #</TableHead>
-                      <TableHead>Size</TableHead>
-                      <TableHead>Uploaded</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {(documents.data?.items ?? []).map((d) => (
-                      <TableRow
-                        key={d.id}
-                        data-testid={`row-document-${d.id}`}
-                      >
-                        <TableCell className="text-sm">
-                          <div className="font-medium">{d.fileName}</div>
-                          <div className="text-xs text-gray-500 break-all">
-                            {d.storageKey}
-                          </div>
-                          {d.description ? (
-                            <div className="text-xs text-gray-500 mt-1">
-                              {d.description}
-                            </div>
-                          ) : null}
-                        </TableCell>
-                        <TableCell className="text-sm capitalize">
-                          {d.documentType.replace(/_/g, " ")}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {d.adviceRecordId ? `#${d.adviceRecordId}` : "—"}
-                        </TableCell>
-                        <TableCell className="text-sm tabular-nums">
-                          {formatBytes(d.fileSizeBytes)}
-                        </TableCell>
-                        <TableCell className="text-sm text-gray-500">
-                          {formatDateTime(d.uploadedAt)}
-                        </TableCell>
+                <TooltipProvider delayDuration={150}>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>File</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>Advice #</TableHead>
+                        <TableHead>Size</TableHead>
+                        <TableHead>Uploaded</TableHead>
+                        <TableHead>Retention until</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {(documents.data?.items ?? []).map((d) => {
+                        const locked =
+                          d.deletionLocked ||
+                          isRetentionActive(d.retentionUntil);
+                        return (
+                          <TableRow
+                            key={d.id}
+                            data-testid={`row-document-${d.id}`}
+                          >
+                            <TableCell className="text-sm">
+                              <div className="font-medium">{d.fileName}</div>
+                              <div className="text-xs text-gray-500 break-all">
+                                {d.storageKey}
+                              </div>
+                              {d.description ? (
+                                <div className="text-xs text-gray-500 mt-1">
+                                  {d.description}
+                                </div>
+                              ) : null}
+                            </TableCell>
+                            <TableCell className="text-sm capitalize">
+                              {d.documentType.replace(/_/g, " ")}
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              {d.adviceRecordId ? `#${d.adviceRecordId}` : "—"}
+                            </TableCell>
+                            <TableCell className="text-sm tabular-nums">
+                              {formatBytes(d.fileSizeBytes)}
+                            </TableCell>
+                            <TableCell className="text-sm text-gray-500">
+                              {formatDateTime(d.uploadedAt)}
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className="text-gray-700"
+                                  data-testid={`text-retention-until-${d.id}`}
+                                >
+                                  {formatRetentionUntil(d.retentionUntil)}
+                                </span>
+                                {locked ? (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Badge
+                                        variant="secondary"
+                                        className="flex items-center gap-1 cursor-help"
+                                        data-testid={`badge-document-locked-${d.id}`}
+                                      >
+                                        <Lock className="h-3 w-3" />
+                                        Locked
+                                      </Badge>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-xs">
+                                      {RETENTION_POLICY_TEXT}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                ) : null}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={locked}
+                                data-testid={`button-delete-document-${d.id}`}
+                                aria-label={
+                                  locked
+                                    ? "Delete disabled — document is retained"
+                                    : "Delete document"
+                                }
+                                title={
+                                  locked ? RETENTION_POLICY_TEXT : "Delete document"
+                                }
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TooltipProvider>
               )}
             </CardContent>
           </Card>

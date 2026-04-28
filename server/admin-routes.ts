@@ -82,6 +82,8 @@ import { findUserIdsByQuery, getUserNameMap } from "./services/user-name-map";
 // advice + fee-engine surfaces. Other admin paths still use auditTx; only the
 // fee-deduction settle/reverse routes below have been migrated.
 import { writeAuditLog } from "./services/audit";
+import { applyDocumentWatermark } from "./services/document-watermark";
+import { resolveWatermarkNames } from "./services/watermark-context";
 // Task #204 — manual insufficient-funds sweep button calls the same service
 // the daily cron uses, so there is exactly one settlement code path to audit.
 import {
@@ -4127,11 +4129,26 @@ export function registerAdminRoutes(app: Express): void {
         footer: `Exported by admin user #${auth.userId} on ${new Date().toISOString()}. ` +
           `This document is informational only — no money will be moved by AMAX based on this consent.`,
       });
+      // Task #318 — apply per-download confidential watermark BEFORE
+      // streaming to disk. The shared helper resolves the (client, adviser)
+      // names; the admin actor isn't part of the watermark footer (the
+      // audit row records who pulled it). downloadedAtUtc is pinned to
+      // the request instant so two downloads of the same consent yield
+      // forensically distinguishable PDFs.
+      const downloadedAtUtc = new Date();
+      const names = await resolveWatermarkNames(row.clientUserId, row.adviserUserId);
+      const watermarked = await applyDocumentWatermark(buf, {
+        clientName: names.clientName,
+        adviserName: names.adviserName,
+        downloadedAtUtc,
+        purpose: "fee_consent_request_download",
+      });
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
         `attachment; filename="fee-consent-request-${row.id}.pdf"`,
       );
+      res.setHeader("Content-Length", String(watermarked.length));
       await writeAuditLog({
         userId: auth.userId,
         action: "fee_consent_request_pdf_exported",
@@ -4142,7 +4159,26 @@ export function registerAdminRoutes(app: Express): void {
         extra: { source: "admin_ui" },
         ipAddress: req.ip || null,
       });
-      res.end(buf);
+      // Task #318 — also emit the unified `document.download` audit row so
+      // the regulator surface can answer "who pulled what when" with a
+      // single query across reports + uploads + consent PDFs.
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "document.download",
+        entityType: "fee_consent_request",
+        entityId: String(row.id),
+        before: null,
+        after: null,
+        extra: {
+          clientUserId: row.clientUserId,
+          documentId: row.id,
+          documentKind: "fee_consent_request",
+          purpose: "fee_consent_request_download",
+          downloadedAtUtc: downloadedAtUtc.toISOString(),
+        },
+        ipAddress: req.ip || null,
+      });
+      res.end(watermarked);
       return;
     }),
   );
@@ -4252,11 +4288,23 @@ export function registerAdminRoutes(app: Express): void {
         footer: `Exported by admin user #${auth.userId} on ${new Date().toISOString()}. ` +
           `This document is informational only — no money will be moved by AMAX based on this consent.`,
       });
+      // Task #318 — apply per-download confidential watermark BEFORE
+      // streaming. See the matching block on the fee-consent-request PDF
+      // route above for the full rationale.
+      const downloadedAtUtc = new Date();
+      const names = await resolveWatermarkNames(row.clientId, row.adviserId ?? null);
+      const watermarked = await applyDocumentWatermark(buf, {
+        clientName: names.clientName,
+        adviserName: names.adviserName,
+        downloadedAtUtc,
+        purpose: "fee_consent_download",
+      });
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
         `attachment; filename="fee-consent-${row.id}.pdf"`,
       );
+      res.setHeader("Content-Length", String(watermarked.length));
       await writeAuditLog({
         userId: auth.userId,
         action: "fee_consent_pdf_exported",
@@ -4267,7 +4315,24 @@ export function registerAdminRoutes(app: Express): void {
         extra: { source: "admin_ui" },
         ipAddress: req.ip || null,
       });
-      res.end(buf);
+      // Task #318 — unified document.download row for cross-surface auditing.
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "document.download",
+        entityType: "fee_consent",
+        entityId: String(row.id),
+        before: null,
+        after: null,
+        extra: {
+          clientUserId: row.clientId,
+          documentId: row.id,
+          documentKind: "fee_consent",
+          purpose: "fee_consent_download",
+          downloadedAtUtc: downloadedAtUtc.toISOString(),
+        },
+        ipAddress: req.ip || null,
+      });
+      res.end(watermarked);
       return;
     }),
   );
