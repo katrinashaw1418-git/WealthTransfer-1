@@ -664,6 +664,96 @@ export async function registerRoutes(app: Express): Promise<Server> {
     );
     await installAuditLogsImmutabilityTriggers(db);
 
+    // -------------------------------------------------------------------------
+    // Task #330 — 7-year retention defaults + backfill
+    // -------------------------------------------------------------------------
+    // Every regulatory `retention_until` column now defaults to
+    // `now() + interval '7 years'` (Corporations Act s912G). The
+    // pre-existing `defaultNow()` placeholder left newly-inserted rows
+    // with an immediately-elapsed retention deadline, which would have
+    // let the daily retention-sweeper cron unlock them on the very next
+    // tick. The migration block below:
+    //
+    //   1. ALTERs the column default on every retention table so future
+    //      inserts get the correct deadline. Idempotent — re-running on
+    //      every boot is a no-op.
+    //
+    //   2. Backfills existing rows whose retention_until still points at
+    //      the placeholder timestamp. We detect the placeholder by checking
+    //      whether retention_until is within 1 day of the row's natural
+    //      anchor (uploaded_at / consented_at / created_at / etc.) — the
+    //      original `defaultNow()` always wrote a timestamp essentially
+    //      identical to the row's creation moment. Rows whose retention has
+    //      already been bumped by some future code path (retention_until
+    //      meaningfully after the anchor) are deliberately left untouched.
+    //
+    // The sweeper itself lives in `server/services/retention-sweeper.ts`
+    // and is wired into `server/index.ts` alongside the other daily crons.
+    // -------------------------------------------------------------------------
+    {
+      // ALTER COLUMN DEFAULTs first. PostgreSQL accepts ALTER COLUMN ...
+      // SET DEFAULT idempotently — re-issuing the same default is a no-op.
+      const tablesAndDefaults: ReadonlyArray<string> = [
+        "fact_find_snapshots",
+        "risk_profiles",
+        "advice_records",
+        "soa_documents",
+        "roa_documents",
+        "fee_consents",
+        "advice_acknowledgements",
+        "execution_authorisations",
+        "client_objectives",
+        "client_documents",
+        "adviser_notes",
+        "advice_record_versions",
+      ];
+      for (const tbl of tablesAndDefaults) {
+        await db.execute(sql.raw(
+          `ALTER TABLE ${tbl} ALTER COLUMN retention_until SET DEFAULT now() + interval '7 years'`,
+        ));
+      }
+
+      // Backfill placeholder rows. Each entry maps a table to the column
+      // we treat as the "natural anchor" for the row — the same column the
+      // 7-year window is supposed to start from. The WHERE clause is the
+      // placeholder detector: retention_until within 1 day of the anchor
+      // means the original defaultNow() default was used.
+      const backfills: ReadonlyArray<{ table: string; anchor: string }> = [
+        { table: "fact_find_snapshots",       anchor: "created_at" },
+        { table: "risk_profiles",             anchor: "created_at" },
+        { table: "advice_records",            anchor: "created_at" },
+        { table: "soa_documents",             anchor: "created_at" },
+        { table: "roa_documents",             anchor: "created_at" },
+        { table: "fee_consents",              anchor: "consented_at" },
+        { table: "advice_acknowledgements",   anchor: "accepted_at" },
+        { table: "execution_authorisations",  anchor: "authorised_at" },
+        { table: "client_objectives",         anchor: "created_at" },
+        { table: "client_documents",          anchor: "uploaded_at" },
+        { table: "adviser_notes",             anchor: "created_at" },
+        { table: "advice_record_versions",    anchor: "issued_at" },
+      ];
+      for (const { table, anchor } of backfills) {
+        // The COALESCE guards rows where the anchor itself is somehow
+        // null (legacy data) by falling back to retention_until itself —
+        // because all twelve anchors carry a `defaultNow()` and were
+        // populated alongside the row, the fallback is essentially
+        // unreachable but kept as a safety belt.
+        //
+        // The 1-day fudge factor absorbs `now()` skew between the row's
+        // INSERT and the placeholder default's evaluation. We deliberately
+        // do NOT reference `created_at` in this query — two retention
+        // tables (client_documents, advice_record_versions) don't carry
+        // that column at all, and adding a per-table branch here would
+        // just duplicate the anchor list.
+        await db.execute(sql.raw(
+          `UPDATE ${table}
+             SET retention_until = COALESCE(${anchor}, retention_until) + interval '7 years'
+           WHERE retention_until IS NOT NULL
+             AND retention_until <= COALESCE(${anchor}, retention_until) + interval '1 day'`,
+        ));
+      }
+    }
+
     // Hash the demo user's plaintext password on first startup
     const demoUser = await storage.getUser(1);
     if (demoUser && !demoUser.password.startsWith("$2")) {

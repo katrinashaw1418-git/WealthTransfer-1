@@ -1933,16 +1933,18 @@ export function registerAdviserRoutes(app: Express): void {
   // Task #318 — DELETE /api/adviser/client-documents/:id
   // ---------------------------------------------------------------------------
   // Documents are retained for 7 years from creation per Corporations Act
-  // s912G. The schema already carries `deletion_locked` (defaults true) and
-  // `retention_until` (defaults to now() — the trigger that pushes it to
-  // now()+7y is a future migration). Until that trigger lands the boolean
-  // alone is sufficient to enforce the contract: an adviser CANNOT delete a
-  // document while the lock is set OR while the retention window is still
-  // open. Both checks short-circuit with HTTP 423 Locked + a structured
-  // body so the UI can render the lock chip + tooltip.
+  // s912G. The schema carries `deletion_locked` (defaults true) and
+  // `retention_until` (defaults to `now() + interval '7 years'` — Task #330).
+  // An adviser CANNOT delete a document while the lock is set OR while the
+  // retention window is still open. Both checks short-circuit with HTTP 423
+  // Locked + a structured body so the UI can render the lock chip + tooltip.
   //
-  // The audit row is emitted both for the successful delete (NOT WIRED YET
-  // because no document is currently delete-eligible) and for blocked
+  // Once `retention_until < now()`, the daily retention-sweeper cron
+  // (`server/services/retention-sweeper.ts`) flips `deletion_locked` to
+  // false and writes a `document.retention.expired` audit row, after which
+  // the row becomes delete-eligible through this route.
+  //
+  // The audit row is emitted for both successful deletes and blocked
   // attempts (`document.delete.blocked`) so a regulator can see when an
   // adviser tried to delete a still-retained file.
   // ---------------------------------------------------------------------------

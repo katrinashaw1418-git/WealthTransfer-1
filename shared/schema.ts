@@ -610,10 +610,10 @@ export type InsertAdviserClient = z.infer<typeof insertAdviserClientSchema>;
 // execution gate / 7-year retention lock are NOT created here — they belong to
 // later phases (2.2 → 2.5).
 //
-// Both tables include retentionUntil + deletionLocked columns up front so the
-// later DB trigger work can enforce the 7-year retention without an additional
-// ALTER. retentionUntil currently defaults to now() — the actual now()+7y rule
-// is enforced by the DB trigger added in a later phase.
+// Both tables include retentionUntil + deletionLocked columns. retentionUntil
+// defaults to `now() + interval '7 years'` (Task #330, Corporations Act
+// s912G); the daily retention-sweeper cron clears `deletionLocked` once the
+// 7-year window has truly elapsed.
 //
 // Decimal columns use the existing `decimal()` helper (Drizzle alias of
 // `numeric()`) for consistency with the rest of the schema.
@@ -670,10 +670,11 @@ export const factFindSnapshots = pgTable("fact_find_snapshots", {
   isComplete: boolean("is_complete").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow(),
 
-  // Retention scaffolding — DB trigger in a later phase will enforce
-  // retentionUntil = createdAt + 7 years and block deletes while
-  // deletionLocked = true. Defaults are placeholders until the trigger lands.
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  // Task #330 — column default is `now() + interval '7 years'` (Corporations
+  // Act s912G). The retention-sweeper cron clears `deletionLocked` once
+  // `retentionUntil < now()`. Both halves of the lock contract are evaluated
+  // by `evaluateRetentionLock` in server/services/document-retention.ts.
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 });
 
@@ -718,7 +719,7 @@ export const riskProfiles = pgTable("risk_profiles", {
 
   createdAt: timestamp("created_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 });
 
@@ -740,8 +741,9 @@ export type InsertRiskProfile = z.infer<typeof insertRiskProfileSchema>;
 // to later phases.
 //
 // All FKs are integer references to users.id (matching the rest of the repo).
-// retentionUntil currently defaults to now() — the actual now()+7y rule will
-// be enforced by a DB trigger in a later phase.
+// retentionUntil defaults to `now() + interval '7 years'` (Task #330,
+// Corporations Act s912G); the daily retention-sweeper cron clears
+// `deletionLocked` once the 7-year window has truly elapsed.
 // ===========================================================================
 
 export const adviceRecords = pgTable("advice_records", {
@@ -824,7 +826,7 @@ export const adviceRecords = pgTable("advice_records", {
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 });
 
@@ -864,7 +866,7 @@ export const soaDocuments = pgTable("soa_documents", {
 
   createdAt: timestamp("created_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 });
 
@@ -900,7 +902,7 @@ export const roaDocuments = pgTable("roa_documents", {
 
   createdAt: timestamp("created_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 });
 
@@ -993,7 +995,7 @@ export const feeConsents = pgTable("fee_consents", {
   supersededAt: timestamp("superseded_at"),
   supersededReason: text("superseded_reason"),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 
   createdAt: timestamp("created_at").defaultNow(),
@@ -1046,7 +1048,7 @@ export const adviceAcknowledgements = pgTable("advice_acknowledgements", {
   ipAddress: text("ip_address"),
   userAgent: text("user_agent"),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 
   createdAt: timestamp("created_at").defaultNow(),
@@ -1087,7 +1089,7 @@ export const executionAuthorisations = pgTable("execution_authorisations", {
   ipAddress: text("ip_address"),
   userAgent: text("user_agent"),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 
   createdAt: timestamp("created_at").defaultNow(),
@@ -2483,9 +2485,10 @@ export type InsertBackgroundJobRun = z.infer<
 //                                live row was never edited in place.
 //
 // All four tables follow the Phase 2.2 retention pattern:
-// retentionUntil + deletionLocked, defaulted to lock-on-create. The actual
-// now()+7y rule is enforced by the same future trigger covering the rest of
-// Phase 2.2 / 2.3.
+// retentionUntil + deletionLocked. retentionUntil defaults to
+// `now() + interval '7 years'` (Task #330, Corporations Act s912G); the
+// daily retention-sweeper cron clears `deletionLocked` once the 7-year
+// window has truly elapsed.
 // =============================================================================
 
 export const clientObjectives = pgTable("client_objectives", {
@@ -2519,7 +2522,7 @@ export const clientObjectives = pgTable("client_objectives", {
   createdByUserId: integer("created_by_user_id").references(() => users.id).notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 }, (table) => ({
   // "show me everything for this client" / "for this advice record"
@@ -2561,7 +2564,7 @@ export const clientDocuments = pgTable("client_documents", {
   uploadedByUserId: integer("uploaded_by_user_id").references(() => users.id).notNull(),
   uploadedAt: timestamp("uploaded_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 }, (table) => ({
   clientIdx: index("client_documents_client_idx").on(table.clientId),
@@ -2606,7 +2609,7 @@ export const adviserNotes = pgTable("adviser_notes", {
 
   createdAt: timestamp("created_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 }, (table) => ({
   adviserClientIdx: index("adviser_notes_adviser_client_idx").on(table.adviserUserId, table.clientUserId),
@@ -2650,7 +2653,7 @@ export const adviceRecordVersions = pgTable("advice_record_versions", {
   issuedByUserId: integer("issued_by_user_id").references(() => users.id),
   issuedAt: timestamp("issued_at").defaultNow(),
 
-  retentionUntil: timestamp("retention_until").defaultNow(),
+  retentionUntil: timestamp("retention_until").default(sql`now() + interval '7 years'`),
   deletionLocked: boolean("deletion_locked").notNull().default(true),
 }, (table) => ({
   // (adviceRecordId, versionNumber) is the natural lookup. UNIQUE so a race

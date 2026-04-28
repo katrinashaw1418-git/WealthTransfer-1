@@ -190,6 +190,17 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
     description:
       "Daily full run of scripts/go-no-go.ts against the production-equivalent environment. Pages on-call on NO-GO and persists the markdown report into operator_alerts so the dashboard always carries the latest verdict.",
   },
+  {
+    // Task #330 — daily 7-year retention sweep. Walks every regulatory
+    // retention table and clears `deletion_locked` on rows whose
+    // `retention_until` is now in the past, with a
+    // `document.retention.expired` audit row per row. Idempotent: rows
+    // already cleared are not re-touched.
+    name: "retention-sweeper",
+    label: "7-year retention sweeper",
+    description:
+      "Daily sweep that flips deletion_locked to false on every regulatory document whose 7-year retention_until has elapsed (Corporations Act s912G), with one audit row per cleared row.",
+  },
 ] as const;
 
 const KNOWN_JOB_NAMES = new Set(KNOWN_BACKGROUND_JOBS.map((j) => j.name));

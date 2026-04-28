@@ -731,6 +731,59 @@ app.use((req, res, next) => {
   }, 390 * 1000);
 
   // ---------------------------------------------------------------------------
+  // Task #330 — Daily 7-year retention sweeper
+  // ---------------------------------------------------------------------------
+  // Companion to the `now() + interval '7 years'` retention defaults installed
+  // in the startup-migration block: walks every regulatory retention table
+  // and clears `deletion_locked` on rows whose `retention_until` is now in
+  // the past, with a `document.retention.expired` audit row per row. The
+  // DELETE routes already re-evaluate the lock at request time, so this
+  // sweeper is the only path by which a regulator-retained document can ever
+  // become delete-eligible.
+  //
+  // The implementation lives in `server/services/retention-sweeper.ts` and
+  // is fully idempotent — re-running on the same day with no new
+  // expirations is a true no-op (no UPDATEs, no audit rows). Per-row
+  // failures are tallied into the summary instead of throwing so a single
+  // bad row cannot poison the entire sweep.
+  //
+  // Staggered 450s after start so it lands AFTER all the other daily crons
+  // (wallet recon, ledger recon, adviser-task automation, fee accruals,
+  // operator-alerts prune + watchdog, insufficient-funds sweep at 360s,
+  // and the instruction-consent-expiry sweep at 390s) have had their
+  // first tick on a fresh boot — a clean log stream to read first.
+  // ---------------------------------------------------------------------------
+  const { runRetentionSweeper, formatRetentionSweeperSummary } = await import(
+    "./services/retention-sweeper"
+  );
+
+  async function runRetentionSweeperCron() {
+    try {
+      await withBackgroundJobRunRecord("retention-sweeper", async () => {
+        // The sweeper writes UPDATEs and audit rows — both are writes, so
+        // the global kill switch must be honoured. Skipping cleanly keeps
+        // the dashboard summary uniform with every other cron in this
+        // module.
+        const ks = await assertWritesAllowed("retention-sweeper");
+        if (!ks.allowed) {
+          return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+        }
+        const summary = await runRetentionSweeper();
+        const line = formatRetentionSweeperSummary(summary);
+        log(`[retention-sweeper] completed: ${line}`);
+        return line;
+      });
+    } catch (e) {
+      console.error("[retention-sweeper] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runRetentionSweeperCron();
+    setInterval(runRetentionSweeperCron, 24 * 60 * 60 * 1000);
+  }, 450 * 1000);
+
+  // ---------------------------------------------------------------------------
   // Task #63 — Posting-receipt invariant guard
   // ---------------------------------------------------------------------------
   // Self-healing replacement for the manual "re-run
