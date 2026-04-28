@@ -138,6 +138,199 @@ function signRequest(
     .digest("hex");
 }
 
+// ---------------------------------------------------------------------------
+// Task #404 — Per-step KYC state
+// -----------------------------------------------------------------------------
+// `mintSumsubAccessToken` only signs/POSTs the access-token endpoint, but
+// reading the applicant + per-document status is the same kind of HMAC-signed
+// GET. The `signedGet` helper centralises that so `getApplicantStatus` can
+// hit two endpoints in parallel without repeating the timestamp/signature
+// dance. Exported for tests; not used outside this module otherwise.
+// ---------------------------------------------------------------------------
+export async function signedGet<T>(
+  config: SumsubConfig,
+  path: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<T> {
+  const ts = Math.floor(Date.now() / 1000);
+  const sig = signRequest(config.secretKey, ts, "GET", path, "");
+  const res = await fetchImpl(`${config.baseUrl}${path}`, {
+    method: "GET",
+    headers: {
+      "Accept": "application/json",
+      "X-App-Token": config.appToken,
+      "X-App-Access-Sig": sig,
+      "X-App-Access-Ts": String(ts),
+    },
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new SumsubApiError(res.status, text.slice(0, 500));
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new SumsubApiError(res.status, `Invalid JSON: ${text.slice(0, 200)}`);
+  }
+}
+
+// Per-step verdict — intentionally narrow so the route layer owns the mapping
+// to the UI-facing `ComplianceStepStatus` shape.
+export type SumsubStepVerdict =
+  | "approved"      // GREEN
+  | "rejected"      // RED + FINAL
+  | "retry"         // RED + RETRY (user can re-submit)
+  | "review"        // submitted, pending Sumsub review
+  | "in_progress"   // images uploaded but no review result yet
+  | "not_started";  // nothing uploaded yet for this step
+
+export interface SumsubApplicantSnapshot {
+  // The Sumsub applicantId — null when the applicant has not been created yet
+  // (i.e. the user has never opened the WebSDK).
+  applicantId: string | null;
+  identity: SumsubStepVerdict;
+  liveness: SumsubStepVerdict;
+  amlPep: SumsubStepVerdict;
+  // ISO timestamp of the last completed review, when known.
+  reviewedAt: string | null;
+}
+
+// Shape extracted from Sumsub responses. Kept loose because Sumsub adds new
+// optional fields over time and we only need a small subset.
+interface SumsubReviewResult {
+  reviewAnswer?: string;       // "GREEN" | "RED"
+  reviewRejectType?: string;   // "FINAL" | "RETRY"
+}
+
+interface SumsubApplicantOne {
+  id?: string;
+  review?: {
+    reviewStatus?: string; // init | pending | queued | completed | onHold | prechecked
+    reviewResult?: SumsubReviewResult;
+    reviewDate?: string;
+  };
+}
+
+interface SumsubDocStatusEntry {
+  imageIds?: number[] | string[];
+  reviewResult?: SumsubReviewResult;
+}
+type SumsubRequiredIdDocsStatus = Record<string, SumsubDocStatusEntry>;
+
+function verdictFromReviewResult(
+  result: SumsubReviewResult | undefined | null,
+): SumsubStepVerdict | null {
+  if (!result) return null;
+  if (result.reviewAnswer === "GREEN") return "approved";
+  if (result.reviewAnswer === "RED") {
+    return result.reviewRejectType === "FINAL" ? "rejected" : "retry";
+  }
+  return null;
+}
+
+function verdictFromDocEntry(
+  entry: SumsubDocStatusEntry | undefined,
+): SumsubStepVerdict {
+  if (!entry) return "not_started";
+  const fromResult = verdictFromReviewResult(entry.reviewResult);
+  if (fromResult) return fromResult;
+  // No verdict yet — uploaded but unreviewed counts as in_progress / review.
+  if (Array.isArray(entry.imageIds) && entry.imageIds.length > 0) return "review";
+  return "not_started";
+}
+
+// Sumsub uses different idDocSetType keys for the liveness step depending on
+// the level configuration ("SELFIE" for selfie matching, "LIVENESS_3D" for
+// the 3D liveness flow, plain "LIVENESS" for older flows). We pick the first
+// one that is present so the helper works across configurations.
+const LIVENESS_KEYS = ["SELFIE", "LIVENESS_3D", "LIVENESS"] as const;
+
+function pickLivenessEntry(
+  docs: SumsubRequiredIdDocsStatus,
+): SumsubDocStatusEntry | undefined {
+  for (const key of LIVENESS_KEYS) {
+    if (docs[key]) return docs[key];
+  }
+  return undefined;
+}
+
+function applicantIsNotFound(err: unknown): boolean {
+  if (!(err instanceof SumsubApiError)) return false;
+  // Sumsub returns 404 when the externalUserId has never been used. That's a
+  // legitimate "user has not started yet" signal, not an error.
+  return err.upstreamStatus === 404;
+}
+
+export async function getApplicantStatus(
+  externalUserId: string,
+  config: SumsubConfig,
+  fetchImpl: typeof fetch = fetch,
+): Promise<SumsubApplicantSnapshot> {
+  const encoded = encodeURIComponent(externalUserId);
+  const onePath = `/resources/applicants/-;externalUserId=${encoded}/one`;
+  const docsPath = `/resources/applicants/-;externalUserId=${encoded}/requiredIdDocsStatus`;
+
+  const [oneSettled, docsSettled] = await Promise.allSettled([
+    signedGet<SumsubApplicantOne>(config, onePath, fetchImpl),
+    signedGet<SumsubRequiredIdDocsStatus>(config, docsPath, fetchImpl),
+  ]);
+
+  // A 404 from either endpoint means "no applicant yet" / "no docs yet" — a
+  // legitimate not_started state. ANY other failure (5xx, network error,
+  // bad JSON, …) means we cannot produce a trustworthy per-step verdict, so
+  // we propagate the error and let the route fall back to the overall-status
+  // mapping. Returning a partial snapshot here would silently mislabel
+  // already-verified users as "Action required".
+  if (oneSettled.status === "rejected" && !applicantIsNotFound(oneSettled.reason)) {
+    throw oneSettled.reason;
+  }
+  if (docsSettled.status === "rejected" && !applicantIsNotFound(docsSettled.reason)) {
+    throw docsSettled.reason;
+  }
+
+  const one = oneSettled.status === "fulfilled" ? oneSettled.value : null;
+  const docs = docsSettled.status === "fulfilled" ? docsSettled.value : null;
+
+  // Per-document verdicts when /requiredIdDocsStatus is available.
+  const identity = docs
+    ? verdictFromDocEntry(docs.IDENTITY)
+    : "not_started";
+  const liveness = docs
+    ? verdictFromDocEntry(pickLivenessEntry(docs))
+    : "not_started";
+
+  // AML/PEP outcome lives at the applicant-level review (no per-doc entry).
+  // Mirror the overall reviewResult when present; fall back to the review
+  // status when the applicant exists but has not been reviewed yet.
+  let amlPep: SumsubStepVerdict = "not_started";
+  if (one?.review) {
+    const fromResult = verdictFromReviewResult(one.review.reviewResult);
+    if (fromResult) {
+      amlPep = fromResult;
+    } else if (one.review.reviewStatus === "completed") {
+      // Completed without an explicit answer — treat as pending review so
+      // the UI doesn't lie about an outcome we don't actually have.
+      amlPep = "review";
+    } else if (
+      one.review.reviewStatus === "pending" ||
+      one.review.reviewStatus === "queued" ||
+      one.review.reviewStatus === "onHold"
+    ) {
+      amlPep = "review";
+    } else if (one.review.reviewStatus === "prechecked") {
+      amlPep = "in_progress";
+    }
+  }
+
+  return {
+    applicantId: one?.id ?? null,
+    identity,
+    liveness,
+    amlPep,
+    reviewedAt: one?.review?.reviewDate ?? null,
+  };
+}
+
 export async function mintSumsubAccessToken(
   externalUserId: string,
   config: SumsubConfig,

@@ -14,6 +14,7 @@ import type {
   ComplianceStepStatus,
   ComplianceTierPill,
   ComplianceWholesalePill,
+  KycStateResponse,
 } from "@shared/schema";
 
 const SUMSUB_SDK_URL =
@@ -238,6 +239,14 @@ export default function Compliance() {
   const { data, isLoading, isError } = useQuery<ComplianceOverview>({
     queryKey: ["/api/compliance/overview"],
   });
+  // Task #404 — per-step KYC state pulled live from Sumsub. Cached briefly so
+  // re-renders don't hammer the upstream; refetched after the WebSDK closes.
+  // Falls back to the overall-status mapping inside the endpoint when Sumsub
+  // is unavailable, so this query never goes empty.
+  const { data: kycState } = useQuery<KycStateResponse>({
+    queryKey: ["/api/kyc/state"],
+    staleTime: 15_000,
+  });
 
   const [sdkOpen, setSdkOpen] = useState(false);
   const [sdkLaunching, setSdkLaunching] = useState(false);
@@ -253,6 +262,7 @@ export default function Compliance() {
 
   const refreshOverview = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/compliance/overview"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/kyc/state"] });
   };
 
   const closeSdk = () => {
@@ -350,14 +360,21 @@ export default function Compliance() {
     );
   }
 
+  // Task #404 — prefer the per-step verdict from `/api/kyc/state` when it
+  // arrived. The endpoint already falls back to the overall-status mapping
+  // server-side if Sumsub is unavailable, so reading directly from the
+  // overview is only the case during the very first render before the query
+  // resolves.
+  const sumsubSteps404 = kycState?.steps ?? data.sumsub.steps;
+
   const sumsubSidebarSteps: Array<{
     label: string;
     title: string;
     step: ComplianceStep;
   }> = [
-    { label: "SUMSUB", title: "Identity verification", step: data.sumsub.steps.identity },
-    { label: "SUMSUB", title: "AML / PEP screening", step: data.sumsub.steps.amlPep },
-    { label: "SUMSUB + AMAX", title: "Source of funds", step: data.sumsub.steps.sourceOfFunds },
+    { label: "SUMSUB", title: "Identity verification", step: sumsubSteps404.identity },
+    { label: "SUMSUB", title: "AML / PEP screening", step: sumsubSteps404.amlPep },
+    { label: "SUMSUB + AMAX", title: "Source of funds", step: sumsubSteps404.sourceOfFunds },
   ];
 
   const amaxSidebarSteps: Array<{
@@ -388,27 +405,27 @@ export default function Compliance() {
   }> = [
     {
       title: "Identity document",
-      desc: data.sumsub.steps.identity.description,
-      step: data.sumsub.steps.identity,
+      desc: sumsubSteps404.identity.description,
+      step: sumsubSteps404.identity,
     },
     {
       title: "Liveness check",
-      desc: data.sumsub.steps.liveness.description,
-      step: data.sumsub.steps.liveness,
+      desc: sumsubSteps404.liveness.description,
+      step: sumsubSteps404.liveness,
     },
     {
       title: "AML / PEP screening",
-      desc: data.sumsub.steps.amlPep.description,
-      step: data.sumsub.steps.amlPep,
+      desc: sumsubSteps404.amlPep.description,
+      step: sumsubSteps404.amlPep,
     },
     {
       title: "Source of funds declaration",
-      desc: data.sumsub.steps.sourceOfFunds.description,
+      desc: sumsubSteps404.sourceOfFunds.description,
       helper:
-        data.sumsub.steps.sourceOfFunds.status === "review"
+        sumsubSteps404.sourceOfFunds.status === "review"
           ? "No further action required from you · Typically 1–2 business days"
           : undefined,
-      step: data.sumsub.steps.sourceOfFunds,
+      step: sumsubSteps404.sourceOfFunds,
     },
   ];
 

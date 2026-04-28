@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { createHmac } from "crypto";
 import {
   buildExternalUserId,
+  getApplicantStatus,
   loadSumsubConfigFromEnv,
   mintSumsubAccessToken,
   parseExternalUserId,
@@ -270,5 +271,229 @@ describe("mapSumsubReviewToKycStatus", () => {
     expect(
       mapSumsubReviewToKycStatus({ reviewStatus: "completed", reviewAnswer: "Red" }),
     ).toBe("rejected");
+  });
+});
+
+describe("getApplicantStatus", () => {
+  const config: SumsubConfig = {
+    appToken: "sbx:test-app-token",
+    secretKey: "test-secret-key",
+    baseUrl: "https://api.sumsub.com",
+    levelName: "id-and-liveness",
+    ttlSecs: 600,
+  };
+
+  function makeFetch(
+    routes: Record<string, { status?: number; body: unknown }>,
+  ): { fetch: typeof fetch; calls: Array<{ url: string; headers: Record<string, string> }> } {
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fakeFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      calls.push({ url, headers: (init?.headers as Record<string, string>) ?? {} });
+      const path = url.replace(config.baseUrl, "");
+      const route = routes[path];
+      if (!route) return new Response("not found", { status: 404 });
+      return new Response(JSON.stringify(route.body), {
+        status: route.status ?? 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+    return { fetch: fakeFetch, calls };
+  }
+
+  it("maps GREEN reviewAnswers to per-step approved verdicts", async () => {
+    const { fetch: fakeFetch } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        body: {
+          id: "applicant-1",
+          review: {
+            reviewStatus: "completed",
+            reviewResult: { reviewAnswer: "GREEN" },
+            reviewDate: "2026-04-20T10:00:00Z",
+          },
+        },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        body: {
+          IDENTITY: { imageIds: [1], reviewResult: { reviewAnswer: "GREEN" } },
+          SELFIE: { imageIds: [2], reviewResult: { reviewAnswer: "GREEN" } },
+        },
+      },
+    });
+    const snap = await getApplicantStatus("amax-user-7", config, fakeFetch);
+    expect(snap).toEqual({
+      applicantId: "applicant-1",
+      identity: "approved",
+      liveness: "approved",
+      amlPep: "approved",
+      reviewedAt: "2026-04-20T10:00:00Z",
+    });
+  });
+
+  it("distinguishes RETRY rejections from FINAL ones", async () => {
+    const { fetch: fakeFetch } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        body: {
+          id: "applicant-2",
+          review: {
+            reviewStatus: "completed",
+            reviewResult: { reviewAnswer: "RED", reviewRejectType: "RETRY" },
+          },
+        },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        body: {
+          IDENTITY: { imageIds: [1], reviewResult: { reviewAnswer: "GREEN" } },
+          SELFIE: {
+            imageIds: [2],
+            reviewResult: { reviewAnswer: "RED", reviewRejectType: "FINAL" },
+          },
+        },
+      },
+    });
+    const snap = await getApplicantStatus("amax-user-7", config, fakeFetch);
+    expect(snap.identity).toBe("approved");
+    expect(snap.liveness).toBe("rejected"); // FINAL → rejected
+    expect(snap.amlPep).toBe("retry");       // RETRY → can re-submit
+  });
+
+  it("treats uploaded-but-unreviewed docs as 'review' and missing docs as 'not_started'", async () => {
+    const { fetch: fakeFetch } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        body: {
+          id: "applicant-3",
+          review: { reviewStatus: "pending" },
+        },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        body: {
+          IDENTITY: { imageIds: [1] }, // no reviewResult yet
+          // SELFIE / liveness key absent → not_started
+        },
+      },
+    });
+    const snap = await getApplicantStatus("amax-user-7", config, fakeFetch);
+    expect(snap.identity).toBe("review");
+    expect(snap.liveness).toBe("not_started");
+    expect(snap.amlPep).toBe("review"); // pending review at applicant level
+  });
+
+  it("falls back to LIVENESS_3D when SELFIE is absent", async () => {
+    const { fetch: fakeFetch } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        body: { id: "a", review: {} },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        body: {
+          IDENTITY: { imageIds: [1], reviewResult: { reviewAnswer: "GREEN" } },
+          LIVENESS_3D: { imageIds: [9], reviewResult: { reviewAnswer: "GREEN" } },
+        },
+      },
+    });
+    const snap = await getApplicantStatus("amax-user-7", config, fakeFetch);
+    expect(snap.liveness).toBe("approved");
+  });
+
+  it("treats a 404 from /one as 'no applicant yet' and reports not_started", async () => {
+    const { fetch: fakeFetch } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        status: 404,
+        body: { description: "applicant not found" },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        status: 404,
+        body: { description: "applicant not found" },
+      },
+    });
+    const snap = await getApplicantStatus("amax-user-7", config, fakeFetch);
+    expect(snap).toEqual({
+      applicantId: null,
+      identity: "not_started",
+      liveness: "not_started",
+      amlPep: "not_started",
+      reviewedAt: null,
+    });
+  });
+
+  it("propagates non-404 upstream failures from /one", async () => {
+    const { fetch: fakeFetch } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        status: 500,
+        body: { description: "internal error" },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        body: { IDENTITY: { imageIds: [1] } },
+      },
+    });
+    await expect(getApplicantStatus("amax-user-7", config, fakeFetch)).rejects.toMatchObject({
+      name: "SumsubApiError",
+      upstreamStatus: 500,
+    });
+  });
+
+  it("propagates non-404 upstream failures from /requiredIdDocsStatus too", async () => {
+    // Regression guard: returning a partial snapshot here used to mislabel
+    // verified users as "Action required" because identity/liveness defaulted
+    // to "not_started" whenever the docs endpoint was unavailable. The route
+    // catches this exception and falls back to the overall-status mapping —
+    // see the `/api/kyc/state` handler in server/routes.ts.
+    const { fetch: fakeFetch } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        body: {
+          id: "applicant-1",
+          review: {
+            reviewStatus: "completed",
+            reviewResult: { reviewAnswer: "GREEN" },
+          },
+        },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        status: 500,
+        body: { description: "internal error" },
+      },
+    });
+    await expect(getApplicantStatus("amax-user-7", config, fakeFetch)).rejects.toMatchObject({
+      name: "SumsubApiError",
+      upstreamStatus: 500,
+    });
+  });
+
+  it("signs each GET with the request method, path, and timestamp", async () => {
+    const { fetch: fakeFetch, calls } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax-user-7/one": {
+        body: { id: "a", review: {} },
+      },
+      "/resources/applicants/-;externalUserId=amax-user-7/requiredIdDocsStatus": {
+        body: {},
+      },
+    });
+    await getApplicantStatus("amax-user-7", config, fakeFetch);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      const path = call.url.replace(config.baseUrl, "");
+      const ts = call.headers["X-App-Access-Ts"];
+      expect(ts).toMatch(/^\d+$/);
+      const expectedSig = createHmac("sha256", "test-secret-key")
+        .update(`${ts}GET${path}`)
+        .digest("hex");
+      expect(call.headers["X-App-Access-Sig"]).toBe(expectedSig);
+      expect(call.headers["X-App-Token"]).toBe("sbx:test-app-token");
+    }
+  });
+
+  it("URL-encodes the externalUserId in both upstream calls", async () => {
+    const { fetch: fakeFetch, calls } = makeFetch({
+      "/resources/applicants/-;externalUserId=amax%20user%2F7/one": {
+        body: { id: "a", review: {} },
+      },
+      "/resources/applicants/-;externalUserId=amax%20user%2F7/requiredIdDocsStatus": {
+        body: {},
+      },
+    });
+    await getApplicantStatus("amax user/7", config, fakeFetch);
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://api.sumsub.com/resources/applicants/-;externalUserId=amax%20user%2F7/one",
+      "https://api.sumsub.com/resources/applicants/-;externalUserId=amax%20user%2F7/requiredIdDocsStatus",
+    ]);
   });
 });

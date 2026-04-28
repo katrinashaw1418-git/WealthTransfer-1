@@ -70,6 +70,7 @@ import {
   SumsubApiError,
   SumsubNotConfiguredError,
 } from "./services/sumsub";
+import { loadKycState } from "./services/kyc-state";
 import {
   assertKillSwitchOff,
   getAllKillSwitchStates,
@@ -115,6 +116,11 @@ const investmentSchema = z.object({
   sourceCurrency: z.string().min(2).max(10).optional(),
   sourceAmount: z.coerce.number().positive().optional(),
 });
+
+// Task #404 — Per-step KYC state cache + fallback logic lives in
+// `./services/kyc-state.ts` so it can be unit-tested without supertest /
+// without standing up the entire route table. The route below is a thin
+// adapter over `loadKycState`.
 
 // ---------------------------------------------------------------------------
 // Lightweight in-memory system event log — persists within a server session.
@@ -2130,6 +2136,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: unknown) {
       console.error("[sumsub-webhook] unexpected error", error);
       return res.status(500).json({ error: "Failed to process Sumsub webhook" });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Task #404 — Per-step KYC state
+  // -------------------------------------------------------------------------
+  // Returns a per-step status (identity / liveness / AML+PEP / source-of-funds)
+  // that the compliance page renders independently. The Sumsub data comes
+  // from two upstream calls (`/applicants/.../one` + `/requiredIdDocsStatus`)
+  // and is cached in-process for KYC_STATE_CACHE_MS so a busy page render
+  // doesn't hammer Sumsub. If the upstream call fails (or Sumsub isn't
+  // configured) we transparently fall back to the overall-status mapping
+  // produced by `buildComplianceOverview`, so the page never goes blank.
+  //
+  // The response always includes `source` ("sumsub" | "fallback") so the
+  // client can distinguish a per-step verdict from an overall-status repeat.
+  // -------------------------------------------------------------------------
+  app.get("/api/kyc/state", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      const result = await loadKycState(userId);
+      if (result.kind === "not_found") return res.status(404).json({ error: "User not found" });
+      return res.json(result.response);
+    } catch (error: any) {
+      if (error?.status) return res.status(error.status).json({ error: error.message });
+      console.error("[kyc-state] unexpected error", error);
+      res.status(500).json({ error: "Failed to load KYC state" });
     }
   });
 

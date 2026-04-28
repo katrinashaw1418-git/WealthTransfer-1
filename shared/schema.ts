@@ -3228,6 +3228,29 @@ export function deriveSumsubApplicantId(userId: number): string {
 }
 
 // =============================================================================
+// TASK #404 — Per-step KYC state
+// -----------------------------------------------------------------------------
+// View type returned by `GET /api/kyc/state`. Surfaces a status for each
+// Sumsub step independently (identity / liveness / AML+PEP / source-of-funds)
+// so the compliance page can show, e.g., "ID = Done, Liveness = Action
+// required" instead of inheriting the same overall status everywhere.
+//
+// `source` is "sumsub" when the data came straight from the Sumsub APIs and
+// "fallback" when the upstream call failed or Sumsub isn't configured — the
+// UI can use this to decide whether to render the per-step granularity at
+// face value or treat the page as overall-status-only.
+// =============================================================================
+export interface KycStateResponse {
+  source: "sumsub" | "fallback";
+  steps: {
+    identity: ComplianceStep;
+    liveness: ComplianceStep;
+    amlPep: ComplianceStep;
+    sourceOfFunds: ComplianceStep;
+  };
+}
+
+// =============================================================================
 // TASK #375 — Risk assessment questionnaire (compliance step A)
 // -----------------------------------------------------------------------------
 // One row per user captures their progress through the AMAX risk-assessment
