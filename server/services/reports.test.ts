@@ -27,6 +27,8 @@ import {
 import {
   DUPLICATE_GUARD_WINDOW_MS,
   findDuplicateRecentReport,
+  isDraftWatermarkEnabled,
+  isLicenseeDisclosurePending,
   notifyAdviserReportFailed,
   notifyAdviserReportReady,
   regenerateReport,
@@ -775,5 +777,86 @@ describe("runReportExpiringSoonReminder", () => {
     // Re-running is a zero-row no-op for the already-notified row.
     const second = await runReportExpiringSoonReminder({ now });
     expect(second.notifiedIds).not.toContain(eligible.id);
+  });
+});
+
+// ===========================================================================
+// Task #333 — Licensee disclosure & DRAFT-watermark gating
+//
+// The two helpers exposed by reports.ts decide:
+//   1. whether the rendered PDF must carry the visible "[PLACEHOLDER]" warning
+//      paragraph on the disclosure page (because the env-driven licensee
+//      values aren't configured yet); and
+//   2. whether a per-request `isDraft=true` actually paints the DRAFT banner
+//      on every page (suppressed in production unless explicitly opted in).
+//
+// `isLicenseeDisclosurePending()` reads module-level constants captured at
+// require-time, so we only assert the boolean shape (not flip env vars
+// after the fact). The default test env leaves the AMAX_LICENSEE_* vars
+// unset, so the helper resolves to true — that's the very signal we want
+// the disclosure page to surface.
+//
+// `isDraftWatermarkEnabled()` reads process.env on every call, so it can
+// be exercised by mutating the var in-place. Each test restores the
+// previous value to avoid bleed between cases.
+// ===========================================================================
+describe("isLicenseeDisclosurePending", () => {
+  it("returns true in the default test env (AMAX_LICENSEE_* not configured)", () => {
+    // The bootstrap doesn't set the four env vars, so the module-level
+    // constants kept their `[PLACEHOLDER]` defaults — the helper MUST
+    // detect that and tell the renderer to stamp the warning paragraph.
+    expect(isLicenseeDisclosurePending()).toBe(true);
+  });
+});
+
+describe("isDraftWatermarkEnabled", () => {
+  const ENV_KEY = "AMAX_REPORT_DRAFT_WATERMARK";
+  const NODE_ENV_KEY = "NODE_ENV";
+  let savedEnv: string | undefined;
+  let savedNodeEnv: string | undefined;
+
+  beforeAll(() => {
+    savedEnv = process.env[ENV_KEY];
+    savedNodeEnv = process.env[NODE_ENV_KEY];
+  });
+  afterAll(() => {
+    if (savedEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = savedEnv;
+    if (savedNodeEnv === undefined) delete process.env[NODE_ENV_KEY];
+    else process.env[NODE_ENV_KEY] = savedNodeEnv;
+  });
+
+  it("returns true when AMAX_REPORT_DRAFT_WATERMARK is explicitly truthy", () => {
+    for (const v of ["1", "true", "TRUE", "yes", "on"]) {
+      process.env[ENV_KEY] = v;
+      expect(isDraftWatermarkEnabled()).toBe(true);
+    }
+  });
+
+  it("returns false when AMAX_REPORT_DRAFT_WATERMARK is explicitly falsy", () => {
+    for (const v of ["0", "false", "FALSE", "no", "off"]) {
+      process.env[ENV_KEY] = v;
+      expect(isDraftWatermarkEnabled()).toBe(false);
+    }
+  });
+
+  it("defaults to FALSE in production-like envs (production/staging) when the env var is unset", () => {
+    delete process.env[ENV_KEY];
+    // Staging is intentionally treated like production: a regulator-facing
+    // UAT must not stamp DRAFT on its reports either. Anything outside the
+    // dev/demo/test allowlist falls through to FALSE.
+    for (const v of ["production", "staging", "uat", "preview"]) {
+      process.env[NODE_ENV_KEY] = v;
+      expect(isDraftWatermarkEnabled()).toBe(false);
+    }
+  });
+
+  it("defaults to TRUE in dev/demo/test envs (and when NODE_ENV is unset)", () => {
+    delete process.env[ENV_KEY];
+    for (const v of ["development", "dev", "demo", "test", undefined]) {
+      if (v === undefined) delete process.env[NODE_ENV_KEY];
+      else process.env[NODE_ENV_KEY] = v;
+      expect(isDraftWatermarkEnabled()).toBe(true);
+    }
   });
 });

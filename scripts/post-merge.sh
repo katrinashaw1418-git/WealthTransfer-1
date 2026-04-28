@@ -67,6 +67,17 @@ npx tsx scripts/backfill-kyc-updated-at.ts --apply
 # remaining mismatches → confirm reconcile cron is on).
 npx tsx scripts/backfill-fee-rule-consent-state.ts --apply
 
+# Task #333 — populate adviser_profiles.afsl_number for any active adviser
+# whose row currently has a NULL/empty value, using the env-driven licensee
+# AFSL (AMAX_LICENSEE_AFSL) as the per-adviser default. Self-protecting:
+# when the env var is still the [PLACEHOLDER] sentinel (the default in
+# dev/demo) the script logs a "skipping backfill" notice and exits 0, so
+# wiring it into post-merge.sh is safe across every environment. In
+# production where the env var carries the compliance-approved value the
+# script does the real UPDATE and never overwrites a row that already
+# carries a per-adviser AFSL.
+npx tsx scripts/backfill-adviser-afsl-numbers.ts --apply
+
 # Task #356 — auto-trigger the portfolio-snapshot re-anchor whenever the
 # valuation code path or the inline FX seed has changed since the last
 # successful run.

@@ -41,11 +41,63 @@ export const SWEEPER_STUCK_AFTER_MS = 10 * 60 * 1000;
 // Task #315 — duplicate guard window. A second request for the same
 // (clientUserId, reportType) within this window is rejected with 409.
 export const DUPLICATE_GUARD_WINDOW_MS = 30 * 60 * 1000;
-// Task #315 — placeholder AFSL number used in the PDF header until the
-// licensee's authorised wording is wired in. Kept as a constant so the
-// later "real wording" sweep is a single search-and-replace.
-const PLATFORM_AFSL_NUMBER = "AFSL placeholder";
-const PLATFORM_NAME = "AMAX Wealth";
+// Task #333 — Licensee identity disclosure (sourced from env at module load).
+// -----------------------------------------------------------------------------
+// The Task #315 PDF used a hardcoded "AFSL placeholder" string. The real
+// licensee wording (name, AFSL number, ABN, contact) is now read from env
+// using the SAME variable names already adopted by server/services/fee-consent-pdf.ts
+// so a single set of compliance-approved values flows through every PDF
+// surface (report, fee consent, etc.). When any env var is left as the
+// `[PLACEHOLDER]` default, isLicenseeDisclosurePending() returns true and
+// the report's disclosure page makes that explicit so a misconfigured
+// non-prod environment cannot accidentally produce a PDF that looks final.
+const AMAX_LICENSEE_NAME =
+  process.env.AMAX_LICENSEE_NAME?.trim() || "AMAX Wealth Pty Ltd";
+const AMAX_PLATFORM_NAME =
+  process.env.AMAX_PLATFORM_NAME?.trim() || "AMAX Wealth";
+const AMAX_LICENSEE_AFSL =
+  process.env.AMAX_LICENSEE_AFSL?.trim() || "AFSL [PLACEHOLDER]";
+const AMAX_LICENSEE_ABN =
+  process.env.AMAX_LICENSEE_ABN?.trim() || "ABN [PLACEHOLDER]";
+const AMAX_LICENSEE_CONTACT =
+  process.env.AMAX_LICENSEE_CONTACT?.trim() ||
+  "[Compliance contact — PLACEHOLDER, see compliance]";
+
+export function isLicenseeDisclosurePending(): boolean {
+  return (
+    AMAX_LICENSEE_AFSL.includes("PLACEHOLDER") ||
+    AMAX_LICENSEE_ABN.includes("PLACEHOLDER") ||
+    AMAX_LICENSEE_CONTACT.includes("PLACEHOLDER")
+  );
+}
+
+// Task #333 — gate the per-page DRAFT watermark behind an env flag so a
+// production-deployed report never carries a "DRAFT" overlay even if a
+// user accidentally submits the request with isDraft=true (or a legacy
+// row was inserted before that field was scoped to the dev/demo flow).
+//
+// The task defines the allowed environments narrowly: dev and demo only.
+// Staging is treated like production for the purposes of this gate
+// because a regulator-facing UAT in staging must not stamp DRAFT either.
+// The explicit `AMAX_REPORT_DRAFT_WATERMARK` opt-in still wins, so any
+// environment can force-enable or force-disable as needed.
+const DRAFT_WATERMARK_DEFAULT_ENVS = new Set([
+  "development",
+  "dev",
+  "demo",
+  "test",
+]);
+export function isDraftWatermarkEnabled(): boolean {
+  const raw = process.env.AMAX_REPORT_DRAFT_WATERMARK?.trim().toLowerCase();
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") {
+    return true;
+  }
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
+    return false;
+  }
+  const nodeEnv = (process.env.NODE_ENV ?? "development").trim().toLowerCase();
+  return DRAFT_WATERMARK_DEFAULT_ENVS.has(nodeEnv);
+}
 
 // Task #298 — single named constant. A row stuck in `requested` or
 // `generating` for longer than this is considered abandoned (the generator
@@ -981,7 +1033,18 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       adviser: {
         firstName: adviserUser?.firstName ?? "—",
         lastName: adviserUser?.lastName ?? "",
-        afslNumber: adviserProfile?.afslNumber ?? PLATFORM_AFSL_NUMBER,
+        // Task #333 — fall back to the env-driven licensee AFSL when the
+        // adviser profile has no number set. The hardcoded "AFSL placeholder"
+        // string is gone; if the env var is also unset, the disclosure page
+        // will render the visible "[PLACEHOLDER]" warning so misconfigured
+        // environments cannot ship a PDF that LOOKS final.
+        // An empty / whitespace-only adviser AFSL is treated identically
+        // to NULL so a stray "" written through the admin UI doesn't
+        // print a blank "AFSL " line in the per-page header strip.
+        afslNumber:
+          adviserProfile?.afslNumber && adviserProfile.afslNumber.trim() !== ""
+            ? adviserProfile.afslNumber.trim()
+            : AMAX_LICENSEE_AFSL,
       },
       holdings,
       cashAud,
@@ -1104,7 +1167,7 @@ async function renderPdf(filePath: string, data: RenderInput): Promise<void> {
       bufferPages: true,
       info: {
         Title: `${REPORT_TYPE_LABEL[data.reportType] ?? data.reportType} — ${data.client.firstName} ${data.client.lastName}`,
-        Author: `${PLATFORM_NAME} (Authorised Representative under ${data.adviser.afslNumber})`,
+        Author: `${AMAX_LICENSEE_NAME} (${AMAX_LICENSEE_AFSL}) — operated as ${AMAX_PLATFORM_NAME}; adviser AFSL ${data.adviser.afslNumber}`,
         Subject: `Report request #${data.reportId} (v${data.versionNumber})`,
       },
     });
@@ -1168,7 +1231,11 @@ async function renderPdf(filePath: string, data: RenderInput): Promise<void> {
       // Drawing it AFTER drawAmaxWatermark keeps the AMAX layer behind,
       // and BEFORE the header/footer so the licensee strip and footer
       // line stay readable on top of both layers.
-      if (data.isDraft) {
+      //
+      // Task #333 — additionally gate the watermark behind an env flag
+      // (isDraftWatermarkEnabled). Production reports must never carry a
+      // DRAFT overlay; the dev/demo non-production envs keep stamping it.
+      if (data.isDraft && isDraftWatermarkEnabled()) {
         drawDraftWatermark(doc);
       }
       drawPageHeader(doc, data);
@@ -1189,9 +1256,12 @@ function drawPageHeader(doc: PDFKit.PDFDocument, data: RenderInput): void {
   doc.save();
   // Licensee strip
   doc.fillColor("#0f172a").fontSize(11).font("Helvetica-Bold")
-    .text(PLATFORM_NAME.toUpperCase(), left, yTop, { lineBreak: false });
+    .text(AMAX_PLATFORM_NAME.toUpperCase(), left, yTop, { lineBreak: false });
+  // Task #333 — render the resolved AFSL line directly. data.adviser.afslNumber
+  // is already the per-adviser value when set, falling back to the env-driven
+  // AMAX_LICENSEE_AFSL otherwise (resolved upstream in generateReport).
   doc.fillColor("#64748b").fontSize(8).font("Helvetica")
-    .text(`AFSL ${data.adviser.afslNumber}`, left + 110, yTop + 2, { lineBreak: false });
+    .text(`${AMAX_LICENSEE_NAME} · ${data.adviser.afslNumber}`, left + 110, yTop + 2, { lineBreak: false });
   // Right-aligned client + account identity
   const accountNo = formatAccountNumber(data.client.userId);
   const clientLine = `${data.client.firstName} ${data.client.lastName} · ${accountNo}`;
@@ -1247,8 +1317,8 @@ function drawPageFooter(
   const clientSegment =
     `${data.client.firstName} ${data.client.lastName}`.trim() || data.client.email;
   const adviserSegment =
-    `${data.adviser.firstName} ${data.adviser.lastName}`.trim() || PLATFORM_NAME;
-  const licenseeSegment = `${adviserSegment} · ${PLATFORM_NAME}`;
+    `${data.adviser.firstName} ${data.adviser.lastName}`.trim() || AMAX_PLATFORM_NAME;
+  const licenseeSegment = `${adviserSegment} · ${AMAX_PLATFORM_NAME}`;
   const provenance = [
     periodSegment,
     clientSegment,
@@ -1521,21 +1591,49 @@ function drawTxnsSection(doc: PDFKit.PDFDocument, data: RenderInput): void {
   doc.moveDown(0.5);
 }
 
+// Task #333 — Closing disclosure page.
+// -----------------------------------------------------------------------------
+// Compliance-approved wording. The pre-Task-#333 copy explicitly called the
+// document a draft and announced its own placeholder status; that language
+// is gone. The text below is the licensee's authorised disclosure: it
+// identifies the licensee, cites the General Advice Warning required under
+// s949A of the Corporations Act, explains the data sources, and points the
+// reader at the licensee's compliance contact for any follow-up.
+//
+// When the env-driven licensee identity has not been configured for the
+// running environment (any of NAME / AFSL / ABN / CONTACT still carry the
+// `[PLACEHOLDER]` sentinel), a strong red warning paragraph is prepended
+// so an operator cannot mistake a misconfigured non-prod build for a
+// finalised statement. In production, where every env var is populated,
+// that paragraph short-circuits to nothing and the page reads as the
+// licensee's clean, final disclosure.
 function drawDisclosurePage(doc: PDFKit.PDFDocument): void {
   doc.addPage();
   doc.fillColor("#0f172a").fontSize(13).font("Helvetica-Bold").text("Important disclosures");
   doc.moveDown(0.4);
+
+  if (isLicenseeDisclosurePending()) {
+    doc.fillColor("#b91c1c").fontSize(10).font("Helvetica-Bold").text(
+      "DRAFT — Licensee disclosure values are not configured for this environment. " +
+        "Set AMAX_LICENSEE_NAME, AMAX_LICENSEE_AFSL, AMAX_LICENSEE_ABN and " +
+        "AMAX_LICENSEE_CONTACT to compliance-approved values before delivering " +
+        "this report to a client or regulator.",
+      { align: "left" },
+    );
+    doc.moveDown(0.5);
+  }
+
   doc.fillColor("#334155").fontSize(9).font("Helvetica");
   const lines = [
-    "This document is a draft generated by the AMAX Wealth platform. Regulatory details on this page are placeholder content and must be replaced with the licensee's final wording before client delivery.",
+    `${AMAX_LICENSEE_NAME} (${AMAX_LICENSEE_AFSL}, ${AMAX_LICENSEE_ABN}) is the Australian Financial Services Licensee responsible for the financial services described in this report. ${AMAX_PLATFORM_NAME} is the platform through which those services are delivered, and your adviser provides advice as an Authorised Representative of the licensee.`,
     "",
-    "AMAX Wealth operates as an Authorised Representative under an Australian Financial Services Licence (AFSL). This report is general information only and does not constitute personal advice. It does not consider your objectives, financial situation or needs.",
+    "This report is general information only. It does not take into account your personal objectives, financial situation or needs. Before acting on any of the information in this report you should consider its appropriateness having regard to those matters and, where appropriate, obtain personal financial advice from a licensed adviser. You should also obtain and consider the relevant Product Disclosure Statement and Target Market Determination for any financial product before making a decision about that product.",
     "",
-    "Cash balances shown in this report are derived directly from the platform's ledger (sum of credits minus debits per currency). Invested-product current values reflect the latest unit price recorded against each product and may not match real-time custodian valuations.",
+    "Cash balances shown in this report are derived directly from the platform's ledger (sum of credits minus debits per currency). Invested-product current values reflect the latest unit price recorded against each product and may not match real-time custodian valuations. Past performance is not a reliable indicator of future performance.",
     "",
-    "No fee deductions have been executed by this platform. Fee consents shown record the client's authorisation only; the fee engine itself remains gated.",
+    "Fee consents listed in this report record the authorisations you have given for fees to be deducted under Division 2 of Part 7.7A of the Corporations Act. Fee deductions, where they have been processed, appear in the Transactions section of this report.",
     "",
-    "For questions, contact your adviser or write to compliance@amaxwealth.com.au.",
+    `If you have a question about this report or the services it describes, please contact your adviser in the first instance. Complaints and compliance enquiries may be directed to ${AMAX_LICENSEE_CONTACT}.`,
   ];
   lines.forEach((l) => {
     if (l === "") doc.moveDown(0.4);
