@@ -292,6 +292,18 @@ export async function installFeeRuleAmountEqualityTrigger(
       c_amount numeric(14,4);
       rule_pct numeric(14,4);
     BEGIN
+      -- Task #475 — terminal-state rows are historical audit evidence and
+      -- must remain immutable in shape: the supersede pass and the
+      -- expiry sweep both UPDATE these rows to set lifecycle pointers
+      -- WITHOUT touching the amount columns, and we must not block
+      -- those updates just because a pre-trigger row has a drifted
+      -- amount on file. The amount-equality invariant is enforced for
+      -- the live lifecycle states (draft / active / paused) only —
+      -- exactly the states from which an accrual can ever be posted.
+      IF NEW.status IN ('superseded', 'expired') THEN
+        RETURN NEW;
+      END IF;
+
       SELECT amount_type, amount INTO c_amount_type, c_amount
       FROM fee_consents
       WHERE id = NEW.fee_consent_id;
