@@ -371,6 +371,16 @@ const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   // writes, no ledger entries, so the surrounding leak-gate snapshot
   // records zero drift.
   "scripts/test-portfolio-allocation-per-client.ts",
+  // Task #407 — companion unit tests for `resolveRecommendationTier`,
+  // the helper extracted from the AI-recommendations route handler so
+  // the textual recommendation tier (conservative / moderate /
+  // aggressive) is derived from the latest `riskProfiles.riskBand`
+  // row when one exists (Task #394), falling back to the per-request
+  // `riskTolerance` 1–5 number only when no profile is on file.
+  // Purely static (no DB writes), same shape as the
+  // test-rebalancing-benchmark.ts entry immediately above, so the
+  // surrounding leak-gate snapshot trivially records zero drift.
+  "scripts/test-recommendation-tier.ts",
   // Task #209 — regression test for the per-scenario platform-leg
   // invariant gate (Task #202). Injects a deliberate platform-only
   // ledger entry under a transaction NOT owned by the gate's fixture

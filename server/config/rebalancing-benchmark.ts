@@ -355,6 +355,62 @@ export function buildAllocationComparisonPayload(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Recommendation tier resolution (task #394 / #407).
+//
+// `/api/ai-recommendations/generate` flavours its textual recommendations by
+// one of three copy buckets — "conservative", "moderate", "aggressive". The
+// resolution policy mirrors `resolvePerClientBenchmark` above:
+//
+//   1. If the client has a stored `riskProfiles` row, derive the tier from
+//      its 5-band `riskBand` value (see `RiskBand` in
+//      `server/services/risk-scoring.ts`):
+//         conservative              → conservative
+//         moderate | balanced       → moderate
+//         growth | high_growth      → aggressive
+//      An unknown band falls through to "moderate" (the safest middle copy)
+//      rather than guessing aggressive on a future band the resolver has
+//      not been taught yet.
+//   2. Otherwise fall back to the per-request `riskTolerance` integer
+//      using the exact `<=` ladder the route handler used pre-extraction
+//      so the helper is a behaviour-preserving refactor:
+//         tolerance <= 2 → conservative
+//         tolerance <= 4 → moderate
+//         else            → aggressive
+//      A `NaN` tolerance (the only common runtime input where every `<=`
+//      comparison is false) lands in the final `else` → aggressive,
+//      matching what the original handler did. Other numeric inputs
+//      (including ±Infinity) flow through the same comparator as before.
+//
+// Centralising the policy here means the route handler stays thin AND the
+// behaviour can be unit-tested without spinning up Express. A regression
+// that re-keys the recommendation copy on `riskTolerance` instead of the
+// stored `riskBand` is caught by `scripts/test-recommendation-tier.ts`.
+export type RecommendationTier = "conservative" | "moderate" | "aggressive";
+
+export function resolveRecommendationTier(
+  latestRiskProfile: { riskBand: string | null | undefined } | null | undefined,
+  riskTolerance: number,
+): RecommendationTier {
+  if (latestRiskProfile) {
+    switch (latestRiskProfile.riskBand) {
+      case "conservative":
+        return "conservative";
+      case "moderate":
+      case "balanced":
+        return "moderate";
+      case "growth":
+      case "high_growth":
+        return "aggressive";
+      default:
+        return "moderate";
+    }
+  }
+  if (riskTolerance <= 2) return "conservative";
+  if (riskTolerance <= 4) return "moderate";
+  return "aggressive";
+}
+
 // Compute the one-sided turnover distance between an allocation (fractions
 // summing to ~1) and a benchmark. Result is in the [0, 1] range — multiply by
 // 100 at the route layer if the consumer expects a percent.

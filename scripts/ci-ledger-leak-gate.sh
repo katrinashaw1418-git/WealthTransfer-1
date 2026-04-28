@@ -50,6 +50,16 @@ SCRIPTS=(
   # writes, no ledger entries, so the surrounding leak-gate snapshot
   # records zero drift.
   scripts/test-portfolio-allocation-per-client.ts
+  # Task #407 — pure unit tests for `resolveRecommendationTier`, the
+  # helper that decides which copy bucket
+  # (`/api/ai-recommendations/generate`) emits based on the latest
+  # `riskProfiles.riskBand` row (Task #394). Same shape as
+  # test-rebalancing-benchmark.ts above — purely static, no DB writes,
+  # so the surrounding leak-gate snapshot trivially records zero
+  # drift. A regression that re-keys the recommendation copy on
+  # `riskTolerance` instead of the stored `riskBand` (the pre-#394
+  # behaviour) fails this gate at PR time.
+  scripts/test-recommendation-tier.ts
   # Task #216 — newer safety tests, audited and added to the gate so any
   # future regression into the same try/finally-cleanup leak pattern
   # fixed by Tasks #158 and #187 is caught at PR time.

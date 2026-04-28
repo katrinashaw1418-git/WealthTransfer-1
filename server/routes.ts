@@ -78,6 +78,7 @@ import {
   DEFAULT_REBALANCING_BENCHMARK,
   computeRebalancingGap,
   resolvePerClientBenchmark,
+  resolveRecommendationTier,
 } from "./config/rebalancing-benchmark";
 import { registerPortfolioRealMetricsRoute } from "./portfolio-real-metrics-route";
 import { registerPortfolioAllocationRoute } from "./portfolio-allocation-route";
@@ -3127,31 +3128,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // This keeps the copy aligned with the personalised rebalancing-gap
       // card so a client with a "growth" profile no longer receives
       // conservative-flavoured advice when a stale `riskTolerance: 1` is sent.
-      type RecommendationTier = "conservative" | "moderate" | "aggressive";
-      let recommendationTier: RecommendationTier;
-      if (latestRiskProfile) {
-        switch (latestRiskProfile.riskBand) {
-          case "conservative":
-            recommendationTier = "conservative";
-            break;
-          case "moderate":
-          case "balanced":
-            recommendationTier = "moderate";
-            break;
-          case "growth":
-          case "high_growth":
-            recommendationTier = "aggressive";
-            break;
-          default:
-            recommendationTier = "moderate";
-        }
-      } else if (riskTolerance <= 2) {
-        recommendationTier = "conservative";
-      } else if (riskTolerance <= 4) {
-        recommendationTier = "moderate";
-      } else {
-        recommendationTier = "aggressive";
-      }
+      // Task #407 — the policy lives in `resolveRecommendationTier` next to
+      // `resolvePerClientBenchmark` so it can be unit-tested without spinning
+      // up Express; see `scripts/test-recommendation-tier.ts`.
+      const recommendationTier = resolveRecommendationTier(
+        latestRiskProfile,
+        riskTolerance,
+      );
 
       // Generate recommendations based on risk profile
       const recommendations: Array<{ userId: number; type: string; title: string; description: string; severity: string; isRead: boolean }> = [];
