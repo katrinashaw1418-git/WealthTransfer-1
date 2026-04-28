@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useForm } from "react-hook-form";
@@ -307,23 +307,7 @@ export default function AdviserInstructions() {
     selectedProduct?.riskProfile === "high" ||
     selectedProduct?.riskProfile === "very_high";
 
-  // Deep-link support: when arriving from /adviser/products via the
-  // "Raise instruction" CTA, open the create dialog and pre-select the
-  // requested product. The query string is then cleared so a refresh
-  // doesn't keep re-opening the dialog.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const raw = params.get("productId");
-    if (!raw) return;
-    const productId = Number(raw);
-    if (!Number.isFinite(productId) || productId <= 0) return;
-    form.setValue("productId", productId, { shouldValidate: false });
-    setOpen(true);
-    setLocation("/adviser/instructions", { replace: true });
-    // location is intentionally not in deps — we only act on the initial mount URL.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const deepLinkAppliedRef = useRef(false);
 
   const createInstruction = useMutation({
     mutationFn: async (values: CreateInstructionForm) => {
@@ -429,6 +413,63 @@ export default function AdviserInstructions() {
       .map((c) => ({ client: c, label: clientOptionLabel(c) }))
       .filter((o): o is { client: ClientLite; label: string } => o.label !== null);
   }, [clients.data]);
+
+  // Deep-link support: when arriving from /adviser/products (with productId)
+  // or /adviser/clients/:id/holdings (with both clientUserId and productId),
+  // open the create dialog and pre-select whichever values resolve to real
+  // entries in the loaded clients/products. Invalid query params are ignored
+  // silently rather than poisoning the form with phantom selections. The
+  // query string is cleared after applying so a refresh doesn't re-open
+  // the dialog.
+  useEffect(() => {
+    if (deepLinkAppliedRef.current) return;
+    if (typeof window === "undefined") return;
+    // Wait until both lookups have resolved so we can validate the params
+    // against real options before pre-filling.
+    if (clients.isLoading || products.isLoading) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const productIdRaw = params.get("productId");
+    const clientUserIdRaw = params.get("clientUserId");
+    if (!productIdRaw && !clientUserIdRaw) {
+      deepLinkAppliedRef.current = true;
+      return;
+    }
+
+    let appliedAny = false;
+
+    if (clientUserIdRaw) {
+      const clientUserId = Number(clientUserIdRaw);
+      if (
+        Number.isFinite(clientUserId) &&
+        clientUserId > 0 &&
+        clientOptions.some((o) => o.client.userId === clientUserId)
+      ) {
+        form.setValue("clientUserId", clientUserId, { shouldValidate: false });
+        appliedAny = true;
+      }
+    }
+
+    if (productIdRaw) {
+      const productId = Number(productIdRaw);
+      if (
+        Number.isFinite(productId) &&
+        productId > 0 &&
+        visibleProducts.some((p) => p.id === productId)
+      ) {
+        form.setValue("productId", productId, { shouldValidate: false });
+        appliedAny = true;
+      }
+    }
+
+    if (appliedAny) {
+      setOpen(true);
+    }
+    setLocation("/adviser/instructions", { replace: true });
+    deepLinkAppliedRef.current = true;
+    // form/setLocation are stable; we only react to data readiness.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clients.isLoading, products.isLoading, clientOptions, visibleProducts]);
 
   // Filtered instruction rows for the table (status filter only — search /
   // pagination are out of scope for this task).

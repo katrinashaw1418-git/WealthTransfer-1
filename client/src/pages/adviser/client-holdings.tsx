@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRoute, Link } from "wouter";
+import { useRoute, Link, useLocation } from "wouter";
 import { apiFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ArrowLeft, Briefcase, AlertCircle } from "lucide-react";
+import { ArrowLeft, Briefcase, AlertCircle, FileSignature } from "lucide-react";
 
 interface HoldingRow {
   id: number;
@@ -69,7 +69,25 @@ function statusVariant(status: string): "default" | "secondary" | "outline" {
 
 export default function AdviserClientHoldings() {
   const [, params] = useRoute<{ id: string }>("/adviser/clients/:id/holdings");
+  const [, setLocation] = useLocation();
   const clientId = params?.id;
+  const clientIdNum = clientId ? Number(clientId) : NaN;
+
+  // Deep-link to the instructions form with both the client and the
+  // product pre-selected. The instructions page validates these params
+  // against its own data before applying, so an invalid clientId here
+  // falls back to the empty form rather than poisoning the selection.
+  const handleRaiseInstruction = (productId: number) => {
+    if (!Number.isFinite(clientIdNum) || clientIdNum <= 0) {
+      setLocation(`/adviser/instructions?productId=${productId}`);
+      return;
+    }
+    const search = new URLSearchParams({
+      clientUserId: String(clientIdNum),
+      productId: String(productId),
+    });
+    setLocation(`/adviser/instructions?${search.toString()}`);
+  };
 
   // Note: the global queryFn only uses queryKey[0] as the URL, so segmented
   // keys need an explicit queryFn that composes the full path. The segmented
@@ -195,6 +213,7 @@ export default function AdviserClientHoldings() {
                   <TableHead className="text-right">Return</TableHead>
                   <TableHead>Invested On</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -218,6 +237,18 @@ export default function AdviserClientHoldings() {
                       <Badge variant={statusVariant(r.status)} className="capitalize">
                         {r.status}
                       </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRaiseInstruction(r.productId)}
+                        data-testid={`button-raise-instruction-${r.id}`}
+                      >
+                        <FileSignature className="h-3.5 w-3.5 mr-1" />
+                        Raise instruction
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}

@@ -142,6 +142,19 @@ export default function AdviserProducts() {
     refetchOnMount: "always",
   });
 
+  // Optional sticky-client mode: when the shelf is reached via an "advise this
+  // client" entry point (e.g. /adviser/products?clientUserId=42), every
+  // "Raise instruction" CTA forwards that client through to the instruction
+  // form so the adviser doesn't have to pick the client a second time. The
+  // param is read once at mount; invalid values are dropped silently.
+  const stickyClientUserId = useMemo<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    const raw = new URLSearchParams(window.location.search).get("clientUserId");
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, []);
+
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const filtersChanged =
     filters.category !== "all" ||
@@ -236,8 +249,15 @@ export default function AdviserProducts() {
     // The instructions workflow requires an adviser-linked client and an
     // amount, so we deep-link to the shared instructions page with the
     // product preselected via query param. The instructions page falls back
-    // to its existing form behaviour if the param is missing.
-    setLocation(`/adviser/instructions?productId=${productId}`);
+    // to its existing form behaviour if the param is missing. When the shelf
+    // was opened with a sticky client (see stickyClientUserId above) we
+    // forward that too so both fields land pre-filled.
+    const params = new URLSearchParams();
+    params.set("productId", String(productId));
+    if (stickyClientUserId !== null) {
+      params.set("clientUserId", String(stickyClientUserId));
+    }
+    setLocation(`/adviser/instructions?${params.toString()}`);
   };
 
   const renderCard = (p: AdviserProduct) => (
