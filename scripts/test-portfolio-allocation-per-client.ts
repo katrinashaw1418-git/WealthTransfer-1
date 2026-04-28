@@ -95,7 +95,14 @@ function targetsApproxEqual(
   );
 }
 
-function fmtTargets(t: { fiat: number; crypto: number; stablecoin: number; investment: number }): string {
+function fmtTargets(
+  t: { fiat: number; crypto: number; stablecoin: number; investment: number } | null | undefined,
+): string {
+  // Defensive: when an assertion is failing because the route returned no
+  // `targets` object at all, the harness used to crash here while building
+  // the failure message — masking the real cause behind a TypeError. Render
+  // a clear "(none)" instead so the underlying assertion failure surfaces.
+  if (t == null) return "(none)";
   return `{ fiat: ${t.fiat}, crypto: ${t.crypto}, stablecoin: ${t.stablecoin}, investment: ${t.investment} }`;
 }
 
