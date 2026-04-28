@@ -181,6 +181,45 @@ export function resolvePerClientBenchmark(
   return DEFAULT_REBALANCING_BENCHMARK;
 }
 
+// Asset-class allocation comparison payload returned by the
+// /api/portfolio/real-metrics route. Centralised here (rather than built
+// inline in the route handler) so the wire shape and the rounding rule —
+// percentages 0–100 with one decimal — live in one auditable place that
+// the AI Advisory page test can pin without duplicating the math.
+//
+// `hasAllocationData` is *not* derived from the per-class numbers because a
+// freshly onboarded client legitimately has zero in every bucket; the route
+// supplies the flag explicitly (`totalValue > 0`) so the UI can render the
+// "no allocation data yet" placeholder instead of a misleading row of zeros.
+export interface AllocationComparisonPayload {
+  currentAllocation: { fiat: number; crypto: number; stablecoin: number; investment: number };
+  benchmarkAllocation: { fiat: number; crypto: number; stablecoin: number; investment: number };
+  hasAllocationData: boolean;
+}
+
+export function buildAllocationComparisonPayload(
+  allocation: { fiat: number; crypto: number; stablecoin: number; investment: number },
+  benchmark: RebalancingBenchmark,
+  hasAllocationData: boolean,
+): AllocationComparisonPayload {
+  const toPct = (n: number): number => +(n * 100).toFixed(1);
+  return {
+    currentAllocation: {
+      fiat:       toPct(allocation.fiat),
+      crypto:     toPct(allocation.crypto),
+      stablecoin: toPct(allocation.stablecoin),
+      investment: toPct(allocation.investment),
+    },
+    benchmarkAllocation: {
+      fiat:       toPct(benchmark.weights.fiat),
+      crypto:     toPct(benchmark.weights.crypto),
+      stablecoin: toPct(benchmark.weights.stablecoin),
+      investment: toPct(benchmark.weights.investment),
+    },
+    hasAllocationData,
+  };
+}
+
 // Compute the one-sided turnover distance between an allocation (fractions
 // summing to ~1) and a benchmark. Result is in the [0, 1] range — multiply by
 // 100 at the route layer if the consumer expects a percent.
