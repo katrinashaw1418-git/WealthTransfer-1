@@ -508,10 +508,15 @@ export function registerClientRoutes(app: Express): void {
           supersededByRequestId: feeConsents.supersededByRequestId,
           supersededAt: feeConsents.supersededAt,
           supersededReason: feeConsents.supersededReason,
+          // Drizzle's sql template renders `${feeConsents.id}` as the bare
+          // column name `"id"` rather than `"fee_consents"."id"`, which inside
+          // a correlated subquery accidentally resolves to `fcr.id` and makes
+          // the back-pointer always look like null. Pin the outer reference
+          // explicitly so the cross-table lookup actually works.
           supersedesRequestId: sql<number | null>`(
             SELECT supersedes_request_id
             FROM ${feeConsentRequests} fcr
-            WHERE fcr.signed_fee_consent_id = ${feeConsents.id}
+            WHERE fcr.signed_fee_consent_id = ${sql.raw('"fee_consents"."id"')}
             LIMIT 1
           )`,
         })
