@@ -70,6 +70,7 @@ interface InvestmentProduct {
   annualReturn: string | null;
   returnMethod: string;
   isActive: boolean;
+  isPublished: boolean;
   createdAt: string | null;
 }
 
@@ -97,6 +98,10 @@ const createProductSchema = z.object({
     .string()
     .regex(/^(0(\.\d{1,4})?|1(\.0{1,4})?)$/, "Decimal fraction in [0, 1], up to 4 decimals e.g. 0.11"),
   isActive: z.boolean().default(true),
+  // Investor-visibility flag — Task #350. Distinct from isActive: a product
+  // can be active (referenced by user_investments, valued nightly) yet still
+  // hidden from investor-facing reads while being staged as a draft.
+  isPublished: z.boolean().default(true),
 });
 type CreateProductValues = z.infer<typeof createProductSchema>;
 
@@ -134,6 +139,7 @@ export default function AdminProducts() {
       returnMethod: "fixed_annual_compound",
       annualReturn: "",
       isActive: true,
+      isPublished: true,
     },
   });
 
@@ -164,6 +170,26 @@ export default function AdminProducts() {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/products"] });
       toast({
         title: vars.isActive ? "Product activated" : "Product deactivated",
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Update failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // Task #350 — investor-visibility toggle. Sent in its own PATCH so it is
+  // independent of the active/inactive switch and cleanly audited.
+  const togglePublishedMut = useMutation({
+    mutationFn: async (vars: { id: number; isPublished: boolean }) => {
+      const res = await apiRequest("PATCH", `/api/admin/products/${vars.id}`, {
+        isPublished: vars.isPublished,
+      });
+      return res.json();
+    },
+    onSuccess: (_d, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/products"] });
+      toast({
+        title: vars.isPublished ? "Product published" : "Moved to draft",
       });
     },
     onError: (err: Error) => {
@@ -210,6 +236,7 @@ export default function AdminProducts() {
                   <TableHead>Target IRR</TableHead>
                   <TableHead>Min</TableHead>
                   <TableHead>Term</TableHead>
+                  <TableHead>Visibility</TableHead>
                   <TableHead className="text-right">Active</TableHead>
                 </TableRow>
               </TableHeader>
@@ -227,6 +254,25 @@ export default function AdminProducts() {
                     <TableCell className="text-sm">{p.targetNetIrr}</TableCell>
                     <TableCell className="text-sm">{fmtMoney(p.minimumInvestment)}</TableCell>
                     <TableCell className="text-sm">{p.term}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Badge
+                          variant={p.isPublished ? "default" : "secondary"}
+                          data-testid={`badge-product-visibility-${p.id}`}
+                        >
+                          {p.isPublished ? "Published" : "Draft"}
+                        </Badge>
+                        <Switch
+                          checked={p.isPublished}
+                          disabled={togglePublishedMut.isPending}
+                          onCheckedChange={(v) =>
+                            togglePublishedMut.mutate({ id: p.id, isPublished: v })
+                          }
+                          aria-label="Toggle visible to investors"
+                          data-testid={`switch-product-published-${p.id}`}
+                        />
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right">
                       <Switch
                         checked={p.isActive}
@@ -483,6 +529,28 @@ export default function AdminProducts() {
                       />
                     </FormControl>
                     <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="isPublished"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2">
+                    <div className="space-y-0.5">
+                      <FormLabel className="text-sm">Visible to investors</FormLabel>
+                      <p className="text-xs text-slate-500">
+                        Off keeps the product as a draft — hidden from investor-facing
+                        listings while still available in the admin catalogue.
+                      </p>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        data-testid="switch-product-published"
+                      />
+                    </FormControl>
                   </FormItem>
                 )}
               />

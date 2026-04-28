@@ -2975,6 +2975,10 @@ export function registerAdminRoutes(app: Express): void {
         .optional()
         .nullable(),
       isActive: z.boolean().optional(),
+      // Investor-visibility flag (Task #336/#350). Defaults to true at the
+      // DB level so omitting it keeps the existing "visible" behaviour;
+      // admins can pass `false` to stage a product as a draft.
+      isPublished: z.boolean().optional(),
     })
     .superRefine((val, ctx) => {
       const active = val.isActive !== false; // default true
@@ -3016,6 +3020,9 @@ export function registerAdminRoutes(app: Express): void {
       annualReturn: z.union([z.string(), z.number()]).transform(String).nullable().optional(),
       returnMethod: z.string().min(1).optional(),
       isActive: z.boolean().optional(),
+      // Task #350 — investor-visibility toggle. Independent of isActive:
+      // a product can be active (referenced, valued) yet hidden as a draft.
+      isPublished: z.boolean().optional(),
     })
     // Same numeric bound as create: if a non-empty annualReturn is supplied
     // on PATCH, it must be a decimal in [0, 1]. (Activation invariant —
@@ -3081,7 +3088,12 @@ export function registerAdminRoutes(app: Express): void {
           "admin_product_created",
           "investment_product",
           String(row.id),
-          { name: row.name, category: row.category, isActive: row.isActive },
+          {
+            name: row.name,
+            category: row.category,
+            isActive: row.isActive,
+            isPublished: row.isPublished,
+          },
           req.ip || null,
         );
         return row;
@@ -3160,6 +3172,8 @@ export function registerAdminRoutes(app: Express): void {
             updatedFields: Object.keys(updates),
             previousIsActive: existing.isActive,
             newIsActive: row.isActive,
+            previousIsPublished: existing.isPublished,
+            newIsPublished: row.isPublished,
           },
           req.ip || null,
         );
