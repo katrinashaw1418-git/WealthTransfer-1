@@ -14,6 +14,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/auth";
 import { useTransactions } from "@/hooks/use-portfolio";
+import { apiFetch } from "@/lib/queryClient";
 import { Search, Download, ArrowUpRight, ArrowDownLeft, RefreshCw, FileText, Clock, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
 
 const getStatusIcon = (status: string) => {
@@ -99,15 +100,22 @@ function defaultExportRange(): { from: string; to: string } {
   return { from: fmt(from), to: fmt(today) };
 }
 
-// Minimal, RFC-4180-ish CSV cell quoting. Wraps the cell in double-quotes
-// when it contains a comma, quote, or newline; doubles embedded quotes.
-function csvCell(value: unknown): string {
-  if (value == null) return "";
-  const s = String(value);
-  if (/[",\n\r]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
+function filenameFromContentDisposition(
+  header: string | null,
+  fallback: string,
+): string {
+  if (!header) return fallback;
+  const star = /filename\*\s*=\s*[^']*''([^;]+)/i.exec(header);
+  if (star?.[1]) {
+    try {
+      return decodeURIComponent(star[1].trim());
+    } catch {
+      // fall through
+    }
   }
-  return s;
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(header);
+  if (plain?.[1]) return plain[1].trim();
+  return fallback;
 }
 
 export default function Transactions() {
@@ -136,13 +144,11 @@ export default function Transactions() {
     return matchesSearch && matchesType && matchesStatus;
   });
 
-  // Task #338 — generate the CSV from the same `transactions` query the page
-  // is already showing (excluding exchanges, same as the on-screen list) and
-  // scope it to the chosen [from, to] window. The window is inclusive: `to`
-  // is bumped to end-of-day so a same-day pick still captures records made
-  // earlier in the day. The filename includes the user identifier and the
-  // ISO range so successive exports never collide on disk.
-  const handleExport = () => {
+  // Hand the chosen window to /api/transactions/export, which streams
+  // the full ledger from the database. Filename comes from the response's
+  // Content-Disposition so it stays in lock-step with the server.
+  const [exportInProgress, setExportInProgress] = useState(false);
+  const handleExport = async () => {
     if (!exportFrom || !exportTo) {
       toast({
         title: "Pick a date range",
@@ -170,59 +176,50 @@ export default function Transactions() {
       return;
     }
 
-    const rows = (transactions ?? []).filter((t: any) => {
-      if (t.type === "exchange") return false;
-      const ts = new Date(t.createdAt).getTime();
-      return Number.isFinite(ts) && ts >= fromMs && ts <= toMs;
-    });
+    const fallbackSlug = slugifyForFilename(
+      user?.username ?? user?.email ?? null,
+    );
+    const fallbackFilename = `account-activity_${fallbackSlug}_${exportFrom}_${exportTo}.csv`;
 
-    const header = [
-      "Date",
-      "Type",
-      "Description",
-      "From currency",
-      "To currency",
-      "Amount",
-      "Fee",
-      "Exchange rate",
-      "Status",
-    ];
-    const lines = [header.map(csvCell).join(",")];
-    for (const t of rows) {
-      lines.push(
-        [
-          new Date(t.createdAt).toISOString(),
-          getTypeLabel(t.type),
-          t.description ?? "",
-          t.fromCurrency ?? "",
-          t.toCurrency ?? "",
-          t.amount ?? "",
-          t.fee ?? "",
-          t.exchangeRate ?? "",
-          t.status ?? "",
-        ].map(csvCell).join(","),
+    setExportInProgress(true);
+    try {
+      const params = new URLSearchParams({
+        from: exportFrom,
+        to: exportTo,
+      });
+      const res = await apiFetch(
+        `/api/transactions/export?${params.toString()}`,
       );
+      const blob = await res.blob();
+      const filename = filenameFromContentDisposition(
+        res.headers.get("Content-Disposition"),
+        fallbackFilename,
+      );
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      setExportOpen(false);
+      toast({
+        title: "Statement downloaded",
+        description: `Exported as ${filename}.`,
+      });
+    } catch (err: any) {
+      toast({
+        title: "Export failed",
+        description:
+          err?.message ?? "Could not download your statement. Try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setExportInProgress(false);
     }
-    const csv = lines.join("\r\n") + "\r\n";
-
-    const userSlug = slugifyForFilename(user?.username ?? user?.email ?? null);
-    const filename = `account-activity_${userSlug}_${exportFrom}_${exportTo}.csv`;
-
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-
-    setExportOpen(false);
-    toast({
-      title: "Statement downloaded",
-      description: `${rows.length} record${rows.length === 1 ? "" : "s"} exported as ${filename}.`,
-    });
   };
 
   if (isLoading) {
@@ -312,10 +309,11 @@ export default function Transactions() {
                 <Button
                   size="sm"
                   onClick={handleExport}
+                  disabled={exportInProgress}
                   data-testid="button-confirm-export"
                 >
                   <Download className="w-3.5 h-3.5 mr-1.5" />
-                  Download CSV
+                  {exportInProgress ? "Downloading..." : "Download CSV"}
                 </Button>
               </div>
             </div>

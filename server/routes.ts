@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { createHash, randomBytes } from "crypto";
 import { z } from "zod";
 import rateLimit, { type Options as RateLimitOptions } from "express-rate-limit";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 import { storage } from "./storage";
 import { db } from "./db";
@@ -2714,6 +2714,263 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to get transactions" });
     }
+  });
+
+  // Server-side account-activity CSV export. Streams the user's full
+  // ledger for the requested [from, to] window straight from the DB in
+  // keyset-paginated batches, hashes the body as it goes, and writes one
+  // audit row per export attempt — `account_activity_exported` on a
+  // completed send, `account_activity_export_aborted` if the connection
+  // closes before all bytes are flushed.
+  const EXPORT_BATCH_SIZE = 500;
+  const transactionExportQuerySchema = z.object({
+    from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "from must be YYYY-MM-DD"),
+    to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "to must be YYYY-MM-DD"),
+  });
+
+  function csvCell(value: unknown): string {
+    if (value == null) return "";
+    const s = String(value);
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  const EXPORT_TYPE_LABELS: Record<string, string> = {
+    deposit: "Inflow",
+    withdrawal: "Outflow",
+    exchange: "Conversion",
+    transfer: "Transfer",
+    crypto_buy: "Acquisition",
+    crypto_sell: "Disposal",
+    adviser_fee_deduction: "Fee deduction",
+    adviser_fee_deduction_reversal: "Fee reversal",
+  };
+
+  function slugifyForFilename(value: string | null | undefined): string {
+    if (!value) return "user";
+    const cleaned = value
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return cleaned || "user";
+  }
+
+  app.get("/api/transactions/export", async (req, res) => {
+    let userId: number;
+    try {
+      ({ userId } = requireAuth(req));
+    } catch (error: any) {
+      if (error?.status) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const parsed = transactionExportQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: "Invalid date range",
+        details: parsed.error.flatten().fieldErrors,
+      });
+    }
+    const { from, to } = parsed.data;
+
+    // Inclusive window: `to` is bumped to end-of-day. Round-trip the
+    // parsed date back to YYYY-MM-DD and require an exact match so JS's
+    // calendar overflow (e.g. Feb 30 → Mar 2) is rejected outright.
+    const parseStrictUtcDate = (s: string): Date | null => {
+      const d = new Date(`${s}T00:00:00.000Z`);
+      if (!Number.isFinite(d.getTime())) return null;
+      if (d.toISOString().slice(0, 10) !== s) return null;
+      return d;
+    };
+    const fromDate = parseStrictUtcDate(from);
+    const toBaseDate = parseStrictUtcDate(to);
+    if (!fromDate || !toBaseDate) {
+      return res.status(400).json({ error: "Could not parse date range" });
+    }
+    const toDate = new Date(toBaseDate.getTime() + (24 * 60 * 60 * 1000) - 1);
+    if (fromDate.getTime() > toDate.getTime()) {
+      return res.status(400).json({ error: "from must be on or before to" });
+    }
+
+    let userSlug = "user";
+    try {
+      const userRow = await storage.getUser(userId);
+      userSlug = slugifyForFilename(userRow?.username ?? userRow?.email ?? null);
+    } catch {
+      userSlug = "user";
+    }
+    const filename = `account-activity_${userSlug}_${from}_${to}.csv`;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "no-store");
+
+    // Track terminal state via listeners attached BEFORE any body write,
+    // so a client that disconnects mid-stream (or before the first byte)
+    // is observed deterministically — the audit branch below picks the
+    // outcome from `terminal` regardless of when it fired.
+    let terminal: "finish" | "close" | "error" | null = null;
+    let terminalErr: Error | null = null;
+    const settled = new Promise<"finish" | "close" | "error">((resolve) => {
+      const fire = (o: "finish" | "close" | "error") => {
+        if (terminal !== null) return;
+        terminal = o;
+        resolve(o);
+      };
+      res.once("finish", () => fire("finish"));
+      res.once("close", () => fire("close"));
+      res.once("error", (e: Error) => {
+        terminalErr = e;
+        fire("error");
+      });
+    });
+    const isAborted = () => terminal !== null && terminal !== "finish";
+
+    const hash = createHash("sha256");
+    let byteCount = 0;
+    let rowCount = 0;
+    class ClientAbortedError extends Error {
+      constructor() {
+        super("client aborted");
+      }
+    }
+    // Honour backpressure, but race `drain` with `close`/`error` so a
+    // dead socket can never leave us awaiting `drain` indefinitely.
+    const writeChunk = async (chunk: string): Promise<void> => {
+      if (isAborted()) throw new ClientAbortedError();
+      const buf = Buffer.from(chunk, "utf-8");
+      hash.update(buf);
+      byteCount += buf.length;
+      const ok = res.write(buf);
+      if (ok) return;
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          res.off("drain", onDrain);
+          res.off("close", onAbort);
+          res.off("error", onAbort);
+        };
+        const onDrain = () => {
+          cleanup();
+          resolve();
+        };
+        const onAbort = () => {
+          cleanup();
+          reject(new ClientAbortedError());
+        };
+        res.once("drain", onDrain);
+        res.once("close", onAbort);
+        res.once("error", onAbort);
+      });
+    };
+
+    const header = [
+      "Date", "Type", "Description", "From currency", "To currency",
+      "Amount", "Fee", "Exchange rate", "Status",
+    ];
+
+    try {
+      await writeChunk(header.map(csvCell).join(",") + "\r\n");
+
+      // Keyset pagination over (createdAt ASC, id ASC). Each batch is
+      // emitted before the next is fetched, so the full result set is
+      // never resident in server memory.
+      let cursorCreatedAt: Date | null = null;
+      let cursorId: number | null = null;
+      while (!isAborted()) {
+        const conds = [
+          eq(transactions.userId, userId),
+          gte(transactions.createdAt, fromDate),
+          lte(transactions.createdAt, toDate),
+        ];
+        if (cursorCreatedAt != null && cursorId != null) {
+          conds.push(
+            sql`(${transactions.createdAt} > ${cursorCreatedAt} OR (${transactions.createdAt} = ${cursorCreatedAt} AND ${transactions.id} > ${cursorId}))`,
+          );
+        }
+        const batch = await db
+          .select()
+          .from(transactions)
+          .where(and(...conds))
+          .orderBy(asc(transactions.createdAt), asc(transactions.id))
+          .limit(EXPORT_BATCH_SIZE);
+
+        if (batch.length === 0) break;
+
+        for (const t of batch) {
+          const createdAtVal = t.createdAt
+            ? new Date(t.createdAt as unknown as string | Date)
+            : null;
+          const line = [
+            createdAtVal ? createdAtVal.toISOString() : "",
+            EXPORT_TYPE_LABELS[t.type] ?? t.type,
+            t.description ?? "",
+            t.fromCurrency ?? "",
+            t.toCurrency ?? "",
+            t.amount ?? "",
+            t.fee ?? "",
+            t.exchangeRate ?? "",
+            t.status ?? "",
+          ].map(csvCell).join(",");
+          await writeChunk(line + "\r\n");
+          rowCount += 1;
+        }
+
+        const last = batch[batch.length - 1];
+        cursorCreatedAt = last.createdAt
+          ? new Date(last.createdAt as unknown as string | Date)
+          : cursorCreatedAt;
+        cursorId = last.id;
+        if (batch.length < EXPORT_BATCH_SIZE) break;
+      }
+
+      if (!isAborted()) res.end();
+    } catch (err) {
+      if (err instanceof ClientAbortedError) {
+        // Connection closed mid-stream. `terminal` is already set; fall
+        // through to the audit branch below which will record the abort.
+      } else {
+        console.error("[transactions/export] export failed", err);
+        if (!res.headersSent) {
+          return res
+            .status(500)
+            .json({ error: "Failed to export activity" });
+        }
+        // Headers already on the wire. Tear the response down so the
+        // client gets a truncated body rather than a silent 200, and let
+        // the close/error listeners record the outcome below.
+        res.destroy(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+
+    const outcome = await settled;
+    const completed = outcome === "finish";
+    const action = completed
+      ? "account_activity_exported"
+      : "account_activity_export_aborted";
+    const meta: Record<string, unknown> = {
+      from,
+      to,
+      filename,
+      rowCount,
+      byteCount,
+      contentSha256: hash.digest("hex"),
+      outcome,
+    };
+    const recordedErr = terminalErr as Error | null;
+    if (!completed && recordedErr) {
+      meta.errorMessage = recordedErr.message.slice(0, 500);
+    }
+
+    await writeAuditLog(
+      userId,
+      action,
+      "user",
+      String(userId),
+      meta,
+      req.ip || null,
+    );
   });
 
   // Get FX rates
