@@ -111,7 +111,7 @@ function formatBytes(n: number | null): string {
 // horizon is shorter than ~5 weeks the annualised number is unstable, so we
 // fall back to the simple-return percentage instead — the same guard the
 // real-metrics route uses for its CAGR readout.
-function computeRequiredCagr(
+export function computeRequiredCagr(
   current: number,
   target: number,
   targetDate: string | null,
