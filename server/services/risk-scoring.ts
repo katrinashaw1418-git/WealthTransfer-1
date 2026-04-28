@@ -195,7 +195,13 @@ export function riskRank(band: RiskBand): number {
   return ranks[band];
 }
 
-const PORTFOLIO_ALLOCATIONS: Record<RiskBand, Allocation> = {
+// Exported as the source of truth for the five canonical risk-band
+// allocations. The rebalancing-benchmark resolver
+// (`server/config/rebalancing-benchmark.ts`) and its CI test
+// (`scripts/test-rebalancing-benchmark.ts`) both read this map directly
+// so a change to the percentages here cannot silently drift away from
+// the resolver's mapping or its benchmark fixtures.
+export const PORTFOLIO_ALLOCATIONS: Record<RiskBand, Allocation> = {
   conservative: { cash: 25, bonds: 45, equities: 25, alternatives: 5, crypto: 0 },
   moderate:     { cash: 15, bonds: 35, equities: 45, alternatives: 5, crypto: 0 },
   balanced:     { cash: 10, bonds: 25, equities: 55, alternatives: 5, crypto: 5 },

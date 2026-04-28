@@ -40,6 +40,7 @@ import {
   type RebalancingBenchmark,
   type RiskProfileAllocation,
 } from "../server/config/rebalancing-benchmark";
+import { PORTFOLIO_ALLOCATIONS } from "../server/services/risk-scoring";
 
 // ---------------------------------------------------------------------------
 // Tiny assertion helpers — kept local so this script has no test-runner
@@ -82,10 +83,24 @@ function fmtWeights(w: RebalancingBenchmark["weights"]): string {
 // ---------------------------------------------------------------------------
 // 1. resolveBenchmarkForRiskProfileRow — canonical risk-band allocations.
 //
-// The source-of-truth allocations (as recorded by the scoring service in
-// `server/services/risk-scoring.ts`) are reproduced here as percentages
-// so a divergence between the two files surfaces as a test failure
-// rather than a silent benchmark drift.
+// The five risk-band percentage allocations are imported directly from
+// `server/services/risk-scoring.ts` (`PORTFOLIO_ALLOCATIONS`) — the same
+// map that produces every persisted `risk_profiles.allocation` row in
+// production. The expected four-bucket weights are then derived from
+// those live percentages using the deterministic mapping documented at
+// the top of this file:
+//
+//   fiat       ← cash       / 100
+//   crypto     ← crypto     / 100
+//   investment ← (bonds + equities + alternatives) / 100
+//   stablecoin ← 0
+//
+// This means an intentional update to `PORTFOLIO_ALLOCATIONS` keeps the
+// test green automatically (both sides move together), while any change
+// that breaks the resolver's mapping — or restructures the allocation
+// shape so the four-bucket buckets no longer sum to 1 — fails the gate
+// with a "benchmark mapping changed" message instead of silently passing
+// on stale numbers.
 // ---------------------------------------------------------------------------
 
 interface CanonicalCase {
@@ -94,33 +109,35 @@ interface CanonicalCase {
   expected: RebalancingBenchmark["weights"];
 }
 
-const CANONICAL_CASES: CanonicalCase[] = [
-  {
-    band: "conservative",
-    allocation: { cash: 25, bonds: 45, equities: 25, alternatives: 5, crypto: 0 },
-    expected: { fiat: 0.25, crypto: 0.0, stablecoin: 0, investment: 0.75 },
-  },
-  {
-    band: "moderate",
-    allocation: { cash: 15, bonds: 35, equities: 45, alternatives: 5, crypto: 0 },
-    expected: { fiat: 0.15, crypto: 0.0, stablecoin: 0, investment: 0.85 },
-  },
-  {
-    band: "balanced",
-    allocation: { cash: 10, bonds: 25, equities: 55, alternatives: 5, crypto: 5 },
-    expected: { fiat: 0.10, crypto: 0.05, stablecoin: 0, investment: 0.85 },
-  },
-  {
-    band: "growth",
-    allocation: { cash: 5, bonds: 10, equities: 70, alternatives: 5, crypto: 10 },
-    expected: { fiat: 0.05, crypto: 0.10, stablecoin: 0, investment: 0.85 },
-  },
-  {
-    band: "high_growth",
-    allocation: { cash: 0, bonds: 5, equities: 75, alternatives: 5, crypto: 15 },
-    expected: { fiat: 0.0, crypto: 0.15, stablecoin: 0, investment: 0.85 },
-  },
-];
+function deriveExpectedWeights(
+  allocation: RiskProfileAllocation,
+): RebalancingBenchmark["weights"] {
+  return {
+    fiat: allocation.cash / 100,
+    crypto: allocation.crypto / 100,
+    stablecoin: 0,
+    investment:
+      (allocation.bonds + allocation.equities + allocation.alternatives) / 100,
+  };
+}
+
+const CANONICAL_CASES: CanonicalCase[] = (
+  Object.entries(PORTFOLIO_ALLOCATIONS) as Array<
+    [keyof typeof PORTFOLIO_ALLOCATIONS, RiskProfileAllocation]
+  >
+).map(([band, allocation]) => ({
+  band,
+  allocation,
+  expected: deriveExpectedWeights(allocation),
+}));
+
+// Defensive: if a future refactor empties or otherwise deletes a band,
+// the test surface itself shrinks silently. Pin the expected count.
+record(
+  "canonical risk-band coverage",
+  CANONICAL_CASES.length === 5,
+  `expected 5 risk bands in PORTFOLIO_ALLOCATIONS, got ${CANONICAL_CASES.length} — benchmark mapping changed`,
+);
 
 for (const { band, allocation, expected } of CANONICAL_CASES) {
   const result = resolveBenchmarkForRiskProfileRow({ allocation });
@@ -128,18 +145,25 @@ for (const { band, allocation, expected } of CANONICAL_CASES) {
     `risk-profile mapping: ${band}`,
     result.type === "risk_profile_personalised" &&
       weightsApproxEqual(result.weights, expected),
-    `expected ${fmtWeights(expected)} (type=risk_profile_personalised), got ${fmtWeights(result.weights)} (type=${result.type})`,
+    `benchmark mapping changed for ${band}: expected ${fmtWeights(expected)} (type=risk_profile_personalised) derived from PORTFOLIO_ALLOCATIONS=${JSON.stringify(allocation)}, got ${fmtWeights(result.weights)} (type=${result.type})`,
   );
 }
 
 // Sanity: every canonical mapping must produce weights that sum to 1.
+// The resolver normalises by the allocation total, so this invariant
+// holds for any positive-sum input — the assertion guards against a
+// future change to the resolver itself (e.g. dropping the normaliser
+// or introducing a fifth output bucket) rather than against the raw
+// PORTFOLIO_ALLOCATIONS totals. Drift from the canonical 100% totals
+// is caught by the per-band mapping assertion above (which compares
+// against value/100, not value/total).
 for (const { band, allocation } of CANONICAL_CASES) {
   const w = resolveBenchmarkForRiskProfileRow({ allocation }).weights;
   const sum = w.fiat + w.crypto + w.stablecoin + w.investment;
   record(
     `risk-profile mapping sum-to-one: ${band}`,
     approxEqual(sum, 1.0, 1e-9),
-    `weights sum to ${sum} for ${band}`,
+    `benchmark mapping changed: resolver weights sum to ${sum} for ${band} (expected 1) — resolver no longer normalises by total or emits an unexpected bucket`,
   );
 }
 
