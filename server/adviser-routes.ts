@@ -68,6 +68,7 @@ import {
   listAdviserInstructions,
   createAdviserInstruction,
   assertAdviserClientLink,
+  loadAdviserFixtureFilterContext,
 } from "./services/adviser-access";
 import { insertAdviserTaskSchema, insertReportRequestSchema } from "@shared/schema";
 
@@ -1310,9 +1311,21 @@ export function registerAdviserRoutes(app: Express): void {
         const offset = (page - 1) * limit;
 
         const conds: any[] = [eq(feeConsentRequests.adviserUserId, auth.userId)];
+        // Task #308 — fixture-client filter, see fee-rules above. Even
+        // pending fee-consent requests authored against a fixture-pattern
+        // client must be hidden from a real adviser's list view.
+        const fixtureCtx = await loadAdviserFixtureFilterContext(auth.userId);
         if (clientIdRaw && Number.isFinite(clientIdRaw)) {
           await assertAdviserClientLink(auth.userId, clientIdRaw);
+          if (fixtureCtx.excludedClientIds.includes(clientIdRaw)) {
+            return res.json({ items: [], page, limit, total: 0 });
+          }
           conds.push(eq(feeConsentRequests.clientUserId, clientIdRaw));
+        } else {
+          if (fixtureCtx.visibleClientIds.length === 0) {
+            return res.json({ items: [], page, limit, total: 0 });
+          }
+          conds.push(inArray(feeConsentRequests.clientUserId, fixtureCtx.visibleClientIds));
         }
         if (status) conds.push(eq(feeConsentRequests.status, status));
 
@@ -1468,9 +1481,24 @@ export function registerAdviserRoutes(app: Express): void {
       const offset = (page - 1) * limit;
 
       const filters: any[] = [eq(adviserFeeRules.adviserUserId, auth.userId)];
+      // Task #308 — defence-in-depth: scope every fee-engine read to the
+      // adviser's post-fixture-filter visible client set. Mirrors the
+      // policy already applied to listAdviserTasks / dashboard /
+      // notifications so a fixture-pattern client (e.g.
+      // `adviser-race-...@example.com`) can never surface fee rules,
+      // accruals, or deductions to a real adviser, even via direct URL.
+      const fixtureCtx = await loadAdviserFixtureFilterContext(auth.userId);
       if (Number.isInteger(clientIdQ) && clientIdQ > 0) {
         await assertAdviserClientLink(auth.userId, clientIdQ);
+        if (fixtureCtx.excludedClientIds.includes(clientIdQ)) {
+          return res.json({ items: [], page, limit, total: 0, users: {} });
+        }
         filters.push(eq(adviserFeeRules.clientUserId, clientIdQ));
+      } else {
+        if (fixtureCtx.visibleClientIds.length === 0) {
+          return res.json({ items: [], page, limit, total: 0, users: {} });
+        }
+        filters.push(inArray(adviserFeeRules.clientUserId, fixtureCtx.visibleClientIds));
       }
       if (statuses.length === 1) filters.push(eq(adviserFeeRules.status, statuses[0]));
       else if (statuses.length > 1) filters.push(inArray(adviserFeeRules.status, statuses));
@@ -1549,9 +1577,19 @@ export function registerAdviserRoutes(app: Express): void {
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
       const clientIdQ = Number(req.query.clientUserId);
       const filters: any[] = [eq(adviserFeeAccruals.adviserUserId, auth.userId)];
+      // Task #308 — fixture-client filter, see fee-rules above.
+      const fixtureCtx = await loadAdviserFixtureFilterContext(auth.userId);
       if (Number.isInteger(clientIdQ) && clientIdQ > 0) {
         await assertAdviserClientLink(auth.userId, clientIdQ);
+        if (fixtureCtx.excludedClientIds.includes(clientIdQ)) {
+          return res.json({ items: [], users: {} });
+        }
         filters.push(eq(adviserFeeAccruals.clientUserId, clientIdQ));
+      } else {
+        if (fixtureCtx.visibleClientIds.length === 0) {
+          return res.json({ items: [], users: {} });
+        }
+        filters.push(inArray(adviserFeeAccruals.clientUserId, fixtureCtx.visibleClientIds));
       }
       const rows = await db
         .select()
@@ -1576,9 +1614,19 @@ export function registerAdviserRoutes(app: Express): void {
       const clientIdQ = Number(req.query.clientUserId);
       const filters: any[] = [eq(adviserFeeDeductions.adviserUserId, auth.userId)];
       if (status) filters.push(eq(adviserFeeDeductions.status, status));
+      // Task #308 — fixture-client filter, see fee-rules above.
+      const fixtureCtx = await loadAdviserFixtureFilterContext(auth.userId);
       if (Number.isInteger(clientIdQ) && clientIdQ > 0) {
         await assertAdviserClientLink(auth.userId, clientIdQ);
+        if (fixtureCtx.excludedClientIds.includes(clientIdQ)) {
+          return res.json({ items: [], users: {} });
+        }
         filters.push(eq(adviserFeeDeductions.clientUserId, clientIdQ));
+      } else {
+        if (fixtureCtx.visibleClientIds.length === 0) {
+          return res.json({ items: [], users: {} });
+        }
+        filters.push(inArray(adviserFeeDeductions.clientUserId, fixtureCtx.visibleClientIds));
       }
       const rows = await db
         .select()

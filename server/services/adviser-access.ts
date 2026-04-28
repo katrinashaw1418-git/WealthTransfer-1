@@ -151,7 +151,7 @@ export interface AdviserFixtureFilterContext {
  * Cheap when the adviser has no linked clients (one SELECT, returns empty).
  * Cheap when no linked clients are fixture (one SELECT, returns full set).
  */
-async function loadAdviserFixtureFilterContext(
+export async function loadAdviserFixtureFilterContext(
   adviserUserId: number,
 ): Promise<AdviserFixtureFilterContext> {
   const linkedRows = await db
@@ -750,7 +750,7 @@ export async function getAdviserClientHoldings(
   clientUserId: number,
 ): Promise<AdviserClientHoldingRow[]> {
   await assertAdviserClientLink(adviserUserId, clientUserId);
-  return db
+  const rows = await db
     .select({
       id: userInvestments.id,
       productId: userInvestments.productId,
@@ -769,6 +769,28 @@ export async function getAdviserClientHoldings(
     .innerJoin(investmentProducts, eq(investmentProducts.id, userInvestments.productId))
     .where(eq(userInvestments.userId, clientUserId))
     .orderBy(desc(userInvestments.investmentDate));
+
+  // Drop holdings whose product is no longer on the canonical AMAX shelf
+  // (category not in `@shared/product-categories`). Mirrors the
+  // `listAdviserProducts` filter so a fixture/legacy product like the
+  // historical `InRange825` (category `x`) cannot leak into the adviser
+  // holdings table for any linked client. One structured warning per
+  // dropped (clientId, productId) pair so future contamination remains
+  // investigable without log spam.
+  const filtered: AdviserClientHoldingRow[] = [];
+  for (const row of rows) {
+    if (isKnownProductCategory(row.productCategory)) {
+      filtered.push(row);
+    } else {
+      console.warn(
+        `[adviser-access] excluded holding with unknown product category: ` +
+          `adviserUserId=${adviserUserId} clientUserId=${clientUserId} ` +
+          `productId=${row.productId} productName="${row.productName}" ` +
+          `category="${row.productCategory}"`,
+      );
+    }
+  }
+  return filtered;
 }
 
 // -----------------------------------------------------------------------------
@@ -883,7 +905,27 @@ export async function listAdviserInstructions(
     email: r.clientEmail,
   }));
   const kept = await filterFixtureClientRows(adviserUserId, tagged);
-  return kept.map((k) => k.row);
+
+  // Also drop any instruction whose product category is not in the
+  // canonical shelf set (`@shared/product-categories`). Mirrors the
+  // `listAdviserProducts` and `createAdviserInstruction` filters: the
+  // adviser dropdown hides these products, the write path rejects new
+  // references, and the instructions list now hides any historical row
+  // that was created before the write-path filter landed.
+  const filtered: AdviserInstructionRow[] = [];
+  for (const k of kept) {
+    if (isKnownProductCategory(k.row.productCategory)) {
+      filtered.push(k.row);
+    } else {
+      console.warn(
+        `[adviser-access] excluded instruction with unknown product category: ` +
+          `adviserUserId=${adviserUserId} instructionId=${k.row.id} ` +
+          `productId=${k.row.productId} productName="${k.row.productName}" ` +
+          `category="${k.row.productCategory}"`,
+      );
+    }
+  }
+  return filtered;
 }
 
 export interface CreateAdviserInstructionInput {
