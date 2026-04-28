@@ -1,0 +1,28 @@
+Verified. Your list is correct, but split it into P0 / P1 / merge-or-clarify so the board does not become messy.
+Add immediately — P0
+1. Fix `$150 rule` vs `$495 consent` discrepancy
+Priority: P0 Reason: data integrity + trust issue. Task: Rule amount must derive from linked fee consent at DB/service layer. No manual override unless a new consent is created.
+2. Fix JWT_SECRET env-load on Gate B script → close #92
+Priority: P0 Reason: #92 is blocked and can stay open indefinitely. Task: Patch Gate B script to load env consistently in staging/CI/local, then re-run and close #92.
+3. Remove internal test labels from client-facing fee screens
+Priority: P0 Reason: “race test” / “smoke test” visible to investors is unacceptable for demo/live. Task: Hide all internal/test labels from investor/adviser UI; keep them only in logs/admin debug.
+Add immediately — P1
+4. Aggregate duplicate investment product positions by `product_id`
+Priority: P1 Reason: Investor portal currently shows repeated Bitcoin Tracker / Corporate Credit rows, which looks broken. Your pasted investor screens show duplicate product rows clearly. Task: Show one row per product, aggregate value/units, expandable transaction history underneath.
+5. `adviser_tasks` table — 3 valid triggers only
+Priority: P1 Valid triggers only:
+
+* KYC pending
+* Consent expiring
+* Portfolio review due
+Reason: prevents workflow noise and fake task inflation.
+6. `report_requests` table + PDF generation from ledger-derived balances
+Priority: P1 Reason: reports should not rely on mutable snapshots if ledger is source of truth. Your pasted reports area shows current requests/downloads, but the generation basis needs tightening.
+Merge / clarify before adding duplicate work
+7. Wire #94 — `users.role + adviser_clients + fee_consents` schema migration
+Status: needs clarification. You are right: #94 and #307 may overlap.
+Do not create a third duplicate task. First ask agent:
+Confirm whether #94 and #307 cover the same compliance backbone schema work. If yes, merge them and keep one canonical task. If no, split clearly: #94 = role/adviser/client/consent schema migration; #307 = broader compliance backbone and audit infrastructure.
+Clean board instruction
+Use this:
+Add P0 tasks for fee rule/consent amount integrity, Gate B JWT_SECRET env-load, and removal of internal test labels from client-facing views. Add P1 tasks for product position aggregation, adviser_tasks restricted-trigger table, and ledger-derived report_requests/PDF generation. Before adding schema migration work, reconcile #94 and #307 to avoid duplicate compliance-backbone tasks. verify and cross check

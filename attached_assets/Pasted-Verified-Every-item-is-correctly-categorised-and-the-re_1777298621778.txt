@@ -1,0 +1,39 @@
+Verified. Every item is correctly categorised and the reasoning is sound. Here is the cross-check with one addition and two refinements:
+
+---
+
+**P0 — all three confirmed correct**
+
+The `$150 vs $495` fix is genuinely P0. It is not just a display issue — if the rule amount does not derive from the consent amount at the database layer, every accrual calculation downstream produces wrong numbers. The investor sees it, the adviser sees it, and any auditor reviewing the fee chain sees it. The fix belongs in the service layer with a constraint that prevents a rule being created with an amount that differs from its source consent.
+
+The JWT_SECRET fix for #92 is P0. A blocked `IN_PROGRESS` task with no follow-up is technical debt that compounds — everything downstream of Gate B stays unverifiable until this is closed.
+
+The internal test label removal is P0 for demo safety. One thing to add to the task definition: the fix should not just hide the label in the UI. The data itself should be environment-gated — test records should only exist in development/staging databases, not in production or any database a real user can reach. A UI hide is insufficient if the data exists in the same database a client is authenticated against.
+
+---
+
+**P1 — all three confirmed correct, one refinement on #6**
+
+Product position aggregation is P1. The investor portal showing five Bitcoin Tracker Fund rows is not a data bug — it is a missing aggregation layer in the query. The fix is straightforward: `GROUP BY product_id`, sum `current_value`, count transactions, expose the transaction list as a sub-query. No schema change needed.
+
+The `adviser_tasks` table with three triggers only is P1 and the trigger restriction is critical. One addition: the task definition should explicitly state that the task creation logic must check whether the triggering condition is still true before surfacing the task. A KYC-pending task must auto-close if KYC is completed by the time the adviser views it. Stale tasks are worse than no tasks.
+
+The `report_requests` table and ledger-derived PDF generation is P1 but needs one clarification added to the task definition: the PDF generation must use ledger-derived balances as the authoritative source, with snapshot data used only as a fallback when ledger data is incomplete, and the PDF must label which source was used. "Balance as at ledger" vs "Balance estimated from snapshot" must appear on the document itself — this is an audit trail requirement, not just a backend implementation detail.
+
+---
+
+**Merge/clarify — confirmed correct, one concrete recommendation**
+
+Do not create a third task. The right action is to ask the agent directly: "Does #307 Compliance backbone for fee execution include the schema migration for `users.role`, `adviser_clients`, and `fee_consents` that was previously tracked as #94?" If yes, close #94 with a note pointing to #307. If no, update #94's description to cover only the schema migration and update #307 to explicitly exclude it. The outcome either way is one canonical task per piece of work.
+
+---
+
+**One item the list does not include that should be P0**
+
+The signed consents appearing simultaneously in both the Pending and Active sections on the investor fee consent page. This is a status flow bug — a consent that has been signed should transition out of Pending and into Active, not appear in both. It is client-visible, it creates confusion about whether the consent is valid, and it is a one-line status check fix. Add it as P0 alongside the other three.
+
+---
+
+**Clean board instruction — final version**
+
+Add P0 tasks for: fee rule/consent amount integrity (DB constraint, not UI fix), Gate B JWT_SECRET env-load closure of #92, removal of internal test data from production/demo databases (not just UI hide), and signed-consent status flow fix (remove from Pending when status = signed). Add P1 tasks for: product position aggregation by product_id, adviser_tasks table with three restricted triggers and stale-task auto-close logic, and ledger-derived report_requests/PDF generation with source labelling on the document. Before adding schema migration work, reconcile #94 and #307 — close whichever is the duplicate and ensure one canonical task owns the `users.role` + `adviser_clients` + `fee_consents` migration.
