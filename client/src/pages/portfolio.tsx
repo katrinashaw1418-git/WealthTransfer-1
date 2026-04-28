@@ -576,9 +576,11 @@ export default function Portfolio() {
                             // Largest-remainder rounding so the displayed
                             // integer percentages add up to exactly 100%
                             // (e.g. three equal lots show 34/33/33, not
-                            // 33/33/33).
-                            const lotSharePcts: number[] = (() => {
-                              if (lotsInvestedSum <= 0) return lots.map(() => 0);
+                            // 33/33/33). When the invested sum is 0 we
+                            // return null entries so the render skips the
+                            // share label entirely (avoids "0%" / NaN%).
+                            const lotSharePcts: Array<number | null> = (() => {
+                              if (lotsInvestedSum <= 0) return lots.map(() => null);
                               const exact = lots.map(
                                 (l) => (Number(l?.investedAmount ?? 0) / lotsInvestedSum) * 100,
                               );
@@ -587,9 +589,9 @@ export default function Portfolio() {
                               const order = exact
                                 .map((v, i) => ({ i, frac: v - Math.floor(v) }))
                                 .sort((a, b) => b.frac - a.frac);
-                              const result = [...floors];
+                              const result: Array<number | null> = [...floors];
                               for (let k = 0; k < order.length && remainder > 0; k++) {
-                                result[order[k].i] += 1;
+                                result[order[k].i] = (result[order[k].i] as number) + 1;
                                 remainder -= 1;
                               }
                               return result;
@@ -629,7 +631,7 @@ export default function Portfolio() {
                                   const invested = Number(lot.investedAmount ?? 0);
                                   const current = Number(lot.currentValue ?? 0);
                                   const returnPct = Number(lot.returnPercentage ?? 0);
-                                  const sharePct = lotSharePcts[lotIdx] ?? 0;
+                                  const sharePct = lotSharePcts[lotIdx];
                                   const dateStr = lot.investmentDate
                                     ? new Date(lot.investmentDate).toLocaleDateString(undefined, {
                                         year: 'numeric',
@@ -647,29 +649,33 @@ export default function Portfolio() {
                                         <span className="font-medium text-gray-800">{dateStr}</span>
                                         <span className="text-gray-400 mx-1.5">·</span>
                                         Invested ${invested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                        <span className="text-gray-400 mx-1.5">·</span>
-                                        <UiTooltip>
-                                          <UiTooltipTrigger asChild>
-                                            <button
-                                              type="button"
-                                              className="text-gray-400 underline decoration-dotted decoration-gray-300 underline-offset-2 cursor-help focus:outline-none focus:ring-1 focus:ring-gray-400 rounded-sm"
-                                              data-testid={`lot-share-${productKey}-${lotIdx}`}
-                                              onClick={(e) => e.stopPropagation()}
-                                            >
-                                              {sharePct}% of position
-                                            </button>
-                                          </UiTooltipTrigger>
-                                          <UiTooltipContent
-                                            side="top"
-                                            className="max-w-xs text-xs"
-                                            data-testid={`lot-share-tooltip-${productKey}-${lotIdx}`}
-                                          >
-                                            Share of this product's total invested capital — $
-                                            {invested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                            {' of $'}
-                                            {lotsInvestedSum.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                          </UiTooltipContent>
-                                        </UiTooltip>
+                                        {sharePct != null && (
+                                          <>
+                                            <span className="text-gray-400 mx-1.5">·</span>
+                                            <UiTooltip>
+                                              <UiTooltipTrigger asChild>
+                                                <button
+                                                  type="button"
+                                                  className="text-gray-400 underline decoration-dotted decoration-gray-300 underline-offset-2 cursor-help focus:outline-none focus:ring-1 focus:ring-gray-400 rounded-sm"
+                                                  data-testid={`lot-share-${productKey}-${lotIdx}`}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                >
+                                                  {sharePct}% of position
+                                                </button>
+                                              </UiTooltipTrigger>
+                                              <UiTooltipContent
+                                                side="top"
+                                                className="max-w-xs text-xs"
+                                                data-testid={`lot-share-tooltip-${productKey}-${lotIdx}`}
+                                              >
+                                                Share of this product's total invested capital — $
+                                                {invested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                                {' of $'}
+                                                {lotsInvestedSum.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                              </UiTooltipContent>
+                                            </UiTooltip>
+                                          </>
+                                        )}
                                       </div>
                                       <div className="flex items-center gap-3">
                                         <span className="text-gray-700">
