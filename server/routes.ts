@@ -2868,7 +2868,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         investment: currentAllocation.investment / 100,
       };
       const [latestRiskProfile] = await db
-        .select({ allocation: riskProfiles.allocation })
+        .select({
+          allocation: riskProfiles.allocation,
+          riskBand: riskProfiles.riskBand,
+        })
         .from(riskProfiles)
         .where(eq(riskProfiles.clientId, userId))
         .orderBy(desc(riskProfiles.createdAt))
@@ -2882,11 +2885,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;
 
+      // Resolve the risk tier used to flavour the textual recommendations
+      // below. We mirror the benchmark-resolution policy: when the client has
+      // a stored `riskProfiles` row, use its `riskBand` (mapping the 5-band
+      // risk-scoring vocabulary onto the 3-tier copy we emit). Only fall back
+      // to the per-request `riskTolerance` 1–5 number when no profile exists.
+      // This keeps the copy aligned with the personalised rebalancing-gap
+      // card so a client with a "growth" profile no longer receives
+      // conservative-flavoured advice when a stale `riskTolerance: 1` is sent.
+      type RecommendationTier = "conservative" | "moderate" | "aggressive";
+      let recommendationTier: RecommendationTier;
+      if (latestRiskProfile) {
+        switch (latestRiskProfile.riskBand) {
+          case "conservative":
+            recommendationTier = "conservative";
+            break;
+          case "moderate":
+          case "balanced":
+            recommendationTier = "moderate";
+            break;
+          case "growth":
+          case "high_growth":
+            recommendationTier = "aggressive";
+            break;
+          default:
+            recommendationTier = "moderate";
+        }
+      } else if (riskTolerance <= 2) {
+        recommendationTier = "conservative";
+      } else if (riskTolerance <= 4) {
+        recommendationTier = "moderate";
+      } else {
+        recommendationTier = "aggressive";
+      }
+
       // Generate recommendations based on risk profile
       const recommendations: Array<{ userId: number; type: string; title: string; description: string; severity: string; isRead: boolean }> = [];
       
       // Risk-based portfolio recommendations
-      if (riskTolerance <= 2) { // Conservative
+      if (recommendationTier === "conservative") {
         if (currentAllocation.crypto > 10) {
           recommendations.push({
             userId,
@@ -2906,7 +2943,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           severity: "info",
           isRead: false,
         });
-      } else if (riskTolerance <= 4) { // Moderate
+      } else if (recommendationTier === "moderate") {
         if (currentAllocation.crypto > 20) {
           recommendations.push({
             userId,
@@ -2926,7 +2963,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           severity: "info",
           isRead: false,
         });
-      } else { // Aggressive
+      } else { // recommendationTier === "aggressive"
         if (currentAllocation.crypto < 15) {
           recommendations.push({
             userId,
