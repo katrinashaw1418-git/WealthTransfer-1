@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearch } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -11,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Form,
   FormControl,
@@ -223,6 +225,16 @@ function fmtTimestamp(s: string | null): string {
   }).format(d);
 }
 
+// Task #358 — visibility filter values for the All / Published / Draft tabs.
+// "all" is the default so the page keeps the same shape as before for admins
+// who land here without an explicit choice.
+const VISIBILITY_FILTERS = ["all", "published", "draft"] as const;
+type VisibilityFilter = (typeof VISIBILITY_FILTERS)[number];
+
+function isVisibilityFilter(value: string | null): value is VisibilityFilter {
+  return value !== null && (VISIBILITY_FILTERS as readonly string[]).includes(value);
+}
+
 export default function AdminProducts() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
@@ -232,6 +244,46 @@ export default function AdminProducts() {
   // Task #385 — when set, the history dialog is open for this product.
   const [historyForProduct, setHistoryForProduct] = useState<InvestmentProduct | null>(null);
   const { data, isLoading } = useQuery<InvestmentProduct[]>({ queryKey: ["/api/admin/products"] });
+
+  // Task #358 — Draft/Published quick filter. Persisted in the URL
+  // (`?visibility=draft|published`) so the choice survives a refresh and is
+  // shareable. We hydrate from the querystring on first render only; the page
+  // UI is the canonical writer afterwards and pushes back to the URL via
+  // history.replaceState (no navigation, no scroll jump).
+  const searchString = useSearch();
+  const initialVisibility: VisibilityFilter = useMemo(() => {
+    const v = new URLSearchParams(searchString).get("visibility");
+    return isVisibilityFilter(v) ? v : "all";
+    // Intentionally only read on first mount; subsequent URL writes come from
+    // this component itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [visibility, setVisibility] = useState<VisibilityFilter>(initialVisibility);
+
+  // Mirror the active filter into the URL so a refresh restores the same
+  // view. We use replaceState to avoid polluting browser history with one
+  // entry per tab click, and we strip the param entirely for the default
+  // ("all") so the URL stays clean when no filter is applied.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    if (visibility === "all") {
+      sp.delete("visibility");
+    } else {
+      sp.set("visibility", visibility);
+    }
+    const next = sp.toString();
+    const url = `${window.location.pathname}${next ? `?${next}` : ""}${window.location.hash}`;
+    window.history.replaceState(null, "", url);
+  }, [visibility]);
+
+  // Filtered list driving both the table body and the header count so the
+  // "N products" label always matches the number of rows actually rendered.
+  const filteredProducts = useMemo(() => {
+    if (!data) return [];
+    if (visibility === "published") return data.filter((p) => p.isPublished);
+    if (visibility === "draft") return data.filter((p) => !p.isPublished);
+    return data;
+  }, [data, visibility]);
 
   const form = useForm<CreateProductValues>({
     resolver: zodResolver(createProductSchema),
@@ -373,11 +425,33 @@ export default function AdminProducts() {
       </div>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
           <CardTitle className="text-base flex items-center gap-2">
             <Package className="h-4 w-4 text-violet-600" />
-            {isLoading ? "Loading…" : `${data?.length ?? 0} product${data?.length === 1 ? "" : "s"}`}
+            {isLoading
+              ? "Loading…"
+              : `${filteredProducts.length} product${filteredProducts.length === 1 ? "" : "s"}`}
           </CardTitle>
+          {/* Task #358 — visibility quick filter. Defaults to All; selection is
+              persisted to the URL so a refresh restores the same view. */}
+          <Tabs
+            value={visibility}
+            onValueChange={(v) => {
+              if (isVisibilityFilter(v)) setVisibility(v);
+            }}
+          >
+            <TabsList data-testid="tabs-product-visibility-filter">
+              <TabsTrigger value="all" data-testid="tab-product-visibility-all">
+                All
+              </TabsTrigger>
+              <TabsTrigger value="published" data-testid="tab-product-visibility-published">
+                Published
+              </TabsTrigger>
+              <TabsTrigger value="draft" data-testid="tab-product-visibility-draft">
+                Draft
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -385,6 +459,12 @@ export default function AdminProducts() {
           ) : !data || data.length === 0 ? (
             <p className="text-sm text-slate-500">
               No products yet. Add one to make it available to advisers.
+            </p>
+          ) : filteredProducts.length === 0 ? (
+            <p className="text-sm text-slate-500" data-testid="text-no-filtered-products">
+              {visibility === "draft"
+                ? "No draft products. Every product is currently published."
+                : "No published products. Every product is currently a draft."}
             </p>
           ) : (
             <Table>
@@ -403,7 +483,7 @@ export default function AdminProducts() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.map((p) => (
+                {filteredProducts.map((p) => (
                   <TableRow key={p.id} data-testid={`row-product-${p.id}`}>
                     <TableCell className="font-medium">{p.name}</TableCell>
                     <TableCell>
