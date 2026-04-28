@@ -52,6 +52,7 @@ import {
 import {
   PRODUCT_CATEGORY_VALUES,
   PRODUCT_CATEGORY_LABELS,
+  productCategoryLabel,
 } from "@shared/product-categories";
 
 interface InvestmentProduct {
@@ -253,7 +254,7 @@ export default function AdminProducts() {
                   <TableRow key={p.id} data-testid={`row-product-${p.id}`}>
                     <TableCell className="font-medium">{p.name}</TableCell>
                     <TableCell>
-                      <div className="text-sm">{p.category}</div>
+                      <div className="text-sm">{productCategoryLabel(p.category)}</div>
                       <div className="text-xs text-slate-500">{p.subCategory}</div>
                     </TableCell>
                     <TableCell>
