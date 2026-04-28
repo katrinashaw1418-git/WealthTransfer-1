@@ -553,7 +553,36 @@ export default function Portfolio() {
                               <div className="text-xs text-gray-500">{product.percentage.toFixed(1)}%</div>
                             </div>
                           </div>
-                          {isExpanded && lots.length > 0 && (
+                          {isExpanded && lots.length > 0 && (() => {
+                            // Task #396 — sum the lot invested amounts so the
+                            // share-of-position percentages always add up to 100%
+                            // even if the parent product.investedAmount drifts.
+                            const lotsInvestedSum = lots.reduce(
+                              (sum, l) => sum + Number(l?.investedAmount ?? 0),
+                              0,
+                            );
+                            // Largest-remainder rounding so the displayed
+                            // integer percentages add up to exactly 100%
+                            // (e.g. three equal lots show 34/33/33, not
+                            // 33/33/33).
+                            const lotSharePcts: number[] = (() => {
+                              if (lotsInvestedSum <= 0) return lots.map(() => 0);
+                              const exact = lots.map(
+                                (l) => (Number(l?.investedAmount ?? 0) / lotsInvestedSum) * 100,
+                              );
+                              const floors = exact.map((v) => Math.floor(v));
+                              let remainder = 100 - floors.reduce((s, v) => s + v, 0);
+                              const order = exact
+                                .map((v, i) => ({ i, frac: v - Math.floor(v) }))
+                                .sort((a, b) => b.frac - a.frac);
+                              const result = [...floors];
+                              for (let k = 0; k < order.length && remainder > 0; k++) {
+                                result[order[k].i] += 1;
+                                remainder -= 1;
+                              }
+                              return result;
+                            })();
+                            return (
                             <div className="px-3 pb-3" data-testid={`lots-list-${productKey}`}>
                               <div className="border-t border-gray-200 pt-2 space-y-1.5">
                                 {(() => {
@@ -588,6 +617,7 @@ export default function Portfolio() {
                                   const invested = Number(lot.investedAmount ?? 0);
                                   const current = Number(lot.currentValue ?? 0);
                                   const returnPct = Number(lot.returnPercentage ?? 0);
+                                  const sharePct = lotSharePcts[lotIdx] ?? 0;
                                   const dateStr = lot.investmentDate
                                     ? new Date(lot.investmentDate).toLocaleDateString(undefined, {
                                         year: 'numeric',
@@ -605,6 +635,13 @@ export default function Portfolio() {
                                         <span className="font-medium text-gray-800">{dateStr}</span>
                                         <span className="text-gray-400 mx-1.5">·</span>
                                         Invested ${invested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                        <span className="text-gray-400 mx-1.5">·</span>
+                                        <span
+                                          className="text-gray-400"
+                                          data-testid={`lot-share-${productKey}-${lotIdx}`}
+                                        >
+                                          {sharePct}% of position
+                                        </span>
                                       </div>
                                       <div className="flex items-center gap-3">
                                         <span className="text-gray-700">
@@ -622,7 +659,8 @@ export default function Portfolio() {
                                 })}
                               </div>
                             </div>
-                          )}
+                            );
+                          })()}
                         </div>
                       );
                     })}
