@@ -106,6 +106,43 @@ export async function convertToUsd(currency: string, amount: number): Promise<nu
   return null;
 }
 
+// Task #336 — AMAX is an Australian platform; the investor-facing portal
+// reports values in AUD. This helper is the single point at which the
+// portfolio engine converts a foreign-currency or crypto balance into the
+// AUD figure shown to clients.
+//
+// Routing:
+//   1. AUD → return as-is.
+//   2. Direct currency→AUD rate (e.g. seeded BTC→AUD).
+//   3. Inverse AUD→currency rate.
+//   4. Chain via USD: currency→USD then USD→AUD. This is critical for ETH
+//      and the USD-pegged stablecoins (USDT/USDC) which only have direct
+//      USD rates seeded — without the chain they would silently fall back
+//      to the raw unit amount labelled "AUD".
+//   5. Otherwise return null so the caller can flag the wallet as unpriced.
+export async function convertToAud(currency: string, amount: number): Promise<number | null> {
+  if (currency === "AUD") return amount;
+  const direct = await storage.getFxRate(currency, "AUD");
+  if (direct) return amount * parseFloat(direct.rate);
+  const inverse = await storage.getFxRate("AUD", currency);
+  if (inverse) return amount / parseFloat(inverse.rate);
+  // Chain via USD: currency → USD → AUD. Stablecoins are treated as 1:1 USD.
+  let usd: number | null = null;
+  if (currency === "USD") {
+    usd = amount;
+  } else if (currency === "USDT" || currency === "USDC") {
+    usd = amount;
+  } else {
+    usd = await convertToUsd(currency, amount);
+  }
+  if (usd === null) return null;
+  const usdToAud = await storage.getFxRate("USD", "AUD");
+  if (usdToAud) return usd * parseFloat(usdToAud.rate);
+  const audToUsd = await storage.getFxRate("AUD", "USD");
+  if (audToUsd) return usd / parseFloat(audToUsd.rate);
+  return null;
+}
+
 // ---- Investment totals -----------------------------------------------------
 
 export interface InvestmentTotals {
@@ -252,26 +289,25 @@ export async function calculatePortfolioTotalsAtDate(
   let hasUnpricedWallets = false;
   const unpricedCurrencies: string[] = [];
 
+  // Task #336 — every wallet bucket is reported in AUD so the investor
+  // dashboard, portfolio overview, wallet list, and footer total all use
+  // the same units. Crypto wallets specifically are valued by chaining
+  // currency → USD price → USD→AUD rate inside convertToAud(), which fixes
+  // the prior "labelled AUD but actually USD" gap on BTC/ETH.
   for (const wallet of walletData) {
     const balance = wallet.balance;
+    const aud = await convertToAud(wallet.currency, balance);
+    if (aud === null) {
+      hasUnpricedWallets = true;
+      unpricedCurrencies.push(wallet.currency);
+      continue;
+    }
     if (wallet.walletType === "fiat") {
-      const usd = await convertToUsd(wallet.currency, balance);
-      if (usd !== null) {
-        fiatValue += usd;
-      } else {
-        hasUnpricedWallets = true;
-        unpricedCurrencies.push(wallet.currency);
-      }
+      fiatValue += aud;
     } else if (wallet.currency === "USDT" || wallet.currency === "USDC") {
-      stablecoinValue += balance;
+      stablecoinValue += aud;
     } else {
-      const rate = await storage.getFxRate(wallet.currency, "USD");
-      if (rate) {
-        cryptoValue += balance * parseFloat(rate.rate);
-      } else {
-        hasUnpricedWallets = true;
-        unpricedCurrencies.push(wallet.currency);
-      }
+      cryptoValue += aud;
     }
   }
 
@@ -291,16 +327,18 @@ export async function calculatePortfolioTotalsAtDate(
 
 // ---- Per-wallet valuation --------------------------------------------------
 //
-// Task #279 — the adviser client detail page needs a per-wallet
-// USD-equivalent (rendered as AUD per the existing portal labelling
-// convention) so the wallet table can show "Currency / Balance / AUD
-// Equivalent / % of Portfolio". This helper mirrors the same pricing logic
-// used in calculatePortfolioTotalsAtDate so the bucket totals and the
-// per-row values are guaranteed to come from the same source — divergence
-// between the two would be an auditability bug for advisers.
+// Task #279 — the adviser client detail page needs a per-wallet AUD figure
+// so the wallet table can show "Currency / Balance / AUD Equivalent / %
+// of Portfolio". This helper mirrors the same pricing logic used in
+// calculatePortfolioTotalsAtDate so the bucket totals and the per-row
+// values are guaranteed to come from the same source — divergence between
+// the two would be an auditability bug for advisers.
 //
-// `audValue` is null for any wallet whose currency has no FX rate available;
-// the caller can render the "unpriced" note from these.
+// Task #336 — `audValue` is now a true AUD figure (USD price chained
+// through USD→AUD where required) rather than the prior USD-equivalent
+// that was misleadingly labelled AUD. `audValue` is null for any wallet
+// whose currency has no FX rate available; the caller can render the
+// "unpriced" note from these.
 
 export interface WalletValuation {
   currency: string;
@@ -326,15 +364,7 @@ export async function calculateWalletValuationsAtDate(
 
   const out: WalletValuation[] = [];
   for (const wallet of walletData) {
-    let audValue: number | null;
-    if (wallet.walletType === "fiat") {
-      audValue = await convertToUsd(wallet.currency, wallet.balance);
-    } else if (wallet.currency === "USDT" || wallet.currency === "USDC") {
-      audValue = wallet.balance;
-    } else {
-      const rate = await storage.getFxRate(wallet.currency, "USD");
-      audValue = rate ? wallet.balance * parseFloat(rate.rate) : null;
-    }
+    const audValue = await convertToAud(wallet.currency, wallet.balance);
     out.push({
       currency: wallet.currency,
       walletType: wallet.walletType,

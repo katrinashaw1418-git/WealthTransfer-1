@@ -194,6 +194,14 @@ export const investmentProducts = pgTable("investment_products", {
   annualReturn: decimal("annual_return", { precision: 10, scale: 4 }), // explicit rate e.g. 0.1100 = 11%
   returnMethod: text("return_method").notNull().default("fixed_annual_compound"), // fixed_annual_compound | fixed_annual_simple
   isActive: boolean("is_active").notNull().default(true),
+  // Task #336 — investor-visibility flag distinct from `isActive`. A product
+  // can be operationally "active" (referenced by user_investments, valued
+  // nightly, available in admin views) yet still hidden from the investor
+  // listing/breakdown endpoints because it is a draft, smoke test, or
+  // staging-only entry. Investor-facing reads must filter by both
+  // `isActive = true` AND `isPublished = true`. Admin reads remain
+  // unfiltered. Default is true so existing rows stay visible.
+  isPublished: boolean("is_published").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

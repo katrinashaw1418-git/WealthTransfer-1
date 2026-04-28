@@ -5,24 +5,50 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import { CurrencyConfig } from '@/lib/types';
 import { Info, DollarSign, BarChart3, Landmark } from 'lucide-react';
-import { useFxRate } from '@/hooks/use-fx-rates';
+import { useFxRates } from '@/hooks/use-fx-rates';
 import { useWallets } from '@/hooks/use-portfolio';
 
+// Task #336 — the wallet table previously called useFxRate(currency, AUD)
+// and silently rendered the raw unit balance whenever a direct rate was
+// missing. ETH→AUD has no direct seeded rate, so a 2.0 ETH wallet displayed
+// as "$2.00" AUD instead of the indicative ~$13k. We now load the full FX
+// table once and chain currency → USD → display when no direct/inverse
+// rate exists. Stablecoins are USD-pegged so we re-base them to USD before
+// the lookup, matching the server-side convertToAud() routing.
 function HoldingValueDisplay({ wallet, displayCurrency }: { wallet: any, displayCurrency: string }) {
-  const { data: fxRate } = useFxRate(wallet.currency, displayCurrency);
+  const { data: rates } = useFxRates();
+  const balance = wallet.balance ? parseFloat(wallet.balance) : 0;
+  const config = CurrencyConfig[displayCurrency as keyof typeof CurrencyConfig];
 
-  if (!fxRate || wallet.currency === displayCurrency) {
-    const config = CurrencyConfig[displayCurrency as keyof typeof CurrencyConfig];
-    const balance = wallet.balance ? parseFloat(wallet.balance) : 0;
-    const formattedBalance = balance > 1 ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : balance.toFixed(6);
-    return <span className="font-semibold">{config?.symbol}{formattedBalance}</span>;
+  const findRate = (from: string, to: string): number | null => {
+    if (from === to) return 1;
+    if (!Array.isArray(rates)) return null;
+    const direct = rates.find((r: any) => r.baseCurrency === from && r.targetCurrency === to);
+    if (direct) return parseFloat(direct.rate);
+    const inverse = rates.find((r: any) => r.baseCurrency === to && r.targetCurrency === from);
+    if (inverse) return 1 / parseFloat(inverse.rate);
+    return null;
+  };
+
+  const sourceCurrency = (wallet.currency === 'USDT' || wallet.currency === 'USDC') ? 'USD' : wallet.currency;
+  let rate = findRate(sourceCurrency, displayCurrency);
+  if (rate === null) {
+    const toUsd = findRate(sourceCurrency, 'USD');
+    const usdToTarget = findRate('USD', displayCurrency);
+    if (toUsd !== null && usdToTarget !== null) {
+      rate = toUsd * usdToTarget;
+    }
   }
 
-  const rate = parseFloat(fxRate.rate);
-  const convertedValue = parseFloat(wallet.balance || '0') * rate;
-  const config = CurrencyConfig[displayCurrency as keyof typeof CurrencyConfig];
-  const formattedValue = convertedValue > 1 ? convertedValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : convertedValue.toFixed(6);
+  if (rate === null) {
+    // No price chain available — surface the raw unit balance rather than
+    // an inflated/incorrect figure so the gap is visible.
+    const formattedBalance = balance > 1 ? balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : balance.toFixed(6);
+    return <span className="font-semibold">{formattedBalance} {wallet.currency}</span>;
+  }
 
+  const convertedValue = balance * rate;
+  const formattedValue = convertedValue > 1 ? convertedValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : convertedValue.toFixed(6);
   return <span className="font-semibold">{config?.symbol}{formattedValue}</span>;
 }
 

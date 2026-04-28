@@ -3595,7 +3595,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
       
       const products = await storage.getInvestmentProducts(Object.keys(filters).length > 0 ? filters : undefined);
-      res.json(products);
+      // Task #336 — investor-facing product shelf must hide unpublished/test
+      // products (Smoke Test Fund, DraftProduct, InRange825, etc.) so
+      // clients only see real funds. Admin routes hit storage directly and
+      // skip this filter so internal tooling continues to see everything.
+      const visible = products.filter((p: any) => p.isActive !== false && p.isPublished !== false);
+      res.json(visible);
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to get investment products" });
@@ -3608,6 +3613,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const id = parseInt(req.params.id);
       const product = await storage.getInvestmentProduct(id);
       if (!product) {
+        return res.status(404).json({ error: "Investment product not found" });
+      }
+      // Task #336 — direct lookups by id (e.g. deep links into a product
+      // page) must also respect the published flag so a leaked id can't
+      // expose a draft fund to an investor.
+      if ((product as any).isActive === false || (product as any).isPublished === false) {
         return res.status(404).json({ error: "Investment product not found" });
       }
       res.json(product);
@@ -3832,32 +3843,71 @@ export async function registerRoutes(app: Express): Promise<Server> {
         cash_deposit: "Cash Deposits",
       };
 
-      const categoryMap: Record<string, { name: string; value: number; products: any[] }> = {};
+      // Task #336 — investors with multiple lots in the same fund (very
+      // common — e.g. two top-ups into the Real Estate Credit Fund) used
+      // to see one row per lot here, which made the Individual Investment
+      // Products grid look duplicated and made percentages add up wrong.
+      // We now bucket by productId, sum the lot values, and surface the
+      // raw lots under a `lots` field so an adviser drill-down can still
+      // show every contributing position.
+      type AggregatedProduct = {
+        productId: number;
+        name: string;
+        value: number;
+        investedAmount: number;
+        returnAmount: number;
+        returnPercentage: number;
+        percentage: number;
+        lots: any[];
+      };
+      const categoryMap: Record<string, { name: string; value: number; productMap: Map<number, AggregatedProduct> }> = {};
       for (const item of totals.items) {
         if (!categoryMap[item.category]) {
           categoryMap[item.category] = {
             name: categoryDisplayNames[item.category] ?? item.category,
             value: 0,
-            products: [],
+            productMap: new Map(),
           };
         }
         categoryMap[item.category].value += item.currentValue ?? 0;
-        categoryMap[item.category].products.push({
-          name: item.productName,
-          value: item.currentValue,
+        const existing = categoryMap[item.category].productMap.get(item.productId);
+        const lot = {
+          investmentId: (item as any).investmentId,
           investedAmount: item.investedAmount,
+          currentValue: item.currentValue,
           returnAmount: item.returnAmount,
           returnPercentage: item.returnPercentage,
-          percentage: 0, // filled below
-        });
+          investmentDate: (item as any).investmentDate,
+        };
+        if (existing) {
+          existing.value += item.currentValue ?? 0;
+          existing.investedAmount += item.investedAmount;
+          existing.returnAmount += item.returnAmount;
+          existing.lots.push(lot);
+        } else {
+          categoryMap[item.category].productMap.set(item.productId, {
+            productId: item.productId,
+            name: item.productName,
+            value: item.currentValue ?? 0,
+            investedAmount: item.investedAmount,
+            returnAmount: item.returnAmount,
+            returnPercentage: 0,
+            percentage: 0,
+            lots: [lot],
+          });
+        }
       }
 
       const categories = Object.values(categoryMap)
         .map(cat => ({
-          ...cat,
+          name: cat.name,
+          value: cat.value,
           percentage: totals.totalCurrentValue > 0 ? (cat.value / totals.totalCurrentValue) * 100 : 0,
-          products: cat.products.map(p => ({
+          products: Array.from(cat.productMap.values()).map(p => ({
             ...p,
+            // Recompute returnPercentage from the aggregated invested basis
+            // so two-lot positions report a coherent blended return.
+            returnPercentage: p.investedAmount > 0 ? (p.returnAmount / p.investedAmount) * 100 : 0,
             percentage: totals.totalCurrentValue > 0 ? (p.value / totals.totalCurrentValue) * 100 : 0,
           })),
         }))

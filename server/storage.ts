@@ -2650,7 +2650,10 @@ export class MemStorage implements IStorage {
     //     qualifiers move into the structure field, never the main term.
     //   - distributions: short label only — Monthly | Quarterly | Semi-annual |
     //     Daily accrual | At exit | None | simple combinations.
-    const demoInvestmentProducts: Omit<InvestmentProduct, 'annualReturn' | 'returnMethod'>[] = [
+    // Task #336 — `isPublished` is added by the .map() pass below so each
+    // demo entry stays a focused product literal; widen the Omit set to
+    // keep the type happy here.
+    const demoInvestmentProducts: Omit<InvestmentProduct, 'annualReturn' | 'returnMethod' | 'isPublished'>[] = [
       {
         id: 1,
         name: "Real Estate Equity Fund",
@@ -2933,8 +2936,19 @@ export class MemStorage implements IStorage {
       },
     ];
 
+    // Task #336 — every seeded product is a real, sales-approved fund and
+    // therefore visible to investors by default. Test fixtures and draft
+    // products created later via the admin UI default to isPublished:true
+    // at the schema level; the cleanup-product-shelf script flips known
+    // test rows (Smoke Test Fund, DraftProduct, InRange825) to false so
+    // they remain admin-visible but hidden from investor-facing reads.
     demoInvestmentProducts
-      .map(p => ({ ...p, annualReturn: null as string | null, returnMethod: "fixed_annual_compound" }))
+      .map(p => ({
+        ...p,
+        annualReturn: null as string | null,
+        returnMethod: "fixed_annual_compound",
+        isPublished: true,
+      }))
       .forEach(product => {
         this.investmentProducts.set(product.id, product);
       });

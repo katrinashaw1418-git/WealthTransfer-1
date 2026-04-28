@@ -86,7 +86,15 @@ describe("getAdviserClientPortfolio — live totals", () => {
       { currency: "USDT", balance: "500000.00", walletType: "crypto" },
     ]);
     (storage.getTransactions as any).mockResolvedValue([]);
-    (storage.getFxRate as any).mockResolvedValue(null);
+    // Task #336 — convertToAud now requires a USD→AUD rate (or inverse)
+    // to value any USD/stablecoin wallet. The original test asserted
+    // raw USD figures because the engine previously labelled USD as AUD.
+    // We mock USD/AUD parity so the existing assertions still describe
+    // the same arithmetic, and any other rate stays unavailable.
+    (storage.getFxRate as any).mockImplementation(async (base: string, target: string) => {
+      if (base === "USD" && target === "AUD") return { rate: "1.0" };
+      return null;
+    });
     (storage.getUserInvestments as any).mockResolvedValue([
       {
         id: 7,
@@ -138,7 +146,12 @@ describe("getAdviserClientPortfolio — live totals", () => {
       { currency: "USD", balance: "100.00", walletType: "fiat" },
     ]);
     (storage.getTransactions as any).mockResolvedValue([]);
-    (storage.getFxRate as any).mockResolvedValue(null);
+    // Task #336 — same parity stub as above; the live total now goes
+    // through convertToAud, which needs a USD→AUD rate.
+    (storage.getFxRate as any).mockImplementation(async (base: string, target: string) => {
+      if (base === "USD" && target === "AUD") return { rate: "1.0" };
+      return null;
+    });
     (storage.getUserInvestments as any).mockResolvedValue([]);
     (storage.getInvestmentProducts as any).mockResolvedValue([]);
 

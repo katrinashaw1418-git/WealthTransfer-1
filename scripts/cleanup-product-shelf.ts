@@ -47,7 +47,7 @@ import {
   PRODUCT_CATEGORY_LABELS,
   type KnownProductCategory,
 } from "../shared/product-categories";
-import { and, eq, inArray, not } from "drizzle-orm";
+import { and, eq, inArray, not, or } from "drizzle-orm";
 
 const CANONICAL_CATEGORIES = Object.keys(PRODUCT_CATEGORY_LABELS);
 
@@ -428,6 +428,46 @@ async function deactivateLegacyExtras(): Promise<void> {
   }
 }
 
+// Task #336 — investor-facing reads filter on `isPublished`. Any product
+// whose name matches a known test/draft fixture is flipped to
+// isPublished=false so:
+//   - investor portal pages never see them (the route layer now drops any
+//     row with isPublished=false), and
+//   - admin tooling can still inspect/edit them in the database.
+//
+// The filter is name-based and idempotent. Add new test names here as the
+// QA team introduces them. Real, sales-approved funds keep the default
+// isPublished=true and remain visible.
+const unpublishedTestNames = [
+  "Smoke Test Fund",
+  "DraftProduct",
+  "InRange825",
+];
+
+async function markTestProductsUnpublished(): Promise<void> {
+  const matches = await db
+    .select({ id: investmentProducts.id, name: investmentProducts.name, isPublished: investmentProducts.isPublished })
+    .from(investmentProducts)
+    .where(inArray(investmentProducts.name, unpublishedTestNames));
+
+  if (matches.length === 0) {
+    console.log("  [skip] no test products to unpublish");
+    return;
+  }
+
+  for (const m of matches) {
+    if (m.isPublished === false) {
+      console.log(`  [skip] ${m.name} (id=${m.id}) already unpublished`);
+      continue;
+    }
+    await db
+      .update(investmentProducts)
+      .set({ isPublished: false })
+      .where(eq(investmentProducts.id, m.id));
+    console.log(`  [unpublish] ${m.name} (id=${m.id})`);
+  }
+}
+
 async function upsertCanonical(): Promise<void> {
   let updated = 0;
   let inserted = 0;
@@ -463,6 +503,9 @@ async function upsertCanonical(): Promise<void> {
           returnType: p.returnType,
           lvr: p.lvr ?? null,
           isActive: true,
+          // Task #336 — explicitly republish canonical funds in case a
+          // previous cleanup pass (or a manual edit) flipped them off.
+          isPublished: true,
         })
         .where(eq(investmentProducts.id, row.id));
       updated++;
@@ -479,6 +522,9 @@ async function main() {
 
   console.log("\nCleanup: deactivating legacy active products outside the canonical 14");
   await deactivateLegacyExtras();
+
+  console.log("\nCleanup: marking known test/draft products as unpublished (Task #336)");
+  await markTestProductsUnpublished();
 
   console.log("\nCleanup: normalising the canonical 14 products");
   await upsertCanonical();

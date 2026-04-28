@@ -77,11 +77,28 @@ function SidebarContent() {
     user && (user.firstName || user.lastName)
       ? `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim()
       : user?.username ?? "Account";
-  const subLabel = isAdviser
-    ? "Adviser"
-    : user?.userTier
-      ? `${user.userTier.charAt(0).toUpperCase()}${user.userTier.slice(1)} Client`
-      : "Client";
+
+  // Task #336 — the previous "Premium Client" / "Standard Client" generic
+  // label gave investors no signal about their actual onboarding state.
+  // The portal's compliance posture is:
+  //   - retail/standard tier with KYC verified → still pending the
+  //     wholesale-eligibility (sophisticated investor / s.708) sign-off,
+  //     so we surface that the upgrade is in progress.
+  //   - hnwi / professional / wholesale tiers with KYC verified → already
+  //     classified as wholesale; advisers can transact accordingly.
+  //   - KYC not yet verified → show a pending state rather than implying
+  //     verified status of any kind.
+  const wholesaleTiers = new Set(["hnwi", "professional", "wholesale"]);
+  let subLabel: string;
+  if (isAdviser) {
+    subLabel = "Adviser";
+  } else if (user?.kycStatus !== "verified") {
+    subLabel = "KYC verification pending";
+  } else if (user?.userTier && wholesaleTiers.has(user.userTier)) {
+    subLabel = "Wholesale client verified";
+  } else {
+    subLabel = "Tier 1 verified · Wholesale upgrade in progress";
+  }
 
   return (
     <div className="flex flex-col h-full">
