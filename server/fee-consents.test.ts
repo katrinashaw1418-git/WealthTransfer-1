@@ -644,6 +644,112 @@ describe("GET /api/admin/fee-consents — Task #293 columns", () => {
     expect(found?.deductionsBlockedReason).toBeNull();
   });
 
+  // Task #372 — the previous tests in this block only used `toHaveProperty`
+  // on `supersedesRequestId` and `signedIp`, which silently passed even
+  // when the correlated subquery returned `null` for every row (because
+  // the inline `${feeConsents.id}` was rendered as the bare column name
+  // `"id"` and resolved to `fcr.id` / `al.id` inside the subquery).
+  // This test asserts the actual VALUES round-trip for a seeded
+  // supersede chain so the bug can never come back unnoticed.
+  it("returns the correct cross-table supersedesRequestId and signedIp for a seeded supersede chain", async () => {
+    const acct = `${seedKey}_admin_chain`;
+    const ref = new Date(Date.now() + 30 * DAY_MS);
+
+    // 1) The prior request — the one that the new (signing) request
+    //    should declare it supersedes.
+    const [priorRequest] = await db
+      .insert(feeConsentRequests)
+      .values({
+        adviserUserId,
+        clientUserId,
+        adviceRecordId,
+        feeType: "ongoing_service_fee",
+        amountType: "fixed",
+        amount: "150.0000",
+        accountNumber: `${acct}_prior`,
+        deductionFrequency: "monthly",
+        proposedReferenceDay: ref,
+        proposedRenewalWindowStart: new Date(ref.getTime() - 60 * DAY_MS),
+        proposedRenewalWindowEnd: new Date(ref.getTime() + 150 * DAY_MS),
+        proposedConsentExpiryDate: new Date(ref.getTime() + 150 * DAY_MS),
+        status: "withdrawn_by_adviser",
+      })
+      .returning();
+
+    // 2) The executed consent we'll be reading back via the admin GET.
+    const [consent] = await db
+      .insert(feeConsents)
+      .values({
+        adviceRecordId,
+        clientId: clientUserId,
+        adviserId: adviserUserId,
+        feeType: "ongoing_service_fee",
+        amountType: "fixed",
+        amount: "150.0000",
+        accountNumber: acct,
+        deductionFrequency: "monthly",
+        referenceDay: ref,
+        renewalWindowStart: new Date(ref.getTime() - 60 * DAY_MS),
+        renewalWindowEnd: new Date(ref.getTime() + 150 * DAY_MS),
+        consentExpiryDate: new Date(ref.getTime() + 150 * DAY_MS),
+        renewalStatus: "active",
+        clientSignatureName: "Chain Test Client",
+      })
+      .returning();
+
+    // 3) The signing request — it consented and points at the executed
+    //    consent via signedFeeConsentId, AND declares the supersede chain
+    //    back-pointer. The admin GET reads `supersedesRequestId` by joining
+    //    feeConsentRequests on signed_fee_consent_id = feeConsents.id, so
+    //    this is the row whose `supersedesRequestId` should round-trip.
+    await db.insert(feeConsentRequests).values({
+      adviserUserId,
+      clientUserId,
+      adviceRecordId,
+      feeType: "ongoing_service_fee",
+      amountType: "fixed",
+      amount: "150.0000",
+      accountNumber: acct,
+      deductionFrequency: "monthly",
+      proposedReferenceDay: ref,
+      proposedRenewalWindowStart: new Date(ref.getTime() - 60 * DAY_MS),
+      proposedRenewalWindowEnd: new Date(ref.getTime() + 150 * DAY_MS),
+      proposedConsentExpiryDate: new Date(ref.getTime() + 150 * DAY_MS),
+      status: "consented",
+      signedFeeConsentId: consent.id,
+      supersedesRequestId: priorRequest.id,
+    });
+
+    // 4) Audit row that simulates the sign-event the live route writes.
+    //    The admin GET pulls signedIp from the most recent
+    //    fee_consent_created row whose entityId matches the consent id.
+    const SIGN_IP = "203.0.113.42";
+    await db.insert(auditLogs).values({
+      userId: clientUserId,
+      action: "fee_consent_created",
+      entityType: "fee_consent",
+      entityId: String(consent.id),
+      metadata: { test: true },
+      ipAddress: SIGN_IP,
+    });
+
+    const { status, body } = await getAdminJson(
+      `/api/admin/fee-consents?page=1&limit=200`,
+    );
+    expect(status).toBe(200);
+    const items = (body.items ?? []) as Array<Record<string, unknown>>;
+    const found = items.find((r) => r.id === consent.id);
+    expect(found, "seeded consent missing from admin list").toBeTruthy();
+
+    // The whole point of this test: the cross-table back-pointer is the
+    // prior request id, NOT null and NOT the consent id. Catches the
+    // `${feeConsents.id}` → `"id"` → `fcr.id` Drizzle bug.
+    expect(found?.supersedesRequestId).toBe(priorRequest.id);
+    // And the audit-log lookup on the SAME outer column resolves the
+    // sign-event IP, not null.
+    expect(found?.signedIp).toBe(SIGN_IP);
+  });
+
   it("flags expired consents with deductionsBlockedReason='expired'", async () => {
     const acct = `${seedKey}_expired`;
     const past = new Date(Date.now() - 200 * DAY_MS);

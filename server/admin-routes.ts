@@ -3631,21 +3631,33 @@ export function registerAdminRoutes(app: Express): void {
             supersededByRequestId: feeConsents.supersededByRequestId,
             supersededAt: feeConsents.supersededAt,
             supersededReason: feeConsents.supersededReason,
+            // Task #372 — Drizzle's sql template renders `${feeConsents.id}`
+            // as the bare column name `"id"` rather than
+            // `"fee_consents"."id"`, which inside this correlated subquery
+            // accidentally resolves to `fcr.id` and makes the back-pointer
+            // always look like null. Pin the outer reference explicitly so
+            // the cross-table lookup actually works (same fix as the
+            // client-side route).
             supersedesRequestId: sql<number | null>`(
               SELECT supersedes_request_id
               FROM ${feeConsentRequests} fcr
-              WHERE fcr.signed_fee_consent_id = ${feeConsents.id}
+              WHERE fcr.signed_fee_consent_id = ${sql.raw('"fee_consents"."id"')}
               LIMIT 1
             )`,
             // Task #293 — pull the IP address recorded on the audit row
             // for the actual sign-event. The audit writer uses
             // entityType='fee_consent', entityId=String(consent.id) for
             // the create row written inside the same tx as the sign.
+            // Task #372 — same bare-column-name bug applies here: the
+            // `${feeConsents.id}::text` template would render as
+            // `"id"::text` inside the subquery and resolve to
+            // `al.id::text`, so the IP would never match. Use a
+            // fully-qualified outer reference instead.
             signedIp: sql<string | null>`(
               SELECT ip_address
               FROM ${auditLogs} al
               WHERE al.entity_type = 'fee_consent'
-                AND al.entity_id = ${feeConsents.id}::text
+                AND al.entity_id = ${sql.raw('"fee_consents"."id"')}::text
                 AND al.action = 'fee_consent_created'
               ORDER BY al.created_at DESC
               LIMIT 1
