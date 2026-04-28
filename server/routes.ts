@@ -80,6 +80,7 @@ import {
   resolvePerClientBenchmark,
 } from "./config/rebalancing-benchmark";
 import { registerPortfolioRealMetricsRoute } from "./portfolio-real-metrics-route";
+import { registerPortfolioAllocationRoute } from "./portfolio-allocation-route";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -2551,55 +2552,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Get portfolio asset allocation — delegates entirely to the shared valuation engine
-  app.get("/api/portfolio/allocation", async (req, res) => {
-    try {
-      const { userId } = requireAuth(req);
-      const totals = await calculatePortfolioTotalsAtDate(userId, new Date());
-      const { fiatValue, cryptoValue, stablecoinValue, investmentValue, totalValue } = totals;
-
-      // Task #338 — surface the rebalancing benchmark alongside the live
-      // allocation so the portfolio page can render actual-vs-target bars
-      // without re-deriving the targets on the client. Targets are returned
-      // as percentages (0–100) for easy display alongside the existing
-      // `percentage` fields. The note is included verbatim so the client UI
-      // can reproduce the same disclaimer the AI flow uses.
-      //
-      // Task #388 — pick the benchmark per-client rather than serving the
-      // shared equal-weight default to everyone. We delegate to
-      // `resolvePerClientBenchmark` so this route, the real-metrics route,
-      // and the AI-recommendations route all resolve the same benchmark
-      // for a given user — never disagreeing on what the target is. A
-      // personalised target must still be set by an adviser in a
-      // Statement of Advice.
-      const [latestRiskProfile] = await db
-        .select({ allocation: riskProfiles.allocation })
-        .from(riskProfiles)
-        .where(eq(riskProfiles.clientId, userId))
-        .orderBy(desc(riskProfiles.createdAt))
-        .limit(1);
-      const benchmark = resolvePerClientBenchmark(latestRiskProfile);
-      res.json({
-        fiat:       { value: fiatValue,        percentage: totalValue > 0 ? (fiatValue        / totalValue) * 100 : 0 },
-        crypto:     { value: cryptoValue,       percentage: totalValue > 0 ? (cryptoValue      / totalValue) * 100 : 0 },
-        stablecoin: { value: stablecoinValue,   percentage: totalValue > 0 ? (stablecoinValue  / totalValue) * 100 : 0 },
-        investment: { value: investmentValue,   percentage: totalValue > 0 ? (investmentValue  / totalValue) * 100 : 0 },
-        totalValue,
-        benchmark: {
-          type: benchmark.type,
-          note: benchmark.note,
-          targets: {
-            fiat:       benchmark.weights.fiat       * 100,
-            crypto:     benchmark.weights.crypto     * 100,
-            stablecoin: benchmark.weights.stablecoin * 100,
-            investment: benchmark.weights.investment * 100,
-          },
-        },
-      });
-    } catch (error: any) {
-      if (error.status) return res.status(error.status).json({ error: error.message });
-      res.status(500).json({ error: "Failed to get portfolio allocation" });
-    }
+  // /api/portfolio/allocation — handler lives in
+  // `server/portfolio-allocation-route.ts` so an automated test can mount it
+  // on a tiny loopback express server with seeded `risk_profiles` rows and
+  // assert that two clients with distinct profiles get different
+  // `benchmark.targets` payloads (Task #406). Behaviour is preserved
+  // byte-for-byte from the previous inline definition — see the registrar
+  // file for the full handler comments.
+  registerPortfolioAllocationRoute(app, {
+    db,
+    calculatePortfolioTotalsAtDate,
   });
 
   // Real metrics for AI advisory — diversification score, expected return, rebalancing gap, period returns

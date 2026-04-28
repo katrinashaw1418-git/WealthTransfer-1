@@ -40,6 +40,16 @@ SCRIPTS=(
   # records zero drift; wiring it here keeps the rebalancing-gap math
   # gated at PR time alongside the other static safety scripts.
   scripts/test-rebalancing-benchmark.ts
+  # Task #406 — end-to-end regression for /api/portfolio/allocation that
+  # seeds two clients with distinct risk_profiles rows and a third with
+  # none, then asserts each client gets the right per-user `benchmark.targets`
+  # payload from the route handler (not just the resolver in isolation,
+  # which the script above already covers). The script seeds + cleans up
+  # its own `__alloc406_<run>__` users, fact_find_snapshots, and
+  # risk_profiles rows on every run via try/finally — no platform-user
+  # writes, no ledger entries, so the surrounding leak-gate snapshot
+  # records zero drift.
+  scripts/test-portfolio-allocation-per-client.ts
   # Task #216 — newer safety tests, audited and added to the gate so any
   # future regression into the same try/finally-cleanup leak pattern
   # fixed by Tasks #158 and #187 is caught at PR time.

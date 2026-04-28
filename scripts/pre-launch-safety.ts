@@ -360,6 +360,17 @@ const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   // drift — same shape as the test-no-synthetic-portfolio-data.ts entry
   // immediately above.
   "scripts/test-rebalancing-benchmark.ts",
+  // Task #406 — end-to-end regression for /api/portfolio/allocation. Seeds
+  // two test clients with distinct risk_profiles rows + a third with none,
+  // mounts the extracted route registrar on a loopback express, and
+  // asserts each client gets the right per-user `benchmark.targets`
+  // payload (the resolver script above only covers the resolver in
+  // isolation; this script exercises the route handler itself). Cleans
+  // its own `__alloc406_<run>__` users / fact_find_snapshots /
+  // risk_profiles rows in try/finally on every run — no platform-user
+  // writes, no ledger entries, so the surrounding leak-gate snapshot
+  // records zero drift.
+  "scripts/test-portfolio-allocation-per-client.ts",
   // Task #209 — regression test for the per-scenario platform-leg
   // invariant gate (Task #202). Injects a deliberate platform-only
   // ledger entry under a transaction NOT owned by the gate's fixture
