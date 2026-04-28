@@ -469,6 +469,34 @@ export default function Portfolio() {
                           {isExpanded && lots.length > 0 && (
                             <div className="px-3 pb-3" data-testid={`lots-list-${productKey}`}>
                               <div className="border-t border-gray-200 pt-2 space-y-1.5">
+                                {(() => {
+                                  const totalInvested = Number(product.investedAmount ?? 0);
+                                  const totalCurrent = Number(product.value ?? 0);
+                                  const blendedReturn = Number(product.returnPercentage ?? 0);
+                                  return (
+                                    <div
+                                      className="flex items-center justify-between text-xs text-gray-600 pb-1.5 border-b border-gray-200"
+                                      data-testid={`lots-subtotal-${productKey}`}
+                                    >
+                                      <span className="font-medium text-gray-700">
+                                        {lots.length} {lots.length === 1 ? 'lot' : 'lots'}
+                                        <span className="text-gray-400 mx-1.5">·</span>
+                                        Invested ${totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                      </span>
+                                      <div className="flex items-center gap-3">
+                                        <span className="text-gray-700">
+                                          Current ${totalCurrent.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                        </span>
+                                        <span
+                                          className={`font-medium tabular-nums ${blendedReturn >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                                        >
+                                          Return {blendedReturn >= 0 ? '+' : ''}
+                                          {blendedReturn.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
                                 {lots.map((lot: any, lotIdx: number) => {
                                   const invested = Number(lot.investedAmount ?? 0);
                                   const current = Number(lot.currentValue ?? 0);
