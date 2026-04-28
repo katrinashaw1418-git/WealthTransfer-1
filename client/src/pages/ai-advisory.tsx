@@ -212,18 +212,133 @@ export default function AiAdvisory() {
             <p className="text-sm text-gray-600">Not a suggestion to act. Any rebalancing must be discussed with your adviser and documented in a Statement of Advice.</p>
           </div>
 
-          <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center">
-            <p className="text-sm font-medium text-gray-700">No personal allocation comparison available</p>
-            <p className="mt-1 text-xs text-gray-500">
-              A personalised benchmark must be set by your licensed adviser as part of a Statement of Advice.
-              No illustrative comparison is shown until then.
-            </p>
-            {!metricsLoading && realMetrics?.rebalancingBenchmarkNote ? (
-              <p className="mt-3 text-xs text-gray-400" data-testid="text-benchmark-note">
-                {realMetrics.rebalancingBenchmarkNote}
+          {metricsLoading ? (
+            <div
+              className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-6 text-center"
+              data-testid="block-allocation-loading"
+            >
+              <p className="text-sm text-gray-500">Loading your portfolio allocation…</p>
+            </div>
+          ) : realMetrics?.hasAllocationData && realMetrics?.currentAllocation && realMetrics?.benchmarkAllocation ? (
+            <div className="space-y-4" data-testid="block-allocation-comparison">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-xs uppercase text-gray-500">
+                      <th className="text-left font-medium py-2">Asset class</th>
+                      <th className="text-right font-medium py-2">Current</th>
+                      <th className="text-right font-medium py-2">Benchmark</th>
+                      <th className="text-right font-medium py-2">Difference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(["fiat", "crypto", "stablecoin", "investment"] as const).map((cls) => {
+                      const current = Number(realMetrics.currentAllocation[cls] ?? 0);
+                      const benchmark = Number(realMetrics.benchmarkAllocation[cls] ?? 0);
+                      const diff = +(current - benchmark).toFixed(1);
+                      const diffColor =
+                        Math.abs(diff) < 0.1
+                          ? "text-gray-500"
+                          : diff > 0
+                            ? "text-amber-700"
+                            : "text-blue-700";
+                      const label =
+                        cls === "fiat" ? "Fiat"
+                          : cls === "crypto" ? "Crypto"
+                          : cls === "stablecoin" ? "Stablecoin"
+                          : "Investment";
+                      const maxPct = Math.max(current, benchmark, 1);
+                      return (
+                        <tr
+                          key={cls}
+                          className="border-b border-gray-100 last:border-b-0"
+                          data-testid={`row-allocation-${cls}`}
+                        >
+                          <td className="py-2 align-middle">
+                            <p className="font-medium text-gray-900">{label}</p>
+                            <div className="mt-1 space-y-1">
+                              <div className="h-1.5 w-full bg-gray-100 rounded">
+                                <div
+                                  className="h-1.5 bg-blue-500 rounded"
+                                  style={{ width: `${Math.min(100, (current / maxPct) * 100)}%` }}
+                                />
+                              </div>
+                              <div className="h-1.5 w-full bg-gray-100 rounded">
+                                <div
+                                  className="h-1.5 bg-gray-400 rounded"
+                                  style={{ width: `${Math.min(100, (benchmark / maxPct) * 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                          </td>
+                          <td
+                            className="py-2 text-right font-medium text-gray-900 align-top"
+                            data-testid={`text-current-${cls}`}
+                          >
+                            {current.toFixed(1)}%
+                          </td>
+                          <td
+                            className="py-2 text-right font-medium text-gray-700 align-top"
+                            data-testid={`text-benchmark-${cls}`}
+                          >
+                            {benchmark.toFixed(1)}%
+                          </td>
+                          <td
+                            className={`py-2 text-right font-medium align-top ${diffColor}`}
+                            data-testid={`text-diff-${cls}`}
+                          >
+                            {diff > 0 ? "+" : ""}{diff.toFixed(1)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex items-center gap-4 text-xs text-gray-500">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-1.5 bg-blue-500 rounded" /> Current
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-1.5 bg-gray-400 rounded" /> Benchmark
+                </span>
+              </div>
+
+              <div className="flex items-baseline justify-between gap-3 flex-wrap rounded-lg bg-gray-50 border border-gray-200 p-3">
+                <div>
+                  <p className="text-xs uppercase font-medium text-gray-500">Rebalancing gap</p>
+                  <p className="text-xs text-gray-500">One-sided turnover vs. the benchmark above</p>
+                </div>
+                <p
+                  className="text-2xl font-bold text-gray-900"
+                  data-testid="text-rebalancing-gap"
+                >
+                  {realMetrics.rebalancingGap != null
+                    ? `${Number(realMetrics.rebalancingGap).toFixed(1)}%`
+                    : "—"}
+                </p>
+              </div>
+
+              {realMetrics?.rebalancingBenchmarkNote ? (
+                <p className="text-xs text-gray-400" data-testid="text-benchmark-note">
+                  {realMetrics.rebalancingBenchmarkNote}
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center">
+              <p className="text-sm font-medium text-gray-700">No personal allocation comparison available</p>
+              <p className="mt-1 text-xs text-gray-500">
+                Add holdings to your portfolio to see how your current allocation compares with your risk-profile benchmark.
               </p>
-            ) : null}
-          </div>
+              {realMetrics?.rebalancingBenchmarkNote ? (
+                <p className="mt-3 text-xs text-gray-400" data-testid="text-benchmark-note">
+                  {realMetrics.rebalancingBenchmarkNote}
+                </p>
+              ) : null}
+            </div>
+          )}
 
           <Button variant="outline" size="sm" className="text-blue-600 border-blue-200">
             Discuss rebalancing with adviser <ExternalLink className="w-3 h-3 ml-1" />

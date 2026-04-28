@@ -2514,6 +2514,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const hasSufficientHistory = sorted.length >= 30;
       const actualSnapshotCount  = sorted.filter((s: any) => s.source === "actual").length;
 
+      // Per-asset-class allocation comparison numbers, expressed as percentages
+      // (0–100) so the UI can render them directly without re-multiplying. The
+      // current weights come from the live portfolio valuation above; the
+      // benchmark weights come from the same `rebalancingBenchmark` we already
+      // resolved for the rebalancing-gap calculation, keeping the two sides
+      // consistent. `hasAllocationData` lets the client decide whether to show
+      // the comparison or a "no data" placeholder without inferring it from
+      // other fields.
+      const currentAllocationPct = {
+        fiat:       +(alloc.fiat       * 100).toFixed(1),
+        crypto:     +(alloc.crypto     * 100).toFixed(1),
+        stablecoin: +(alloc.stablecoin * 100).toFixed(1),
+        investment: +(alloc.investment * 100).toFixed(1),
+      };
+      const benchmarkAllocationPct = {
+        fiat:       +(rebalancingBenchmark.weights.fiat       * 100).toFixed(1),
+        crypto:     +(rebalancingBenchmark.weights.crypto     * 100).toFixed(1),
+        stablecoin: +(rebalancingBenchmark.weights.stablecoin * 100).toFixed(1),
+        investment: +(rebalancingBenchmark.weights.investment * 100).toFixed(1),
+      };
+      const hasAllocationData = totalValue > 0;
+
       res.json({
         diversificationScore: +diversificationScore.toFixed(1),
         // contractedInvestmentReturn: weighted average of explicit product annualReturn rates from DB.
@@ -2524,6 +2546,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         rebalancingGap: +rebalancingGap.toFixed(1),
         rebalancingBenchmarkType,
         rebalancingBenchmarkNote,
+        currentAllocation: currentAllocationPct,
+        benchmarkAllocation: benchmarkAllocationPct,
+        hasAllocationData,
         historySource,
         hasSufficientHistory,
         hasMeaningfulHistory,
