@@ -96,6 +96,11 @@ import { adviceRecords } from "@shared/schema";
 // audit() helper below; only fee-consent + advice-record paths have been
 // migrated.
 import { writeAuditLog } from "./services/audit";
+// Task #301 — best-effort client notification when a fresh fee-consent
+// request is created. The helper looks up the client email, sends the
+// deep-link, and writes an audit_logs row recording delivery success or
+// failure (audit row is the source of truth — see helper docstring).
+import { notifyClientOfFeeConsentRequest } from "./services/fee-consent-notifications";
 import {
   evaluateRetentionLock,
   RETENTION_POLICY_TEXT,
@@ -1312,6 +1317,20 @@ export function registerAdviserRoutes(app: Express): void {
             ipAddress: req.ip || null,
           });
           return row;
+        });
+        // Task #301 — best-effort client notification with deep-link to
+        // /client/fee-consents?request=:id. Runs OUTSIDE the transaction so
+        // SMTP latency / failure can never roll back the inserted request.
+        // Delivery success/failure is recorded as a separate audit_logs row
+        // (action `fee_consent_request.client_notified` or
+        // `_client_notification_failed`) so an auditor can prove a notice
+        // was attempted for every created request — including the dev /
+        // preview "SMTP not configured" case where we log only.
+        await notifyClientOfFeeConsentRequest({
+          requestRow: created,
+          adviserUserId: auth.userId,
+          trigger: "new_request",
+          ipAddress: req.ip || null,
         });
         res.status(201).json(created);
       } catch (error: any) {

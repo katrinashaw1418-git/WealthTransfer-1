@@ -144,6 +144,11 @@ import {
 } from "./services/write-kill-switch";
 import { requireAuth, requireRole, hashPassword } from "./auth";
 import { sendInviteEmail, type InviteRole } from "./email";
+// Task #301 — best-effort client notification when an admin Supersedes a
+// live consent and a fresh pending request is created. Same helper as the
+// adviser POST handler so the audit-log shape is identical regardless of
+// trigger source.
+import { notifyClientOfFeeConsentRequest } from "./services/fee-consent-notifications";
 import { storage } from "./storage";
 
 // ---------------------------------------------------------------------------
@@ -4227,6 +4232,22 @@ export function registerAdminRoutes(app: Express): void {
           supersededConsent,
           newRequest,
         };
+      });
+      // Task #301 — best-effort client notification with deep-link to the
+      // sign page. Runs OUTSIDE the supersede transaction so SMTP latency
+      // / failure can never roll back the supersede + new-request inserts
+      // (which already produced their own audit rows on lines above).
+      // Delivery success/failure is recorded as a separate audit_logs row
+      // with action `fee_consent_request.client_notified` /
+      // `_client_notification_failed` and trigger='supersede' so an
+      // operator can prove a notice was attempted for every superseded
+      // consent — including the dev / preview "SMTP not configured" case
+      // where we log only.
+      await notifyClientOfFeeConsentRequest({
+        requestRow: result.newRequest,
+        adviserUserId: auth.userId,
+        trigger: "supersede",
+        ipAddress: req.ip || null,
       });
       return result;
     }),

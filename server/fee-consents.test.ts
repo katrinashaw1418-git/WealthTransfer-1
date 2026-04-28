@@ -46,6 +46,28 @@ vi.hoisted(() => {
   process.env.JWT_SECRET ||= "fee-consents-task-293-test-secret";
 });
 
+// Task #301 — the adviser POST and admin Supersede endpoints now
+// fire-and-forget a client notification via sendFeeConsentRequestEmail.
+// Stub the email module so the existing #293 tests don't make real SMTP
+// calls when GMAIL_USER / GMAIL_APP_PASSWORD are set in the dev shell.
+// The stub returns sent:true so the route's audit-log line records a
+// success — none of the assertions in this file inspect that audit row,
+// so success vs. failure doesn't matter here. (Task #301-specific
+// behaviour is covered in fee-consent-client-notifications.test.ts.)
+vi.mock("./email", () => ({
+  sendFeeConsentRequestEmail: vi.fn(async (args: any) => ({
+    sent: true,
+    signLink: `/client/fee-consents?request=${args.requestId}`,
+  })),
+  emailConfigured: true,
+  sendVerificationEmail: vi.fn(async () => ({ sent: true })),
+  sendInviteEmail: vi.fn(async () => ({ sent: true })),
+  sendInsufficientFundsEmail: vi.fn(async () => ({ sent: true })),
+  sendReportReadyEmail: vi.fn(async () => ({ sent: true })),
+  sendReportFailedEmail: vi.fn(async () => ({ sent: true })),
+  sendReportExpiringSoonEmail: vi.fn(async () => ({ sent: true })),
+}));
+
 import express from "express";
 import http from "node:http";
 import type { AddressInfo } from "node:net";

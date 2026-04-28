@@ -672,3 +672,137 @@ export async function sendReportExpiringSoonEmail(args: {
     return { sent: false, error: msg };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Fee-consent request notifications (Task #301)
+//
+// Fired the moment a fresh client-facing fee-consent request appears in the
+// client's queue, so a "pending" row stops sitting unseen until the next
+// login. Two trigger flavours share one renderer because the body is almost
+// identical — the subject line and lead paragraph differ so the client can
+// tell, at a glance, whether this is brand-new or a replacement for a live
+// consent that an admin just superseded.
+//
+// The deep link points at the client SPA's existing /client/fee-consents
+// page; an optional `?request=:id` query string is included for forward
+// compatibility (a future task can wire the page to scroll/highlight that
+// row). The link uses APP_BASE_URL when configured, or a relative path so
+// preview environments still produce something the SPA can navigate to.
+//
+// Returns a structured result rather than throwing so the caller can:
+//   1. write an audit_logs row reflecting the attempt (success/failure), and
+//   2. keep iterating across remaining recipients if one address bounces.
+//
+// When SMTP is not configured (dev / preview) we log a one-line summary and
+// return `{ sent: false }` so the caller still records "notification was
+// attempted (logs only)" in the audit trail.
+// ---------------------------------------------------------------------------
+export type FeeConsentRequestEmailTrigger = "new_request" | "supersede";
+
+function feeConsentSignDeepLink(
+  requestId: number,
+  baseUrl?: string | null,
+): string {
+  const path = `/client/fee-consents?request=${requestId}`;
+  const base = (baseUrl ?? process.env.APP_BASE_URL ?? "").replace(/\/$/, "");
+  return base ? `${base}${path}` : path;
+}
+
+export async function sendFeeConsentRequestEmail(args: {
+  to: string;
+  firstName: string;
+  requestId: number;
+  feeType: string;
+  trigger: FeeConsentRequestEmailTrigger;
+  adviserName?: string | null;
+  baseUrl?: string | null;
+}): Promise<{ sent: boolean; error?: string; signLink: string }> {
+  const { to, firstName, requestId, feeType, trigger, adviserName, baseUrl } =
+    args;
+  const signLink = feeConsentSignDeepLink(requestId, baseUrl);
+  const feeLabel = feeType.replace(/_/g, " ");
+  const adviserLabel = (adviserName ?? "").trim() || "your adviser";
+  const isSupersede = trigger === "supersede";
+  const subject = isSupersede
+    ? `Action required: review the replacement ${feeLabel} consent for your AMAX Wealth account`
+    : `Action required: review and sign your ${feeLabel} consent on AMAX Wealth`;
+  const heading = isSupersede
+    ? "A replacement fee consent is waiting for your signature"
+    : "A new fee consent is waiting for your signature";
+  const lead = isSupersede
+    ? `Hi ${firstName}, an AMAX Wealth administrator has replaced your existing ${feeLabel} consent and ${adviserLabel} has sent through a fresh request that needs your review and signature. The previous consent has been marked as superseded — no fees will be deducted under the new request until you sign.`
+    : `Hi ${firstName}, ${adviserLabel} has sent you a new ${feeLabel} consent to review and sign. No fees will be deducted until you sign.`;
+
+  if (!emailConfigured) {
+    console.log(
+      `[email] Fee-consent-request notice NOT sent to ${to} — SMTP not configured ` +
+        `(request #${requestId}, feeType=${feeType}, trigger=${trigger})`,
+    );
+    return {
+      sent: false,
+      error: "SMTP not configured (GMAIL_USER / GMAIL_APP_PASSWORD missing)",
+      signLink,
+    };
+  }
+
+  const transport = createTransport()!;
+  try {
+    await transport.sendMail({
+      from: FROM_HEADER,
+      replyTo: REPLY_TO,
+      to,
+      subject,
+      html: `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 20px">
+    <tr><td align="center">
+      <table width="540" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:16px;border:1px solid #334155;overflow:hidden">
+        <tr><td style="padding:32px 40px 0;text-align:center">
+          <span style="font-size:22px;font-weight:700;color:#fff;letter-spacing:2px">AMAX WEALTH</span>
+        </td></tr>
+        <tr><td style="padding:24px 40px">
+          <h1 style="color:#fff;font-size:20px;font-weight:700;margin:0 0 12px">${heading}</h1>
+          <p style="color:#94a3b8;font-size:15px;line-height:1.6;margin:0 0 20px">${lead}</p>
+          <div style="text-align:center;margin:0 0 24px">
+            <a href="${signLink}" style="display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 32px;border-radius:10px">
+              Review &amp; sign →
+            </a>
+          </div>
+          <p style="color:#94a3b8;font-size:13px;margin:0 0 8px">
+            If the button doesn't work, copy and paste this link into your browser:
+          </p>
+          <p style="color:#0ea5e9;font-size:12px;word-break:break-all;margin:0 0 16px">
+            ${signLink}
+          </p>
+          <p style="color:#64748b;font-size:12px;margin:0">Reference: fee-consent request #${requestId}</p>
+        </td></tr>
+        <tr><td style="padding:20px 40px;border-top:1px solid #334155;text-align:center">
+          <p style="color:#475569;font-size:11px;margin:0">
+            AMAX GLOBAL Pty Ltd &nbsp;·&nbsp; ABN 54 690 827 608 &nbsp;·&nbsp; AUSTRAC Registered<br>
+            Level 2, 8-12 King Street, Rockdale NSW 2216 &nbsp;·&nbsp; +61 2 8320 1908
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+      text:
+        `${lead}\n\n` +
+        `Review and sign: ${signLink}\n\n` +
+        `Reference: fee-consent request #${requestId}\n\n` +
+        `AMAX GLOBAL Pty Ltd`,
+    });
+    return { sent: true, signLink };
+  } catch (err: any) {
+    const msg = err?.message || String(err) || "SMTP send failed";
+    console.error(
+      `[email] Fee-consent-request SMTP send FAILED for ${to} (request #${requestId}):`,
+      msg,
+    );
+    return { sent: false, error: msg, signLink };
+  }
+}
