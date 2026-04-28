@@ -638,6 +638,66 @@ app.use((req, res, next) => {
   }, 360 * 1000);
 
   // ---------------------------------------------------------------------------
+  // TASK #309 — Auto-cancel investment instructions after their consent
+  // window expires
+  // ---------------------------------------------------------------------------
+  // Task #292 wrote an `expiresAt` deadline onto every newly-raised
+  // investment instruction (default 7 days, configurable via
+  // INVESTMENT_INSTRUCTION_CONSENT_TTL_DAYS). This sweep flips the row
+  // from `pending_consent` to `cancelled` once the deadline has passed
+  // and writes one audit row per cancellation, so the adviser table
+  // never shows an "expired" date next to an actionable status and a
+  // client cannot accidentally consent to a stale instruction.
+  //
+  // Hard rules: no money movement, no fee-consent / execution-auth
+  // touches; only `investment_instructions` (status flip + updatedAt)
+  // and one `audit_logs` row per cancellation. Idempotent — re-running
+  // any time after the previous tick picks up zero rows. Wrapped in
+  // `withBackgroundJobRunRecord` so the admin Background Jobs page
+  // shows last-run / overdue alongside the other crons, and gated on
+  // `assertWritesAllowed` so a paused environment skips the entire
+  // sweep cleanly.
+  //
+  // Staggered 390s after start so it lands between the insufficient-funds
+  // sweep (360s) and the database-backup family (420s+) on first boot.
+  // ---------------------------------------------------------------------------
+  const { runInstructionConsentExpirySweep } = await import(
+    "./services/instruction-consent-expiry-sweep"
+  );
+
+  async function runInstructionConsentExpirySweepCron() {
+    try {
+      await withBackgroundJobRunRecord(
+        "instruction-consent-expiry-sweep",
+        async () => {
+          const ks = await assertWritesAllowed(
+            "instruction-consent-expiry-sweep",
+          );
+          if (!ks.allowed) {
+            return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+          }
+          const summary = await runInstructionConsentExpirySweep();
+          const line =
+            `${summary.checked} expired pending instruction(s) examined, ` +
+            `${summary.cancelled} cancelled, ${summary.errors} error(s)`;
+          log(`[instruction-consent-expiry-sweep] completed: ${line}`);
+          return line;
+        },
+      );
+    } catch (e) {
+      console.error("[instruction-consent-expiry-sweep] cron error", e);
+    }
+  }
+
+  setTimeout(() => {
+    void runInstructionConsentExpirySweepCron();
+    setInterval(
+      runInstructionConsentExpirySweepCron,
+      24 * 60 * 60 * 1000,
+    );
+  }, 390 * 1000);
+
+  // ---------------------------------------------------------------------------
   // Task #63 — Posting-receipt invariant guard
   // ---------------------------------------------------------------------------
   // Self-healing replacement for the manual "re-run

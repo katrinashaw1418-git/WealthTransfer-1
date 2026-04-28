@@ -54,12 +54,31 @@ import {
 import { isKnownProductCategory } from "@shared/product-categories";
 
 // -----------------------------------------------------------------------------
-// Default consent expiry for newly-raised investment instructions. After this
-// window elapses with no client action, downstream sweeps may transition the
-// row to "cancelled" — the column is set at creation so the adviser table can
-// always render a clear deadline.
+// Consent expiry for newly-raised investment instructions. After this window
+// elapses with no client action, the auto-cancel sweep
+// (`server/services/instruction-consent-expiry-sweep.ts`) transitions the row
+// from `pending_consent` to `cancelled` and writes an audit row. The column
+// is set at creation so the adviser table can always render a clear deadline.
+//
+// Task #309 — the value is no longer hard-coded. Operations can override the
+// default 7-day window by setting INVESTMENT_INSTRUCTION_CONSENT_TTL_DAYS to
+// a positive integer; an absent / malformed value falls back to 7 so a typo
+// can never silently push pending instructions out to "never expire". The
+// sweep reads the SAME helper, so the create path and the cancellation path
+// can never drift apart.
 // -----------------------------------------------------------------------------
-const INSTRUCTION_CONSENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_INSTRUCTION_CONSENT_TTL_DAYS = 7;
+
+export function getInstructionConsentTtlMs(): number {
+  const raw = process.env.INVESTMENT_INSTRUCTION_CONSENT_TTL_DAYS;
+  if (raw !== undefined && raw !== "") {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) {
+      return n * 24 * 60 * 60 * 1000;
+    }
+  }
+  return DEFAULT_INSTRUCTION_CONSENT_TTL_DAYS * 24 * 60 * 60 * 1000;
+}
 
 // -----------------------------------------------------------------------------
 // Test-fixture email filter — defence in depth for adviser surfaces.
@@ -1109,7 +1128,7 @@ export async function createAdviserInstruction(
     }
   }
 
-  const expiresAt = new Date(Date.now() + INSTRUCTION_CONSENT_TTL_MS);
+  const expiresAt = new Date(Date.now() + getInstructionConsentTtlMs());
 
   const [row] = await db
     .insert(investmentInstructions)

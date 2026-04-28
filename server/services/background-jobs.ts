@@ -176,6 +176,15 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
       "Daily sweep that flips active adviser_clients rows whose client email matches a known fixture pattern (and whose adviser does NOT) to is_active=false, with one audit row per deactivated (adviser, client) link.",
   },
   {
+    // Task #309 — daily sweep that flips `pending_consent` investment
+    // instruction rows to `cancelled` once their `expiresAt` deadline
+    // has passed, with one audit row per cancellation.
+    name: "instruction-consent-expiry-sweep",
+    label: "Instruction consent expiry sweep",
+    description:
+      "Daily sweep that cancels investment_instructions rows in 'pending_consent' whose expiresAt deadline has passed. Writes one audit row per cancellation. Configure the deadline with INVESTMENT_INSTRUCTION_CONSENT_TTL_DAYS (default 7).",
+  },
+  {
     name: "nightly-go-no-go",
     label: "Nightly launch readiness gate",
     description:
