@@ -1,9 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Check, Lock } from "lucide-react";
+import { Check, Lock, Loader2, X } from "lucide-react";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import type {
   ComplianceOverview,
   ComplianceStep,
@@ -12,12 +15,58 @@ import type {
   ComplianceWholesalePill,
 } from "@shared/schema";
 
-// ---------------------------------------------------------------------------
-// Task #373 — wire `/compliance` to live KYC data.
-// All status pills, dates, counters, and the Sumsub applicant ID are derived
-// server-side and fetched via /api/compliance/overview. This file is now
-// purely presentational over the typed view shape.
-// ---------------------------------------------------------------------------
+const SUMSUB_SDK_URL =
+  "https://static.sumsub.com/idensic/static/sns-websdk-builder.js";
+
+type SumsubTokenResponse = { token: string; userId: string; expiresIn: number };
+
+type SumsubBuilderInstance = {
+  withConf: (conf: Record<string, unknown>) => SumsubBuilderInstance;
+  withOptions: (opts: Record<string, unknown>) => SumsubBuilderInstance;
+  on: (event: string, cb: (...args: unknown[]) => void) => SumsubBuilderInstance;
+  build: () => { launch: (selector: string) => void; destroy?: () => void };
+};
+
+declare global {
+  interface Window {
+    snsWebSdk?: {
+      init: (
+        token: string,
+        onTokenExpired: () => Promise<string>,
+      ) => SumsubBuilderInstance;
+    };
+  }
+}
+
+let sumsubSdkPromise: Promise<void> | null = null;
+
+function loadSumsubSdk(): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  if (window.snsWebSdk) return Promise.resolve();
+  if (sumsubSdkPromise) return sumsubSdkPromise;
+  sumsubSdkPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      `script[src="${SUMSUB_SDK_URL}"]`,
+    );
+    if (existing) {
+      existing.addEventListener("load", () => resolve());
+      existing.addEventListener("error", () =>
+        reject(new Error("Failed to load Sumsub WebSDK")),
+      );
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = SUMSUB_SDK_URL;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => {
+      sumsubSdkPromise = null;
+      reject(new Error("Failed to load Sumsub WebSDK"));
+    };
+    document.head.appendChild(script);
+  });
+  return sumsubSdkPromise;
+}
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -184,9 +233,108 @@ function ComplianceSkeleton() {
 }
 
 export default function Compliance() {
+  const { toast } = useToast();
   const { data, isLoading, isError } = useQuery<ComplianceOverview>({
     queryKey: ["/api/compliance/overview"],
   });
+
+  const [sdkOpen, setSdkOpen] = useState(false);
+  const [sdkLaunching, setSdkLaunching] = useState(false);
+  const sdkContainerRef = useRef<HTMLDivElement | null>(null);
+  const sdkInstanceRef = useRef<{ destroy?: () => void } | null>(null);
+
+  const tokenMutation = useMutation<SumsubTokenResponse>({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/kyc/sumsub-token");
+      return (await res.json()) as SumsubTokenResponse;
+    },
+  });
+
+  const refreshOverview = () => {
+    queryClient.invalidateQueries({ queryKey: ["/api/compliance/overview"] });
+  };
+
+  const closeSdk = () => {
+    if (sdkInstanceRef.current?.destroy) {
+      try {
+        sdkInstanceRef.current.destroy();
+      } catch {
+        // ignore destroy errors — modal is closing anyway
+      }
+    }
+    sdkInstanceRef.current = null;
+    setSdkOpen(false);
+    refreshOverview();
+  };
+
+  const launchSdk = async () => {
+    setSdkLaunching(true);
+    setSdkOpen(true);
+    try {
+      const [tokenResult] = await Promise.all([
+        tokenMutation.mutateAsync(),
+        loadSumsubSdk(),
+      ]);
+      if (!window.snsWebSdk) throw new Error("Sumsub WebSDK unavailable");
+      if (!sdkContainerRef.current) {
+        // Container hasn't mounted yet — wait one frame for the modal to render.
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      }
+      if (!sdkContainerRef.current) {
+        throw new Error("Sumsub container unavailable");
+      }
+      sdkContainerRef.current.id = "sumsub-websdk-container";
+      const builder = window.snsWebSdk
+        .init(tokenResult.token, async () => {
+          const next = await tokenMutation.mutateAsync();
+          return next.token;
+        })
+        .withConf({ lang: "en" })
+        .withOptions({ addViewportTag: false, adaptIframeHeight: true })
+        .on("idCheck.onApplicantSubmitted", () => refreshOverview())
+        .on("idCheck.onApplicantStatusChanged", () => refreshOverview())
+        .on("idCheck.onError", () => refreshOverview());
+      const instance = builder.build();
+      sdkInstanceRef.current = instance;
+      instance.launch("#sumsub-websdk-container");
+    } catch (err: unknown) {
+      let description = "Couldn't start identity verification. Please try again.";
+      if (err && typeof err === "object" && "message" in err) {
+        const msg = (err as { message?: unknown }).message;
+        if (typeof msg === "string" && msg.length > 0) description = msg;
+      }
+      // Surface the not-configured case from the API with a clearer message.
+      if (
+        err &&
+        typeof err === "object" &&
+        "status" in err &&
+        (err as { status?: unknown }).status === 503
+      ) {
+        description =
+          "Identity verification isn't configured yet. Please contact support.";
+      }
+      toast({
+        title: "Verification unavailable",
+        description,
+        variant: "destructive",
+      });
+      setSdkOpen(false);
+    } finally {
+      setSdkLaunching(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (sdkInstanceRef.current?.destroy) {
+        try {
+          sdkInstanceRef.current.destroy();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
 
   if (isLoading) return <ComplianceSkeleton />;
 
@@ -295,6 +443,14 @@ export default function Compliance() {
       : "Re-verification due: pending verification";
 
   const stepCount = amaxSidebarSteps.length;
+
+  const showLaunchCta = data.sumsub.sessionState !== "verified";
+  const launchLabel =
+    data.sumsub.sessionState === "session_active"
+      ? "Continue identity verification"
+      : data.sumsub.sessionState === "rejected"
+        ? "Restart identity verification"
+        : "Start identity verification";
 
   return (
     <div className="min-h-screen bg-[#faf8f5] p-6">
@@ -538,6 +694,33 @@ export default function Compliance() {
                   })}
                 </div>
 
+                {showLaunchCta && (
+                  <div
+                    className="flex items-center justify-between gap-4 px-5 py-4 border-t border-gray-100 bg-white"
+                    data-testid="row-sumsub-launch"
+                  >
+                    <div className="text-sm text-gray-600">
+                      Complete identity verification through Sumsub to progress your
+                      classification.
+                    </div>
+                    <Button
+                      onClick={launchSdk}
+                      disabled={sdkLaunching}
+                      data-testid="button-launch-sumsub"
+                      className="flex-shrink-0"
+                    >
+                      {sdkLaunching ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Loading…
+                        </>
+                      ) : (
+                        launchLabel
+                      )}
+                    </Button>
+                  </div>
+                )}
+
                 {/* Audit footer */}
                 <div
                   className="grid grid-cols-1 sm:grid-cols-3 gap-4 px-5 py-4 bg-[#faf8f5] border-t border-gray-100"
@@ -735,6 +918,37 @@ export default function Compliance() {
           </main>
         </div>
       </div>
+
+      {sdkOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+          data-testid="sumsub-modal"
+        >
+          <div className="bg-white rounded-lg w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden shadow-xl">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+              <p className="font-semibold text-gray-900">Identity verification</p>
+              <button
+                type="button"
+                onClick={closeSdk}
+                className="text-gray-500 hover:text-gray-900"
+                aria-label="Close verification"
+                data-testid="button-close-sumsub"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-4">
+              {sdkLaunching && (
+                <div className="flex items-center justify-center py-16 text-sm text-gray-500">
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Loading verification…
+                </div>
+              )}
+              <div ref={sdkContainerRef} id="sumsub-websdk-container" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

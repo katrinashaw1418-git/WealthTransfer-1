@@ -56,6 +56,13 @@ import {
 import { MATCH_EPSILON } from "./services/reconciliation";
 import { emitAuditWriteFailureAlert } from "./services/audit";
 import {
+  loadSumsubConfigFromEnv,
+  mintSumsubAccessToken,
+  buildExternalUserId,
+  SumsubApiError,
+  SumsubNotConfiguredError,
+} from "./services/sumsub";
+import {
   assertKillSwitchOff,
   getAllKillSwitchStates,
   sendKillSwitchResponse,
@@ -1875,6 +1882,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Unexpected DB or runtime errors get a generic message to avoid leaking internal details.
       if (error?.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to retrieve account details" });
+    }
+  });
+
+  // Mint a short-lived Sumsub WebSDK access token for the logged-in user.
+  // Returns 503 when SUMSUB_APP_TOKEN / SUMSUB_SECRET_KEY are unset.
+  app.post("/api/kyc/sumsub-token", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const config = loadSumsubConfigFromEnv();
+      if (!config) throw new SumsubNotConfiguredError();
+      const externalUserId = buildExternalUserId(auth.userId);
+      const issued = await mintSumsubAccessToken(externalUserId, config);
+      res.json({
+        token: issued.token,
+        userId: issued.userId,
+        externalUserId,
+        levelName: issued.levelName,
+        expiresInSecs: config.ttlSecs,
+      });
+    } catch (error: unknown) {
+      if (error instanceof SumsubNotConfiguredError) {
+        return res.status(503).json({ error: error.message, code: "sumsub_not_configured" });
+      }
+      if (error instanceof SumsubApiError) {
+        console.error("[sumsub] upstream error", error.upstreamStatus, error.upstreamBody);
+        return res.status(502).json({ error: "Failed to reach the identity verification provider." });
+      }
+      const status = (error as { status?: number } | null)?.status;
+      const message = error instanceof Error ? error.message : "Unknown error";
+      if (status) return res.status(status).json({ error: message });
+      console.error("[sumsub] unexpected error", error);
+      res.status(500).json({ error: "Failed to start identity verification session." });
     }
   });
 
