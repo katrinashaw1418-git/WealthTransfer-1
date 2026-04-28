@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Progress } from "@/components/ui/progress";
 import {
   Tabs,
   TabsContent,
@@ -720,6 +721,19 @@ function DocumentDialog({
   const { toast } = useToast();
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  // Task #380 — track byte-level upload progress so the dialog can render a
+  // real progress bar (instead of just a "Uploading…" button label) for
+  // large files. `percent === null` means the browser couldn't report a
+  // content length and we fall back to an indeterminate-looking bar.
+  const [uploadProgress, setUploadProgress] = useState<{
+    loaded: number;
+    total: number;
+    percent: number | null;
+  } | null>(null);
+  // AbortController for the in-flight XHR. Held in a ref (not state) so
+  // closing the dialog mid-upload can synchronously abort without waiting
+  // for a re-render.
+  const abortControllerRef = useRef<AbortController | null>(null);
   const form = useForm<DocumentForm>({
     resolver: zodResolver(documentFormSchema),
     defaultValues: {
@@ -730,11 +744,12 @@ function DocumentDialog({
   });
 
   // Reset transient state every time the dialog opens so a re-opened dialog
-  // doesn't show last upload's file or error.
+  // doesn't show last upload's file, error, or progress bar.
   useEffect(() => {
     if (open) {
       setFile(null);
       setFileError(null);
+      setUploadProgress(null);
     }
   }, [open]);
 
@@ -764,11 +779,28 @@ function DocumentDialog({
       if (values.description && values.description.trim() !== "") {
         fd.append("description", values.description.trim());
       }
-      const res = await apiUpload(
-        "/api/adviser/client-documents/upload",
-        fd,
-      );
-      return res.json();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      // Seed the progress bar at 0% immediately so the bar appears the
+      // moment the request starts, before the first onprogress event.
+      setUploadProgress({ loaded: 0, total: file.size, percent: 0 });
+      try {
+        const res = await apiUpload(
+          "/api/adviser/client-documents/upload",
+          fd,
+          {
+            signal: controller.signal,
+            onProgress: ({ loaded, total, percent }) => {
+              setUploadProgress({ loaded, total, percent });
+            },
+          },
+        );
+        return await res.json();
+      } finally {
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
+        }
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({
@@ -779,8 +811,18 @@ function DocumentDialog({
       form.reset();
       setFile(null);
       setFileError(null);
+      setUploadProgress(null);
     },
     onError: (err: unknown) => {
+      setUploadProgress(null);
+      // Adviser cancelled mid-upload — the dialog has already been closed
+      // by handleOpenChange, so a destructive toast would be misleading.
+      // A small confirmation toast keeps the action visible without
+      // implying the request failed.
+      if (err instanceof Error && err.name === "AbortError") {
+        toast({ title: "Upload cancelled" });
+        return;
+      }
       const { title, description } = explainUploadError(err);
       toast({
         title,
@@ -799,8 +841,25 @@ function DocumentDialog({
     create.mutate(v);
   });
 
+  // Wrap the parent-supplied onOpenChange so closing the dialog while an
+  // upload is in flight cleanly aborts the XHR (Task #380). Without this,
+  // the request would keep streaming bytes after the dialog disappears
+  // and the eventual response would be discarded silently.
+  const handleOpenChange = (next: boolean) => {
+    if (!next && create.isPending) {
+      abortControllerRef.current?.abort();
+    }
+    onOpenChange(next);
+  };
+
+  const uploading = create.isPending;
+  const progressValue =
+    uploadProgress?.percent != null
+      ? Math.floor(uploadProgress.percent)
+      : null;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent data-testid="dialog-add-document">
         <DialogHeader>
           <DialogTitle>Upload a document</DialogTitle>
@@ -921,6 +980,36 @@ function DocumentDialog({
                   {fileError}
                 </p>
               ) : null}
+              {uploading && uploadProgress ? (
+                <div
+                  className="space-y-1.5 pt-1"
+                  data-testid="upload-progress"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>
+                      Uploading{file ? ` ${file.name}` : ""}…
+                    </span>
+                    <span data-testid="upload-progress-percent">
+                      {progressValue != null
+                        ? `${progressValue}%`
+                        : formatBytes(uploadProgress.loaded)}
+                    </span>
+                  </div>
+                  <Progress
+                    value={progressValue ?? 0}
+                    data-testid="progress-document-upload"
+                    aria-label="Upload progress"
+                  />
+                  <div className="text-xs text-muted-foreground">
+                    {formatBytes(uploadProgress.loaded)}
+                    {uploadProgress.total > 0
+                      ? ` / ${formatBytes(uploadProgress.total)}`
+                      : ""}
+                  </div>
+                </div>
+              ) : null}
             </FormItem>
             <FormField
               control={form.control}
@@ -944,15 +1033,14 @@ function DocumentDialog({
               <Button
                 type="button"
                 variant="ghost"
-                onClick={() => onOpenChange(false)}
+                onClick={() => handleOpenChange(false)}
+                data-testid="button-cancel-document"
               >
-                Cancel
+                {uploading ? "Cancel upload" : "Cancel"}
               </Button>
               <Button
                 type="submit"
-                disabled={
-                  create.isPending || selectedRecordLocked || !file
-                }
+                disabled={uploading || selectedRecordLocked || !file}
                 data-testid="button-submit-document"
                 title={
                   selectedRecordLocked
@@ -962,8 +1050,10 @@ function DocumentDialog({
                       : undefined
                 }
               >
-                {create.isPending
-                  ? "Uploading…"
+                {uploading
+                  ? progressValue != null
+                    ? `Uploading… ${progressValue}%`
+                    : "Uploading…"
                   : selectedRecordLocked
                     ? "Locked — under review"
                     : "Upload document"}

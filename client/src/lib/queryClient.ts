@@ -86,48 +86,183 @@ function parseUploadErrorBody(raw: string): UploadErrorBody | null {
   }
 }
 
+// Progress payload pushed to `apiUpload`'s `onProgress` callback. `total`
+// and `percent` fall back to 0 / null when the browser cannot report a
+// content length (e.g. a streamed body), so callers can render an
+// indeterminate state without crashing.
+export interface ApiUploadProgress {
+  loaded: number;
+  total: number;
+  percent: number | null;
+}
+
+export interface ApiUploadOptions {
+  // Called repeatedly while the request body is being sent. Useful for
+  // driving a per-byte progress bar in the UI.
+  onProgress?: (progress: ApiUploadProgress) => void;
+  // When the signal aborts, the in-flight XHR is cancelled and the
+  // returned promise rejects with an Error whose `name === "AbortError"`.
+  // Callers can branch on that name to skip the usual error toast.
+  signal?: AbortSignal;
+}
+
+function makeAbortError(): Error {
+  const err = new Error("Upload aborted");
+  err.name = "AbortError";
+  return err;
+}
+
+function buildResponseHeaders(rawHeaders: string): Headers {
+  const headers = new Headers();
+  if (!rawHeaders) return headers;
+  for (const line of rawHeaders.trim().split(/[\r\n]+/)) {
+    const idx = line.indexOf(":");
+    if (idx <= 0) continue;
+    const name = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    try {
+      headers.append(name, value);
+    } catch {
+      // Skip invalid header names (rare; not worth failing the upload).
+    }
+  }
+  return headers;
+}
+
 // Multipart upload helper. Mirrors apiRequest's auth + 401 handling but
 // deliberately omits the JSON Content-Type so the browser can set the
-// multipart boundary itself. On non-OK responses it tries to parse the
-// JSON body so the caller can read `code`/`error` fields straight off the
-// thrown ApiUploadError and surface a friendly toast (e.g. UPLOAD_TOO_LARGE,
-// UPLOAD_MIME_REJECTED). Falls back to the raw response text when the body
-// is not JSON.
-export async function apiUpload(
+// multipart boundary itself. Internally uses XMLHttpRequest (instead of
+// fetch) so we can wire `xhr.upload.onprogress` for byte-level progress
+// reporting and `signal` for clean cancellation — neither is currently
+// supported by fetch's request body in mainstream browsers. The returned
+// `Response` is reconstructed from the XHR so callers can keep calling
+// `.json()` / `.text()` exactly as they did with the fetch-based version.
+//
+// On non-OK responses it tries to parse the JSON body so the caller can
+// read `code`/`error` fields straight off the thrown ApiUploadError and
+// surface a friendly toast (e.g. UPLOAD_TOO_LARGE, UPLOAD_MIME_REJECTED).
+// Falls back to the raw response text when the body is not JSON.
+export function apiUpload(
   url: string,
   body: FormData,
+  options: ApiUploadOptions = {},
 ): Promise<Response> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: authHeaders(),
-    body,
-  });
-  if (res.status === 401) {
-    try {
-      localStorage.removeItem(TOKEN_KEY);
-    } catch {
-      // ignore storage errors
-    }
-    if (typeof window !== "undefined") {
-      window.location.href = "/login";
-    }
-    throw new Error("401: token expired");
+  const { onProgress, signal } = options;
+
+  if (signal?.aborted) {
+    return Promise.reject(makeAbortError());
   }
-  if (!res.ok) {
-    const raw = await res.text();
-    const parsed = parseUploadErrorBody(raw);
-    const message =
-      parsed?.error ||
-      parsed?.message ||
-      raw ||
-      `${res.status}: upload failed`;
-    throw new ApiUploadError(message, {
-      status: res.status,
-      code: parsed?.code,
-      body: parsed ?? raw,
+
+  return new Promise<Response>((resolve, reject) => {
+    const token = getToken();
+    const xhr = new XMLHttpRequest();
+    let aborted = false;
+    let settled = false;
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
+      fn();
+    };
+
+    const onAbort = () => {
+      aborted = true;
+      try {
+        xhr.abort();
+      } catch {
+        // ignore — we still want to settle the promise below
+      }
+      settle(() => reject(makeAbortError()));
+    };
+    if (signal) signal.addEventListener("abort", onAbort);
+
+    if (onProgress && xhr.upload) {
+      xhr.upload.addEventListener("progress", (ev) => {
+        const total = ev.lengthComputable ? ev.total : 0;
+        const percent =
+          ev.lengthComputable && ev.total > 0
+            ? Math.min(100, Math.max(0, (ev.loaded / ev.total) * 100))
+            : null;
+        try {
+          onProgress({ loaded: ev.loaded, total, percent });
+        } catch {
+          // Don't let a buggy callback tear down the upload.
+        }
+      });
+    }
+
+    xhr.addEventListener("load", () => {
+      if (aborted) return;
+      const status = xhr.status;
+      const raw = xhr.responseText ?? "";
+
+      if (status === 401) {
+        try {
+          localStorage.removeItem(TOKEN_KEY);
+        } catch {
+          // ignore storage errors
+        }
+        if (typeof window !== "undefined") {
+          window.location.href = "/login";
+        }
+        settle(() => reject(new Error("401: token expired")));
+        return;
+      }
+
+      if (status < 200 || status >= 300) {
+        const parsed = parseUploadErrorBody(raw);
+        const message =
+          parsed?.error ||
+          parsed?.message ||
+          raw ||
+          `${status}: upload failed`;
+        settle(() =>
+          reject(
+            new ApiUploadError(message, {
+              status,
+              code: parsed?.code,
+              body: parsed ?? raw,
+            }),
+          ),
+        );
+        return;
+      }
+
+      try {
+        const response = new Response(raw, {
+          status,
+          statusText: xhr.statusText,
+          headers: buildResponseHeaders(xhr.getAllResponseHeaders()),
+        });
+        settle(() => resolve(response));
+      } catch (err) {
+        settle(() =>
+          reject(err instanceof Error ? err : new Error(String(err))),
+        );
+      }
     });
-  }
-  return res;
+
+    xhr.addEventListener("error", () => {
+      if (aborted) return;
+      settle(() => reject(new Error("Network error during upload")));
+    });
+
+    xhr.addEventListener("timeout", () => {
+      if (aborted) return;
+      settle(() => reject(new Error("Upload timed out")));
+    });
+
+    try {
+      xhr.open("POST", url, true);
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.send(body);
+    } catch (err) {
+      settle(() =>
+        reject(err instanceof Error ? err : new Error(String(err))),
+      );
+    }
+  });
 }
 
 export async function apiFetch(url: string): Promise<Response> {
