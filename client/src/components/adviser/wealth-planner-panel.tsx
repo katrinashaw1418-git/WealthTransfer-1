@@ -72,6 +72,7 @@ import {
   Lock,
   ShieldAlert,
   Trash2,
+  Download,
 } from "lucide-react";
 import {
   Tooltip,
@@ -284,6 +285,74 @@ function formatBytes(n: number | null): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+// Task #383 — fire the adviser-side download route, save the streamed bytes
+// locally using the original filename. The server already sets
+// `Content-Disposition: attachment; filename="..."` but anchor downloads
+// are flakier across browsers than driving the filename ourselves with the
+// row metadata we already have in cache. apiFetch handles auth + 401
+// redirect + non-OK rejection (which we translate into a friendly toast).
+async function downloadAdviserClientDocument(
+  documentId: number,
+  fileName: string,
+): Promise<void> {
+  const res = await apiFetch(
+    `/api/adviser/client-documents/${documentId}/download`,
+  );
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName || "document";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    // Release the object URL on the next tick so the browser has time to
+    // start the actual download before we revoke the underlying blob.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+}
+
+// Translate the `${status}: ${body}` Error apiFetch throws into something
+// readable for a toast. The body is usually a JSON envelope like
+// `{"error":"Document not found"}` so we try to pull the inner message out;
+// otherwise we fall back to the raw error message.
+function explainAdviserDownloadError(err: unknown): {
+  title: string;
+  description: string;
+} {
+  const raw = err instanceof Error ? err.message : "Unexpected error";
+  const match = raw.match(/^(\d+):\s*(.+)$/);
+  let status: number | null = null;
+  let body = raw;
+  if (match) {
+    status = Number(match[1]);
+    body = match[2];
+  }
+  let inner = body;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "error" in parsed &&
+      typeof (parsed as { error: unknown }).error === "string"
+    ) {
+      inner = (parsed as { error: string }).error;
+    }
+  } catch {
+    // body wasn't JSON — keep as-is
+  }
+  if (status === 404) {
+    return { title: "Document not available", description: inner };
+  }
+  if (status === 403) {
+    return { title: "Not allowed", description: inner };
+  }
+  return { title: "Could not download document", description: inner };
 }
 
 // =============================================================================
@@ -1250,10 +1319,28 @@ export interface WealthPlannerPanelProps {
 }
 
 export function WealthPlannerPanel({ clientId, adviceRecords }: WealthPlannerPanelProps) {
+  const { toast } = useToast();
   const [objectiveOpen, setObjectiveOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
   const [amending, setAmending] = useState<AdviserNote | null>(null);
+  // Task #383 — track which document is currently being downloaded so we can
+  // disable just that row's button + swap its label to "Downloading…" without
+  // freezing the rest of the table. Only one in-flight download at a time
+  // because the underlying anchor click is per-document.
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
+
+  const handleDownloadDocument = async (doc: ClientDocument) => {
+    setDownloadingId(doc.id);
+    try {
+      await downloadAdviserClientDocument(doc.id, doc.fileName);
+    } catch (err) {
+      const { title, description } = explainAdviserDownloadError(err);
+      toast({ title, description, variant: "destructive" });
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   const objectives = useQuery<{ items: ClientObjective[] }>({
     queryKey: ["/api/adviser/client-objectives", clientId],
@@ -1519,22 +1606,48 @@ export function WealthPlannerPanel({ clientId, adviceRecords }: WealthPlannerPan
                               </div>
                             </TableCell>
                             <TableCell className="text-right">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled={locked}
-                                data-testid={`button-delete-document-${d.id}`}
-                                aria-label={
-                                  locked
-                                    ? "Delete disabled — document is retained"
-                                    : "Delete document"
-                                }
-                                title={
-                                  locked ? RETENTION_POLICY_TEXT : "Delete document"
-                                }
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
+                              <div className="flex items-center justify-end gap-2">
+                                {/* Task #383 — adviser-side download. Mirrors
+                                    the per-row Download button on the client
+                                    wealth-planner page (client/src/pages/
+                                    client/wealth-planner.tsx) and hits the
+                                    new GET /api/adviser/client-documents/:id/
+                                    download endpoint. The button is always
+                                    enabled (retention only restricts deletes,
+                                    not reads) and the row-scoped loading
+                                    state keeps the rest of the table
+                                    interactive. */}
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => handleDownloadDocument(d)}
+                                  disabled={downloadingId === d.id}
+                                  data-testid={`button-download-document-${d.id}`}
+                                  aria-label={`Download ${d.fileName}`}
+                                  title={`Download ${d.fileName}`}
+                                >
+                                  <Download className="h-4 w-4 mr-1" />
+                                  {downloadingId === d.id
+                                    ? "Downloading…"
+                                    : "Download"}
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={locked}
+                                  data-testid={`button-delete-document-${d.id}`}
+                                  aria-label={
+                                    locked
+                                      ? "Delete disabled — document is retained"
+                                      : "Delete document"
+                                  }
+                                  title={
+                                    locked ? RETENTION_POLICY_TEXT : "Delete document"
+                                  }
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                         );

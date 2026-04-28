@@ -106,6 +106,15 @@ import {
 } from "./services/document-retention";
 import { applyDocumentWatermark } from "./services/document-watermark";
 import { resolveWatermarkNames } from "./services/watermark-context";
+// Task #383 — adviser-side document download needs the same object-storage
+// helpers the client route uses (statObject for the existence check, plus
+// getObjectBytes for PDF watermarking and getObjectStream for non-PDF
+// passthrough).
+import {
+  getObjectBytes,
+  getObjectStream,
+  statObject,
+} from "./services/object-storage";
 // Task #148 — shared multer factory that enforces a maximum file size and a
 // strict mime allow-list, returning 400 BEFORE any bytes are handed off to
 // uploadClientDocument(). Replaces the route-local multer config.
@@ -1896,6 +1905,183 @@ export function registerAdviserRoutes(app: Express): void {
       );
       return { items };
     }),
+  );
+
+  // ---------------------------------------------------------------------------
+  // Task #383 — GET /api/adviser/client-documents/:id/download
+  // ---------------------------------------------------------------------------
+  // Streams a previously uploaded client document back to the requesting
+  // adviser. Mirrors the client-side download contract (server/client-routes.ts
+  // → /api/client/documents/:id/download) so:
+  //
+  //   - Cross-tenant access is blocked by assertAdviserClientLink against
+  //     the document's clientId — an adviser without an active link gets 403.
+  //   - The underlying blob is verified against object storage; if metadata
+  //     exists but the file is missing we return 404 rather than streaming a
+  //     zero-byte body.
+  //   - Outbound headers force `application/octet-stream` for anything outside
+  //     SAFE_INLINE_MIME_TYPES and always set `X-Content-Type-Options: nosniff`,
+  //     so a smuggled rich type cannot render inline in the adviser's browser.
+  //   - PDFs are passed through applyDocumentWatermark with the request
+  //     instant + canonical purpose so a leaked file is forensically
+  //     attributable to the (adviser, download instant) pair.
+  //   - Two audit rows are emitted: the legacy `client_document.download`
+  //     (so existing dashboards keep working) and the unified
+  //     `document.download` (so the regulator surface can answer "who
+  //     pulled what" with a single query). Both rows record actor:"adviser"
+  //     so the cross-actor query can distinguish client self-pulls from
+  //     adviser pulls.
+  //
+  // Not wrapped in adviserRoute() because the response body is binary, not
+  // JSON. Auth + role + tenant checks are performed inline.
+  // ---------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/client-documents/:id/download",
+    async (req: Request, res: Response) => {
+      try {
+        const auth = requireAuth(req);
+        requireRole(auth, "adviser");
+
+        const documentId = parseInt(req.params.id, 10);
+        if (!Number.isFinite(documentId) || documentId <= 0) {
+          return res.status(400).json({ error: "Invalid document id" });
+        }
+
+        const [row] = await db
+          .select()
+          .from(clientDocuments)
+          .where(eq(clientDocuments.id, documentId))
+          .limit(1);
+        if (!row) {
+          return res.status(404).json({ error: "Document not found" });
+        }
+
+        // Cross-tenant defence — the adviser must own the client this
+        // document belongs to. Throws 403 if the link is missing/inactive.
+        await assertAdviserClientLink(auth.userId, row.clientId);
+
+        // Confirm the file is still present in object storage. Without this
+        // a backup/restore that lost the blob would silently stream an
+        // empty body that the UI would treat as a successful download.
+        const head = await statObject(row.storageKey);
+        if (!head) {
+          return res
+            .status(404)
+            .json({ error: "Document file missing in storage" });
+        }
+
+        // Same MIME-sniff hardening as the client route — only a small
+        // allow-list of browser-safe types is served as-declared; everything
+        // else is forced to application/octet-stream so it can't render
+        // inline. The nosniff header below covers browsers that ignore
+        // Content-Disposition: attachment.
+        const SAFE_INLINE_MIME_TYPES = new Set([
+          "application/pdf",
+          "image/jpeg",
+          "image/png",
+          "image/gif",
+          "image/webp",
+          "image/heic",
+          "image/heif",
+          "image/tiff",
+        ]);
+        const storedMime = (row.mimeType ?? "").toLowerCase();
+        const safeContentType = SAFE_INLINE_MIME_TYPES.has(storedMime)
+          ? storedMime
+          : "application/octet-stream";
+
+        // Per-download watermark for PDFs. Carries the request instant +
+        // canonical purpose so a leaked PDF is attributable to this exact
+        // download event, not just to the upload event. Non-PDF downloads
+        // (images, etc.) pass through unchanged.
+        const downloadedAtUtc = new Date();
+        let payload: Buffer | null = null;
+        let payloadLength = head.sizeBytes;
+        if (storedMime === "application/pdf") {
+          const original = await getObjectBytes(row.storageKey);
+          const names = await resolveWatermarkNames(row.clientId, auth.userId);
+          payload = await applyDocumentWatermark(original, {
+            clientName: names.clientName,
+            adviserName: names.adviserName,
+            downloadedAtUtc,
+            purpose: "client_document_download",
+          });
+          payloadLength = payload.length;
+        }
+
+        // Legacy + unified audit rows. The legacy action keeps existing
+        // adviser dashboards working unchanged; the unified action lets the
+        // regulator surface answer "who pulled what" across reports +
+        // uploaded documents with a single query.
+        await audit(
+          auth.userId,
+          "client_document.download",
+          "client_document",
+          String(row.id),
+          {
+            actor: "adviser",
+            adviserUserId: auth.userId,
+            clientUserId: row.clientId,
+            sizeBytes: head.sizeBytes,
+          },
+          req.ip ?? null,
+        );
+        await audit(
+          auth.userId,
+          "document.download",
+          "client_document",
+          String(row.id),
+          {
+            actor: "adviser",
+            adviserUserId: auth.userId,
+            clientUserId: row.clientId,
+            documentId: row.id,
+            documentKind: "client_document",
+            purpose:
+              storedMime === "application/pdf"
+                ? "client_document_download"
+                : "client_document_download_passthrough",
+            downloadedAtUtc: downloadedAtUtc.toISOString(),
+            sizeBytes: head.sizeBytes,
+            watermarked: storedMime === "application/pdf",
+          },
+          req.ip ?? null,
+        );
+
+        res.setHeader("Content-Type", safeContentType);
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Content-Length", String(payloadLength));
+        // Quote the filename and strip CR/LF so a hostile filename cannot
+        // inject extra response headers.
+        const safeName = (row.fileName ?? "download.bin").replace(
+          /[\r\n"]/g,
+          "_",
+        );
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${safeName}"`,
+        );
+
+        if (payload !== null) {
+          // Watermarked PDF — small enough to send in one shot.
+          res.end(payload);
+          return;
+        }
+
+        const stream = getObjectStream(row.storageKey);
+        stream.on("error", (err) => {
+          console.error("[adviser-routes] document stream error:", err);
+          if (!res.headersSent) {
+            res.status(500).json({ error: "Failed to stream document" });
+          } else {
+            res.destroy(err as Error);
+          }
+        });
+        stream.pipe(res);
+      } catch (error: any) {
+        handleError(res, error, "Failed to download client document");
+      }
+    },
   );
 
   // ---------------------------------------------------------------------------

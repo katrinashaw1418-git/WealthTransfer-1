@@ -12,6 +12,7 @@
 //   B. GET /api/client/documents/:id/download (PDF storedMime)
 //   C. GET /api/admin/fee-consent-requests/:id/pdf
 //   D. GET /api/admin/fee-consents/:id/pdf
+//   E. GET /api/adviser/client-documents/:id/download (PDF storedMime, Task #383)
 //
 // Tests run end-to-end against the real route handler and the real
 // PostgreSQL test DB seeded by the bootstrap helper. JWT_SECRET is set
@@ -443,5 +444,108 @@ describe("GET /api/admin/fee-consents/:id/pdf — watermarked (Task #318)", () =
     expect(meta.documentId).toBe(consentId);
     expect(meta.purpose).toBe("fee_consent_download");
     expect(typeof meta.downloadedAtUtc).toBe("string");
+  });
+});
+
+// =============================================================================
+// E. Adviser-side client document download (Task #383)
+// =============================================================================
+describe("GET /api/adviser/client-documents/:id/download — watermarked (Task #383)", () => {
+  let docId: number;
+  let storageKey: string;
+  let sourcePdf: Buffer;
+
+  beforeAll(async () => {
+    sourcePdf = await makeFixturePdf(2);
+    const put = await putObject({
+      prefix: `client-documents/${clientId}`,
+      fileName: "adviser-fact-find.pdf",
+      bytes: sourcePdf,
+    });
+    storageKey = put.storageKey;
+
+    const [row] = await db
+      .insert(clientDocuments)
+      .values({
+        clientId,
+        documentType: "fact_find",
+        fileName: "adviser-fact-find.pdf",
+        storageKey,
+        mimeType: "application/pdf",
+        fileSizeBytes: sourcePdf.length,
+        uploadedByUserId: adviserId,
+      })
+      .returning();
+    docId = row.id;
+  });
+
+  afterAll(async () => {
+    try {
+      await deleteObject(storageKey);
+    } catch {}
+  });
+
+  it("returns a watermarked PDF that differs from the stored bytes", async () => {
+    const res = await request(app)
+      .get(`/api/adviser/client-documents/${docId}/download`)
+      .set("Authorization", `Bearer ${adviserToken}`)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (c: Buffer) => chunks.push(c));
+        response.on("end", () => callback(null, Buffer.concat(chunks)));
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("application/pdf");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    const body = res.body as Buffer;
+    expect(body.equals(sourcePdf)).toBe(false);
+    expect(await pdfPageCount(body)).toBe(2);
+  });
+
+  it("writes a unified document.download audit row tagged actor:adviser", async () => {
+    const row = await latestDocumentDownloadAudit(
+      adviserId,
+      "client_document",
+      docId,
+    );
+    expect(row).not.toBeNull();
+    const meta = row!.metadata as Record<string, unknown>;
+    expect(meta.actor).toBe("adviser");
+    expect(meta.adviserUserId).toBe(adviserId);
+    expect(meta.clientUserId).toBe(clientId);
+    expect(meta.documentId).toBe(docId);
+    expect(meta.purpose).toBe("client_document_download");
+    expect(meta.watermarked).toBe(true);
+    expect(typeof meta.downloadedAtUtc).toBe("string");
+  });
+
+  it("returns 403 when a different adviser without an active link tries to download", async () => {
+    // Spin up a second adviser with NO adviser_clients link to this client.
+    const stamp = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+    const [other] = await db
+      .insert(users)
+      .values({
+        username: `t383-other-adv-${stamp}`,
+        email: `t383-other-adv-${stamp}@example.test`,
+        password: "x",
+        firstName: "Other",
+        lastName: "Adviser",
+        role: "adviser",
+        kycStatus: "verified",
+      })
+      .returning();
+    const otherToken = signToken({
+      userId: other.id,
+      username: other.username,
+      email: other.email,
+      role: "adviser",
+    });
+
+    const res = await request(app)
+      .get(`/api/adviser/client-documents/${docId}/download`)
+      .set("Authorization", `Bearer ${otherToken}`);
+    expect(res.status).toBe(403);
   });
 });
