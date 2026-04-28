@@ -254,6 +254,16 @@ export default function ClientFeeConsents() {
   });
   const live = useQuery<ClientFeeConsentRow[]>({ queryKey: ["/api/client/fee-consents"] });
 
+  // Task #367 — Pending must show ONLY consents that are genuinely awaiting
+  // the client's action. Anything that has been signed, declined, withdrawn,
+  // or superseded is terminal for this surface and belongs in the Active
+  // section (signed consents are already returned by /api/client/fee-consents
+  // and rendered there). Without this filter, a freshly-signed consent
+  // appears in BOTH cards at the same time, leaving the investor unable to
+  // tell whether their signature took effect.
+  const pendingRequests =
+    requests.data?.filter((r) => r.status === "pending") ?? [];
+
   const signForm = useForm<SignForm>({
     resolver: zodResolver(signSchema),
     defaultValues: { signatureName: "" },
@@ -342,9 +352,9 @@ export default function ClientFeeConsents() {
             <Skeleton className="h-32 w-full" />
           ) : requests.isError ? (
             <p className="text-sm text-red-600">Unable to load requests.</p>
-          ) : !requests.data || requests.data.length === 0 ? (
+          ) : pendingRequests.length === 0 ? (
             <p className="text-sm text-gray-500" data-testid="text-no-client-requests">
-              No fee consent requests at the moment.
+              No pending fee consent requests at the moment.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -363,7 +373,7 @@ export default function ClientFeeConsents() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {requests.data.map((r) => (
+                  {pendingRequests.map((r) => (
                     <TableRow key={r.id} data-testid={`row-client-fee-consent-request-${r.id}`}>
                       <TableCell className="text-sm">{formatDate(r.createdAt)}</TableCell>
                       <TableCell className="text-sm capitalize">

@@ -77,6 +77,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { signToken } from "./auth";
 import { registerAdminRoutes } from "./admin-routes";
 import { registerAdviserRoutes } from "./adviser-routes";
+import { registerClientRoutes } from "./client-routes";
 import { db } from "./db";
 import {
   users,
@@ -102,6 +103,7 @@ let secondAdviceRecordId: number;
 
 let adminToken: string;
 let adviserToken: string;
+let clientToken: string;
 
 beforeAll(async () => {
   seedKey = `t293_${randomBytes(4).toString("hex")}`;
@@ -110,6 +112,7 @@ beforeAll(async () => {
   app.use(express.json());
   registerAdminRoutes(app);
   registerAdviserRoutes(app);
+  registerClientRoutes(app);
 
   server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -200,6 +203,12 @@ beforeAll(async () => {
     username: adviserRow.username,
     email: adviserRow.email,
     role: "adviser",
+  });
+  clientToken = signToken({
+    userId: clientUserId,
+    username: clientRow.username,
+    email: clientRow.email,
+    role: "client",
   });
 });
 
@@ -298,6 +307,38 @@ async function postAdminJson(
 async function getAdminJson(path: string): Promise<JsonResponse> {
   const res = await fetch(`${baseUrl}${path}`, {
     headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: res.status, body: json };
+}
+
+async function postClientJson(
+  path: string,
+  body: JsonBody,
+): Promise<JsonResponse> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${clientToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: res.status, body: json };
+}
+
+async function getClientJson(path: string): Promise<JsonResponse> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    headers: { Authorization: `Bearer ${clientToken}` },
+  });
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: res.status, body: json };
+}
+
+async function getAdviserJson(path: string): Promise<JsonResponse> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    headers: { Authorization: `Bearer ${adviserToken}` },
   });
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: res.status, body: json };
@@ -801,5 +842,147 @@ describe("GET /api/admin/fee-consents — Task #293 columns", () => {
     const items = (body.items ?? []) as Array<Record<string, unknown>>;
     const found = items.find((r) => r.id === consent.id);
     expect(found?.deductionsBlockedReason).toBe("expired");
+  });
+});
+
+// =============================================================================
+// Task #367 — A signed consent must NOT appear in the Pending section.
+// -----------------------------------------------------------------------------
+// The investor fee-consent page splits its UI into "Pending requests"
+// (driven by /api/client/fee-consent-requests) and "Active fee consents"
+// (driven by /api/client/fee-consents). Before this fix, a freshly-signed
+// consent was rendered in BOTH cards at once because the Pending card
+// iterated every row regardless of status. The contract this block locks:
+//
+//   1. After signing, the investor's Pending list (status='pending') is
+//      empty for that account, while their Active list contains exactly
+//      one matching executed consent.
+//   2. The same correctness holds on the adviser-side equivalent listing:
+//      a status=pending query returns 0 rows for that account, and the
+//      unfiltered list shows the request as 'consented' exactly once.
+// =============================================================================
+describe("Task #367 — signed consents are excluded from Pending", () => {
+  it("after signing, the request is gone from Pending and the executed consent appears once in Active (investor surface)", async () => {
+    // 1) Adviser sends a fee consent request with a unique account number
+    //    so we can identify it on both surfaces without colliding with
+    //    other tests in this file.
+    const acct = `${seedKey}_t367_inv`;
+    const created = await postAdviserRequest(
+      buildRequestPayload({ accountNumber: acct }),
+    );
+    expect(created.status).toBe(201);
+    const requestId = created.body.id as number;
+
+    // Sanity: before signing, the request shows up in the client's
+    // pending list exactly once. The `?status=pending` filter is the
+    // server-side contract Pending UIs should be relying on.
+    const beforePending = await getClientJson(
+      "/api/client/fee-consent-requests?status=pending",
+    );
+    expect(beforePending.status).toBe(200);
+    const beforePendingRows = beforePending.body as unknown as Array<
+      Record<string, unknown>
+    >;
+    const beforeMatches = beforePendingRows.filter(
+      (r) => r.accountNumber === acct,
+    );
+    expect(beforeMatches.length).toBe(1);
+    expect(beforeMatches[0].status).toBe("pending");
+
+    // 2) Client signs the consent.
+    const signed = await postClientJson(
+      `/api/client/fee-consent-requests/${requestId}/sign`,
+      { signatureName: "Test Client" },
+    );
+    expect(signed.status).toBe(200);
+    expect((signed.body as any).request.status).toBe("consented");
+    const executedConsentId = (signed.body as any).feeConsent.id as number;
+
+    // 3) Pending (status=pending) MUST no longer contain this request.
+    //    This is the bug Task #367 is closing — previously the Pending
+    //    card would still show the row with a "You signed" badge.
+    const afterPending = await getClientJson(
+      "/api/client/fee-consent-requests?status=pending",
+    );
+    expect(afterPending.status).toBe(200);
+    const afterPendingRows = afterPending.body as unknown as Array<
+      Record<string, unknown>
+    >;
+    const afterMatches = afterPendingRows.filter(
+      (r) => r.accountNumber === acct,
+    );
+    expect(
+      afterMatches.length,
+      "signed consent must NOT appear in the client's pending list",
+    ).toBe(0);
+
+    // 4) The unfiltered request endpoint still returns the row (so the
+    //    audit trail is preserved) but with status='consented' — it is
+    //    not duplicated.
+    const allRequests = await getClientJson("/api/client/fee-consent-requests");
+    expect(allRequests.status).toBe(200);
+    const allRequestRows = allRequests.body as unknown as Array<
+      Record<string, unknown>
+    >;
+    const allMatches = allRequestRows.filter((r) => r.accountNumber === acct);
+    expect(allMatches.length).toBe(1);
+    expect(allMatches[0].status).toBe("consented");
+
+    // 5) The Active section MUST contain the executed consent exactly
+    //    once — no duplicate row, no missing row.
+    const liveConsents = await getClientJson("/api/client/fee-consents");
+    expect(liveConsents.status).toBe(200);
+    const liveRows = liveConsents.body as unknown as Array<
+      Record<string, unknown>
+    >;
+    const liveMatches = liveRows.filter((r) => r.accountNumber === acct);
+    expect(liveMatches.length).toBe(1);
+    expect(liveMatches[0].id).toBe(executedConsentId);
+    expect(liveMatches[0].renewalStatus).toBe("active");
+  });
+
+  it("after signing, the request is gone from Pending and shows once as 'consented' in the unfiltered list (adviser surface)", async () => {
+    // Mirror the same scenario from the adviser side. The adviser fee
+    // consents page exposes a status filter dropdown; "Pending" must
+    // return zero rows for a signed account, while the unfiltered list
+    // shows the row exactly once with status='consented'.
+    const acct = `${seedKey}_t367_adv`;
+    const created = await postAdviserRequest(
+      buildRequestPayload({ accountNumber: acct }),
+    );
+    expect(created.status).toBe(201);
+    const requestId = created.body.id as number;
+
+    const signed = await postClientJson(
+      `/api/client/fee-consent-requests/${requestId}/sign`,
+      { signatureName: "Test Client" },
+    );
+    expect(signed.status).toBe(200);
+
+    const advPending = await getAdviserJson(
+      `/api/adviser/fee-consent-requests?status=pending&clientUserId=${clientUserId}`,
+    );
+    expect(advPending.status).toBe(200);
+    const pendingItems = ((advPending.body as any).items ?? []) as Array<
+      Record<string, unknown>
+    >;
+    const pendingMatches = pendingItems.filter(
+      (r) => r.accountNumber === acct,
+    );
+    expect(
+      pendingMatches.length,
+      "signed consent must NOT appear in the adviser's pending list",
+    ).toBe(0);
+
+    const advAll = await getAdviserJson(
+      `/api/adviser/fee-consent-requests?clientUserId=${clientUserId}`,
+    );
+    expect(advAll.status).toBe(200);
+    const allItems = ((advAll.body as any).items ?? []) as Array<
+      Record<string, unknown>
+    >;
+    const allMatches = allItems.filter((r) => r.accountNumber === acct);
+    expect(allMatches.length).toBe(1);
+    expect(allMatches[0].status).toBe("consented");
   });
 });
