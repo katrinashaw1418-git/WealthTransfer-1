@@ -1751,6 +1751,12 @@ export const reportRequests = pgTable("report_requests", {
   readyNotifiedAt: timestamp("ready_notified_at"),
   failedNotifiedAt: timestamp("failed_notified_at"),
   expiringSoonNotifiedAt: timestamp("expiring_soon_notified_at"),
+  // Task #345 — opt-in DRAFT flag. When true, the generator overlays a
+  // strong "DRAFT" banner on top of the per-page AMAX watermark so a
+  // preview/in-review PDF can never be mistaken for a final delivered
+  // statement. Defaults to false so existing non-draft behaviour is
+  // preserved for every legacy row and every request that omits the flag.
+  isDraft: boolean("is_draft").notNull().default(false),
 }, (table) => ({
   // "show me all my report requests" / "show me all reports for this client"
   adviserCreatedIdx: index("report_requests_adviser_created_idx").on(table.adviserUserId, table.requestedAt),

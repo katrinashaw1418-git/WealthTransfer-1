@@ -681,6 +681,11 @@ export async function regenerateReport(
       reportType: original.reportType,
       format: original.format,
       notes: original.notes,
+      // Task #345 — a regenerated version inherits the draft flag of
+      // the head it supersedes. Brief use-case: "a regenerated v2 the
+      // adviser hasn't sent yet" stays clearly DRAFT-marked until the
+      // adviser explicitly raises a fresh non-draft request.
+      isDraft: head.isDraft ?? false,
       // The new row supersedes the CURRENT head, not the row whose id was
       // passed in — that way the chain stays a clean linked list ordered
       // by versionNumber.
@@ -956,6 +961,11 @@ export async function generateReportPdf(reportId: number): Promise<ReportResult>
       notes: row.notes,
       versionNumber: row.versionNumber ?? 1,
       generatedAt,
+      // Task #345 — propagate the request-level draft flag so the
+      // generator can stamp every page with a strong DRAFT overlay.
+      // Defaults to false for any legacy row inserted before the
+      // column existed.
+      isDraft: row.isDraft ?? false,
       // Task #298 — pass the resolved window through verbatim so the rendered
       // header explicitly states the data slice. Both ISO date strings or
       // null (older queued rows that predate the column).
@@ -1024,6 +1034,10 @@ interface RenderInput {
   notes: string | null;
   versionNumber: number;
   generatedAt: Date;
+  // Task #345 — when true, overlay a strong "DRAFT" banner on every page
+  // *in addition to* the brand AMAX watermark. Carries straight through
+  // from the reportRequests row.
+  isDraft: boolean;
   // Task #298 — when both are set, the rendered header explicitly states
   // the window the data was scoped to. When null, the existing
   // "everything-on-record" rendering is preserved.
@@ -1149,6 +1163,14 @@ async function renderPdf(filePath: string, data: RenderInput): Promise<void> {
     for (let i = range.start; i < range.start + totalPages; i++) {
       doc.switchToPage(i);
       drawAmaxWatermark(doc);
+      // Task #345 — stack a stronger DRAFT banner on top of the brand
+      // watermark when the request was submitted with isDraft=true.
+      // Drawing it AFTER drawAmaxWatermark keeps the AMAX layer behind,
+      // and BEFORE the header/footer so the licensee strip and footer
+      // line stay readable on top of both layers.
+      if (data.isDraft) {
+        drawDraftWatermark(doc);
+      }
       drawPageHeader(doc, data);
       drawPageFooter(doc, data, i - range.start + 1, totalPages);
     }
@@ -1286,6 +1308,36 @@ function drawAmaxWatermark(doc: PDFKit.PDFDocument): void {
   doc.fillColor("#0f172a").fontSize(120).font("Helvetica-Bold");
   doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
   doc.text("AMAX", 0, doc.page.height / 2 - 60, {
+    width: doc.page.width,
+    align: "center",
+    lineBreak: false,
+  });
+  doc.restore();
+}
+
+// Task #345 — opt-in DRAFT overlay. Drawn ON TOP of the AMAX brand
+// watermark when reportRequests.isDraft = true. The two layers are
+// intentionally complementary: AMAX establishes provenance on every
+// page (faint slate behind body), DRAFT establishes status on every
+// page (red, larger, higher opacity) so an in-review v2 can never be
+// mistaken for a finalised statement that's been sent to the client.
+//
+// Visual contract:
+//   - Same -30° angle as the AMAX layer so the page composition stays
+//     coherent — the two banners read as a single stamp.
+//   - Larger font (160pt vs 120pt) and higher opacity (0.18 vs 0.08)
+//     so the badge dominates without obliterating the body text.
+//   - Vertically offset above the AMAX text (~ -160px from centre)
+//     so the two words are readable independently rather than
+//     overlapping into an illegible blob.
+//   - Red fill (#dc2626) so the status reads as a warning even on a
+//     monochrome print.
+function drawDraftWatermark(doc: PDFKit.PDFDocument): void {
+  doc.save();
+  doc.opacity(0.18);
+  doc.fillColor("#dc2626").fontSize(160).font("Helvetica-Bold");
+  doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
+  doc.text("DRAFT", 0, doc.page.height / 2 - 240, {
     width: doc.page.width,
     align: "center",
     lineBreak: false,

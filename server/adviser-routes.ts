@@ -733,6 +733,10 @@ export function registerAdviserRoutes(app: Express): void {
         periodFrom: report.periodFrom,
         periodTo: report.periodTo,
         regenerate: regenerate === true,
+        // Task #345 — record whether the request was submitted as a draft
+        // so an auditor can correlate a watermarked PDF on disk with the
+        // adviser's intent at submit time.
+        isDraft: report.isDraft === true,
       }, (req as Request).ip || null);
 
       // Generate the PDF synchronously. Datasets are small (one client, ≤100

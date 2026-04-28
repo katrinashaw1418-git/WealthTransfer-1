@@ -36,6 +36,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -110,6 +111,10 @@ interface ReportRequest {
   versionNumber?: number | null;
   supersedesReportId?: number | null;
   downloadLinkExpiresAt?: string | null;
+  // Task #345 — when true, the generated PDF carries an extra DRAFT
+  // overlay on every page. Surfaced in the row as a "Draft" badge so
+  // the adviser can spot in-review v2s at a glance.
+  isDraft?: boolean | null;
   versions?: PriorVersion[];
 }
 
@@ -193,6 +198,10 @@ const formSchema = z
     periodFrom: z.string().regex(isoDateRe, "Pick a start date"),
     periodTo: z.string().regex(isoDateRe, "Pick an end date"),
     notes: z.string().max(2000).optional(),
+    // Task #345 — opt-in DRAFT flag. When ticked the generated PDF
+    // carries a stronger DRAFT overlay on every page (the standard
+    // AMAX brand watermark stays in place either way).
+    isDraft: z.boolean().optional().default(false),
   })
   .superRefine((val, ctx) => {
     if (val.periodFrom > val.periodTo) {
@@ -432,6 +441,7 @@ export default function AdviserReports() {
       periodFrom: initialRange.from,
       periodTo: initialRange.to,
       notes: "",
+      isDraft: false,
     },
   });
 
@@ -473,6 +483,7 @@ export default function AdviserReports() {
         periodFrom: initialRange.from,
         periodTo: initialRange.to,
         notes: "",
+        isDraft: false,
       });
     },
     onError: (err: any) => {
@@ -825,6 +836,37 @@ export default function AdviserReports() {
                         />
                       </FormControl>
                       <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                {/* Task #345 — opt-in DRAFT flag. Sits next to notes
+                    rather than at the top of the form so the default
+                    (final report) stays the path of least resistance —
+                    the adviser only ticks this when they're previewing
+                    or sharing for review. */}
+                <FormField
+                  control={form.control}
+                  name="isDraft"
+                  render={({ field }) => (
+                    <FormItem className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50/40 p-3">
+                      <FormControl>
+                        <Checkbox
+                          checked={field.value === true}
+                          onCheckedChange={(v) => field.onChange(v === true)}
+                          data-testid="checkbox-report-draft"
+                          className="mt-0.5"
+                        />
+                      </FormControl>
+                      <div className="space-y-0.5">
+                        <FormLabel className="text-sm font-medium text-amber-900">
+                          Mark as draft
+                        </FormLabel>
+                        <p className="text-xs text-amber-800">
+                          Stamps a strong "DRAFT" overlay on every page
+                          so a preview or in-review copy can't be
+                          mistaken for a final statement.
+                        </p>
+                      </div>
                     </FormItem>
                   )}
                 />
@@ -1210,8 +1252,21 @@ export default function AdviserReports() {
                         )}
                       </TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           {statusBadge(r.status)}
+                          {/* Task #345 — Draft badge. Surfaced next to
+                              the status pill so an adviser scanning the
+                              list can spot in-review v2s without opening
+                              each PDF. */}
+                          {r.isDraft && (
+                            <Badge
+                              variant="outline"
+                              className="font-medium bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-100"
+                              data-testid={`badge-draft-${r.id}`}
+                            >
+                              Draft
+                            </Badge>
+                          )}
                           {isFailed && r.failureReason && (
                             <TooltipProvider>
                               <Tooltip>
