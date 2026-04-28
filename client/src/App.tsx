@@ -15,6 +15,7 @@ import Portfolio from "@/pages/portfolio";
 import AiAdvisory from "@/pages/ai-advisory";
 import Transactions from "@/pages/transactions";
 import Compliance from "@/pages/compliance";
+import RiskAssessment from "@/pages/risk-assessment";
 import Investments from "@/pages/investments";
 import Login from "@/pages/login";
 import Signup from "@/pages/signup";
@@ -138,6 +139,7 @@ function ClientApp() {
         <Route path="/ai-advisory" component={AiAdvisory} />
         <Route path="/transactions" component={Transactions} />
         <Route path="/compliance" component={Compliance} />
+        <Route path="/risk-assessment" component={RiskAssessment} />
         <Route path="/investments" component={Investments} />
         <Route path="/legal" component={Legal} />
         <Route path="/client/instructions" component={ClientInstructions} />

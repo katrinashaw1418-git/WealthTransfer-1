@@ -23,6 +23,9 @@ import {
   applications as applicationsTable,
   factFindSnapshots,
   riskProfiles,
+  riskAssessmentResponses,
+  riskAssessmentAnswersSchema,
+  riskAssessmentSubmitSchema,
   normalizeEmail,
 } from "@shared/schema";
 import { buildComplianceOverview } from "./services/compliance-overview";
@@ -4720,6 +4723,73 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("Get latest risk profile error:", error);
       res.status(500).json({ error: "Failed to fetch risk profile" });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task #375 — Risk assessment questionnaire (compliance step A)
+  //
+  // The compliance centre links to a multi-step questionnaire covering
+  // investment experience, objectives, and risk tolerance. The page promises
+  // "Save and continue later", so PUT saves partial progress (status stays
+  // in_progress) and POST /submit finalises the answers (status flips to
+  // complete, submittedAt set). The compliance page reads GET to flip step
+  // A from "Action required" to "Complete" and unlock step B.
+  // ---------------------------------------------------------------------------
+  app.get("/api/risk-assessment", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      const response = await storage.getRiskAssessmentResponse(userId);
+      res.json({ response: response ?? null });
+    } catch (error: any) {
+      if (error?.status) return res.status(error.status).json({ error: error.message });
+      console.error("Get risk assessment error:", error);
+      res.status(500).json({ error: "Failed to fetch risk assessment" });
+    }
+  });
+
+  const riskAssessmentSaveSchema = z.object({
+    answers: riskAssessmentAnswersSchema.optional(),
+    currentStep: z.number().int().min(0).max(3).optional(),
+  });
+
+  app.put("/api/risk-assessment", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      const parsed = riskAssessmentSaveSchema.parse(req.body ?? {});
+      const response = await storage.saveRiskAssessmentProgress(userId, parsed);
+      res.json({ response });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors[0]?.message || "Invalid request" });
+      }
+      if (error?.status) return res.status(error.status).json({ error: error.message });
+      console.error("Save risk assessment error:", error);
+      res.status(500).json({ error: "Failed to save risk assessment" });
+    }
+  });
+
+  app.post("/api/risk-assessment/submit", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      const answers = riskAssessmentSubmitSchema.parse(req.body ?? {});
+      const response = await storage.submitRiskAssessmentResponse(userId, answers);
+      await writeAuditLog(
+        userId,
+        "risk_assessment_completed",
+        "risk_assessment_response",
+        String(response.id),
+        { submittedAt: response.submittedAt },
+        req.ip || null,
+      );
+      res.json({ response });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors[0]?.message || "Invalid request" });
+      }
+      if (error?.status) return res.status(error.status).json({ error: error.message });
+      console.error("Submit risk assessment error:", error);
+      res.status(500).json({ error: "Failed to submit risk assessment" });
     }
   });
 

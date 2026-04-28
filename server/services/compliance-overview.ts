@@ -23,6 +23,7 @@ import { desc, eq } from "drizzle-orm";
 import { db } from "../db";
 import {
   factFindSnapshots,
+  riskAssessmentResponses,
   riskProfiles,
   users,
   wealthApplications,
@@ -168,7 +169,25 @@ function buildRiskAssessmentStep(
   hasFactFind: boolean,
   factFindCreatedAt: Date | null,
   factFindIsComplete: boolean,
+  riskAssessmentResponse: {
+    status: string;
+    submittedAt: Date | null;
+    updatedAt: Date | null;
+  } | null,
 ): ComplianceStep {
+  // Task #375 introduced a dedicated risk-assessment questionnaire stored in
+  // `risk_assessment_responses`. Treat a submitted response as authoritative,
+  // an in-progress response as the "Continue questionnaire" state, and fall
+  // back to the legacy fact-find / risk-profile signals otherwise.
+  if (riskAssessmentResponse?.status === "complete") {
+    const ts = riskAssessmentResponse.submittedAt ?? riskAssessmentResponse.updatedAt;
+    return {
+      key: "risk_assessment",
+      status: "completed",
+      description: ts ? `Completed ${formatVerifiedDate(ts)}` : "Completed",
+      completedAt: ts ? ts.toISOString() : null,
+    };
+  }
   if (hasRiskProfile) {
     return {
       key: "risk_assessment",
@@ -177,6 +196,17 @@ function buildRiskAssessmentStep(
         ? `Completed ${formatVerifiedDate(riskProfileCreatedAt)}`
         : "Completed",
       completedAt: riskProfileCreatedAt ? riskProfileCreatedAt.toISOString() : null,
+    };
+  }
+  if (riskAssessmentResponse?.status === "in_progress") {
+    const startedAt = riskAssessmentResponse.updatedAt;
+    return {
+      key: "risk_assessment",
+      status: "in_progress",
+      description: startedAt
+        ? `Started ${formatVerifiedDate(startedAt)} · Continue questionnaire`
+        : "In progress · Continue questionnaire",
+      completedAt: null,
     };
   }
   if (hasFactFind) {
@@ -374,9 +404,10 @@ export async function buildComplianceOverview(
   const kycUpdatedAt = user.kycUpdatedAt ?? null;
   const createdAt = user.createdAt ?? now;
 
-  // Fetch the latest fact-find / risk-profile / wealth-application rows in
-  // parallel — each is at most one row per user for the purposes of this view.
-  const [latestFactFind, latestRiskProfile, latestApp] = await Promise.all([
+  // Fetch the latest fact-find / risk-profile / wealth-application / risk-
+  // assessment rows in parallel — each is at most one row per user for the
+  // purposes of this view.
+  const [latestFactFind, latestRiskProfile, latestApp, latestRiskAssessment] = await Promise.all([
     db
       .select({
         id: factFindSnapshots.id,
@@ -409,6 +440,16 @@ export async function buildComplianceOverview(
       .orderBy(desc(wealthApplications.createdAt))
       .limit(1)
       .then((rows) => rows[0] ?? null),
+    db
+      .select({
+        status: riskAssessmentResponses.status,
+        submittedAt: riskAssessmentResponses.submittedAt,
+        updatedAt: riskAssessmentResponses.updatedAt,
+      })
+      .from(riskAssessmentResponses)
+      .where(eq(riskAssessmentResponses.userId, userId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
   ]);
 
   // Sumsub steps (identity / liveness / AML-PEP) all share the same "kycStatus"
@@ -431,10 +472,22 @@ export async function buildComplianceOverview(
     !!latestFactFind,
     latestFactFind?.createdAt ?? null,
     !!latestFactFind?.isComplete,
+    latestRiskAssessment
+      ? {
+          status: latestRiskAssessment.status,
+          submittedAt: latestRiskAssessment.submittedAt ?? null,
+          updatedAt: latestRiskAssessment.updatedAt ?? null,
+        }
+      : null,
   );
 
+  // Wholesale certification gates on either the legacy risk-profile signal or
+  // a completed task #375 risk-assessment response.
+  const riskAssessmentSatisfied =
+    !!latestRiskProfile || latestRiskAssessment?.status === "complete";
+
   const wholesaleCertification = buildWholesaleCertificationStep(
-    !!latestRiskProfile,
+    riskAssessmentSatisfied,
     userTier,
     kycUpdatedAt,
   );

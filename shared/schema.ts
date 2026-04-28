@@ -3031,3 +3031,108 @@ export interface ComplianceOverview {
 export function deriveSumsubApplicantId(userId: number): string {
   return `AMAX-W-${String(userId).padStart(5, "0")}`;
 }
+
+// =============================================================================
+// TASK #375 — Risk assessment questionnaire (compliance step A)
+// -----------------------------------------------------------------------------
+// One row per user captures their progress through the AMAX risk-assessment
+// flow that the compliance centre links to. The page promises "Save and
+// continue later", so the row is created on first save with status="in_progress"
+// and updated in place as the user advances. On final submit, status flips to
+// "complete" and submittedAt is set; the compliance page reads this row to
+// flip step A from "Action required" to "Complete" and to unlock step B
+// (wholesale certification). Answers live in a single jsonb blob keyed by
+// section so we can extend the questionnaire without a migration per
+// question.
+// =============================================================================
+export type RiskAssessmentAnswers = {
+  experience?: {
+    yearsInvesting?: string;
+    productTypes?: string[];
+    complexProductsExperience?: string;
+  };
+  objectives?: {
+    primaryObjective?: string;
+    investmentHorizon?: string;
+    liquidityNeeds?: string;
+  };
+  riskTolerance?: {
+    maxAcceptableLoss?: string;
+    downturnReaction?: string;
+    riskAttitude?: string;
+  };
+};
+
+export const riskAssessmentResponses = pgTable(
+  "risk_assessment_responses",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id").references(() => users.id).notNull().unique(),
+    // in_progress | complete
+    status: text("status").notNull().default("in_progress"),
+    // Last step the user reached so "Continue later" resumes at the right
+    // place. 0-indexed, capped at the number of sections in the form.
+    currentStep: integer("current_step").notNull().default(0),
+    answers: jsonb("answers").$type<RiskAssessmentAnswers>().notNull().default({}),
+    submittedAt: timestamp("submitted_at"),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+);
+
+export const insertRiskAssessmentResponseSchema = createInsertSchema(
+  riskAssessmentResponses,
+).omit({
+  id: true,
+  submittedAt: true,
+  updatedAt: true,
+});
+
+// Per-section validation. The route uses the right schema depending on
+// whether the user is saving progress (any subset OK) or submitting the
+// final answers (every section + every required field).
+export const riskAssessmentExperienceSchema = z.object({
+  yearsInvesting: z.enum(["lt2", "2to5", "5to10", "10plus"]),
+  productTypes: z.array(z.string()).min(1, "Select at least one product type"),
+  complexProductsExperience: z.enum(["none", "some", "extensive"]),
+});
+
+export const riskAssessmentObjectivesSchema = z.object({
+  primaryObjective: z.enum([
+    "capital_preservation",
+    "income",
+    "balanced",
+    "growth",
+    "aggressive_growth",
+  ]),
+  investmentHorizon: z.enum(["lt1", "1to3", "3to5", "5to10", "10plus"]),
+  liquidityNeeds: z.enum(["high", "medium", "low"]),
+});
+
+export const riskAssessmentRiskToleranceSchema = z.object({
+  maxAcceptableLoss: z.enum(["lt5", "5to10", "10to20", "20to30", "gt30"]),
+  downturnReaction: z.enum(["sell_all", "sell_some", "hold", "buy_more"]),
+  riskAttitude: z.enum([
+    "very_conservative",
+    "conservative",
+    "moderate",
+    "aggressive",
+    "very_aggressive",
+  ]),
+});
+
+export const riskAssessmentAnswersSchema = z.object({
+  experience: riskAssessmentExperienceSchema.partial().optional(),
+  objectives: riskAssessmentObjectivesSchema.partial().optional(),
+  riskTolerance: riskAssessmentRiskToleranceSchema.partial().optional(),
+});
+
+export const riskAssessmentSubmitSchema = z.object({
+  experience: riskAssessmentExperienceSchema,
+  objectives: riskAssessmentObjectivesSchema,
+  riskTolerance: riskAssessmentRiskToleranceSchema,
+});
+
+export type RiskAssessmentResponse = typeof riskAssessmentResponses.$inferSelect;
+export type InsertRiskAssessmentResponse = z.infer<
+  typeof insertRiskAssessmentResponseSchema
+>;

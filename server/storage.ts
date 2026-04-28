@@ -17,6 +17,7 @@
 import { 
   users, wallets, portfolios, transactions, fxRates, aiRecommendations, investmentProducts, userInvestments, portfolioSnapshots, applications, leads,
   adviserFeeRules, adviserFeeAccruals, adviserFeeDeductions,
+  riskAssessmentResponses,
   type User, type InsertUser, type Wallet, type InsertWallet, 
   type Portfolio, type InsertPortfolio, type Transaction, type InsertTransaction,
   type FxRate, type InsertFxRate, type AiRecommendation, type InsertAiRecommendation,
@@ -27,6 +28,7 @@ import {
   type AdviserFeeRule, type InsertAdviserFeeRule,
   type AdviserFeeAccrual, type InsertAdviserFeeAccrual,
   type AdviserFeeDeduction, type InsertAdviserFeeDeduction,
+  type RiskAssessmentResponse, type RiskAssessmentAnswers,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, sql, and, desc, gte, lte, inArray } from "drizzle-orm";
@@ -137,6 +139,19 @@ export interface IStorage {
       rejectedReason: string | null;
     }>,
   ): Promise<AdviserFeeDeduction | undefined>;
+
+  // ---------------------------------------------------------------------------
+  // Task #375 — Risk assessment questionnaire (compliance step A)
+  // ---------------------------------------------------------------------------
+  getRiskAssessmentResponse(userId: number): Promise<RiskAssessmentResponse | undefined>;
+  saveRiskAssessmentProgress(
+    userId: number,
+    patch: { answers?: RiskAssessmentAnswers; currentStep?: number },
+  ): Promise<RiskAssessmentResponse>;
+  submitRiskAssessmentResponse(
+    userId: number,
+    answers: RiskAssessmentAnswers,
+  ): Promise<RiskAssessmentResponse>;
 }
 
 export class MemStorage implements IStorage {
@@ -3493,6 +3508,15 @@ export class MemStorage implements IStorage {
   async updateAdviserFeeDeduction(): Promise<AdviserFeeDeduction | undefined> {
     throw new Error("MemStorage does not implement adviser fee engine — use DatabaseStorage");
   }
+  async getRiskAssessmentResponse(): Promise<RiskAssessmentResponse | undefined> {
+    throw new Error("MemStorage does not implement risk-assessment storage — use DatabaseStorage");
+  }
+  async saveRiskAssessmentProgress(): Promise<RiskAssessmentResponse> {
+    throw new Error("MemStorage does not implement risk-assessment storage — use DatabaseStorage");
+  }
+  async submitRiskAssessmentResponse(): Promise<RiskAssessmentResponse> {
+    throw new Error("MemStorage does not implement risk-assessment storage — use DatabaseStorage");
+  }
 }
 
 // Database Storage Implementation - prevents data loss on server restart
@@ -3893,6 +3917,98 @@ export class DatabaseStorage implements IStorage {
       .where(eq(adviserFeeDeductions.id, id))
       .returning();
     return row || undefined;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Task #375 — Risk assessment questionnaire (compliance step A)
+  // ---------------------------------------------------------------------------
+  async getRiskAssessmentResponse(userId: number): Promise<RiskAssessmentResponse | undefined> {
+    const [row] = await db
+      .select()
+      .from(riskAssessmentResponses)
+      .where(eq(riskAssessmentResponses.userId, userId))
+      .limit(1);
+    return row || undefined;
+  }
+
+  async saveRiskAssessmentProgress(
+    userId: number,
+    patch: { answers?: RiskAssessmentAnswers; currentStep?: number },
+  ): Promise<RiskAssessmentResponse> {
+    const existing = await this.getRiskAssessmentResponse(userId);
+    // Once submitted, progress saves are no-ops — the row is locked.
+    if (existing && existing.status === "complete") {
+      return existing;
+    }
+
+    const mergedAnswers: RiskAssessmentAnswers = {
+      ...(existing?.answers ?? {}),
+      ...(patch.answers ?? {}),
+    };
+    const nextStep = patch.currentStep ?? existing?.currentStep ?? 0;
+    const updatedAt = new Date();
+
+    if (existing) {
+      const [row] = await db
+        .update(riskAssessmentResponses)
+        .set({
+          answers: mergedAnswers,
+          currentStep: nextStep,
+          updatedAt,
+        })
+        .where(eq(riskAssessmentResponses.userId, userId))
+        .returning();
+      return row;
+    }
+
+    const [row] = await db
+      .insert(riskAssessmentResponses)
+      .values({
+        userId,
+        status: "in_progress",
+        currentStep: nextStep,
+        answers: mergedAnswers,
+        updatedAt,
+      })
+      .returning();
+    return row;
+  }
+
+  async submitRiskAssessmentResponse(
+    userId: number,
+    answers: RiskAssessmentAnswers,
+  ): Promise<RiskAssessmentResponse> {
+    const existing = await this.getRiskAssessmentResponse(userId);
+    if (existing && existing.status === "complete") {
+      return existing;
+    }
+    const now = new Date();
+    if (existing) {
+      const [row] = await db
+        .update(riskAssessmentResponses)
+        .set({
+          status: "complete",
+          answers,
+          currentStep: 3,
+          submittedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(riskAssessmentResponses.userId, userId))
+        .returning();
+      return row;
+    }
+    const [row] = await db
+      .insert(riskAssessmentResponses)
+      .values({
+        userId,
+        status: "complete",
+        currentStep: 3,
+        answers,
+        submittedAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    return row;
   }
 }
 

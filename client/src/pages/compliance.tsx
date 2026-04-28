@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -815,15 +816,17 @@ export default function Compliance() {
                       Completed
                     </Badge>
                   ) : (
-                    <Button
-                      variant="outline"
-                      className="flex-shrink-0"
-                      data-testid="button-complete-questionnaire"
-                    >
-                      {data.amax.riskAssessment.status === "in_progress"
-                        ? "Continue questionnaire"
-                        : "Complete questionnaire"}
-                    </Button>
+                    <Link href="/risk-assessment">
+                      <Button
+                        variant="outline"
+                        className="flex-shrink-0"
+                        data-testid="button-complete-questionnaire"
+                      >
+                        {data.amax.riskAssessment.status === "in_progress"
+                          ? "Continue questionnaire"
+                          : "Complete questionnaire"}
+                      </Button>
+                    </Link>
                   )}
                 </div>
 
