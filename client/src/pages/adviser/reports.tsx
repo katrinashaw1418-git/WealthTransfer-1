@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -594,8 +594,21 @@ export default function AdviserReports() {
     const rawTo = params.get("to") ?? "";
     const from = isoDateRe.test(rawFrom) ? rawFrom : "";
     const to = isoDateRe.test(rawTo) ? rawTo : "";
-    return { clientUserId, type, statuses, from, to };
+    const rawFocus = params.get("focus") ?? "";
+    const focusReportId = /^\d+$/.test(rawFocus) ? Number(rawFocus) : null;
+    return { clientUserId, type, statuses, from, to, focusReportId };
   }, [searchString]);
+
+  // Task #327 — bell deep-link target. When the URL carries ?focus=<id>
+  // (set on bell items for ready/failed reports), scroll the matching row
+  // into view and flash a transient highlight so the adviser lands on the
+  // actionable button (Download for ready, Regenerate for failed).
+  // Once the row has been highlighted, strip the param from the URL so a
+  // subsequent filter change or refresh doesn't keep re-flashing the row.
+  const focusReportId = filters.focusReportId;
+  const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
+  const [flashRowId, setFlashRowId] = useState<number | null>(null);
+  const handledFocusRef = useRef<number | null>(null);
 
   const updateFilter = useCallback(
     (next: {
@@ -657,6 +670,42 @@ export default function AdviserReports() {
     }
     return rows;
   }, [allRows, filters]);
+
+  // Task #327 — When the bell deep-link supplies ?focus=<id>, scroll the
+  // matching row into view and flash a transient highlight. We wait until
+  // the rows query has resolved (so the row is mounted) and only run once
+  // per focus value to avoid re-flashing on every render.
+  useEffect(() => {
+    if (focusReportId == null) {
+      handledFocusRef.current = null;
+      return;
+    }
+    if (handledFocusRef.current === focusReportId) return;
+    if (reports.isLoading) return;
+    const exists = allRows.some((r) => r.id === focusReportId);
+    if (!exists) return;
+    handledFocusRef.current = focusReportId;
+    // Defer to the next paint so the row's ref is registered.
+    const raf = window.requestAnimationFrame(() => {
+      const node = rowRefs.current.get(focusReportId);
+      if (node && typeof node.scrollIntoView === "function") {
+        node.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+      setFlashRowId(focusReportId);
+      // Strip ?focus= so a later filter change or reload doesn't re-flash.
+      const params = new URLSearchParams(searchString);
+      params.delete("focus");
+      const qs = params.toString();
+      setLocation(qs ? `/adviser/reports?${qs}` : "/adviser/reports", {
+        replace: true,
+      });
+    });
+    const clear = window.setTimeout(() => setFlashRowId(null), 2400);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.clearTimeout(clear);
+    };
+  }, [focusReportId, allRows, reports.isLoading, searchString, setLocation]);
 
   const filtersActive =
     filters.clientUserId !== "all" ||
@@ -1197,17 +1246,28 @@ export default function AdviserReports() {
                   const client = clientMap.get(r.clientUserId);
                   const clientName = client ? `${client.firstName ?? ""} ${client.lastName ?? ""}`.trim() : `Client #${r.clientUserId}`;
 
+                  const baseRowClass = isFailed
+                    ? "border-l-4 border-l-red-500 bg-red-50/40"
+                    : isExpiredLink
+                      ? "border-l-4 border-l-slate-400 bg-slate-50/40"
+                      : "";
+                  // Task #327 — bell deep-link highlight. When this row is
+                  // the ?focus target we layer a brief ring + transition so
+                  // the adviser sees exactly which row the bell pointed at.
+                  const flashClass =
+                    flashRowId === r.id
+                      ? "ring-2 ring-sky-400 ring-offset-1 transition-shadow duration-300"
+                      : "transition-shadow duration-300";
                   return (
                     <TableRow
                       key={r.id}
+                      ref={(node) => {
+                        if (node) rowRefs.current.set(r.id, node);
+                        else rowRefs.current.delete(r.id);
+                      }}
                       data-testid={`row-report-${r.id}`}
-                      className={
-                        isFailed
-                          ? "border-l-4 border-l-red-500 bg-red-50/40"
-                          : isExpiredLink
-                            ? "border-l-4 border-l-slate-400 bg-slate-50/40"
-                            : ""
-                      }
+                      data-focus-target={focusReportId === r.id ? "true" : undefined}
+                      className={`${baseRowClass} ${flashClass}`.trim()}
                     >
                       <TableCell className="text-sm">
                         <div className="font-medium text-gray-900">{clientName}</div>

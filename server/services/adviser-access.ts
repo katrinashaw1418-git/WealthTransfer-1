@@ -2005,7 +2005,30 @@ export async function getAdviserNotifications(
       ),
     );
 
-  // ---- 4. Pending reports (requested or generating) ----
+  // ---- 4. Reports (requested / generating / ready / failed) ----
+  // Task #327 — close-the-loop bell entries for terminal report states.
+  //   - `requested` / `generating` keep the existing in-progress entry so an
+  //     adviser can see "I asked for this and it's running"
+  //   - `ready`  surfaces the moment the PDF is downloadable, and disappears
+  //     automatically once the adviser collects it (firstDownloadedAt set by
+  //     the download endpoint). The dismiss preference layer is also
+  //     respected, so an adviser can hide a row they don't want to download.
+  //   - `failed` (including stale-job sweep flips) surfaces with the failure
+  //     reason and points at the row so the adviser can hit Regenerate. It
+  //     stays visible until dismissed.
+  // De-duplication is per report-request id by construction: the bucket is a
+  // straight read of the rows, so a sweeper re-run that re-asserts the same
+  // failed status writes nothing new and the bell entry does not multiply.
+  const reportStatusFilter = inArray(reportRequests.status, [
+    "requested",
+    "generating",
+    "ready",
+    "failed",
+  ]);
+  const reportReadyDownloadedFilter = or(
+    notInArray(reportRequests.status, ["ready"]),
+    isNull(reportRequests.firstDownloadedAt),
+  );
   const reportRows = await db
     .select({
       id: reportRequests.id,
@@ -2013,13 +2036,16 @@ export async function getAdviserNotifications(
       reportType: reportRequests.reportType,
       status: reportRequests.status,
       requestedAt: reportRequests.requestedAt,
+      generatedAt: reportRequests.generatedAt,
+      failureReason: reportRequests.failureReason,
     })
     .from(reportRequests)
     .where(
       and(
         eq(reportRequests.adviserUserId, adviserUserId),
         inArray(reportRequests.clientUserId, linkedClientIds),
-        inArray(reportRequests.status, ["requested", "generating"]),
+        reportStatusFilter,
+        reportReadyDownloadedFilter,
         exclude(reportRequests.id, dismissedIds.report),
       ),
     )
@@ -2033,7 +2059,8 @@ export async function getAdviserNotifications(
       and(
         eq(reportRequests.adviserUserId, adviserUserId),
         inArray(reportRequests.clientUserId, linkedClientIds),
-        inArray(reportRequests.status, ["requested", "generating"]),
+        reportStatusFilter,
+        reportReadyDownloadedFilter,
         exclude(reportRequests.id, dismissedIds.report),
       ),
     );
@@ -2142,14 +2169,41 @@ export async function getAdviserNotifications(
 
   for (const r of reportRows) {
     const client = clientNameById.get(r.clientUserId) ?? clientDisplayName({}, r.clientUserId);
+    const reportTypeLabel = r.reportType.replace(/_/g, " ");
+    // Task #327 — status-aware bell entry. Ready/failed are the new
+    // close-the-loop variants; requested/generating preserve the existing
+    // "in progress" copy. The deep-link points at the row via ?focus=
+    // for all four so the adviser lands on the actionable button
+    // (download for ready, regenerate for failed).
+    let title: string;
+    let description: string;
+    let severity: NotificationSeverity;
+    let createdAt: Date;
+    if (r.status === "ready") {
+      title = "Report ready to download";
+      description = `${client} — ${reportTypeLabel} is ready to download.`;
+      severity = "info";
+      createdAt = r.generatedAt ?? r.requestedAt ?? new Date();
+    } else if (r.status === "failed") {
+      const reason = (r.failureReason ?? "").trim() || "unknown error";
+      title = "Report failed";
+      description = `${client} — ${reportTypeLabel} failed: ${reason}. Regenerate from the row.`;
+      severity = "urgent";
+      createdAt = r.generatedAt ?? r.requestedAt ?? new Date();
+    } else {
+      title = r.status === "generating" ? "Report generating" : "Report requested";
+      description = `${client} — ${reportTypeLabel}.`;
+      severity = "info";
+      createdAt = r.requestedAt ?? new Date();
+    }
     items.push({
       id: `report:${r.id}`,
       type: "report",
-      title: r.status === "generating" ? "Report generating" : "Report requested",
-      description: `${client} — ${r.reportType.replace(/_/g, " ")}.`,
-      severity: "info",
-      deepLink: "/adviser/reports",
-      createdAt: (r.requestedAt ?? new Date()).toISOString(),
+      title,
+      description,
+      severity,
+      deepLink: `/adviser/reports?focus=${r.id}`,
+      createdAt: createdAt.toISOString(),
     });
   }
 
