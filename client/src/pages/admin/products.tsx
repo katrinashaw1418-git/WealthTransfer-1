@@ -37,6 +37,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+// Task #359 — confirm-before-unpublish dialog. AlertDialog is used (not the
+// editable Dialog above) so the modal is keyboard-trapped, escape-only-on-
+// cancel, and visually flagged as a destructive confirmation.
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Select,
   SelectContent,
@@ -243,6 +256,14 @@ export default function AdminProducts() {
   const [editingId, setEditingId] = useState<number | null>(null);
   // Task #385 — when set, the history dialog is open for this product.
   const [historyForProduct, setHistoryForProduct] = useState<InvestmentProduct | null>(null);
+  // Task #359 — when not null, the unpublish confirmation dialog is open
+  // for this product. `count` is null until the active-holdings count
+  // request resolves; we still open the dialog immediately and render a
+  // "checking…" line so the admin gets instant feedback.
+  const [unpublishTarget, setUnpublishTarget] = useState<
+    | { product: InvestmentProduct; count: number | null; loadError: string | null }
+    | null
+  >(null);
   const { data, isLoading } = useQuery<InvestmentProduct[]>({ queryKey: ["/api/admin/products"] });
 
   // Task #358 — Draft/Published quick filter. Persisted in the URL
@@ -507,9 +528,46 @@ export default function AdminProducts() {
                         <Switch
                           checked={p.isPublished}
                           disabled={togglePublishedMut.isPending}
-                          onCheckedChange={(v) =>
-                            togglePublishedMut.mutate({ id: p.id, isPublished: v })
-                          }
+                          onCheckedChange={(v) => {
+                            // Task #359 — going true → false hides the
+                            // product from investor reads. If anyone
+                            // currently holds it, surface a confirmation
+                            // dialog with the holder count first; the
+                            // PATCH only fires if the admin confirms.
+                            // The Switch is bound to server state
+                            // (checked={p.isPublished}), so doing nothing
+                            // on cancel naturally leaves the toggle in
+                            // its previous "on" position — no manual
+                            // revert needed.
+                            if (!v && p.isPublished) {
+                              setUnpublishTarget({
+                                product: p,
+                                count: null,
+                                loadError: null,
+                              });
+                              apiRequest(
+                                "GET",
+                                `/api/admin/products/${p.id}/active-holdings-count`,
+                              )
+                                .then((res) => res.json() as Promise<{ count: number }>)
+                                .then((body) => {
+                                  setUnpublishTarget((prev) =>
+                                    prev && prev.product.id === p.id
+                                      ? { ...prev, count: body.count }
+                                      : prev,
+                                  );
+                                })
+                                .catch((err: Error) => {
+                                  setUnpublishTarget((prev) =>
+                                    prev && prev.product.id === p.id
+                                      ? { ...prev, loadError: err.message }
+                                      : prev,
+                                  );
+                                });
+                              return;
+                            }
+                            togglePublishedMut.mutate({ id: p.id, isPublished: v });
+                          }}
                           aria-label="Toggle visible to investors"
                           data-testid={`switch-product-published-${p.id}`}
                         />
@@ -854,6 +912,92 @@ export default function AdminProducts() {
           if (!next) setHistoryForProduct(null);
         }}
       />
+
+      {/*
+        Task #359 — confirm-before-unpublish dialog. Open is driven by
+        `unpublishTarget`; cancelling just clears it. The Switch is bound
+        to `p.isPublished` (server state), so leaving the target unchanged
+        naturally keeps the toggle in its previous "Published" position —
+        no manual revert needed. The Confirm action is disabled until the
+        active-holdings count finishes loading so the admin always sees
+        the number before they commit.
+      */}
+      <AlertDialog
+        open={unpublishTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setUnpublishTarget(null);
+        }}
+      >
+        <AlertDialogContent data-testid="dialog-unpublish-product">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Move this product to draft?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div>
+                {unpublishTarget?.loadError ? (
+                  <p className="text-red-600" data-testid="text-unpublish-error">
+                    Couldn't check active holdings: {unpublishTarget.loadError}.
+                    Confirming will still hide{" "}
+                    <span className="font-medium">{unpublishTarget.product.name}</span>{" "}
+                    from investor reads.
+                  </p>
+                ) : unpublishTarget?.count === null ? (
+                  <p data-testid="text-unpublish-loading">
+                    Checking how many investors currently hold{" "}
+                    <span className="font-medium">{unpublishTarget?.product.name}</span>…
+                  </p>
+                ) : unpublishTarget &&
+                  unpublishTarget.count !== null &&
+                  unpublishTarget.count > 0 ? (
+                  <p data-testid="text-unpublish-warning">
+                    <span className="font-medium" data-testid="text-unpublish-holder-count">
+                      {unpublishTarget.count}
+                    </span>{" "}
+                    {unpublishTarget.count === 1 ? "investor" : "investors"} currently
+                    hold{unpublishTarget.count === 1 ? "s" : ""}{" "}
+                    <span className="font-medium">{unpublishTarget.product.name}</span>.
+                    Moving it to draft will hide it from their dashboard. Existing
+                    positions stay in place — you can republish at any time.
+                  </p>
+                ) : (
+                  <p data-testid="text-unpublish-no-holders">
+                    No investors currently hold{" "}
+                    <span className="font-medium">{unpublishTarget?.product.name}</span>.
+                    Moving it to draft will hide it from investor reads.
+                  </p>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-unpublish-cancel">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="button-unpublish-confirm"
+              // Block confirm only while we're still waiting on the count
+              // (loadError === null && count === null). If the count load
+              // failed we ENABLE confirm so the dialog copy "Confirming
+              // will still hide…" is honest — admins can still unpublish
+              // a product when the holder-count probe is transiently
+              // broken (the underlying PATCH does not depend on the
+              // count). count===0 / count>0 also enable.
+              disabled={
+                (unpublishTarget?.count === null &&
+                  unpublishTarget?.loadError === null) ||
+                togglePublishedMut.isPending
+              }
+              onClick={() => {
+                if (!unpublishTarget) return;
+                const id = unpublishTarget.product.id;
+                setUnpublishTarget(null);
+                togglePublishedMut.mutate({ id, isPublished: false });
+              }}
+            >
+              Move to draft
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

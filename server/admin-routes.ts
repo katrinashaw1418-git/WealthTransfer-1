@@ -66,6 +66,9 @@ import {
   backgroundJobRuns,
   // Task #144 — admin metrics tile reads transaction failures
   transactions,
+  // Task #359 — confirm-before-unpublish needs the active holdings count
+  // for a product when the visibility toggle is flipped true → false.
+  userInvestments,
 } from "@shared/schema";
 // Task #341 — canonical investment-product category enum used to validate
 // admin create/update payloads (see adminCreateProductSchema /
@@ -3322,6 +3325,43 @@ export function registerAdminRoutes(app: Express): void {
         return row;
       });
       return updated;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/admin/products/:id/active-holdings-count — Task #359
+  //
+  // Returns the number of distinct investors that currently hold an active
+  // position in the given product. The admin catalogue calls this right
+  // before flipping `isPublished` from true → false so the confirmation
+  // dialog can warn "N investors still hold this product" and the admin
+  // can decide whether to proceed. "Active" matches the user_investments
+  // status enum value used everywhere else in this codebase (the other
+  // states being `matured` and `withdrawn`, which we deliberately exclude:
+  // those holders no longer see the product on their dashboard so hiding
+  // it from investor reads cannot confuse them).
+  //
+  // Strictly read-only.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/products/:id/active-holdings-count",
+    adminRoute(async (req) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid product id"), { status: 400 });
+      }
+      const [row] = await db
+        .select({
+          count: sql<number>`count(distinct ${userInvestments.userId})::int`,
+        })
+        .from(userInvestments)
+        .where(
+          and(
+            eq(userInvestments.productId, id),
+            eq(userInvestments.status, "active"),
+          ),
+        );
+      return { count: row?.count ?? 0 };
     }),
   );
 
