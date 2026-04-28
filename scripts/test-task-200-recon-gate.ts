@@ -29,6 +29,9 @@
 // would otherwise see our manufactured drift as "real" drift.
 // =============================================================================
 
+// TASK #366 — bootstrap calls assertFixtureInsertionAllowed() so this
+// script refuses to run against a production-like database.
+import "./_bootstrap-test-env";
 import { db } from "../server/db";
 import {
   users,

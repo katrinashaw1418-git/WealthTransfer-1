@@ -41,6 +41,9 @@
 //   npx tsx scripts/test-transaction-safety.ts
 // =============================================================================
 
+// TASK #366 — bootstrap calls assertFixtureInsertionAllowed() so this
+// script refuses to run against a production-like database.
+import "./_bootstrap-test-env";
 import { createHash } from "crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../server/db";

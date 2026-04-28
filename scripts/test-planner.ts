@@ -48,6 +48,9 @@
 // JWT_SECRET set at module-init time. The body-code `||=` defaults are a
 // safety belt for environments where .env is absent. We then hard-fail if
 // JWT_SECRET still isn't set, refusing to run with an unknown signing key.
+// TASK #366 — bootstrap calls assertFixtureInsertionAllowed() so this
+// script refuses to run against a production-like database.
+import "./_bootstrap-test-env";
 import "dotenv/config";
 
 process.env.NODE_ENV ||= "test";

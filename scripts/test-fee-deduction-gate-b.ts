@@ -88,6 +88,10 @@
 // resolved) and populates process.env from .env so that downstream imports
 // of `server/auth.ts` see JWT_SECRET set at module-init time. The body-code
 // `||=` defaults are a safety belt for environments where .env is absent.
+// TASK #366 — refuse if this script is launched against a production DB.
+// `_bootstrap-test-env` loads dotenv, defaults NODE_ENV/JWT_SECRET, AND
+// calls assertFixtureInsertionAllowed() before any other module side-effect.
+import "./_bootstrap-test-env";
 import "dotenv/config";
 
 process.env.NODE_ENV ||= "test";

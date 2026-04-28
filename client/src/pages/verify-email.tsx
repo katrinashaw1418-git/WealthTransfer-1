@@ -252,9 +252,17 @@ export default function VerifyEmail() {
               ))}
             </div>
 
-            {devOtp && (
+            {/*
+              TASK #366 — Replaces the previous "Demo mode — email not configured"
+              banner. The server only ever returns `devOtp` when GMAIL_USER /
+              GMAIL_APP_PASSWORD are unset (i.e. real email is not configured),
+              and the import.meta.env.DEV gate keeps even that fallback out of
+              the production bundle so the panel can never render to a
+              client-facing user.
+            */}
+            {import.meta.env.DEV && devOtp && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
-                <p className="text-amber-800 font-semibold text-xs uppercase tracking-wider mb-1">Demo mode — email not configured</p>
+                <p className="text-amber-800 font-semibold text-xs uppercase tracking-wider mb-1">Local development — email delivery not configured</p>
                 <p className="text-amber-900 font-mono text-2xl tracking-widest font-bold">{devOtp}</p>
                 <p className="text-amber-700 text-xs mt-1">Configure GMAIL_USER & GMAIL_APP_PASSWORD to send real emails.</p>
               </div>

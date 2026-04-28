@@ -187,18 +187,32 @@ export default function ApplicationStatus() {
                   <p className="text-sm text-gray-500 text-center">
                     Your application is being reviewed. You will be contacted when a decision is made.
                   </p>
-                  <div className="border border-dashed border-blue-200 rounded-lg p-3 text-center">
-                    <p className="text-xs text-gray-400 mb-2">Demo only — simulate approval</p>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleDemoApprove}
-                      disabled={isLoading}
-                      className="text-blue-900 border-blue-200 hover:bg-blue-50"
-                    >
-                      {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : "Approve Application"}
-                    </Button>
-                  </div>
+                  {/*
+                    TASK #366 — The local-dev "self-approve" shortcut is hidden in
+                    production builds. The matching server endpoint
+                    `/api/applications/approve/:email` already returns 403 unless
+                    `isLocalDev` is true, so the previous always-rendered
+                    "Demo only — simulate approval" panel was leaking an internal
+                    test affordance into the client-facing page even though the
+                    button never actually worked in production. We render it only
+                    when Vite's DEV flag is set so the production bundle ships
+                    nothing user-visible from this branch.
+                  */}
+                  {import.meta.env.DEV && (
+                    <div className="border border-dashed border-blue-200 rounded-lg p-3 text-center">
+                      <p className="text-xs text-gray-400 mb-2">Local development only</p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleDemoApprove}
+                        disabled={isLoading}
+                        className="text-blue-900 border-blue-200 hover:bg-blue-50"
+                        data-testid="button-local-dev-approve-application"
+                      >
+                        {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : "Approve Application"}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
 

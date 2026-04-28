@@ -75,7 +75,7 @@ export default function StablecoinCard({ currency, balance, availableBalance, co
       await createTransactionMutation.mutateAsync({
         type: "deposit",
         toCurrency: currency,
-        amount: "1000.00", // Demo deposit amount
+        amount: "1000.00", // TASK #366 — was labelled "Demo deposit amount"
         description: `${currency} deposit from blockchain`,
         status: "completed",
         fee: 0.00,
@@ -83,7 +83,7 @@ export default function StablecoinCard({ currency, balance, availableBalance, co
 
       toast({
         title: "Deposit Detected",
-        description: `Demo deposit of 1000 ${currency} has been processed`,
+        description: `Deposit of 1000 ${currency} has been processed`,
       });
       
       setDepositModalOpen(false);

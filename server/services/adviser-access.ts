@@ -556,7 +556,19 @@ export async function getAdviserClientDetail(
     .from(users)
     .where(eq(users.id, clientUserId))
     .limit(1);
-  return client ?? null;
+  if (!client) return null;
+  // Task #366 — defence in depth: even if a fixture client somehow remains
+  // linked to a real adviser (e.g. an old adviser_clients row Task #347's
+  // cleanup script hasn't been run against), the per-client detail page
+  // must NOT render their email, name or KYC status to a real adviser.
+  // Mirrors the same check listAdviserClients applies to the list view.
+  if (client.email && isTestFixtureEmail(client.email)) {
+    if (!(await isAdviserAFixture(adviserUserId))) {
+      logFixtureFiltered(adviserUserId, client.id, client.email);
+      return null;
+    }
+  }
+  return client;
 }
 
 // -----------------------------------------------------------------------------

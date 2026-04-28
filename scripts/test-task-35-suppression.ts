@@ -14,6 +14,9 @@
 //   7. A second acknowledge attempt while one is open returns conflict.
 // =============================================================================
 
+// TASK #366 — bootstrap calls assertFixtureInsertionAllowed() so this
+// script refuses to run against a production-like database.
+import "./_bootstrap-test-env";
 import { db } from "../server/db";
 import {
   users,
