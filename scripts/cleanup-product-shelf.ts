@@ -12,9 +12,16 @@
  *      the canonical 14-product catalogue, so the adviser shelf shows the
  *      expected 14 cleaned-up products.
  *   3. Updates the canonical 14 products in place with the normalised
- *      formatting (sentence-case risk, en-dash ranges with p.a., short
- *      distribution labels, FCS instead of FDIC, Bitcoin "Market-linked"
- *      label, etc.).
+ *      formatting (canonical lowercase risk_profile keys from
+ *      `shared/risk-profiles.ts` — "low"/"moderate"/"high"/"very_high",
+ *      en-dash ranges with p.a., short distribution labels, FCS instead of
+ *      FDIC, Bitcoin "Market-linked" label, etc.).
+ *   4. Normalises the `risk_profile` column on every other row to one of the
+ *      canonical lowercase keys. Historical seed data wrote sentence-case
+ *      values like "Very High", which silently broke the investments-page
+ *      risk filter (strict equality) and the adviser-access suitability
+ *      check (compares against "high"/"very_high"). See
+ *      `normalizeRiskProfileColumn()` below.
  *
  * Safe to re-run: every step is keyed by product name and is idempotent.
  * Re-running on an already-clean DB is a no-op.
@@ -47,6 +54,11 @@ import {
   PRODUCT_CATEGORY_LABELS,
   type KnownProductCategory,
 } from "../shared/product-categories";
+import {
+  RISK_PROFILE_KEYS,
+  isKnownRiskProfile,
+  toKnownRiskProfile,
+} from "../shared/risk-profiles";
 import { and, eq, inArray, not, or } from "drizzle-orm";
 
 const CANONICAL_CATEGORIES = Object.keys(PRODUCT_CATEGORY_LABELS);
@@ -96,7 +108,7 @@ const canonical: ProductPatch[] = [
     distributions: "Quarterly",
     liquidity: "Fixed-term, no early redemptions",
     minimumInvestment: "250000.00",
-    riskProfile: "High",
+    riskProfile: "high",
     returnType: "capital_gains",
     lvr: "40–80% (typ. ~70%)",
     isActive: true,
@@ -113,7 +125,7 @@ const canonical: ProductPatch[] = [
     distributions: "Quarterly",
     liquidity: "Quarterly redemptions (5% NAV cap)",
     minimumInvestment: "100000.00",
-    riskProfile: "Moderate",
+    riskProfile: "moderate",
     returnType: "income",
     lvr: "68%",
     isActive: true,
@@ -130,7 +142,7 @@ const canonical: ProductPatch[] = [
     distributions: "Quarterly",
     liquidity: "Quarterly redemption",
     minimumInvestment: "50000.00",
-    riskProfile: "Moderate",
+    riskProfile: "moderate",
     returnType: "income",
     lvr: "64%",
     isActive: true,
@@ -147,7 +159,7 @@ const canonical: ProductPatch[] = [
     distributions: "Monthly",
     liquidity: "Locked term",
     minimumInvestment: "100000.00",
-    riskProfile: "Moderate",
+    riskProfile: "moderate",
     returnType: "income",
     isActive: true,
   },
@@ -163,7 +175,7 @@ const canonical: ProductPatch[] = [
     distributions: "Quarterly + At exit",
     liquidity: "Locked term",
     minimumInvestment: "150000.00",
-    riskProfile: "Moderate",
+    riskProfile: "moderate",
     returnType: "blended",
     isActive: true,
   },
@@ -181,7 +193,7 @@ const canonical: ProductPatch[] = [
     distributions: "At exit",
     liquidity: "Illiquid / long-term lock-in",
     minimumInvestment: "500000.00",
-    riskProfile: "High",
+    riskProfile: "high",
     returnType: "capital_gains",
     isActive: true,
   },
@@ -197,7 +209,7 @@ const canonical: ProductPatch[] = [
     distributions: "Quarterly + At exit",
     liquidity: "Locked term",
     minimumInvestment: "250000.00",
-    riskProfile: "High",
+    riskProfile: "high",
     returnType: "blended",
     isActive: true,
   },
@@ -213,7 +225,7 @@ const canonical: ProductPatch[] = [
     distributions: "None",
     liquidity: "Quarterly",
     minimumInvestment: "25000.00",
-    riskProfile: "Very High",
+    riskProfile: "very_high",
     returnType: "capital_gains",
     isActive: true,
   },
@@ -231,7 +243,7 @@ const canonical: ProductPatch[] = [
     distributions: "Quarterly",
     liquidity: "Illiquid",
     minimumInvestment: "250000.00",
-    riskProfile: "Very High",
+    riskProfile: "very_high",
     returnType: "capital_gains",
     isActive: true,
   },
@@ -249,7 +261,7 @@ const canonical: ProductPatch[] = [
     distributions: "Semi-annual",
     liquidity: "Quarterly",
     minimumInvestment: "50000.00",
-    riskProfile: "High",
+    riskProfile: "high",
     returnType: "blended",
     isActive: true,
   },
@@ -266,7 +278,7 @@ const canonical: ProductPatch[] = [
     distributions: "Monthly",
     liquidity: "Daily",
     minimumInvestment: "10000.00",
-    riskProfile: "Moderate",
+    riskProfile: "moderate",
     returnType: "income",
     isActive: true,
   },
@@ -283,7 +295,7 @@ const canonical: ProductPatch[] = [
     distributions: "Daily accrual",
     liquidity: "Instant access (T+0)",
     minimumInvestment: "0.00",
-    riskProfile: "Low",
+    riskProfile: "low",
     returnType: "yield",
     isActive: true,
   },
@@ -299,7 +311,7 @@ const canonical: ProductPatch[] = [
     distributions: "Daily accrual",
     liquidity: "Same-day settlement (T+0)",
     minimumInvestment: "1000.00",
-    riskProfile: "Low",
+    riskProfile: "low",
     returnType: "yield",
     isActive: true,
   },
@@ -316,7 +328,7 @@ const canonical: ProductPatch[] = [
     distributions: "Daily accrual",
     liquidity: "Next-day access (T+1)",
     minimumInvestment: "10000.00",
-    riskProfile: "Low",
+    riskProfile: "low",
     returnType: "yield",
     isActive: true,
   },
@@ -468,6 +480,67 @@ async function markTestProductsUnpublished(): Promise<void> {
   }
 }
 
+// Task #339 — historical seed data wrote sentence-case `risk_profile` values
+// like "Low" / "Very High". The shared enum (`shared/risk-profiles.ts`) uses
+// canonical lowercase keys ("low" | "conservative" | "moderate" | "high" |
+// "very_high"), and both the investments-page filter (strict equality) and
+// the adviser-access suitability check compare against those keys. Anything
+// outside the canonical set silently breaks both code paths.
+//
+// This pass coerces every row's `risk_profile` to a canonical key via
+// `toKnownRiskProfile`, which already handles sentence-case + whitespace
+// drift ("Very High" -> "very_high"). Rows that genuinely cannot be matched
+// are left untouched and reported, so an operator can decide whether to set
+// them to a canonical value manually rather than this script silently
+// downgrading them. Idempotent: rows already on a canonical key are skipped.
+async function normalizeRiskProfileColumn(): Promise<void> {
+  const rows = await db
+    .select({
+      id: investmentProducts.id,
+      name: investmentProducts.name,
+      riskProfile: investmentProducts.riskProfile,
+    })
+    .from(investmentProducts);
+
+  let updated = 0;
+  let alreadyCanonical = 0;
+  const unmappable: Array<{ id: number; name: string; riskProfile: string }> = [];
+
+  for (const r of rows) {
+    if (isKnownRiskProfile(r.riskProfile)) {
+      alreadyCanonical++;
+      continue;
+    }
+    const canonical = toKnownRiskProfile(r.riskProfile);
+    if (!canonical) {
+      unmappable.push({ id: r.id, name: r.name, riskProfile: r.riskProfile });
+      continue;
+    }
+    await db
+      .update(investmentProducts)
+      .set({ riskProfile: canonical })
+      .where(eq(investmentProducts.id, r.id));
+    console.log(
+      `  [normalize] ${r.name} (id=${r.id}): "${r.riskProfile}" -> "${canonical}"`,
+    );
+    updated++;
+  }
+
+  console.log(
+    `  Normalised: ${updated}, already canonical: ${alreadyCanonical}` +
+      (unmappable.length > 0 ? `, unmappable: ${unmappable.length}` : ""),
+  );
+
+  if (unmappable.length > 0) {
+    for (const u of unmappable) {
+      console.warn(
+        `  [WARN] ${u.name} (id=${u.id}) has unmappable risk_profile "${u.riskProfile}". ` +
+          `Allowed values: ${RISK_PROFILE_KEYS.join(", ")}.`,
+      );
+    }
+  }
+}
+
 async function upsertCanonical(): Promise<void> {
   let updated = 0;
   let inserted = 0;
@@ -525,6 +598,11 @@ async function main() {
 
   console.log("\nCleanup: marking known test/draft products as unpublished (Task #336)");
   await markTestProductsUnpublished();
+
+  console.log(
+    "\nCleanup: normalising risk_profile column to canonical lowercase keys (Task #339)",
+  );
+  await normalizeRiskProfileColumn();
 
   console.log("\nCleanup: normalising the canonical 14 products");
   await upsertCanonical();

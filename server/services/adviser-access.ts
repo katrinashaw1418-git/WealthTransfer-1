@@ -1028,8 +1028,15 @@ export async function createAdviserInstruction(
   }
 
   // Suitability basis is required when the product is high-risk.
+  // Task #339 — match both canonical lowercase keys ("high" and "very_high").
+  // Historical seed data wrote sentence-case values like "High" / "Very High",
+  // which made this strict equality silently always false. The data is now
+  // normalised to canonical keys (see scripts/cleanup-product-shelf.ts), so
+  // this guard now triggers as intended for both bands.
   const suitabilityBasis = (input.suitabilityBasis ?? "").trim();
-  if (product.riskProfile === "high" && suitabilityBasis.length === 0) {
+  const isHighRiskProduct =
+    product.riskProfile === "high" || product.riskProfile === "very_high";
+  if (isHighRiskProduct && suitabilityBasis.length === 0) {
     throw Object.assign(
       new Error("Suitability basis is required for high-risk products"),
       { status: 400 },

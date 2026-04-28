@@ -189,7 +189,7 @@ export const investmentProducts = pgTable("investment_products", {
   distributions: text("distributions").notNull(),
   liquidity: text("liquidity").notNull(),
   minimumInvestment: decimal("minimum_investment", { precision: 15, scale: 2 }).notNull(),
-  riskProfile: text("risk_profile").notNull(), // conservative, moderate, high
+  riskProfile: text("risk_profile").notNull(), // canonical lowercase keys from shared/risk-profiles.ts: low | conservative | moderate | high | very_high
   returnType: text("return_type").notNull(), // income, capital_gains, blended
   lvr: text("lvr"), // Loan-to-Value Ratio
   annualReturn: decimal("annual_return", { precision: 10, scale: 4 }), // explicit rate e.g. 0.1100 = 11%

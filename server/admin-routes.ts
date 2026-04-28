@@ -104,6 +104,13 @@ import {
   projectDeductionForApiContract,
   projectFeeExceptionRow,
 } from "../shared/fee-deduction-status";
+// Task #339 — admin product create/update validates `riskProfile` against
+// the canonical lowercase enum so legacy sentence-case values can no longer
+// drift into the database via the admin UI / API.
+import {
+  RISK_PROFILE_KEYS,
+  type KnownRiskProfile,
+} from "@shared/risk-profiles";
 import {
   getInProcessCounters,
   getLastSuccessfulHealthProbeAt,
@@ -2986,6 +2993,9 @@ export function registerAdminRoutes(app: Express): void {
       // DB level so omitting it keeps the existing "visible" behaviour;
       // admins can pass `false` to stage a product as a draft.
       isPublished: z.boolean().optional(),
+      // Task #339 — same canonical-key constraint as the update path; see
+      // adminUpdateProductSchema below for context.
+      riskProfile: z.enum(RISK_PROFILE_KEYS as [KnownRiskProfile, ...KnownRiskProfile[]]),
     })
     .superRefine((val, ctx) => {
       const active = val.isActive !== false; // default true
@@ -3030,7 +3040,12 @@ export function registerAdminRoutes(app: Express): void {
       distributions: z.string().min(1).optional(),
       liquidity: z.string().min(1).optional(),
       minimumInvestment: z.union([z.string(), z.number()]).transform(String).optional(),
-      riskProfile: z.string().min(1).optional(),
+      // Task #339 — only canonical lowercase keys from shared/risk-profiles.ts
+      // are accepted. Sentence-case values like "High" / "Very High" used to
+      // sneak in via legacy callers and silently broke the investments-page
+      // filter and the adviser suitability check (both compare against the
+      // lowercase keys with strict equality).
+      riskProfile: z.enum(RISK_PROFILE_KEYS as [KnownRiskProfile, ...KnownRiskProfile[]]).optional(),
       returnType: z.string().min(1).optional(),
       lvr: z.string().nullable().optional(),
       annualReturn: z.union([z.string(), z.number()]).transform(String).nullable().optional(),

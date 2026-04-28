@@ -22,6 +22,8 @@ import {
 } from "@shared/product-categories";
 import {
   RISK_PROFILE_LABELS,
+  riskProfileLabel,
+  toKnownRiskProfile,
   type KnownRiskProfile,
 } from "@shared/risk-profiles";
 
@@ -470,9 +472,14 @@ export default function Investments() {
                 </div>
 
                 <div className="flex gap-2 mb-4">
-                  <Badge className={riskProfileColors[product.riskProfile as keyof typeof riskProfileColors]}>
-                    {product.riskProfile}
-                  </Badge>
+                  {(() => {
+                    const known = toKnownRiskProfile(product.riskProfile);
+                    return (
+                      <Badge className={known ? riskProfileColors[known] : undefined}>
+                        {riskProfileLabel(product.riskProfile)}
+                      </Badge>
+                    );
+                  })()}
                   <Badge className={returnTypeColors[product.returnType as keyof typeof returnTypeColors]}>
                     {product.returnType.replace('_', ' ')}
                   </Badge>
@@ -642,9 +649,14 @@ export default function Investments() {
                   </div>
                   <div className="flex justify-between">
                     <span>Risk Profile:</span>
-                    <Badge className={riskProfileColors[selectedProduct.riskProfile as keyof typeof riskProfileColors]}>
-                      {selectedProduct.riskProfile}
-                    </Badge>
+                    {(() => {
+                      const known = toKnownRiskProfile(selectedProduct.riskProfile);
+                      return (
+                        <Badge className={known ? riskProfileColors[known] : undefined}>
+                          {riskProfileLabel(selectedProduct.riskProfile)}
+                        </Badge>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>

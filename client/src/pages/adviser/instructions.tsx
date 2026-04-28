@@ -299,7 +299,13 @@ export default function AdviserInstructions() {
   }, [visibleProducts]);
 
   const selectedProduct = watchedProductId > 0 ? productById.get(watchedProductId) : undefined;
-  const selectedProductIsHighRisk = selectedProduct?.riskProfile === "high";
+  // Task #339 — match the server-side suitability rule, which now requires a
+  // suitability basis for both "high" and "very_high" canonical risk bands.
+  // Keeping these in sync prevents a UX where the form lets the adviser
+  // submit without a basis and the API then rejects it.
+  const selectedProductIsHighRisk =
+    selectedProduct?.riskProfile === "high" ||
+    selectedProduct?.riskProfile === "very_high";
 
   // Deep-link support: when arriving from /adviser/products via the
   // "Raise instruction" CTA, open the create dialog and pre-select the
