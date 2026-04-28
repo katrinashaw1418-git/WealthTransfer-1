@@ -1,5 +1,19 @@
 # Wealth Management Platform
 
+## Recent Changes (April 2026) — Task #311: Backfill historical KYC change timestamps for older clients
+
+Task #285 added `users.kyc_updated_at` with a `defaultNow()` so the adviser-task-automation cron could anchor `kyc_followup` due dates on the per-client signal `kycUpdatedAt + 30d`. The Task #285 deploy ran an inline `psql` block in `scripts/post-merge.sh` that overwrote every legacy row's `kyc_updated_at` with its `created_at` (gated by a `_post_merge_state` marker). That fixed the "every legacy row clusters on the same schema-push instant" symptom but ignored real status changes recorded in `audit_logs`.
+
+Task #311 extends that backfill with a one-off TS script `scripts/backfill-kyc-updated-at.ts`, invoked from `scripts/post-merge.sh` immediately after the existing inline block:
+
+* **Audit-log walk** — for each user, find the most recent `audit_logs` row whose `action` matches `ILIKE '%kyc%'` OR whose `metadata` contains a `"kycStatus"` key (covers both bare-key writes and the standard `writeAuditLog({ before, after })` shape used elsewhere in the code base). The user is matched via `audit_logs.user_id` OR via `entity_type='user' AND entity_id::int = users.id` (the `text` column is digit-guarded with `~ '^[0-9]+$'` before the cast because `entity_id` can hold emails for invite-flow events).
+* **Set value** — `kyc_updated_at = GREATEST(created_at, latest matching audit-log timestamp)`. So a user with a real change in the audit log is anchored on that change; a user with no audit-log evidence falls back to `created_at`, exactly the rule the task description called for.
+* **Monotonic-only** — the UPDATE has `WHERE candidate > current_kyc_updated_at`, so a real `storage.updateUser()` write that landed between deploys is preserved (we never decrease the timestamp). This is the script's true idempotency guard, which is why a re-run after future KYC audit-log entries land will still re-anchor the column correctly without clobbering live updates.
+* **State marker** — records `_post_merge_state` key `task_311_kyc_updated_at_audit_walk_backfill` for operator visibility (when did the backfill first run cleanly), but does NOT short-circuit on it.
+* **Today's behaviour** — the current `audit_logs` table contains zero KYC-named actions and zero metadata `kycStatus` payloads, so the script reports `with_audit_evidence=0, fallback_to_created_at=59, needs_update=0` on the dev DB and changes no rows. The pre-existing Task #285 `created_at` backfill already converged the data; Task #311's contribution is the audit-log-driven re-anchor that will activate the moment KYC change events start being written (and the change to the deploy story so that future operators don't have to remember to re-run anything by hand).
+
+**Files**: `scripts/backfill-kyc-updated-at.ts` (new — `--apply` to commit, dry-run by default), `scripts/post-merge.sh` (new `npx tsx scripts/backfill-kyc-updated-at.ts --apply` step after the existing inline block, with a header comment cross-referencing Task #285).
+
 ## Recent Changes (April 2026) — Task #344: Email advisers when a report is ready or has failed
 
 The adviser report request lifecycle now closes the loop on the adviser's inbox without changing the existing UI surfaces. Three short transactional emails (`server/email.ts`):

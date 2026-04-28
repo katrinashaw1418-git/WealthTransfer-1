@@ -37,6 +37,19 @@ BEGIN
 END$$;
 SQL
 
+# Task #311 — extend the Task #285 backfill above so legacy clients whose
+# KYC status was actually changed in the past (recorded in `audit_logs`)
+# get their `kyc_updated_at` anchored on the real change instant rather
+# than the cruder created_at fallback. The script walks `audit_logs` for
+# any KYC-related entry per user (action ILIKE '%kyc%' OR metadata
+# containing a `kycStatus` field) and uses GREATEST(created_at, latest
+# audit timestamp). Monotonic-only: it never decreases an existing
+# kyc_updated_at, so a real storage.updateUser() write that landed
+# between deploys is preserved. Records its own `_post_merge_state` key
+# (`task_311_kyc_updated_at_audit_walk_backfill`) for operator
+# visibility, but the monotonic predicate is the real idempotency guard.
+npx tsx scripts/backfill-kyc-updated-at.ts --apply
+
 # Task #356 — auto-trigger the portfolio-snapshot re-anchor whenever the
 # valuation code path or the inline FX seed has changed since the last
 # successful run.
