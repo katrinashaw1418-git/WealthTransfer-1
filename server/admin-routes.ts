@@ -3215,6 +3215,53 @@ export function registerAdminRoutes(app: Express): void {
   );
 
   // -------------------------------------------------------------------------
+  // GET /api/admin/products/:id/history — Task #385
+  //
+  // Per-product change history powered by the existing `audit_logs` rows
+  // written on every PATCH /api/admin/products/:id (action
+  // `admin_product_updated`, entityType `investment_product`, entityId =
+  // the product id as a string). Returns the most recent entries first
+  // joined with the actor's username/email so the admin UI can show
+  // "who changed what, when" without going to the database.
+  //
+  // Strictly read-only.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/products/:id/history",
+    adminRoute(async (req) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid product id"), { status: 400 });
+      }
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+
+      const rows = await db
+        .select({
+          id: auditLogs.id,
+          userId: auditLogs.userId,
+          action: auditLogs.action,
+          metadata: auditLogs.metadata,
+          createdAt: auditLogs.createdAt,
+          actorUsername: users.username,
+          actorEmail: users.email,
+        })
+        .from(auditLogs)
+        .leftJoin(users, eq(users.id, auditLogs.userId))
+        .where(
+          and(
+            eq(auditLogs.action, "admin_product_updated"),
+            eq(auditLogs.entityType, "investment_product"),
+            eq(auditLogs.entityId, String(id)),
+          ),
+        )
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(limit);
+
+      return { items: rows };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
   // GET /api/admin/instructions — read-only review list (paginated, filterable)
   // -------------------------------------------------------------------------
   app.get(

@@ -42,7 +42,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Package, Pencil } from "lucide-react";
+import { Plus, Package, Pencil, History } from "lucide-react";
 import {
   RISK_PROFILE_KEYS,
   RISK_PROFILE_LABELS,
@@ -55,7 +55,7 @@ import {
   productCategoryLabel,
 } from "@shared/product-categories";
 
-interface InvestmentProduct {
+export interface InvestmentProduct {
   id: number;
   name: string;
   category: string;
@@ -192,12 +192,45 @@ function productToFormValues(p: InvestmentProduct): CreateProductValues {
   };
 }
 
+// Task #385 — shape returned by GET /api/admin/products/:id/history. The
+// audit-log row's metadata is the same JSON the PATCH handler writes (see
+// `admin_product_updated` audit call in `server/admin-routes.ts`); only
+// `updatedFields` is rendered today but the full blob is kept here so a
+// future "before/after" surface can light up without a server change.
+interface ProductHistoryEntry {
+  id: number;
+  userId: number | null;
+  action: string;
+  metadata: {
+    updatedFields?: string[];
+    previousIsActive?: boolean | null;
+    newIsActive?: boolean | null;
+    previousIsPublished?: boolean | null;
+    newIsPublished?: boolean | null;
+  } | null;
+  createdAt: string | null;
+  actorUsername: string | null;
+  actorEmail: string | null;
+}
+
+function fmtTimestamp(s: string | null): string {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return new Intl.DateTimeFormat("en-AU", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(d);
+}
+
 export default function AdminProducts() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   // When set, the dialog is in "edit" mode targeting this product's id.
   // null means the dialog (when open) is creating a new product.
   const [editingId, setEditingId] = useState<number | null>(null);
+  // Task #385 — when set, the history dialog is open for this product.
+  const [historyForProduct, setHistoryForProduct] = useState<InvestmentProduct | null>(null);
   const { data, isLoading } = useQuery<InvestmentProduct[]>({ queryKey: ["/api/admin/products"] });
 
   const form = useForm<CreateProductValues>({
@@ -366,6 +399,7 @@ export default function AdminProducts() {
                   <TableHead>Visibility</TableHead>
                   <TableHead className="text-right">Active</TableHead>
                   <TableHead className="text-right">Edit</TableHead>
+                  <TableHead className="text-right">History</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -418,6 +452,17 @@ export default function AdminProducts() {
                       >
                         <Pencil className="h-4 w-4 mr-1" />
                         Edit
+                      </Button>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setHistoryForProduct(p)}
+                        data-testid={`button-history-product-${p.id}`}
+                      >
+                        <History className="h-4 w-4 mr-1" />
+                        History
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -722,6 +767,117 @@ export default function AdminProducts() {
           </Form>
         </DialogContent>
       </Dialog>
+
+      <ProductHistoryDialog
+        product={historyForProduct}
+        onOpenChange={(next) => {
+          if (!next) setHistoryForProduct(null);
+        }}
+      />
     </div>
+  );
+}
+
+// Task #385 — per-product change history dialog. Lazy fetch: the query is
+// only enabled when a product is selected (so opening the page doesn't fan
+// out one request per row), and cached per product id so re-opening the
+// same product is instant.
+//
+// Exported so a focused component test can lock the URL wiring (the
+// default queryFn fetches `queryKey[0]`, so the per-product URL has to be
+// the first element of the key, not split across array segments).
+export function ProductHistoryDialog({
+  product,
+  onOpenChange,
+}: {
+  product: InvestmentProduct | null;
+  onOpenChange: (next: boolean) => void;
+}) {
+  const productId = product?.id ?? null;
+  // The default queryFn (see `client/src/lib/queryClient.ts`) fetches
+  // `queryKey[0]` as the URL, so the per-product history URL must be the
+  // FIRST element of the key, not split across segments — otherwise the
+  // dialog would silently re-fetch `/api/admin/products` (the catalogue
+  // list) and crash on `data.items.length`.
+  const { data, isLoading, isError, error } = useQuery<{ items: ProductHistoryEntry[] }>({
+    queryKey: [`/api/admin/products/${productId}/history`],
+    enabled: productId !== null,
+  });
+
+  return (
+    <Dialog open={product !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle data-testid="text-product-history-title">
+            Change history{product ? ` — ${product.name}` : ""}
+          </DialogTitle>
+          <DialogDescription>
+            The most recent admin updates to this product. Each entry shows
+            who saved the change, when, and which fields they touched.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[60vh] overflow-y-auto pr-1">
+          {isLoading ? (
+            <Skeleton className="h-32 w-full" />
+          ) : isError ? (
+            <p className="text-sm text-red-600" data-testid="text-product-history-error">
+              Failed to load history: {error instanceof Error ? error.message : "Unknown error"}
+            </p>
+          ) : !data || data.items.length === 0 ? (
+            <p className="text-sm text-slate-500" data-testid="text-product-history-empty">
+              No edits recorded for this product yet.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>When</TableHead>
+                  <TableHead>Who</TableHead>
+                  <TableHead>Fields changed</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.items.map((entry) => {
+                  const fields = entry.metadata?.updatedFields ?? [];
+                  const actor =
+                    entry.actorUsername ||
+                    entry.actorEmail ||
+                    (entry.userId !== null ? `user #${entry.userId}` : "unknown");
+                  return (
+                    <TableRow
+                      key={entry.id}
+                      data-testid={`row-product-history-${entry.id}`}
+                    >
+                      <TableCell className="text-sm whitespace-nowrap">
+                        {fmtTimestamp(entry.createdAt)}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        <div className="font-medium">{actor}</div>
+                        {entry.actorUsername && entry.actorEmail ? (
+                          <div className="text-xs text-slate-500">{entry.actorEmail}</div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        {fields.length === 0 ? (
+                          <span className="text-xs text-slate-500">—</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            {fields.map((f) => (
+                              <Badge key={f} variant="secondary" className="text-xs">
+                                {f}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
