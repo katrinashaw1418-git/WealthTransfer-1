@@ -809,12 +809,23 @@ export default function Compliance() {
                     </div>
                   </div>
                   {data.amax.riskAssessment.status === "completed" ? (
-                    <Badge
-                      className="bg-green-50 text-green-700 border border-green-200 hover:bg-green-50 px-3 py-1 rounded-full font-medium flex-shrink-0"
-                      data-testid="badge-step-a-completed"
-                    >
-                      Completed
-                    </Badge>
+                    <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                      <Badge
+                        className="bg-green-50 text-green-700 border border-green-200 hover:bg-green-50 px-3 py-1 rounded-full font-medium"
+                        data-testid="badge-step-a-completed"
+                      >
+                        Completed
+                      </Badge>
+                      <Link href="/risk-assessment">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          data-testid="button-review-answers"
+                        >
+                          Review answers
+                        </Button>
+                      </Link>
+                    </div>
                   ) : (
                     <Link href="/risk-assessment">
                       <Button

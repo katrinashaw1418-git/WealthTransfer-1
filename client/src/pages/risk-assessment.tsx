@@ -109,6 +109,85 @@ const ATTITUDE_OPTIONS = [
 
 type Answers = Required<RiskAssessmentAnswers>;
 
+const SUMMARY_SECTIONS = [
+  {
+    key: "experience" as const,
+    title: "Investment experience",
+    questions: [
+      {
+        field: "yearsInvesting" as const,
+        label: "How long have you been actively investing?",
+        type: "single" as const,
+        options: YEARS_OPTIONS,
+      },
+      {
+        field: "productTypes" as const,
+        label: "Which products have you personally invested in?",
+        type: "multi" as const,
+        options: PRODUCT_OPTIONS,
+      },
+      {
+        field: "complexProductsExperience" as const,
+        label: "How much experience do you have with complex investment products?",
+        type: "single" as const,
+        options: COMPLEX_OPTIONS,
+      },
+    ],
+  },
+  {
+    key: "objectives" as const,
+    title: "Investment objectives",
+    questions: [
+      {
+        field: "primaryObjective" as const,
+        label: "What is the primary objective for your AMAX portfolio?",
+        type: "single" as const,
+        options: OBJECTIVE_OPTIONS,
+      },
+      {
+        field: "investmentHorizon" as const,
+        label: "Over what time horizon do you expect to stay invested?",
+        type: "single" as const,
+        options: HORIZON_OPTIONS,
+      },
+      {
+        field: "liquidityNeeds" as const,
+        label: "How quickly might you need to access these funds?",
+        type: "single" as const,
+        options: LIQUIDITY_OPTIONS,
+      },
+    ],
+  },
+  {
+    key: "riskTolerance" as const,
+    title: "Risk tolerance",
+    questions: [
+      {
+        field: "maxAcceptableLoss" as const,
+        label: "Maximum drop in portfolio value tolerable in a single year",
+        type: "single" as const,
+        options: MAX_LOSS_OPTIONS,
+      },
+      {
+        field: "downturnReaction" as const,
+        label: "If your portfolio fell 25% over a few months, what would you do?",
+        type: "single" as const,
+        options: DOWNTURN_OPTIONS,
+      },
+      {
+        field: "riskAttitude" as const,
+        label: "Overall attitude to risk",
+        type: "single" as const,
+        options: ATTITUDE_OPTIONS,
+      },
+    ],
+  },
+];
+
+function labelFor(options: { value: string; label: string }[], value: string): string {
+  return options.find((o) => o.value === value)?.label ?? value;
+}
+
 function emptyAnswers(): Answers {
   return {
     experience: { yearsInvesting: "", productTypes: [], complexProductsExperience: "" },
@@ -380,7 +459,76 @@ export default function RiskAssessment() {
           </Card>
         )}
 
-        {/* Step content */}
+        {/* Read-only summary when submitted */}
+        {isComplete && (
+          <Card
+            className="bg-white border border-gray-200 shadow-none"
+            data-testid="card-answers-summary"
+          >
+            <CardContent className="p-6 space-y-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Your saved answers</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  This is what you submitted. Contact compliance if you need to retake the
+                  questionnaire.
+                </p>
+              </div>
+              {SUMMARY_SECTIONS.map((section) => {
+                const sectionAnswers = answers[section.key] as Record<string, unknown>;
+                return (
+                  <div
+                    key={section.key}
+                    className="space-y-4"
+                    data-testid={`summary-section-${section.key}`}
+                  >
+                    <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">
+                      {section.title}
+                    </h3>
+                    <dl className="space-y-3">
+                      {section.questions.map((q) => {
+                        const raw = sectionAnswers?.[q.field];
+                        return (
+                          <div
+                            key={q.field}
+                            className="border border-gray-200 rounded-md p-3"
+                            data-testid={`summary-item-${q.field}`}
+                          >
+                            <dt className="text-sm font-medium text-gray-700">{q.label}</dt>
+                            <dd className="mt-1 text-sm text-gray-900">
+                              {q.type === "multi" ? (
+                                Array.isArray(raw) && raw.length > 0 ? (
+                                  <ul className="flex flex-wrap gap-2">
+                                    {(raw as string[]).map((v) => (
+                                      <li
+                                        key={v}
+                                        className="inline-flex items-center px-2.5 py-1 rounded-full bg-gray-100 text-gray-800 text-xs font-medium"
+                                      >
+                                        {labelFor(q.options, v)}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <span className="text-gray-400 italic">No selection</span>
+                                )
+                              ) : typeof raw === "string" && raw ? (
+                                labelFor(q.options, raw)
+                              ) : (
+                                <span className="text-gray-400 italic">No answer</span>
+                              )}
+                            </dd>
+                          </div>
+                        );
+                      })}
+                    </dl>
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Step content (editable form, hidden once submitted) */}
+        {!isComplete && (
         <Card className="bg-white border border-gray-200 shadow-none">
           <CardContent className="p-6 space-y-6">
             <div>
@@ -478,8 +626,10 @@ export default function RiskAssessment() {
             )}
           </CardContent>
         </Card>
+        )}
 
-        {/* Footer actions */}
+        {/* Footer actions (hidden once submitted) */}
+        {!isComplete && (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <Button
             variant="outline"
@@ -528,6 +678,7 @@ export default function RiskAssessment() {
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );
