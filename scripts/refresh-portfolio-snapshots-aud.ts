@@ -45,6 +45,7 @@
 //   tsx scripts/refresh-portfolio-snapshots-aud.ts --user-id 42    # target one user
 // =============================================================================
 
+import { fileURLToPath } from "url";
 import { sql } from "drizzle-orm";
 import { db } from "../server/db";
 import { portfolioSnapshots, users } from "../shared/schema";
@@ -84,7 +85,12 @@ async function listTargetUsers(): Promise<{ id: number }[]> {
   return await db.select({ id: users.id }).from(users);
 }
 
-async function rebuildForUser(userId: number, start: Date, end: Date): Promise<UserResult> {
+export async function rebuildForUser(
+  userId: number,
+  start: Date,
+  end: Date,
+  apply: boolean = APPLY,
+): Promise<UserResult> {
   // Read the pre-rebuild "today" total so the operator can see the delta.
   const todayKey = end.toISOString().split("T")[0];
   const existingTodayRows = await storage.getPortfolioSnapshots(
@@ -130,7 +136,7 @@ async function rebuildForUser(userId: number, start: Date, end: Date): Promise<U
   // Phase 2 — atomically delete-and-rewrite this user's window in one
   // DB transaction, so a mid-loop failure can never leave the user with
   // a half-rebuilt history that mixes old and new AUD figures.
-  if (APPLY) {
+  if (apply) {
     await db.transaction(async (tx) => {
       for (const day of pending) {
         await tx.execute(sql`
@@ -209,10 +215,21 @@ async function main() {
   );
 }
 
-main().then(
-  () => process.exit(0),
-  (err) => {
-    console.error("[refresh-portfolio-snapshots-aud] FAILED:", err);
-    process.exit(1);
-  },
-);
+// Only run main() when this file is invoked directly (e.g. via tsx). Importing
+// the module from a test must not kick off a real DB rebuild.
+const isEntry = (() => {
+  try {
+    return process.argv[1] === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+if (isEntry) {
+  main().then(
+    () => process.exit(0),
+    (err) => {
+      console.error("[refresh-portfolio-snapshots-aud] FAILED:", err);
+      process.exit(1);
+    },
+  );
+}
