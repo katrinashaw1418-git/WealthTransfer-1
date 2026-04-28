@@ -32,6 +32,12 @@ import {
   AdviceStatusBadge,
   isAdviceRecordLocked,
 } from "@/components/adviser/wealth-planner-panel";
+// Task #471 — canonical six-term consent display vocabulary.
+import {
+  consentRenewalDisplayStatus,
+  consentStatusBadgeVariant,
+  consentStatusLabel,
+} from "@/lib/consent-status";
 
 // =============================================================================
 // Task #279 — adviser client detail page redesign
@@ -473,22 +479,38 @@ export default function AdviserClientDetail() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {feeConsents.map((fc) => (
-                      <TableRow key={fc.id} data-testid={`row-fee-${fc.id}`}>
-                        <TableCell className="capitalize text-sm">
-                          {fc.feeType.replace(/_/g, " ")}
-                        </TableCell>
-                        <TableCell className="text-sm tabular-nums">
-                          {fc.amountType === "percentage" ? `${fc.amount}%` : formatAud(fc.amount)}
-                        </TableCell>
-                        <TableCell className="text-sm">{formatDate(fc.consentExpiryDate)}</TableCell>
-                        <TableCell>
-                          <Badge variant={fc.renewalStatus === "active" ? "default" : "secondary"}>
-                            {fc.renewalStatus}
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {feeConsents.map((fc) => {
+                      // Task #471 — renewal_status -> canonical six-term
+                      // display vocabulary. Computed expiry beats stale
+                      // `active` rows whose expiry has already passed.
+                      const display = consentRenewalDisplayStatus(
+                        fc.renewalStatus,
+                        fc.consentExpiryDate,
+                      );
+                      return (
+                        <TableRow key={fc.id} data-testid={`row-fee-${fc.id}`}>
+                          <TableCell className="capitalize text-sm">
+                            {fc.feeType.replace(/_/g, " ")}
+                          </TableCell>
+                          <TableCell className="text-sm tabular-nums">
+                            {fc.amountType === "percentage"
+                              ? `${fc.amount}%`
+                              : formatAud(fc.amount)}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {formatDate(fc.consentExpiryDate)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge
+                              variant={consentStatusBadgeVariant(display)}
+                              data-testid={`badge-client-fee-consent-${display}`}
+                            >
+                              {consentStatusLabel(display)}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
                   </TableBody>
                 </Table>
               )}

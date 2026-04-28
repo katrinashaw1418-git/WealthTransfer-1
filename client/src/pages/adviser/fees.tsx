@@ -28,6 +28,12 @@ import { HandCoins, Undo2, ExternalLink, Search, X } from "lucide-react";
 import { INSUFFICIENT_FUNDS_STATUS } from "@/lib/insufficient-funds";
 // Task #294 — pure forecaster reused across the 3 fee surfaces.
 import { formatNextChargeCell } from "@shared/fee-rule-helpers";
+// Task #471 — canonical six-term consent display vocabulary.
+import {
+  consentContextDisplayStatus,
+  consentStatusBadgeVariant,
+  consentStatusLabel,
+} from "@/lib/consent-status";
 
 const TOKEN_KEY = "amax_jwt";
 
@@ -312,33 +318,29 @@ function ruleStatusBadge(r: FeeRuleRow) {
 // Renders the consent-context pill column shown on every rule row. The
 // adviser only needs the renewal status + expiry — the account number /
 // account name live in the existing Account column.
+//
+// Task #471 — pill labels collapse to the canonical six-term display
+// vocabulary via `consentContextDisplayStatus`. The lower-case "expires …"
+// and "withdrawn …" sub-lines stay (timestamps, not status pills) because
+// they are informational and complement — never replace — the pill above.
 function ConsentContextCell({ r }: { r: FeeRuleRow }) {
-  if (!r.consentRenewalStatus && !r.consentExpiryDate && !r.consentWithdrawnAt) {
+  const display = consentContextDisplayStatus({
+    renewalStatus: r.consentRenewalStatus,
+    expiryDate: r.consentExpiryDate,
+    withdrawnAt: r.consentWithdrawnAt,
+  });
+  if (display === null) {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
   return (
     <div className="flex flex-col gap-1 text-xs">
-      {r.consentRenewalStatus && (
-        <Badge
-          variant={
-            // Task #294 review fix — withdrawn/expired are blocking states,
-            // shown destructive. Active and renewed both render as "Signed"
-            // (the compliance label the user-facing copy asked for).
-            r.consentWithdrawnAt
-              ? "destructive"
-              : r.consentRenewalStatus === "expired"
-                ? "destructive"
-                : "outline"
-          }
-          className="w-fit"
-        >
-          {r.consentWithdrawnAt
-            ? "Withdrawn"
-            : r.consentRenewalStatus === "expired"
-              ? "Expired"
-              : "Signed"}
-        </Badge>
-      )}
+      <Badge
+        variant={consentStatusBadgeVariant(display)}
+        className="w-fit"
+        data-testid={`badge-rule-consent-${display}`}
+      >
+        {consentStatusLabel(display)}
+      </Badge>
       {r.consentExpiryDate && (
         <span className="text-muted-foreground">
           expires {r.consentExpiryDate.slice(0, 10)}
@@ -346,7 +348,7 @@ function ConsentContextCell({ r }: { r: FeeRuleRow }) {
       )}
       {r.consentWithdrawnAt && (
         <span className="text-destructive">
-          withdrawn {r.consentWithdrawnAt.slice(0, 10)}
+          revoked {r.consentWithdrawnAt.slice(0, 10)}
         </span>
       )}
     </div>

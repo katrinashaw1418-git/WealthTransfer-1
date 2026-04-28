@@ -1452,7 +1452,20 @@ export function registerAdviserRoutes(app: Express): void {
           }
           conds.push(inArray(feeConsentRequests.clientUserId, fixtureCtx.visibleClientIds));
         }
-        if (status) conds.push(eq(feeConsentRequests.status, status));
+        // Task #471 — the adviser UI exposes a single canonical "Revoked"
+        // filter that must match both `declined` and `withdrawn_by_adviser`,
+        // since both DB lifecycle terminals collapse to the same canonical
+        // display state. The other DB enum values map 1:1 to a canonical term.
+        if (status === "revoked") {
+          conds.push(
+            inArray(feeConsentRequests.status, [
+              "declined",
+              "withdrawn_by_adviser",
+            ]),
+          );
+        } else if (status) {
+          conds.push(eq(feeConsentRequests.status, status));
+        }
 
         const where = conds.length === 1 ? conds[0] : and(...conds);
         const [items, totalRow] = await Promise.all([

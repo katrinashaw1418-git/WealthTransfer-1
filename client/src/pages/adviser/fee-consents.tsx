@@ -44,6 +44,11 @@ import {
 } from "@/components/ui/table";
 import { Plus, Receipt, ShieldAlert, Users } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import {
+  consentRequestDisplayStatus,
+  consentStatusBadgeVariant,
+  consentStatusLabel,
+} from "@/lib/consent-status";
 
 interface FeeConsentRequestRow {
   id: number;
@@ -116,12 +121,17 @@ const FREQUENCIES = [
   { value: "annually", label: "Annually" },
 ];
 
+// Task #471 — filter values still target the underlying DB enum so the
+// Filter dropdown uses the canonical six-term display vocabulary. The
+// "revoked" sentinel value is translated server-side into an `inArray` over
+// the two terminal DB enums (`declined`, `withdrawn_by_adviser`) — the
+// adviser surface intentionally exposes only the canonical term.
 const STATUSES = [
   { value: "all", label: "All statuses" },
-  { value: "pending", label: "Pending" },
-  { value: "consented", label: "Consented" },
-  { value: "declined", label: "Declined" },
-  { value: "withdrawn_by_adviser", label: "Withdrawn" },
+  { value: "pending", label: "Pending signature" },
+  { value: "consented", label: "Active" },
+  { value: "revoked", label: "Revoked" },
+  { value: "superseded", label: "Superseded" },
 ];
 
 const RENEWAL_BEFORE_DAYS = 60;
@@ -160,16 +170,20 @@ const createSchema = z
   });
 type CreateForm = z.infer<typeof createSchema>;
 
+// Task #471 — render every fee_consent_requests.status row using the
+// canonical six-term display vocabulary. The mapping lives in
+// `@/lib/consent-status` so Fee rules, Client detail and any future surface
+// can never disagree with this page.
 function statusBadge(status: string) {
-  const map: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string }> = {
-    pending: { variant: "secondary", label: "Pending client" },
-    consented: { variant: "default", label: "Consented" },
-    declined: { variant: "destructive", label: "Declined" },
-    withdrawn_by_adviser: { variant: "outline", label: "Withdrawn" },
-    superseded: { variant: "outline", label: "Superseded" },
-  };
-  const e = map[status] ?? { variant: "outline" as const, label: status };
-  return <Badge variant={e.variant}>{e.label}</Badge>;
+  const display = consentRequestDisplayStatus(status);
+  return (
+    <Badge
+      variant={consentStatusBadgeVariant(display)}
+      data-testid={`badge-consent-status-${display}`}
+    >
+      {consentStatusLabel(display)}
+    </Badge>
+  );
 }
 
 function formatAud(value: string | null): string {

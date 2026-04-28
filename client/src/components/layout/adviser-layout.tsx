@@ -8,7 +8,7 @@ import { useAuth } from "@/contexts/auth";
 import { Menu, Search, Shield, LogOut } from "lucide-react";
 import NotificationsPopover from "@/components/notifications-popover";
 import WriteKillSwitchBanner from "@/components/write-kill-switch-banner";
-import DeductionExecutionBanner from "@/components/deduction-execution-banner";
+import DeductionsDisabledBanner from "@/components/deductions-disabled-banner";
 
 interface AdviserLayoutProps {
   children: React.ReactNode;
@@ -54,12 +54,13 @@ export default function AdviserLayout({ children }: AdviserLayoutProps) {
         {/* Task #155 — visible above the topbar so a paused environment is
             obvious before the adviser tries a write that would 503. */}
         <WriteKillSwitchBanner />
-        {/* Task #307 — shell-level Gate-A signal. Renders on EVERY adviser
-            page so a future page can never forget to surface it; replaces
-            the page-local banner that used to live in /adviser/fees. Both
-            banners can stack; the kill-switch row sits above this one when
-            both are active. */}
-        <DeductionExecutionBanner />
+        {/* Task #307 + #471 — shell-level Gate-A signal. Renders on EVERY
+            adviser page so a future page can never forget to surface it;
+            replaces the page-local banner that used to live in /adviser/fees.
+            Both banners can stack; the kill-switch row sits above this one
+            when both are active. The component is reusable — the future
+            Compliance tab (Task #473) drops it inline into a tab body. */}
+        <DeductionsDisabledBanner />
         {/* Top bar */}
         <header
           className="sticky top-0 z-30 bg-white border-b border-slate-200 shadow-sm"
