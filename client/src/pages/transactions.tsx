@@ -1,10 +1,18 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/auth";
 import { useTransactions } from "@/hooks/use-portfolio";
 import { Search, Download, ArrowUpRight, ArrowDownLeft, RefreshCw, FileText, Clock, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
 
@@ -67,10 +75,51 @@ const formatAmount = (transaction: any) => {
   return `${amount.toLocaleString()} ${transaction.fromCurrency || transaction.toCurrency}`;
 };
 
+// Task #338 — slug a username/email into something safe to drop straight
+// into a Content-Disposition filename without surprising downstream tools.
+// Falls back to "user" when the input is empty so the filename always
+// matches the documented `account-activity_<user>_<from>_<to>.csv` shape.
+function slugifyForFilename(value: string | null | undefined): string {
+  if (!value) return "user";
+  const cleaned = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "user";
+}
+
+// Default the export window to the last 90 days. Long enough that the
+// statement covers a quarter without manual fiddling, short enough that the
+// download stays small for a typical client.
+function defaultExportRange(): { from: string; to: string } {
+  const today = new Date();
+  const from = new Date(today);
+  from.setDate(from.getDate() - 90);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  return { from: fmt(from), to: fmt(today) };
+}
+
+// Minimal, RFC-4180-ish CSV cell quoting. Wraps the cell in double-quotes
+// when it contains a comma, quote, or newline; doubles embedded quotes.
+function csvCell(value: unknown): string {
+  if (value == null) return "";
+  const s = String(value);
+  if (/[",\n\r]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
 export default function Transactions() {
   const [searchTerm, setSearchTerm] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [exportOpen, setExportOpen] = useState(false);
+  const defaultRange = useMemo(defaultExportRange, []);
+  const [exportFrom, setExportFrom] = useState<string>(defaultRange.from);
+  const [exportTo, setExportTo] = useState<string>(defaultRange.to);
+  const { user } = useAuth();
+  const { toast } = useToast();
   const { data: transactions, isLoading, error } = useTransactions();
 
   const nonExchangeTransactions = transactions?.filter((t: any) => t.type !== "exchange") || [];
@@ -86,6 +135,95 @@ export default function Transactions() {
     const matchesStatus = statusFilter === "all" || transaction.status === statusFilter;
     return matchesSearch && matchesType && matchesStatus;
   });
+
+  // Task #338 — generate the CSV from the same `transactions` query the page
+  // is already showing (excluding exchanges, same as the on-screen list) and
+  // scope it to the chosen [from, to] window. The window is inclusive: `to`
+  // is bumped to end-of-day so a same-day pick still captures records made
+  // earlier in the day. The filename includes the user identifier and the
+  // ISO range so successive exports never collide on disk.
+  const handleExport = () => {
+    if (!exportFrom || !exportTo) {
+      toast({
+        title: "Pick a date range",
+        description: "Both a from-date and a to-date are required.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const fromMs = new Date(`${exportFrom}T00:00:00`).getTime();
+    const toMs = new Date(`${exportTo}T23:59:59.999`).getTime();
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) {
+      toast({
+        title: "Invalid date",
+        description: "Could not parse the date range.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (fromMs > toMs) {
+      toast({
+        title: "Invalid range",
+        description: "The from-date must be on or before the to-date.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const rows = (transactions ?? []).filter((t: any) => {
+      if (t.type === "exchange") return false;
+      const ts = new Date(t.createdAt).getTime();
+      return Number.isFinite(ts) && ts >= fromMs && ts <= toMs;
+    });
+
+    const header = [
+      "Date",
+      "Type",
+      "Description",
+      "From currency",
+      "To currency",
+      "Amount",
+      "Fee",
+      "Exchange rate",
+      "Status",
+    ];
+    const lines = [header.map(csvCell).join(",")];
+    for (const t of rows) {
+      lines.push(
+        [
+          new Date(t.createdAt).toISOString(),
+          getTypeLabel(t.type),
+          t.description ?? "",
+          t.fromCurrency ?? "",
+          t.toCurrency ?? "",
+          t.amount ?? "",
+          t.fee ?? "",
+          t.exchangeRate ?? "",
+          t.status ?? "",
+        ].map(csvCell).join(","),
+      );
+    }
+    const csv = lines.join("\r\n") + "\r\n";
+
+    const userSlug = slugifyForFilename(user?.username ?? user?.email ?? null);
+    const filename = `account-activity_${userSlug}_${exportFrom}_${exportTo}.csv`;
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setExportOpen(false);
+    toast({
+      title: "Statement downloaded",
+      description: `${rows.length} record${rows.length === 1 ? "" : "s"} exported as ${filename}.`,
+    });
+  };
 
   if (isLoading) {
     return (
@@ -118,10 +256,71 @@ export default function Transactions() {
           <h1 className="text-2xl font-bold text-gray-900">Account Activity</h1>
           <p className="text-sm text-gray-500 mt-1">Record of all portfolio movements and transactions</p>
         </div>
-        <Button variant="outline" size="sm">
-          <Download className="w-4 h-4 mr-2" />
-          Export Statement
-        </Button>
+        <Popover open={exportOpen} onOpenChange={setExportOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="button-open-export"
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Export Statement
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-80" align="end">
+            <div className="space-y-3">
+              <div>
+                <h4 className="text-sm font-semibold text-gray-900">
+                  Export account activity
+                </h4>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Pick the date range you want included in the CSV.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <Label htmlFor="export-from" className="text-xs">From</Label>
+                  <Input
+                    id="export-from"
+                    type="date"
+                    value={exportFrom}
+                    max={exportTo || undefined}
+                    onChange={(e) => setExportFrom(e.target.value)}
+                    data-testid="input-export-from"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="export-to" className="text-xs">To</Label>
+                  <Input
+                    id="export-to"
+                    type="date"
+                    value={exportTo}
+                    min={exportFrom || undefined}
+                    onChange={(e) => setExportTo(e.target.value)}
+                    data-testid="input-export-to"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExportOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleExport}
+                  data-testid="button-confirm-export"
+                >
+                  <Download className="w-3.5 h-3.5 mr-1.5" />
+                  Download CSV
+                </Button>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

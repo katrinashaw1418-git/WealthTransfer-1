@@ -337,6 +337,93 @@ export default function Portfolio() {
                 ))}
               </div>
             </div>
+
+            {/* Task #338 — actual-vs-target allocation bars per asset class.
+                Targets come from the illustrative rebalancing benchmark
+                surfaced by /api/portfolio/allocation; actuals are the live
+                percentages already computed above. The bar is the actual
+                allocation; the dashed marker shows the benchmark target so
+                drift is visible at a glance. */}
+            {allocation?.benchmark?.targets ? (
+              <div className="mt-6 pt-6 border-t border-gray-100" data-testid="allocation-vs-target">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-semibold text-gray-900">Allocation vs benchmark</h4>
+                  <span className="text-xs text-gray-500">
+                    {/* Build the subtitle from the live benchmark payload so a
+                        future risk-banded benchmark (e.g. 30/15/20/35) doesn't
+                        leave the label silently misreporting the targets. */}
+                    Illustrative ·{' '}
+                    {[
+                      allocation.benchmark.targets.fiat,
+                      allocation.benchmark.targets.crypto,
+                      allocation.benchmark.targets.stablecoin,
+                      allocation.benchmark.targets.investment,
+                    ]
+                      .map((n: number) => `${Math.round(n)}`)
+                      .join('/')}
+                  </span>
+                </div>
+                <div className="space-y-3">
+                  {([
+                    { key: 'fiat',       label: 'Fiat Currencies' },
+                    { key: 'crypto',     label: 'Crypto Assets' },
+                    { key: 'stablecoin', label: 'Stablecoins' },
+                    { key: 'investment', label: 'Investment Products' },
+                  ] as const).map(({ key, label }) => {
+                    const actual = allocation?.[key]?.percentage ?? 0;
+                    const target = allocation.benchmark.targets[key] ?? 0;
+                    const drift = actual - target;
+                    const driftAbs = Math.abs(drift);
+                    const driftLabel =
+                      driftAbs < 0.05
+                        ? 'On target'
+                        : `${drift > 0 ? '+' : '−'}${driftAbs.toFixed(1)}pp ${drift > 0 ? 'over' : 'under'}`;
+                    const driftColor =
+                      driftAbs < 0.05
+                        ? 'text-gray-500'
+                        : driftAbs < 5
+                          ? 'text-amber-600'
+                          : 'text-red-600';
+                    // Cap rendered bar at 100% so a heavy concentration in
+                    // one class doesn't blow out the layout, but keep the
+                    // numeric readout truthful.
+                    const actualWidth = Math.min(100, Math.max(0, actual));
+                    const targetLeft = Math.min(100, Math.max(0, target));
+                    return (
+                      <div key={key} data-testid={`allocation-bar-${key}`}>
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="font-medium text-gray-700">{label}</span>
+                          <span className="text-gray-600 tabular-nums">
+                            <span className="font-semibold">{actual.toFixed(1)}%</span>
+                            <span className="text-gray-400 mx-1">/</span>
+                            <span>target {target.toFixed(0)}%</span>
+                            <span className="text-gray-300 mx-1.5">·</span>
+                            <span className={driftColor}>{driftLabel}</span>
+                          </span>
+                        </div>
+                        <div className="relative h-2 bg-gray-100 rounded-full overflow-hidden">
+                          <div
+                            className="absolute inset-y-0 left-0 bg-sky-500 rounded-full"
+                            style={{ width: `${actualWidth}%` }}
+                          />
+                          {/* Target marker — vertical dashed line over the bar */}
+                          <div
+                            className="absolute inset-y-0 w-0.5 bg-gray-700"
+                            style={{ left: `calc(${targetLeft}% - 1px)` }}
+                            aria-hidden
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {allocation.benchmark.note ? (
+                  <p className="text-[11px] text-gray-400 mt-3 leading-snug">
+                    {allocation.benchmark.note}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 

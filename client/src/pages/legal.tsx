@@ -363,7 +363,7 @@ export default function Legal() {
           </div>
         </div>
         <div className="mt-6 pt-4 border-t border-gray-100 text-xs text-gray-400">
-          <p>© 2025 AMAX Wealth Pty Ltd. All rights reserved. Eligible clients only —</p>
+          <p>© {new Date().getFullYear()} AMAX Wealth Pty Ltd. All rights reserved. Eligible clients only —</p>
           <p>Authorised Representative under an Australian Financial Services Licence arrangement.</p>
         </div>
       </footer>

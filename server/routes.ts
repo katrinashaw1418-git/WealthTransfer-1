@@ -2307,12 +2307,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const totals = await calculatePortfolioTotalsAtDate(userId, new Date());
       const { fiatValue, cryptoValue, stablecoinValue, investmentValue, totalValue } = totals;
 
+      // Task #338 — surface the illustrative rebalancing benchmark alongside
+      // the live allocation so the portfolio page can render actual-vs-target
+      // bars without re-deriving the targets on the client. Targets are
+      // returned as percentages (0–100) for easy display alongside the
+      // existing `percentage` fields. The note is included verbatim so the
+      // client UI can reproduce the same disclaimer the AI flow uses.
+      const benchmark = DEFAULT_REBALANCING_BENCHMARK;
       res.json({
         fiat:       { value: fiatValue,        percentage: totalValue > 0 ? (fiatValue        / totalValue) * 100 : 0 },
         crypto:     { value: cryptoValue,       percentage: totalValue > 0 ? (cryptoValue      / totalValue) * 100 : 0 },
         stablecoin: { value: stablecoinValue,   percentage: totalValue > 0 ? (stablecoinValue  / totalValue) * 100 : 0 },
         investment: { value: investmentValue,   percentage: totalValue > 0 ? (investmentValue  / totalValue) * 100 : 0 },
         totalValue,
+        benchmark: {
+          type: benchmark.type,
+          note: benchmark.note,
+          targets: {
+            fiat:       benchmark.weights.fiat       * 100,
+            crypto:     benchmark.weights.crypto     * 100,
+            stablecoin: benchmark.weights.stablecoin * 100,
+            investment: benchmark.weights.investment * 100,
+          },
+        },
       });
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
