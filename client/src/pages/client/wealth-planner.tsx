@@ -139,7 +139,10 @@ export function computeRequiredCagr(
 // across browsers are flakier than driving the filename ourselves with the
 // row metadata we already have in cache. apiFetch handles auth + 401 redirect
 // + non-OK rejection (which we translate into a friendly toast).
-async function downloadClientDocument(
+// Exported so the Task #382 download-flow tests can drive this directly,
+// asserting the URL hit, the saved filename, and the cleanup of the
+// temporary object URL without having to render the whole page.
+export async function downloadClientDocument(
   documentId: number,
   fileName: string,
 ): Promise<void> {
@@ -164,7 +167,7 @@ async function downloadClientDocument(
 // the client can read in a toast. The body is usually a JSON envelope like
 // `{"error":"Document not found"}` so we try to pull the inner message out;
 // otherwise we fall back to the raw error message.
-function explainDownloadError(err: unknown): {
+export function explainDownloadError(err: unknown): {
   title: string;
   description: string;
 } {

@@ -743,7 +743,11 @@ const UPLOAD_ACCEPT_HINT = [
 // titles a non-technical adviser can act on. Anything we don't recognise
 // falls through to a generic "Could not upload document" with the raw
 // server message as the description so we never swallow a real error.
-function explainUploadError(err: unknown): {
+//
+// Exported so the table-driven Task #382 test suite can pin every well-known
+// rejection code (UPLOAD_TOO_LARGE / UPLOAD_MIME_REJECTED / UPLOAD_MIME_MISMATCH /
+// 423 locked) to its friendly toast title without driving the whole dialog.
+export function explainUploadError(err: unknown): {
   title: string;
   description: string;
 } {
@@ -776,7 +780,11 @@ function explainUploadError(err: unknown): {
   return { title: "Could not upload document", description };
 }
 
-function DocumentDialog({
+// Exported so the Task #382 component test can mount the dialog directly
+// instead of clicking through the whole adviser panel — this keeps the
+// upload-flow test focused on the behaviour the task cares about (file
+// pick → multipart POST → success toast + cache invalidation).
+export function DocumentDialog({
   open,
   onOpenChange,
   clientId,
