@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -352,14 +353,42 @@ function MetadataCell({
 }
 
 export default function AdminAuditLogs() {
-  const [actionFilter, setActionFilter] = useState("");
-  const [entityFilter, setEntityFilter] = useState("");
-  const [userFilter, setUserFilter] = useState("");
+  // Read filters from the querystring once, on first render — other admin
+  // pages (e.g. background-jobs) deep-link here with `?action=…&entityType=
+  // …&entityId=…` so the operator lands on the exact audit row that backs
+  // the surface they clicked from. We deliberately don't subscribe to live
+  // querystring changes because the user can also edit the filter inputs;
+  // re-syncing on every URL change would clobber their in-progress edits.
+  // `entityId` has no input field — it is a deep-link-only narrowing that
+  // is preserved across pagination and cleared via the Reset button.
+  const initialSearch = useSearch();
+  const initialParams = new URLSearchParams(initialSearch);
+  const [actionFilter, setActionFilter] = useState(
+    (initialParams.get("action") ?? "").slice(0, 200),
+  );
+  const [entityFilter, setEntityFilter] = useState(
+    (initialParams.get("entityType") ?? "").slice(0, 200),
+  );
+  const [userFilter, setUserFilter] = useState(
+    (initialParams.get("userId") ?? "").slice(0, 64),
+  );
+  const [entityIdFilter, setEntityIdFilter] = useState(
+    (initialParams.get("entityId") ?? "").slice(0, 200),
+  );
+  // Task #399 — exact-row deep-link: callers can pin the page to a single
+  // audit row (the `id` URL param). No input field — chip only, cleared
+  // via the chip's Clear button or the global Reset.
+  const [exactIdFilter, setExactIdFilter] = useState(
+    (initialParams.get("id") ?? "").slice(0, 32),
+  );
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const limit = 50;
 
-  const queryKey = ["/api/admin/audit-logs", { actionFilter, entityFilter, userFilter, page }];
+  const queryKey = [
+    "/api/admin/audit-logs",
+    { actionFilter, entityFilter, userFilter, entityIdFilter, exactIdFilter, page },
+  ];
 
   const { data, isLoading } = useQuery<AuditPage>({
     queryKey,
@@ -368,6 +397,8 @@ export default function AdminAuditLogs() {
       if (actionFilter.trim()) params.set("action", actionFilter.trim());
       if (entityFilter.trim()) params.set("entityType", entityFilter.trim());
       if (userFilter.trim()) params.set("userId", userFilter.trim());
+      if (entityIdFilter.trim()) params.set("entityId", entityIdFilter.trim());
+      if (exactIdFilter.trim()) params.set("id", exactIdFilter.trim());
       params.set("page", String(page));
       params.set("limit", String(limit));
       const token = (() => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } })();
@@ -385,6 +416,8 @@ export default function AdminAuditLogs() {
     setActionFilter("");
     setEntityFilter("");
     setUserFilter("");
+    setEntityIdFilter("");
+    setExactIdFilter("");
     setPage(1);
     setExpandedId(null);
   }
@@ -446,6 +479,38 @@ export default function AdminAuditLogs() {
               </Button>
             </div>
           </div>
+          {entityIdFilter.trim() && (
+            <div className="mt-3 flex items-center gap-2" data-testid="chip-entity-id-filter">
+              <Badge variant="outline" className="bg-violet-50 text-violet-800 border-violet-300">
+                Entity ID = {entityIdFilter}
+              </Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setEntityIdFilter(""); setPage(1); setExpandedId(null); }}
+                className="h-6 px-2 text-xs"
+                data-testid="button-clear-entity-id"
+              >
+                Clear
+              </Button>
+            </div>
+          )}
+          {exactIdFilter.trim() && (
+            <div className="mt-3 flex items-center gap-2" data-testid="chip-exact-id-filter">
+              <Badge variant="outline" className="bg-violet-50 text-violet-800 border-violet-300">
+                Audit row #{exactIdFilter}
+              </Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setExactIdFilter(""); setPage(1); setExpandedId(null); }}
+                className="h-6 px-2 text-xs"
+                data-testid="button-clear-exact-id"
+              >
+                Clear
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 

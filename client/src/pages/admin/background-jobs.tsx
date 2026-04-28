@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import {
   Card,
   CardContent,
@@ -32,6 +33,8 @@ import {
   XCircle,
   Clock,
   RefreshCw,
+  Trash2,
+  ExternalLink,
 } from "lucide-react";
 
 const TOKEN_KEY = "amax_jwt";
@@ -67,6 +70,26 @@ interface BackgroundJobsHealthResponse {
 
 interface JobRunsResponse {
   items: Array<JobRun & { jobName: string }>;
+}
+
+// TASK #399 — Recent fixture-cleanup deactivations (one row per audit_logs
+// entry written by the `fixture-adviser-clients-cleanup` cron). Surfaces
+// which adviser↔client pairs were unlinked on a given night without ops
+// having to query `audit_logs` directly.
+interface FixtureCleanupDeactivation {
+  auditLogId: number;
+  createdAt: string | null;
+  linkId: number | null;
+  adviserUserId: number | null;
+  adviserEmail: string | null;
+  clientUserId: number | null;
+  clientEmail: string | null;
+  matchedPattern: string | null;
+  trigger: string | null;
+}
+
+interface FixtureCleanupDeactivationsResponse {
+  items: FixtureCleanupDeactivation[];
 }
 
 function formatDateTime(iso: string | null): string {
@@ -178,6 +201,26 @@ export default function AdminBackgroundJobs() {
       return res.json();
     },
   });
+
+  // TASK #399 — recent fixture-cleanup deactivations panel
+  const { data: cleanupData, isLoading: cleanupLoading } =
+    useQuery<FixtureCleanupDeactivationsResponse>({
+      queryKey: ["/api/admin/background-jobs/fixture-cleanup-deactivations"],
+      queryFn: async () => {
+        const token = localStorage.getItem(TOKEN_KEY);
+        const res = await fetch(
+          "/api/admin/background-jobs/fixture-cleanup-deactivations",
+          { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+        );
+        if (!res.ok) {
+          throw new Error("Failed to load fixture-cleanup deactivations");
+        }
+        return res.json();
+      },
+      // Re-fetch on the same cadence as the job-health table so a fresh
+      // nightly run shows up without a manual reload.
+      refetchInterval: 60_000,
+    });
 
   const overdueCount = (data?.jobs ?? []).filter((j) => j.isOverdue).length;
   const errorCount = (data?.jobs ?? []).filter(
@@ -351,6 +394,117 @@ export default function AdminBackgroundJobs() {
                     </TableCell>
                     <TableCell className="align-top text-xs font-mono text-slate-700 text-right whitespace-nowrap">
                       {formatDuration(job.lastRun?.durationMs ?? null)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/*
+        TASK #399 — Recent fixture-cleanup deactivations panel.
+        Shows the most recent (adviser ↔ client) pairs unlinked by the
+        `fixture-adviser-clients-cleanup` cron, sourced from the matching
+        `audit_logs` rows. Each row deep-links into the audit-log viewer
+        with the entity narrowed so an operator can see the full before/
+        after snapshot for that one link.
+      */}
+      <Card data-testid="card-fixture-cleanup-deactivations">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Trash2 className="h-4 w-4 text-violet-600" />
+            Recent fixture-cleanup deactivations
+          </CardTitle>
+          <p className="text-xs text-slate-500 mt-1">
+            Adviser ↔ client links the nightly fixture-cleanup cron flipped
+            to inactive, most recent first. One row per audit entry.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {cleanupLoading ? (
+            <Skeleton className="h-32 w-full" />
+          ) : !cleanupData || cleanupData.items.length === 0 ? (
+            <p
+              className="text-sm text-slate-500"
+              data-testid="text-no-cleanup-deactivations"
+            >
+              No fixture-cleanup deactivations recorded yet.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>When</TableHead>
+                  <TableHead>Adviser</TableHead>
+                  <TableHead>Client</TableHead>
+                  <TableHead>Matched pattern</TableHead>
+                  <TableHead className="text-right">Audit</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {cleanupData.items.map((row) => (
+                  <TableRow
+                    key={row.auditLogId}
+                    data-testid={`row-cleanup-${row.auditLogId}`}
+                  >
+                    <TableCell className="align-top text-xs text-slate-700 whitespace-nowrap">
+                      {formatDateTime(row.createdAt)}
+                    </TableCell>
+                    <TableCell
+                      className="align-top text-xs text-slate-700"
+                      data-testid={`text-cleanup-adviser-${row.auditLogId}`}
+                    >
+                      <div className="font-medium text-slate-900">
+                        {row.adviserEmail ?? "—"}
+                      </div>
+                      {row.adviserUserId !== null && (
+                        <div className="text-slate-500 font-mono">
+                          #{row.adviserUserId}
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell
+                      className="align-top text-xs text-slate-700"
+                      data-testid={`text-cleanup-client-${row.auditLogId}`}
+                    >
+                      <div className="font-medium text-slate-900">
+                        {row.clientEmail ?? "—"}
+                      </div>
+                      {row.clientUserId !== null && (
+                        <div className="text-slate-500 font-mono">
+                          #{row.clientUserId}
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell
+                      className="align-top text-xs font-mono text-slate-700"
+                      data-testid={`text-cleanup-pattern-${row.auditLogId}`}
+                    >
+                      {row.matchedPattern ?? "—"}
+                    </TableCell>
+                    <TableCell className="align-top text-right whitespace-nowrap">
+                      <Link
+                        // Pin to the exact audit row via `id`. The
+                        // additional action / entityType / entityId params
+                        // are belt-and-braces so the chips still surface
+                        // useful context if the operator clears the id
+                        // chip in-place. linkId may be null for
+                        // defensively-surfaced rows with a non-integer
+                        // entityId — the deep-link still targets the
+                        // single audit row by id.
+                        href={
+                          row.linkId !== null
+                            ? `/admin/audit-logs?id=${row.auditLogId}&action=adviser_client.deactivated_fixture_cleanup&entityType=adviser_client&entityId=${row.linkId}`
+                            : `/admin/audit-logs?id=${row.auditLogId}&action=adviser_client.deactivated_fixture_cleanup&entityType=adviser_client`
+                        }
+                        data-testid={`link-cleanup-audit-${row.auditLogId}`}
+                        className="inline-flex items-center gap-1 text-xs text-violet-700 hover:underline"
+                      >
+                        View audit
+                        <ExternalLink className="h-3 w-3" />
+                      </Link>
                     </TableCell>
                   </TableRow>
                 ))}

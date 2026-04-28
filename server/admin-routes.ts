@@ -1800,6 +1800,12 @@ export function registerAdminRoutes(app: Express): void {
       const entityId = typeof req.query.entityId === "string" ? req.query.entityId.trim() : "";
       const userIdRaw = typeof req.query.userId === "string" ? Number(req.query.userId) : null;
       const userId = userIdRaw && Number.isInteger(userIdRaw) && userIdRaw > 0 ? userIdRaw : null;
+      // Task #399 — exact-row targeting via auditLogId. Used by the
+      // Background Jobs page's "View audit" deep-link so a click lands on
+      // exactly ONE row instead of every audit entry that ever touched
+      // the same (action, entityType, entityId) tuple.
+      const idRaw = typeof req.query.id === "string" ? Number(req.query.id) : null;
+      const exactId = idRaw && Number.isInteger(idRaw) && idRaw > 0 ? idRaw : null;
 
       const limit = Math.min(
         Math.max(Number(req.query.limit) || 50, 1),
@@ -1813,6 +1819,7 @@ export function registerAdminRoutes(app: Express): void {
       if (entityType) conditions.push(eq(auditLogs.entityType, entityType));
       if (entityId) conditions.push(eq(auditLogs.entityId, entityId));
       if (userId) conditions.push(eq(auditLogs.userId, userId));
+      if (exactId) conditions.push(eq(auditLogs.id, exactId));
       const where = conditions.length ? and(...conditions) : undefined;
 
       const [rows, totalRow] = await Promise.all([
@@ -3071,6 +3078,96 @@ export function registerAdminRoutes(app: Express): void {
         "./services/background-jobs"
       );
       return await getBackgroundJobsHealth();
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // TASK #399 — Recent fixture-cleanup deactivations panel
+  // -------------------------------------------------------------------------
+  // The `fixture-adviser-clients-cleanup` cron writes one
+  // `adviser_client.deactivated_fixture_cleanup` audit row per link it flips
+  // to is_active=false. The Background Jobs page already shows the cron's
+  // one-line summary (`scanned=…, deactivated=…`), but ops had no way to see
+  // WHICH adviser↔client pairs were unlinked without dropping into SQL
+  // against `audit_logs`. This endpoint surfaces the most recent N
+  // deactivations (default 50), joined with `users` so the UI can render
+  // human emails instead of raw user ids. Read-only.
+  //
+  // We deliberately filter on the canonical action name and entity type
+  // so a future audit row for the same pair (e.g. a manual deactivation
+  // by an admin) can never accidentally show up here.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/background-jobs/fixture-cleanup-deactivations",
+    adminRoute(async (req) => {
+      const limit = Math.min(
+        Math.max(Number(req.query.limit) || 50, 1),
+        200,
+      );
+      const rows = await db
+        .select({
+          id: auditLogs.id,
+          createdAt: auditLogs.createdAt,
+          entityId: auditLogs.entityId,
+          metadata: auditLogs.metadata,
+        })
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.action, "adviser_client.deactivated_fixture_cleanup"),
+            eq(auditLogs.entityType, "adviser_client"),
+          ),
+        )
+        .orderBy(desc(auditLogs.createdAt), desc(auditLogs.id))
+        .limit(limit);
+
+      // Pull adviser + client emails for the user ids referenced in the
+      // metadata.extra payload. One round-trip via getUserNameMap.
+      const userIds: number[] = [];
+      for (const r of rows) {
+        const meta = (r.metadata ?? {}) as Record<string, unknown>;
+        const a = meta["adviserUserId"];
+        const c = meta["clientUserId"];
+        if (typeof a === "number" && Number.isFinite(a)) userIds.push(a);
+        if (typeof c === "number" && Number.isFinite(c)) userIds.push(c);
+      }
+      const nameMap = await getUserNameMap(userIds);
+
+      const items = rows.map((r) => {
+        const meta = (r.metadata ?? {}) as Record<string, unknown>;
+        const adviserUserId =
+          typeof meta["adviserUserId"] === "number"
+            ? (meta["adviserUserId"] as number)
+            : null;
+        const clientUserId =
+          typeof meta["clientUserId"] === "number"
+            ? (meta["clientUserId"] as number)
+            : null;
+        const matchedPattern =
+          typeof meta["matchedPattern"] === "string"
+            ? (meta["matchedPattern"] as string)
+            : null;
+        const trigger =
+          typeof meta["trigger"] === "string"
+            ? (meta["trigger"] as string)
+            : null;
+        const linkIdNum = Number(r.entityId);
+        return {
+          auditLogId: r.id,
+          createdAt: r.createdAt,
+          linkId:
+            Number.isInteger(linkIdNum) && linkIdNum > 0 ? linkIdNum : null,
+          adviserUserId,
+          adviserEmail:
+            adviserUserId !== null ? (nameMap[adviserUserId]?.email ?? null) : null,
+          clientUserId,
+          clientEmail:
+            clientUserId !== null ? (nameMap[clientUserId]?.email ?? null) : null,
+          matchedPattern,
+          trigger,
+        };
+      });
+      return { items };
     }),
   );
 

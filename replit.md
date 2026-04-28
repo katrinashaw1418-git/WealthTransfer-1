@@ -1,5 +1,54 @@
 # Wealth Management Platform
 
+## Recent Changes (April 2026) — Task #399: Show fixture-cleanup deactivations on the admin Background Jobs page
+
+The `fixture-adviser-clients-cleanup` cron (Task #347) writes one
+`adviser_client.deactivated_fixture_cleanup` audit row per link it flips to
+`is_active=false`, with `extra={ adviserUserId, clientUserId, matchedPattern, trigger }`.
+The Background Jobs page already showed the cron's one-line summary
+(`scanned=…, deactivated=…`), but ops had no surface listing WHICH
+adviser↔client pairs were unlinked on a given night — they had to drop into
+SQL against `audit_logs`.
+
+**New admin endpoint** (`GET /api/admin/background-jobs/fixture-cleanup-deactivations`)
+returns the most recent N (default 50, capped at 200) audit rows scoped to
+`action='adviser_client.deactivated_fixture_cleanup'` AND
+`entityType='adviser_client'` (so an unrelated entityType reusing the same
+verb cannot leak through), joined with `users` via the existing
+`getUserNameMap` helper so the response carries human emails. `entityId` is
+parsed to an int as `linkId`; if a future writer ever uses a non-integer
+id the row is still surfaced with `linkId=null` instead of being silently
+dropped (defensive — a hidden bad row is worse than a visible one).
+
+**New panel** on `client/src/pages/admin/background-jobs.tsx` — "Recent
+fixture-cleanup deactivations" — shows when, adviser email + id, client
+email + id, matched pattern, and a "View audit" deep-link to
+`/admin/audit-logs?action=adviser_client.deactivated_fixture_cleanup&entityType=adviser_client&entityId=<linkId>`.
+Re-fetches every 60s on the same cadence as the rest of the page so a
+fresh nightly run shows up without a manual reload.
+
+**Audit-logs URL params** — `client/src/pages/admin/audit-logs.tsx` now
+reads `action`, `entityType`, `userId`, and (deep-link-only, no input)
+`entityId` from the querystring on first render so the link from the
+Background Jobs panel narrows the audit viewer to the exact row. A small
+violet chip with a "Clear" button surfaces the active `entityId` filter
+since it has no input field. Mirrors the existing pattern used by
+`operator-alerts.tsx` (read-once via `useSearch`, in-page edits never
+re-clobbered by a stale URL).
+
+**Tests** (`server/admin-routes-fixture-cleanup-deactivations.test.ts`, 6
+cases) — auth gate (401 unauth, 403 non-admin, 200 admin), action +
+entityType scope (a decoy row with `entityType='wrong_type'` does NOT
+appear), most-recent-first ordering, email join correctness, the
+`linkId=null` fallback for non-integer entityIds, and the limit query
+param being clamped into [1, 200]. Seeded users are scrubbed in afterAll;
+seeded `audit_logs` rows are namespaced by a unique TAG (the
+`audit_logs_block_delete` trigger from Task #149 makes the table
+append-only, so the test cannot delete them — the namespace + per-run
+unique entityId values guarantee isolation across reruns).
+
+**Files**: `server/admin-routes.ts` (new endpoint), `server/admin-routes-fixture-cleanup-deactivations.test.ts` (new), `client/src/pages/admin/background-jobs.tsx` (panel + query + new lucide icons), `client/src/pages/admin/audit-logs.tsx` (`useSearch`-driven URL params + entityId chip).
+
 ## Recent Changes (April 2026) — Task #381: Retire the legacy storage-key client-document POST
 
 The JSON `POST /api/adviser/client-documents` route (the one that let the caller pick its own `storageKey`) has been removed. No UI surface called it after Task #115 moved the adviser dialog onto the multipart `POST /api/adviser/client-documents/upload` path; leaving it alive let any future caller (including a leaked adviser token) bind a client_document row to an arbitrary bucket key and abuse the download path. The matching `createClientDocument(...)` service function in `server/services/wealth-planner.ts` (and its `CreateClientDocumentInput` type) were removed alongside the route — those three pieces were the trust-the-caller-storageKey surface.
