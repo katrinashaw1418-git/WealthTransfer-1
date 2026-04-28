@@ -9,6 +9,7 @@
 // =============================================================================
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import {
   QueryClient,
@@ -222,12 +223,10 @@ describe("ClientWealthPlanner objectives table", () => {
     // --- House deposit: in-flight goal, half covered ---
     const progressRow1 = screen.getByTestId("cell-objective-progress-101");
     const bar1 = within(progressRow1).getByTestId("progress-objective-101");
-    // The shadcn Progress wrapper destructures `value` and applies it to the
-    // indicator's `translateX` rather than forwarding it to Radix's root, so
-    // `aria-valuenow` stays unset. The translateX percentage on the single
-    // child indicator is therefore the canonical DOM signal of the value.
-    const indicator1 = bar1.firstElementChild as HTMLElement;
-    expect(indicator1.style.transform).toBe("translateX(-50%)");
+    // The shadcn Progress wrapper forwards `value` to Radix's root, so
+    // assistive tech reads the actual completion via `aria-valuenow`
+    // instead of being stuck on the indeterminate "loading" state.
+    expect(bar1).toHaveAttribute("aria-valuenow", "50");
     expect(progressRow1.textContent).toContain("50,000 / 100,000");
     expect(progressRow1.textContent).toContain("50.0%");
 
@@ -241,10 +240,9 @@ describe("ClientWealthPlanner objectives table", () => {
     const progressRow2 = screen.getByTestId("cell-objective-progress-202");
     const bar2 = within(progressRow2).getByTestId("progress-objective-202");
     // Portfolio (50k) far exceeds target (25k); the helper caps the bar at
-    // 100 so an over-funded goal still renders as a full bar instead of a
-    // 200% glitch (which would translateX(+100%) and slide off the right).
-    const indicator2 = bar2.firstElementChild as HTMLElement;
-    expect(indicator2.style.transform).toBe("translateX(-0%)");
+    // 100 so an over-funded goal announces as fully complete instead of a
+    // 200% glitch that would slide the indicator off the right.
+    expect(bar2).toHaveAttribute("aria-valuenow", "100");
     expect(progressRow2.textContent).toContain("100.0%");
 
     const cagrCell2 = screen.getByTestId("cell-objective-required-cagr-202");
