@@ -41,7 +41,7 @@ import express from "express";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import { signToken } from "./auth";
 import { registerClientRoutes } from "./client-routes";
@@ -50,6 +50,7 @@ import {
   users,
   adviserClients,
   adviceRecords,
+  auditLogs,
   feeConsents,
   feeConsentRequests,
 } from "@shared/schema";
@@ -559,5 +560,169 @@ describe("GET /api/client/fee-consents — Task #342 client projection", () => {
     const otherIds = other.body.map((r) => r.id as number);
     expect(otherIds).toContain(theirs.id);
     expect(otherIds).not.toContain(mine.id);
+  });
+});
+
+// =============================================================================
+// Task #343 — client PDF download endpoints
+// -----------------------------------------------------------------------------
+// Locks two invariants the regulator cares about:
+//   1. The ownership boundary the existing list endpoints already enforce
+//      ALSO applies to the per-row PDF endpoints — clientB cannot pull the
+//      PDF for clientA's signed consent. The shared builder enforces this
+//      via `requireOwnerUserId`; if a future contributor accidentally drops
+//      the gate the test below flips from 403 to 200.
+//   2. Every successful client download leaves an audit trail: a typed
+//      `*_pdf_exported_by_client` row PLUS the unified `document.download`
+//      row (Task #318) the cross-surface auditor relies on. Without these
+//      we couldn't prove to ASIC that the client retrieved their copy.
+// =============================================================================
+async function pdfDownload(
+  path: string,
+  token = clientToken,
+): Promise<{ status: number; contentType: string | null; bodyLen: number }> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const buf = Buffer.from(await res.arrayBuffer());
+  return {
+    status: res.status,
+    contentType: res.headers.get("content-type"),
+    bodyLen: buf.length,
+  };
+}
+
+describe("Task #343 — GET /api/client/fee-consents/:id/pdf", () => {
+  it("streams a PDF for the owning client and writes both audit rows", async () => {
+    const consent = await insertConsent({
+      accountNumber: `${seedKey}_pdf_mine_cons`,
+      clientSignatureName: "My Client",
+    });
+
+    const r = await pdfDownload(`/api/client/fee-consents/${consent.id}/pdf`);
+    expect(r.status).toBe(200);
+    expect(r.contentType).toContain("application/pdf");
+    expect(r.bodyLen).toBeGreaterThan(0);
+
+    // Typed action — proves the client (not an admin) pulled it.
+    const [typedRow] = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.entityType, "fee_consent"),
+          eq(auditLogs.entityId, String(consent.id)),
+          eq(auditLogs.action, "fee_consent_pdf_exported_by_client"),
+        ),
+      )
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(1);
+    expect(typedRow).toBeDefined();
+    expect(typedRow.userId).toBe(clientUserId);
+
+    // Unified document.download row used by the cross-surface auditor.
+    const [downloadRow] = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.entityType, "fee_consent"),
+          eq(auditLogs.entityId, String(consent.id)),
+          eq(auditLogs.action, "document.download"),
+        ),
+      )
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(1);
+    expect(downloadRow).toBeDefined();
+    expect(downloadRow.userId).toBe(clientUserId);
+    const meta = downloadRow.metadata as Record<string, unknown>;
+    expect(meta.purpose).toBe("fee_consent_download");
+    expect(meta.clientUserId).toBe(clientUserId);
+  });
+
+  it("rejects another client trying to download (ownership boundary)", async () => {
+    const consent = await insertConsent({
+      accountNumber: `${seedKey}_pdf_mine_cons2`,
+      clientSignatureName: "My Client",
+    });
+
+    const r = await pdfDownload(
+      `/api/client/fee-consents/${consent.id}/pdf`,
+      otherClientToken,
+    );
+    expect(r.status).toBe(403);
+  });
+
+  it("returns 404 for a consent that does not exist", async () => {
+    const r = await pdfDownload(`/api/client/fee-consents/999999999/pdf`);
+    expect(r.status).toBe(404);
+  });
+});
+
+describe("Task #343 — GET /api/client/fee-consent-requests/:id/pdf", () => {
+  it("streams a PDF for the owning client and writes both audit rows", async () => {
+    const req = await insertRequest({
+      accountNumber: `${seedKey}_pdf_mine_req`,
+      status: "pending",
+    });
+
+    const r = await pdfDownload(
+      `/api/client/fee-consent-requests/${req.id}/pdf`,
+    );
+    expect(r.status).toBe(200);
+    expect(r.contentType).toContain("application/pdf");
+    expect(r.bodyLen).toBeGreaterThan(0);
+
+    const [typedRow] = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.entityType, "fee_consent_request"),
+          eq(auditLogs.entityId, String(req.id)),
+          eq(auditLogs.action, "fee_consent_request_pdf_exported_by_client"),
+        ),
+      )
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(1);
+    expect(typedRow).toBeDefined();
+    expect(typedRow.userId).toBe(clientUserId);
+
+    const [downloadRow] = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.entityType, "fee_consent_request"),
+          eq(auditLogs.entityId, String(req.id)),
+          eq(auditLogs.action, "document.download"),
+        ),
+      )
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(1);
+    expect(downloadRow).toBeDefined();
+    const meta = downloadRow.metadata as Record<string, unknown>;
+    expect(meta.purpose).toBe("fee_consent_request_download");
+    expect(meta.clientUserId).toBe(clientUserId);
+  });
+
+  it("rejects another client trying to download (ownership boundary)", async () => {
+    const req = await insertRequest({
+      accountNumber: `${seedKey}_pdf_mine_req2`,
+      status: "pending",
+    });
+
+    const r = await pdfDownload(
+      `/api/client/fee-consent-requests/${req.id}/pdf`,
+      otherClientToken,
+    );
+    expect(r.status).toBe(403);
+  });
+
+  it("returns 404 for a request that does not exist", async () => {
+    const r = await pdfDownload(
+      `/api/client/fee-consent-requests/999999999/pdf`,
+    );
+    expect(r.status).toBe(404);
   });
 });

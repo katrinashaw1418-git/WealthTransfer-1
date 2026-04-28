@@ -63,6 +63,12 @@ import { adviceRecords } from "@shared/schema";
 // used for non-fee/advice paths (instruction consent/reject); only the
 // fee-consent sign/decline writes have been migrated to writeAuditLog.
 import { writeAuditLog } from "./services/audit";
+// Task #343 — shared fee-consent PDF builder; identical artefact to the admin
+// surface so the two never drift.
+import {
+  buildFeeConsentPdf,
+  buildFeeConsentRequestPdf,
+} from "./services/fee-consent-pdf";
 
 async function audit(
   userId: number,
@@ -537,6 +543,119 @@ export function registerClientRoutes(app: Express): void {
       res.json(items);
     } catch (error: any) {
       handleError(res, error, "Failed to list fee consents");
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Task #343 — let a client retain their own copy of a consent artefact.
+  // Both endpoints render the SAME PDF as the admin-side equivalents (same
+  // helper in server/services/fee-consent-pdf.ts) so the two surfaces can
+  // never drift, then write a `*_pdf_exported_by_client` audit row + the
+  // unified `document.download` row used by the cross-surface auditor.
+  // Ownership is enforced inside the helper via `requireOwnerUserId`: the
+  // builder throws a 403-tagged Error if the row's clientUserId/clientId
+  // does not match `auth.userId`, mirroring the boundary the existing list
+  // endpoints already enforce (see server/client-fee-consents.test.ts).
+  // -------------------------------------------------------------------------
+  app.get("/api/client/fee-consent-requests/:id/pdf", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        throw Object.assign(new Error("Invalid request id"), { status: 400 });
+      }
+      const artefact = await buildFeeConsentRequestPdf({
+        id,
+        exportedByUserId: auth.userId,
+        purpose: "fee_consent_request_download",
+        requireOwnerUserId: auth.userId,
+      });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${artefact.filename}"`,
+      );
+      res.setHeader("Content-Length", String(artefact.buf.length));
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_consent_request_pdf_exported_by_client",
+        entityType: "fee_consent_request",
+        entityId: String(id),
+        before: null,
+        after: null,
+        extra: { source: "client_ui" },
+        ipAddress: req.ip || null,
+      });
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "document.download",
+        entityType: "fee_consent_request",
+        entityId: String(id),
+        before: null,
+        after: null,
+        extra: {
+          clientUserId: artefact.clientUserId,
+          documentId: id,
+          documentKind: "fee_consent_request",
+          purpose: "fee_consent_request_download",
+          downloadedAtUtc: artefact.downloadedAtUtc.toISOString(),
+        },
+        ipAddress: req.ip || null,
+      });
+      res.end(artefact.buf);
+    } catch (error: any) {
+      handleError(res, error, "Failed to download fee consent request");
+    }
+  });
+
+  app.get("/api/client/fee-consents/:id/pdf", async (req, res) => {
+    try {
+      const auth = requireAuth(req);
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        throw Object.assign(new Error("Invalid consent id"), { status: 400 });
+      }
+      const artefact = await buildFeeConsentPdf({
+        id,
+        exportedByUserId: auth.userId,
+        purpose: "fee_consent_download",
+        requireOwnerUserId: auth.userId,
+      });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${artefact.filename}"`,
+      );
+      res.setHeader("Content-Length", String(artefact.buf.length));
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "fee_consent_pdf_exported_by_client",
+        entityType: "fee_consent",
+        entityId: String(id),
+        before: null,
+        after: null,
+        extra: { source: "client_ui" },
+        ipAddress: req.ip || null,
+      });
+      await writeAuditLog({
+        userId: auth.userId,
+        action: "document.download",
+        entityType: "fee_consent",
+        entityId: String(id),
+        before: null,
+        after: null,
+        extra: {
+          clientUserId: artefact.clientUserId,
+          documentId: id,
+          documentKind: "fee_consent",
+          purpose: "fee_consent_download",
+          downloadedAtUtc: artefact.downloadedAtUtc.toISOString(),
+        },
+        ipAddress: req.ip || null,
+      });
+      res.end(artefact.buf);
+    } catch (error: any) {
+      handleError(res, error, "Failed to download fee consent");
     }
   });
 

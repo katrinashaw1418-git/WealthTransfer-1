@@ -3,7 +3,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { queryClient, apiRequest } from "@/lib/queryClient";
+import { queryClient, apiRequest, apiFetch } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -32,7 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Receipt, ShieldAlert, AlertTriangle, Clock } from "lucide-react";
+import { Receipt, ShieldAlert, AlertTriangle, Clock, Download } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 // Task #300 — client-side rows now carry the same supersede chain links,
@@ -162,6 +162,32 @@ function daysUntil(value: string | null): number | null {
 
 function formatFeeType(t: string): string {
   return t.replace(/_/g, " ");
+}
+
+// Task #343 — authenticated PDF download. The new client endpoints sit
+// behind the same JWT gate as every other /api/client route, so we can't
+// just window.open() the URL — the browser won't attach the Authorization
+// header from localStorage. Mirrors the helper used by the admin surface
+// (see client/src/pages/admin/fee-consents.tsx) so both downloads behave
+// identically: fetch the bytes, build a transient blob URL, click an
+// invisible <a download>, then revoke.
+async function downloadPdf(url: string, filename: string): Promise<void> {
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    throw new Error(`Download failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  }
 }
 
 // Task #300 — same mapping the admin page uses. Keeping it here verbatim
@@ -393,33 +419,54 @@ export default function ClientFeeConsents() {
                         </div>
                       </TableCell>
                       <TableCell className="text-right">
-                        {r.status === "pending" ? (
-                          <div className="flex gap-2 justify-end">
-                            <Button
-                              size="sm"
-                              onClick={() => {
-                                setSignTarget(r);
-                                signForm.reset({ signatureName: "" });
-                              }}
-                              data-testid={`button-sign-${r.id}`}
-                            >
-                              Sign
-                            </Button>
+                        <div className="flex gap-2 justify-end">
+                          {r.status === "pending" ? (
+                            <>
+                              <Button
+                                size="sm"
+                                onClick={() => {
+                                  setSignTarget(r);
+                                  signForm.reset({ signatureName: "" });
+                                }}
+                                data-testid={`button-sign-${r.id}`}
+                              >
+                                Sign
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setDeclineTarget(r);
+                                  declineForm.reset({ reason: "" });
+                                }}
+                                data-testid={`button-decline-${r.id}`}
+                              >
+                                Decline
+                              </Button>
+                            </>
+                          ) : (
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => {
-                                setDeclineTarget(r);
-                                declineForm.reset({ reason: "" });
-                              }}
-                              data-testid={`button-decline-${r.id}`}
+                              onClick={() =>
+                                downloadPdf(
+                                  `/api/client/fee-consent-requests/${r.id}/pdf`,
+                                  `fee-consent-request-${r.id}.pdf`,
+                                ).catch((err: Error) =>
+                                  toast({
+                                    title: "Download failed",
+                                    description: err.message,
+                                    variant: "destructive",
+                                  }),
+                                )
+                              }
+                              data-testid={`button-download-request-${r.id}`}
                             >
-                              Decline
+                              <Download className="h-3 w-3 mr-1" />
+                              PDF
                             </Button>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-500">—</span>
-                        )}
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -455,6 +502,7 @@ export default function ClientFeeConsents() {
                     <TableHead>Renewal window</TableHead>
                     <TableHead>Expires</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -534,6 +582,28 @@ export default function ClientFeeConsents() {
                               </button>
                             )}
                           </div>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              downloadPdf(
+                                `/api/client/fee-consents/${c.id}/pdf`,
+                                `fee-consent-${c.id}.pdf`,
+                              ).catch((err: Error) =>
+                                toast({
+                                  title: "Download failed",
+                                  description: err.message,
+                                  variant: "destructive",
+                                }),
+                              )
+                            }
+                            data-testid={`button-download-consent-${c.id}`}
+                          >
+                            <Download className="h-3 w-3 mr-1" />
+                            PDF
+                          </Button>
                         </TableCell>
                       </TableRow>
                     );
