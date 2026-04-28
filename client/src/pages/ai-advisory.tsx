@@ -249,8 +249,10 @@ export default function AiAdvisory() {
                           : cls === "stablecoin" ? "Stablecoin"
                           : "Investment";
                       const maxPct = Math.max(current, benchmark, 1);
-                      const showDerivation =
-                        realMetrics?.rebalancingBenchmarkType === "risk_profile_personalised";
+                      const derivation =
+                        realMetrics?.rebalancingBenchmarkType === "risk_profile_personalised"
+                          ? realMetrics?.benchmarkDerivation?.[cls]
+                          : null;
                       return (
                         <tr
                           key={cls}
@@ -260,8 +262,12 @@ export default function AiAdvisory() {
                           <td className="py-2 align-middle">
                             <div className="flex items-center gap-1.5">
                               <p className="font-medium text-gray-900">{label}</p>
-                              {showDerivation ? (
-                                <BenchmarkDerivationPopover assetClass={cls} />
+                              {derivation ? (
+                                <BenchmarkDerivationPopover
+                                  assetClass={cls}
+                                  label={label}
+                                  derivation={derivation}
+                                />
                               ) : null}
                             </div>
                             <div className="mt-1 space-y-1">
@@ -378,6 +384,64 @@ export default function AiAdvisory() {
       </Card>
 
     </div>
+  );
+}
+
+type BenchmarkAssetClass = "fiat" | "crypto" | "stablecoin" | "investment";
+
+// Bucket-derivation payload as returned by /api/portfolio/real-metrics under
+// `benchmarkDerivation`. The popover renders these strings verbatim — by
+// design, no copy lives client-side. The mapping (formula + explanation)
+// is built server-side in `RISK_PROFILE_BENCHMARK_DERIVATION` so it can
+// never silently disagree with the math the rebalancing-gap calculation
+// actually uses (task #402).
+type BenchmarkBucketDerivation = {
+  components: Array<{ sourceClass: string; weight: number }>;
+  formula: string;
+  explanation: string;
+};
+
+function BenchmarkDerivationPopover({
+  assetClass,
+  label,
+  derivation,
+}: {
+  assetClass: BenchmarkAssetClass;
+  label: string;
+  derivation: BenchmarkBucketDerivation;
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`How is the ${label} benchmark derived?`}
+          className="text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-300 rounded"
+          data-testid={`button-derivation-${assetClass}`}
+        >
+          <Info className="w-3.5 h-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-72 text-sm"
+        data-testid={`popover-derivation-${assetClass}`}
+      >
+        <p className="font-semibold text-gray-900">How this benchmark is derived</p>
+        <p
+          className="mt-2 font-mono text-xs text-blue-700"
+          data-testid={`text-derivation-formula-${assetClass}`}
+        >
+          {derivation.formula}
+        </p>
+        <p
+          className="mt-2 text-xs text-gray-600"
+          data-testid={`text-derivation-explanation-${assetClass}`}
+        >
+          {derivation.explanation}
+        </p>
+      </PopoverContent>
+    </Popover>
   );
 }
 

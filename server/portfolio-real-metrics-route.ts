@@ -32,6 +32,7 @@ import { db as defaultDb } from "./db";
 import { requireAuth } from "./auth";
 import {
   buildAllocationComparisonPayload,
+  buildBenchmarkDerivation,
   computeRebalancingGap,
   resolvePerClientBenchmark,
 } from "./config/rebalancing-benchmark";
@@ -138,6 +139,19 @@ export function registerPortfolioRealMetricsRoute(
       const rebalancingGap = computeRebalancingGap(alloc, rebalancingBenchmark) * 100;
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;
+
+      // Per-bucket derivation payload — only meaningful when the personalised
+      // benchmark is in use (the equal-weight fallback isn't projected from
+      // a risk-profile row, so there's nothing to derive). The client renders
+      // the popover under each bucket label directly from this payload, so
+      // the formula and explanation can never silently disagree with the
+      // math `resolveBenchmarkForRiskProfileRow` ran above (task #402). Both
+      // the math and the payload come from `RISK_PROFILE_BENCHMARK_DERIVATION`
+      // in `server/config/rebalancing-benchmark.ts`.
+      const benchmarkDerivation =
+        rebalancingBenchmarkType === "risk_profile_personalised"
+          ? buildBenchmarkDerivation()
+          : null;
 
       // Snapshot history for period returns
       const now = requestNow;
@@ -288,6 +302,7 @@ export function registerPortfolioRealMetricsRoute(
         rebalancingGap: +rebalancingGap.toFixed(1),
         rebalancingBenchmarkType,
         rebalancingBenchmarkNote,
+        benchmarkDerivation,
         currentAllocation: currentAllocationPct,
         benchmarkAllocation: benchmarkAllocationPct,
         hasAllocationData,

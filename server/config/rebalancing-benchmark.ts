@@ -112,19 +112,147 @@ export interface RiskProfileAllocation {
   crypto: number;
 }
 
+// The five asset classes the risk-profile model tracks. Kept as an exported
+// string-literal union so the derivation payload sent to the client is
+// statically typed end-to-end and the UI can format labels from the same
+// vocabulary the math uses.
+export type RiskProfileClass = keyof RiskProfileAllocation;
+
+// One source-of-truth mapping that projects the risk-profile model's five
+// classes (cash, bonds, equities, alternatives, crypto) onto the platform's
+// four rebalancing buckets (fiat, crypto, stablecoin, investment).
+//
+// Each bucket carries:
+//   • `components` — the risk-profile classes that contribute to it, with
+//     a `weight` in (0, 1] describing what fraction of that class flows
+//     into the bucket. An empty array means "the risk model does not
+//     allocate anything to this bucket" (current case for stablecoin).
+//   • `explanation` — the human-readable copy the UI popover shows next to
+//     the formula. Living here next to the components keeps the math and
+//     the explanation in lockstep: if a future change splits investment
+//     into separate equities/alternatives buckets, the explanation has to
+//     be updated in the same place.
+//
+// `resolveBenchmarkForRiskProfileRow` and `buildBenchmarkDerivation` both
+// derive their output from this table, which is the property task #402
+// requires: the popover shown to the client can never drift from the
+// math the rebalancing-gap calculation actually uses. The route-level
+// test pins this self-healing property by recomputing the math from the
+// derivation components and asserting equality with the resolver's
+// weights.
+type Bucket = "fiat" | "crypto" | "stablecoin" | "investment";
+
+interface BenchmarkBucketDerivationConfig {
+  components: ReadonlyArray<{ sourceClass: RiskProfileClass; weight: number }>;
+  explanation: string;
+}
+
+export const RISK_PROFILE_BENCHMARK_DERIVATION: Record<
+  Bucket,
+  BenchmarkBucketDerivationConfig
+> = {
+  fiat: {
+    components: [{ sourceClass: "cash", weight: 1 }],
+    explanation:
+      "Cash from your risk profile maps to fiat because cash held on the platform sits in fiat wallets.",
+  },
+  crypto: {
+    components: [{ sourceClass: "crypto", weight: 1 }],
+    explanation:
+      "The crypto weight from your risk profile maps directly to volatile (non-stablecoin) crypto holdings.",
+  },
+  stablecoin: {
+    components: [],
+    explanation:
+      "The risk-profile model does not allocate to stablecoins, so the benchmark stablecoin weight is always 0%. Any stablecoin holdings you have will therefore show up as a real deviation in the rebalancing gap.",
+  },
+  investment: {
+    components: [
+      { sourceClass: "bonds", weight: 1 },
+      { sourceClass: "equities", weight: 1 },
+      { sourceClass: "alternatives", weight: 1 },
+    ],
+    explanation:
+      "The risk-profile model tracks bonds, equities and alternatives as three separate classes. The platform groups them into a single 'investment' bucket, so the benchmark weight here is the sum of those three.",
+  },
+};
+
+const BUCKETS: ReadonlyArray<Bucket> = ["fiat", "crypto", "stablecoin", "investment"];
+
+const BUCKET_LABELS: Record<Bucket, string> = {
+  fiat: "Fiat",
+  crypto: "Crypto",
+  stablecoin: "Stablecoin",
+  investment: "Investment",
+};
+
+const RISK_PROFILE_CLASS_LABELS: Record<RiskProfileClass, string> = {
+  cash: "Cash",
+  bonds: "Bonds",
+  equities: "Equities",
+  alternatives: "Alternatives",
+  crypto: "Crypto",
+};
+
+function formatComponent(component: { sourceClass: RiskProfileClass; weight: number }): string {
+  const label = RISK_PROFILE_CLASS_LABELS[component.sourceClass];
+  if (component.weight === 1) return label;
+  const pct = +(component.weight * 100).toFixed(1);
+  return `${pct}% of ${label}`;
+}
+
+function formatFormula(bucket: Bucket): string {
+  const { components } = RISK_PROFILE_BENCHMARK_DERIVATION[bucket];
+  const lhs = BUCKET_LABELS[bucket];
+  if (components.length === 0) return `${lhs} ← 0%`;
+  return `${lhs} ← ${components.map(formatComponent).join(" + ")}`;
+}
+
+// Wire shape for the benchmark-derivation payload returned by the
+// /api/portfolio/real-metrics endpoint when the personalised benchmark is in
+// use. Mirrors the shape the AI Advisory popover renders directly — keeping
+// the formula + explanation server-side ensures the UI can never silently
+// disagree with the math (task #402).
+export interface BenchmarkBucketDerivation {
+  components: Array<{ sourceClass: RiskProfileClass; weight: number }>;
+  formula: string;
+  explanation: string;
+}
+
+export interface BenchmarkDerivation {
+  fiat: BenchmarkBucketDerivation;
+  crypto: BenchmarkBucketDerivation;
+  stablecoin: BenchmarkBucketDerivation;
+  investment: BenchmarkBucketDerivation;
+}
+
+// Build the per-bucket derivation payload from the same source-of-truth
+// mapping table the math uses, so the popover the client renders can never
+// drift from `resolveBenchmarkForRiskProfileRow`. Returned as a fresh
+// object each call so callers can serialise it without worrying about
+// shared mutable state.
+export function buildBenchmarkDerivation(): BenchmarkDerivation {
+  const out = {} as BenchmarkDerivation;
+  for (const bucket of BUCKETS) {
+    out[bucket] = {
+      components: RISK_PROFILE_BENCHMARK_DERIVATION[bucket].components.map((c) => ({
+        sourceClass: c.sourceClass,
+        weight: c.weight,
+      })),
+      formula: formatFormula(bucket),
+      explanation: RISK_PROFILE_BENCHMARK_DERIVATION[bucket].explanation,
+    };
+  }
+  return out;
+}
+
 // Resolve a personalised benchmark from the latest risk-profile row of a
 // client. The risk-profile model tracks five asset classes (cash, bonds,
 // equities, alternatives, crypto) while the platform-side rebalancing
-// benchmark works in four buckets (fiat, crypto, stablecoin, investment),
-// so we apply the following deterministic mapping:
-//
-//   • fiat       ← cash               (cash is held on-platform as fiat)
-//   • crypto     ← crypto             (volatile crypto stays as crypto)
-//   • investment ← bonds + equities + alternatives
-//   • stablecoin ← 0                  (the risk model does not recommend any
-//                                      stablecoin allocation; any stablecoin
-//                                      holding therefore shows up as a real
-//                                      deviation in the rebalancing gap)
+// benchmark works in four buckets — see `RISK_PROFILE_BENCHMARK_DERIVATION`
+// above for the mapping. This function derives its weights from that table
+// rather than hardcoding the projection, so changing the mapping in one
+// place automatically updates both the math and the UI explanation.
 //
 // The function falls back to the illustrative equal-weight benchmark when
 // no profile is supplied or the stored allocation is malformed (e.g. all
@@ -136,23 +264,30 @@ export function resolveBenchmarkForRiskProfileRow(
   if (!profile || !profile.allocation) return DEFAULT_REBALANCING_BENCHMARK;
   const a = profile.allocation;
 
-  const cash         = Number(a.cash)         || 0;
-  const bonds        = Number(a.bonds)        || 0;
-  const equities     = Number(a.equities)     || 0;
-  const alternatives = Number(a.alternatives) || 0;
-  const crypto       = Number(a.crypto)       || 0;
+  const sources: Record<RiskProfileClass, number> = {
+    cash:         Number(a.cash)         || 0,
+    bonds:        Number(a.bonds)        || 0,
+    equities:     Number(a.equities)     || 0,
+    alternatives: Number(a.alternatives) || 0,
+    crypto:       Number(a.crypto)       || 0,
+  };
 
-  const total = cash + bonds + equities + alternatives + crypto;
+  const total =
+    sources.cash + sources.bonds + sources.equities + sources.alternatives + sources.crypto;
   if (!Number.isFinite(total) || total <= 0) return DEFAULT_REBALANCING_BENCHMARK;
 
-  const fiat       = cash / total;
-  const cryptoFrac = crypto / total;
-  const investment = (bonds + equities + alternatives) / total;
-  const stablecoin = 0;
+  const weights = { fiat: 0, crypto: 0, stablecoin: 0, investment: 0 };
+  for (const bucket of BUCKETS) {
+    let sum = 0;
+    for (const c of RISK_PROFILE_BENCHMARK_DERIVATION[bucket].components) {
+      sum += sources[c.sourceClass] * c.weight;
+    }
+    weights[bucket] = sum / total;
+  }
 
   return {
     type: "risk_profile_personalised",
-    weights: { fiat, crypto: cryptoFrac, stablecoin, investment },
+    weights,
     note: NOTE_RISK_PROFILE_PERSONALISED,
   };
 }

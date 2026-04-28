@@ -51,6 +51,8 @@ import {
 } from "./portfolio-real-metrics-route";
 import {
   DEFAULT_REBALANCING_BENCHMARK,
+  RISK_PROFILE_BENCHMARK_DERIVATION,
+  buildBenchmarkDerivation,
   resolveBenchmarkForRiskProfileRow,
 } from "./config/rebalancing-benchmark";
 
@@ -323,6 +325,128 @@ describe("/api/portfolio/real-metrics — allocation comparison payload (Task #3
     });
   });
 
+  // -------------------------------------------------------------------------
+  // Task #402 — the bucket-derivation popover the AI Advisory page renders
+  // must come from the API payload, not from hard-coded client copy. The
+  // tests below pin (a) the wire shape, (b) the gating on benchmark type,
+  // and (c) the self-healing property: the components in the derivation
+  // payload reproduce the math `resolveBenchmarkForRiskProfileRow` runs.
+  // -------------------------------------------------------------------------
+  it("includes a per-bucket benchmarkDerivation payload when the personalised benchmark is in use", async () => {
+    const allocation = { cash: 20, bonds: 30, equities: 40, alternatives: 5, crypto: 5 };
+    const harness = await startTrackedHarness({
+      totals: {
+        fiatValue: 5_000,
+        cryptoValue: 2_500,
+        stablecoinValue: 0,
+        investmentValue: 2_500,
+        totalValue: 10_000,
+      },
+      riskProfileAllocation: allocation,
+    });
+
+    const { status, body } = await fetchRealMetrics(harness);
+    expect(status).toBe(200);
+
+    // The payload must carry one entry per platform bucket so the UI can key
+    // off `benchmarkDerivation[cls]` directly without inventing fallback copy.
+    expect(body.rebalancingBenchmarkType).toBe("risk_profile_personalised");
+    expect(Object.keys(body.benchmarkDerivation).sort()).toEqual([
+      "crypto",
+      "fiat",
+      "investment",
+      "stablecoin",
+    ]);
+
+    // Pin the wire shape of one entry — formula is the human-readable string
+    // the popover renders verbatim, components is the structured mapping the
+    // server-side math also reads from. If a future contributor renames
+    // `formula` or `components`, this assertion fails before the popover
+    // silently goes blank in production.
+    const fiat = body.benchmarkDerivation.fiat;
+    expect(typeof fiat.formula).toBe("string");
+    expect(typeof fiat.explanation).toBe("string");
+    expect(Array.isArray(fiat.components)).toBe(true);
+    expect(fiat.components).toEqual([{ sourceClass: "cash", weight: 1 }]);
+    // Stablecoin currently has no contributing class — the popover must
+    // describe this explicitly, otherwise the user is left guessing why
+    // the bench shows 0%.
+    expect(body.benchmarkDerivation.stablecoin.components).toEqual([]);
+    expect(body.benchmarkDerivation.stablecoin.formula).toContain("0%");
+  });
+
+  it("omits benchmarkDerivation when the equal-weight fallback is used (nothing to derive from a risk-profile row)", async () => {
+    // Without a risk-profile row the benchmark is the platform-wide
+    // illustrative default, which isn't a per-client projection. The
+    // payload is `null` so the UI knows not to render the popover.
+    const harness = await startTrackedHarness({
+      totals: {
+        fiatValue: 1_000,
+        cryptoValue: 0,
+        stablecoinValue: 0,
+        investmentValue: 0,
+        totalValue: 1_000,
+      },
+      riskProfileAllocation: null,
+    });
+
+    const { status, body } = await fetchRealMetrics(harness);
+    expect(status).toBe(200);
+    expect(body.rebalancingBenchmarkType).toBe("equal_weight_illustrative");
+    expect(body.benchmarkDerivation).toBeNull();
+  });
+
+  it("self-healing: the derivation components reproduce the same math the resolver runs (so changing the mapping changes the UI)", async () => {
+    // This is the load-bearing assertion for task #402. We feed an arbitrary
+    // risk-profile allocation to the route, recompute each bucket weight by
+    // applying the derivation `components` to the same source numbers, and
+    // assert it matches the percentages the route shipped in
+    // `benchmarkAllocation`. If a future contributor changes
+    // `RISK_PROFILE_BENCHMARK_DERIVATION` (e.g. gives stablecoin a non-zero
+    // share of cash, or splits investment into separate buckets), this test
+    // fails iff the route's math drifted from the derivation payload — i.e.
+    // iff the popover would silently lie to the user.
+    const allocation = { cash: 12, bonds: 28, equities: 40, alternatives: 15, crypto: 5 };
+    const harness = await startTrackedHarness({
+      totals: {
+        fiatValue: 5_000,
+        cryptoValue: 2_500,
+        stablecoinValue: 0,
+        investmentValue: 2_500,
+        totalValue: 10_000,
+      },
+      riskProfileAllocation: allocation,
+    });
+
+    const { status, body } = await fetchRealMetrics(harness);
+    expect(status).toBe(200);
+
+    const total =
+      allocation.cash +
+      allocation.bonds +
+      allocation.equities +
+      allocation.alternatives +
+      allocation.crypto;
+    const sources: Record<string, number> = {
+      cash: allocation.cash,
+      bonds: allocation.bonds,
+      equities: allocation.equities,
+      alternatives: allocation.alternatives,
+      crypto: allocation.crypto,
+    };
+
+    for (const bucket of ["fiat", "crypto", "stablecoin", "investment"] as const) {
+      const components = body.benchmarkDerivation[bucket].components as Array<{
+        sourceClass: string;
+        weight: number;
+      }>;
+      const weightFromDerivation =
+        components.reduce((acc, c) => acc + (sources[c.sourceClass] ?? 0) * c.weight, 0) / total;
+      const expectedPct = +(weightFromDerivation * 100).toFixed(1);
+      expect(body.benchmarkAllocation[bucket]).toBe(expectedPct);
+    }
+  });
+
   it("falls back to the equal-weight benchmark when a risk_profiles row exists but its allocation is all zero", async () => {
     // All-zero allocation is the canonical "malformed/seed-default" case the
     // resolver guards against (see comment in resolveBenchmarkForRiskProfileRow).
@@ -385,6 +509,37 @@ describe("resolveBenchmarkForRiskProfileRow — Task #392 personalised vs fallba
   it("falls back to the equal-weight illustrative benchmark when the row is missing", async () => {
     expect(resolveBenchmarkForRiskProfileRow(null).type).toBe("equal_weight_illustrative");
     expect(resolveBenchmarkForRiskProfileRow(undefined).type).toBe("equal_weight_illustrative");
+  });
+
+  // -------------------------------------------------------------------------
+  // Task #402 — pin the derivation builder directly. The route tests above
+  // prove the route ships the derivation, and the self-healing test proves
+  // the math reads from the same components. These tests pin the format of
+  // the formula strings the popover renders verbatim, so a regression in
+  // the formatting helper (e.g. dropping the " + " separator) trips here
+  // before it reaches a user.
+  // -------------------------------------------------------------------------
+  it("buildBenchmarkDerivation produces a formula and explanation per bucket, matching RISK_PROFILE_BENCHMARK_DERIVATION", async () => {
+    const derivation = buildBenchmarkDerivation();
+
+    expect(derivation.fiat.formula).toBe("Fiat ← Cash");
+    expect(derivation.crypto.formula).toBe("Crypto ← Crypto");
+    expect(derivation.stablecoin.formula).toBe("Stablecoin ← 0%");
+    expect(derivation.investment.formula).toBe(
+      "Investment ← Bonds + Equities + Alternatives",
+    );
+
+    // Explanations come straight from the source-of-truth table, so changing
+    // the table updates both the popover and this assertion in lockstep.
+    for (const bucket of ["fiat", "crypto", "stablecoin", "investment"] as const) {
+      expect(derivation[bucket].explanation).toBe(
+        RISK_PROFILE_BENCHMARK_DERIVATION[bucket].explanation,
+      );
+      // The wire components must be a plain array, not a frozen
+      // ReadonlyArray reference — that lets the route layer JSON-serialise
+      // the payload without leaking the config object's identity.
+      expect(Array.isArray(derivation[bucket].components)).toBe(true);
+    }
   });
 
   it("falls back to the equal-weight illustrative benchmark when the allocation is all zero or malformed", async () => {
