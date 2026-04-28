@@ -55,7 +55,6 @@ DB_BACKUP_RETENTION = "14"
 DB_BACKUP_OFFSITE_BUCKET = "amax-db-backups-prod"
 DB_BACKUP_OFFSITE_PREFIX = "dumps"
 DB_BACKUP_OFFSITE_SSE = "AES256"
-NODE_ENV = "test"
 LOG_DIR = "/tmp/amax-logs"
 
 [postMerge]

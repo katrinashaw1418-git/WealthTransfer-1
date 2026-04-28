@@ -61,6 +61,18 @@
 set -u
 set -o pipefail
 
+# ---------------------------------------------------------------------------
+# Build-time NODE_ENV. The launch gates (Stages 1 + 2 below) insert fixture
+# rows to drive their drills; server/services/fixture-data-guard.ts hard-
+# refuses inserts when NODE_ENV=production with no override possible. The
+# raw-env snapshot the gates check (scripts/_raw-env-snapshot.ts) just
+# requires NODE_ENV to be SET, not to equal "production". So we force
+# "test" here for the build container only — the runtime entrypoint
+# (`npm run start` → `NODE_ENV=production node dist/index.js`) sets
+# NODE_ENV=production inline for the actual deployed app, so production
+# behaviour is preserved at runtime regardless of what we set here.
+export NODE_ENV="${NODE_ENV:-test}"
+
 REPORT_DIR="docs/golive"
 ARTEFACT_NAME="go-no-go-report.md"
 
