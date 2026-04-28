@@ -2,6 +2,7 @@ import { pgTable, text, serial, integer, boolean, decimal, timestamp, date, json
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+import { PRODUCT_CATEGORY_VALUES } from "./product-categories";
 
 // ---------------------------------------------------------------------------
 // Email normalisation — single source of truth.
@@ -297,10 +298,24 @@ export const insertAiRecommendationSchema = createInsertSchema(aiRecommendations
   createdAt: true,
 });
 
-export const insertInvestmentProductSchema = createInsertSchema(investmentProducts).omit({
-  id: true,
-  createdAt: true,
-});
+// Reject any `category` value that isn't one of the canonical enum values
+// declared in `shared/product-categories.ts`. This is the single write-path
+// guard that stops test fixtures, manual SQL fix-ups, or admin typos from
+// re-introducing rows like the historical `DraftProduct`/`InRange825`
+// (category `"x"`) that get filtered out everywhere downstream and force
+// another cleanup pass. Keep in sync with `PRODUCT_CATEGORY_VALUES`.
+export const insertInvestmentProductSchema = createInsertSchema(investmentProducts)
+  .omit({
+    id: true,
+    createdAt: true,
+  })
+  .extend({
+    category: z.enum(PRODUCT_CATEGORY_VALUES, {
+      errorMap: () => ({
+        message: `category must be one of: ${PRODUCT_CATEGORY_VALUES.join(", ")}`,
+      }),
+    }),
+  });
 
 export const insertUserInvestmentSchema = createInsertSchema(userInvestments).omit({
   id: true,

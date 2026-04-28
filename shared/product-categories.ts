@@ -22,15 +22,28 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+// Canonical list of investment product category enum values, declared as a
+// non-empty tuple so it can be passed straight to `z.enum(...)` for write-path
+// validation (see `insertInvestmentProductSchema` in `shared/schema.ts`). Keep
+// this tuple and `PRODUCT_CATEGORY_LABELS` below in sync — the `satisfies`
+// constraint on the labels object enforces that every tuple entry has a label.
+export const PRODUCT_CATEGORY_VALUES = [
+  "cash_deposit",
+  "digital_assets",
+  "venture_capital",
+  "real_estate",
+  "corporate_credit",
+] as const;
+
+export type KnownProductCategory = (typeof PRODUCT_CATEGORY_VALUES)[number];
+
 export const PRODUCT_CATEGORY_LABELS = {
   cash_deposit: "Cash & Fixed Income",
   digital_assets: "Digital Assets",
   venture_capital: "Venture Capital",
   real_estate: "Real Estate",
   corporate_credit: "Corporate Credit",
-} as const;
-
-export type KnownProductCategory = keyof typeof PRODUCT_CATEGORY_LABELS;
+} as const satisfies Record<KnownProductCategory, string>;
 
 export const PRODUCT_CATEGORY_ICONS: Record<KnownProductCategory, LucideIcon> = {
   cash_deposit: DollarSign,

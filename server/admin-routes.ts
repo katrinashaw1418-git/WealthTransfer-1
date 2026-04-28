@@ -64,6 +64,10 @@ import {
   // Task #144 — admin metrics tile reads transaction failures
   transactions,
 } from "@shared/schema";
+// Task #341 — canonical investment-product category enum used to validate
+// admin create/update payloads (see adminCreateProductSchema /
+// adminUpdateProductSchema below).
+import { PRODUCT_CATEGORY_VALUES } from "@shared/product-categories";
 import {
   acknowledgeWalletLedgerDrift,
   clearWalletLedgerDriftAcknowledgement,
@@ -3003,7 +3007,16 @@ export function registerAdminRoutes(app: Express): void {
   const adminUpdateProductSchema = z
     .object({
       name: z.string().min(1).optional(),
-      category: z.string().min(1).optional(),
+      // Same canonical-enum guard as the create path: a PATCH cannot move a
+      // product onto a non-canonical category like the historical `"x"`,
+      // which would otherwise be silently filtered out everywhere downstream.
+      category: z
+        .enum(PRODUCT_CATEGORY_VALUES, {
+          errorMap: () => ({
+            message: `category must be one of: ${PRODUCT_CATEGORY_VALUES.join(", ")}`,
+          }),
+        })
+        .optional(),
       subCategory: z.string().min(1).optional(),
       investmentStrategy: z.string().min(1).optional(),
       targetNetIrr: z.string().min(1).optional(),
