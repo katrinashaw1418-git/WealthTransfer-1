@@ -411,7 +411,15 @@ export default function Portfolio() {
                     {category.products.map((product: any, idx: number) => {
                       const productKey = `${category.name}-${product.productId ?? idx}`;
                       const isExpanded = expandedProductKey === productKey;
-                      const lots: any[] = Array.isArray(product.lots) ? product.lots : [];
+                      // Task #354 — show the most recent top-up first regardless
+                      // of the order the API returns lots in.
+                      const lots: any[] = Array.isArray(product.lots)
+                        ? [...product.lots].sort((a, b) => {
+                            const aTime = a?.investmentDate ? new Date(a.investmentDate).getTime() : 0;
+                            const bTime = b?.investmentDate ? new Date(b.investmentDate).getTime() : 0;
+                            return bTime - aTime;
+                          })
+                        : [];
                       const hasMultipleLots = lots.length > 1;
                       return (
                         <div

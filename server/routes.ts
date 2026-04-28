@@ -3909,6 +3909,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             // so two-lot positions report a coherent blended return.
             returnPercentage: p.investedAmount > 0 ? (p.returnAmount / p.investedAmount) * 100 : 0,
             percentage: totals.totalCurrentValue > 0 ? (p.value / totals.totalCurrentValue) * 100 : 0,
+            // Task #354 — surface the most recent top-up first so the
+            // expandable lot list in the client matches investor intuition.
+            lots: [...p.lots].sort((a, b) => {
+              const aTime = a.investmentDate ? new Date(a.investmentDate).getTime() : 0;
+              const bTime = b.investmentDate ? new Date(b.investmentDate).getTime() : 0;
+              return bTime - aTime;
+            }),
           })),
         }))
         .filter(cat => cat.value > 0);
