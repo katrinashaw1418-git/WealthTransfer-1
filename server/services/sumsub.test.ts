@@ -4,6 +4,9 @@ import {
   buildExternalUserId,
   loadSumsubConfigFromEnv,
   mintSumsubAccessToken,
+  parseExternalUserId,
+  verifyWebhookSignature,
+  mapSumsubReviewToKycStatus,
   SumsubApiError,
   type SumsubConfig,
 } from "./sumsub";
@@ -162,5 +165,110 @@ describe("mintSumsubAccessToken", () => {
     await mintSumsubAccessToken("amax user/7", { ...config, levelName: "id & live" }, fakeFetch);
     expect(capturedUrl).toContain("userId=amax%20user%2F7");
     expect(capturedUrl).toContain("levelName=id%20%26%20live");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task #403 — webhook helpers
+// ---------------------------------------------------------------------------
+
+describe("parseExternalUserId", () => {
+  it("recovers the numeric id for ids minted by buildExternalUserId", () => {
+    expect(parseExternalUserId("amax-user-1")).toBe(1);
+    expect(parseExternalUserId("amax-user-42")).toBe(42);
+    expect(parseExternalUserId(buildExternalUserId(987_654))).toBe(987_654);
+  });
+
+  it("returns null for malformed or non-positive ids", () => {
+    expect(parseExternalUserId("amax-user-")).toBeNull();
+    expect(parseExternalUserId("amax-user-0")).toBeNull();
+    expect(parseExternalUserId("amax-user-abc")).toBeNull();
+    expect(parseExternalUserId("not-our-prefix-7")).toBeNull();
+    expect(parseExternalUserId("")).toBeNull();
+    expect(parseExternalUserId("amax-user-7-extra")).toBeNull();
+  });
+});
+
+describe("verifyWebhookSignature", () => {
+  const secret = "test-webhook-secret";
+  const body = Buffer.from(JSON.stringify({ hello: "world" }), "utf8");
+  const sha256Hex = createHmac("sha256", secret).update(body).digest("hex");
+
+  it("accepts a valid HMAC_SHA256_HEX digest (default algorithm)", () => {
+    expect(verifyWebhookSignature(body, sha256Hex, secret)).toBe(true);
+    expect(verifyWebhookSignature(body, sha256Hex.toUpperCase(), secret)).toBe(true);
+  });
+
+  it("accepts SHA1 and SHA512 when the matching algorithm is named", () => {
+    const sha1 = createHmac("sha1", secret).update(body).digest("hex");
+    const sha512 = createHmac("sha512", secret).update(body).digest("hex");
+    expect(verifyWebhookSignature(body, sha1, secret, "HMAC_SHA1_HEX")).toBe(true);
+    expect(verifyWebhookSignature(body, sha512, secret, "HMAC_SHA512_HEX")).toBe(true);
+  });
+
+  it("rejects when the digest header is missing or empty", () => {
+    expect(verifyWebhookSignature(body, undefined, secret)).toBe(false);
+    expect(verifyWebhookSignature(body, null, secret)).toBe(false);
+    expect(verifyWebhookSignature(body, "", secret)).toBe(false);
+  });
+
+  it("rejects a tampered body", () => {
+    const tampered = Buffer.from(JSON.stringify({ hello: "evil" }), "utf8");
+    expect(verifyWebhookSignature(tampered, sha256Hex, secret)).toBe(false);
+  });
+
+  it("rejects when the secret doesn't match", () => {
+    expect(verifyWebhookSignature(body, sha256Hex, "wrong-secret")).toBe(false);
+  });
+
+  it("rejects unknown / unsupported algorithm names", () => {
+    expect(verifyWebhookSignature(body, sha256Hex, secret, "HMAC_MD5_HEX")).toBe(false);
+    expect(verifyWebhookSignature(body, sha256Hex, secret, "")).toBe(false);
+  });
+
+  it("rejects digests of the wrong length even before constant-time compare", () => {
+    expect(verifyWebhookSignature(body, sha256Hex.slice(0, 10), secret)).toBe(false);
+    expect(verifyWebhookSignature(body, sha256Hex + "00", secret)).toBe(false);
+  });
+});
+
+describe("mapSumsubReviewToKycStatus", () => {
+  it("maps GREEN -> verified", () => {
+    expect(
+      mapSumsubReviewToKycStatus({ reviewStatus: "completed", reviewAnswer: "GREEN" }),
+    ).toBe("verified");
+  });
+
+  it("maps RED -> rejected", () => {
+    expect(
+      mapSumsubReviewToKycStatus({ reviewStatus: "completed", reviewAnswer: "RED" }),
+    ).toBe("rejected");
+  });
+
+  it("maps intermediate states -> under_review", () => {
+    for (const reviewStatus of ["init", "pending", "queued", "onHold", "prechecked"]) {
+      expect(
+        mapSumsubReviewToKycStatus({ reviewStatus, reviewAnswer: undefined }),
+      ).toBe("under_review");
+    }
+    // `completed` without a verdict is still review-noise: treat as under_review
+    // until the final reviewAnswer arrives.
+    expect(
+      mapSumsubReviewToKycStatus({ reviewStatus: "completed", reviewAnswer: undefined }),
+    ).toBe("under_review");
+  });
+
+  it("returns null when no review fields are present (notification events)", () => {
+    expect(mapSumsubReviewToKycStatus({})).toBeNull();
+    expect(mapSumsubReviewToKycStatus({ reviewStatus: "", reviewAnswer: "" })).toBeNull();
+  });
+
+  it("is case-insensitive on reviewAnswer", () => {
+    expect(
+      mapSumsubReviewToKycStatus({ reviewStatus: "completed", reviewAnswer: "green" }),
+    ).toBe("verified");
+    expect(
+      mapSumsubReviewToKycStatus({ reviewStatus: "completed", reviewAnswer: "Red" }),
+    ).toBe("rejected");
   });
 });

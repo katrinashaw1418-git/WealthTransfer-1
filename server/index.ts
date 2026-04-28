@@ -14,6 +14,14 @@ import {
 
 const app = express();
 app.set("trust proxy", 1); // Trust first proxy hop (Replit's reverse proxy sets X-Forwarded-For)
+// Task #403 — Sumsub webhook signs the *raw* request body. Mount a route-
+// scoped raw parser BEFORE the global JSON parser so the webhook handler
+// receives `req.body` as a Buffer that's byte-for-byte identical to what
+// Sumsub hashed. Other routes still see parsed JSON via `express.json()`.
+app.use(
+  "/api/kyc/sumsub-webhook",
+  express.raw({ type: "*/*", limit: "1mb" }),
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 

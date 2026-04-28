@@ -62,6 +62,10 @@ import {
   loadSumsubConfigFromEnv,
   mintSumsubAccessToken,
   buildExternalUserId,
+  parseExternalUserId,
+  verifyWebhookSignature,
+  mapSumsubReviewToKycStatus,
+  DEFAULT_SUMSUB_DIGEST_ALG,
   SumsubApiError,
   SumsubNotConfiguredError,
 } from "./services/sumsub";
@@ -2008,6 +2012,120 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (status) return res.status(status).json({ error: message });
       console.error("[sumsub] unexpected error", error);
       res.status(500).json({ error: "Failed to start identity verification session." });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Task #403 — Sumsub webhook → automatic kycStatus updates
+  // -------------------------------------------------------------------------
+  // Sumsub posts review results back to us with an HMAC SHA-256 digest of
+  // the raw request body in `x-payload-digest` (algorithm declared via
+  // `x-payload-digest-alg`, defaulting to HMAC_SHA256_HEX). The route is
+  // intentionally unauthenticated — the signature IS the auth. Any request
+  // without a valid digest is rejected with 401 before we touch the DB.
+  //
+  // The route-scoped `express.raw(...)` middleware mounted in server/index.ts
+  // ensures `req.body` is the exact byte buffer Sumsub signed; the global
+  // `express.json()` would otherwise have already drained the stream.
+  app.post("/api/kyc/sumsub-webhook", async (req, res) => {
+    try {
+      const config = loadSumsubConfigFromEnv();
+      if (!config) {
+        // Treat as not-configured: surface 503 so the sender can retry once
+        // the operator wires the secret in. Important: do NOT 200-OK or we
+        // would silently drop real review events during a config gap.
+        return res.status(503).json({ error: "Sumsub webhook not configured" });
+      }
+
+      // express.raw gives us a Buffer; defensively coerce in case the route
+      // is hit through a test app that didn't mount the raw parser (we then
+      // refuse to verify rather than guess).
+      const rawBody = Buffer.isBuffer(req.body) ? (req.body as Buffer) : null;
+      if (!rawBody) {
+        return res.status(400).json({ error: "Raw body required" });
+      }
+
+      const digest = req.header("x-payload-digest") || req.header("X-Payload-Digest");
+      const alg =
+        req.header("x-payload-digest-alg") ||
+        req.header("X-Payload-Digest-Alg") ||
+        DEFAULT_SUMSUB_DIGEST_ALG;
+      const valid = verifyWebhookSignature(rawBody, digest, config.secretKey, alg);
+      if (!valid) {
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+
+      let payload: any;
+      try {
+        payload = JSON.parse(rawBody.toString("utf8"));
+      } catch {
+        return res.status(400).json({ error: "Malformed JSON payload" });
+      }
+
+      const externalUserId: string | undefined = payload?.externalUserId;
+      if (!externalUserId || typeof externalUserId !== "string") {
+        return res.status(400).json({ error: "Missing externalUserId" });
+      }
+      const userId = parseExternalUserId(externalUserId);
+      if (userId == null) {
+        return res.status(404).json({ error: "Unknown externalUserId" });
+      }
+
+      const existing = await storage.getUser(userId);
+      if (!existing) {
+        return res.status(404).json({ error: "Unknown externalUserId" });
+      }
+
+      const reviewStatus: string | undefined = payload?.reviewStatus;
+      const reviewAnswer: string | undefined = payload?.reviewResult?.reviewAnswer;
+      const nextStatus = mapSumsubReviewToKycStatus({ reviewStatus, reviewAnswer });
+
+      if (!nextStatus) {
+        // Notification-style events (e.g. `applicantCreated`) don't carry
+        // a review verdict. ACK them so Sumsub stops retrying.
+        return res.status(200).json({ ok: true, changed: false, reason: "no_review_verdict" });
+      }
+
+      if (existing.kycStatus === nextStatus) {
+        return res.status(200).json({ ok: true, changed: false, reason: "already_in_state" });
+      }
+
+      // Persist via the storage interface so kycUpdatedAt is auto-stamped
+      // (see Task #285 logic in DatabaseStorage.updateUser).
+      await storage.updateUser(userId, { kycStatus: nextStatus });
+
+      // Audit row so admins can later trace exactly which webhook event
+      // flipped the row. userId here is the affected client (audit_logs
+      // rows are user-scoped, not actor-scoped, in this codebase).
+      await writeAuditLog(
+        userId,
+        "kyc_status_changed",
+        "user",
+        String(userId),
+        {
+          source: "sumsub_webhook",
+          before: existing.kycStatus,
+          after: nextStatus,
+          reviewStatus: reviewStatus ?? null,
+          reviewAnswer: reviewAnswer ?? null,
+          applicantId: payload?.applicantId ?? null,
+          inspectionId: payload?.inspectionId ?? null,
+          correlationId: payload?.correlationId ?? null,
+          eventType: payload?.type ?? null,
+          externalUserId,
+        },
+        req.ip || null,
+      );
+
+      return res.status(200).json({
+        ok: true,
+        changed: true,
+        userId,
+        kycStatus: nextStatus,
+      });
+    } catch (error: unknown) {
+      console.error("[sumsub-webhook] unexpected error", error);
+      return res.status(500).json({ error: "Failed to process Sumsub webhook" });
     }
   });
 
