@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
@@ -7,6 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -24,6 +26,7 @@ import {
   ExternalLink,
   Lock,
   ShieldAlert,
+  Download,
 } from "lucide-react";
 import {
   Tooltip,
@@ -31,6 +34,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useToast } from "@/hooks/use-toast";
 
 // Task #318 — same s912G policy text the adviser surface and the DELETE
 // route quote. Surfaced here so a client browsing their own documents
@@ -103,6 +107,62 @@ export default function ClientWealthPlanner() {
   const documents = useQuery<{ items: ClientDocument[] }>({
     queryKey: ["/api/client/documents"],
   });
+  const { toast } = useToast();
+  // Per-row "downloading…" state. A Set rather than a single id so that
+  // clicking Download on row B while row A is still in flight does NOT
+  // erase row A's spinner — both rows stay correctly marked until each
+  // download settles.
+  const [downloadingIds, setDownloadingIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const markDownloading = (id: number, on: boolean) =>
+    setDownloadingIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  // Task #113 — the download endpoint requires a Bearer token, so a plain
+  // <a href> would 401. We fetch the bytes with the same auth header the
+  // rest of the app uses, then trigger a save via a transient blob URL.
+  // The server resolves the storageKey to the underlying object-storage
+  // bytes; the browser never sees the storageKey at all.
+  const handleDownload = async (doc: ClientDocument) => {
+    markDownloading(doc.id, true);
+    try {
+      const token =
+        (typeof localStorage !== "undefined" &&
+          localStorage.getItem("amax_jwt")) ||
+        "";
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`/api/client/documents/${doc.id}/download`, {
+        headers,
+      });
+      if (!res.ok) {
+        const text = (await res.text()) || res.statusText;
+        throw new Error(`${res.status}: ${text}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = doc.fileName || `document-${doc.id}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      toast({
+        title: "Could not download document",
+        description: String(err?.message ?? "Unexpected error"),
+        variant: "destructive",
+      });
+    } finally {
+      markDownloading(doc.id, false);
+    }
+  };
 
   return (
     <div className="p-6 space-y-6" data-testid="page-client-wealth-planner">
@@ -266,6 +326,7 @@ export default function ClientWealthPlanner() {
                         <TableHead>Size</TableHead>
                         <TableHead>Uploaded</TableHead>
                         <TableHead>Retention until</TableHead>
+                        <TableHead className="text-right">Download</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -333,6 +394,21 @@ export default function ClientWealthPlanner() {
                                   </Tooltip>
                                 ) : null}
                               </div>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={downloadingIds.has(d.id)}
+                                onClick={() => handleDownload(d)}
+                                data-testid={`button-download-document-${d.id}`}
+                                aria-label={`Download ${d.fileName}`}
+                              >
+                                <Download className="h-4 w-4 mr-1" />
+                                {downloadingIds.has(d.id)
+                                  ? "Downloading…"
+                                  : "Download"}
+                              </Button>
                             </TableCell>
                           </TableRow>
                         );

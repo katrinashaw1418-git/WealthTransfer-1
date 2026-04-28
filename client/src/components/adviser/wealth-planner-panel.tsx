@@ -621,12 +621,16 @@ function ObjectiveDialog({
 // Document upload form
 // =============================================================================
 
+// Task #113 — the dialog now wraps a real multipart upload to
+// `/api/adviser/client-documents/upload`. The browser file picker drives the
+// flow: the picked File supplies the storageKey-bearing payload (the server
+// computes the storageKey itself and returns it), the mimeType, and the
+// fileSizeBytes — none of those are typed in by hand any more. The form only
+// captures the metadata the server CAN'T derive from the file: which
+// document type it is, which advice record (if any) to pin it to, and an
+// optional description.
 const documentFormSchema = z.object({
   documentType: z.enum(CLIENT_DOCUMENT_TYPES),
-  fileName: z.string().min(1, "File name is required").max(500),
-  storageKey: z.string().min(1, "Storage key is required").max(2000),
-  mimeType: z.string().max(200).optional(),
-  fileSizeBytes: z.string().optional(),
   adviceRecordId: z.string().optional(),
   description: z.string().max(2000).optional(),
 });
@@ -644,18 +648,25 @@ function DocumentDialog({
   adviceRecords: AdviceRecordOption[];
 }) {
   const { toast } = useToast();
+  const [pickedFile, setPickedFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const form = useForm<DocumentForm>({
     resolver: zodResolver(documentFormSchema),
     defaultValues: {
       documentType: "fact_find",
-      fileName: "",
-      storageKey: "",
-      mimeType: "",
-      fileSizeBytes: "",
       adviceRecordId: "",
       description: "",
     },
   });
+
+  // Reset the picked file whenever the dialog is closed so re-opening for
+  // another upload doesn't silently retain a previously-chosen file.
+  useEffect(() => {
+    if (!open) {
+      setPickedFile(null);
+      setFileError(null);
+    }
+  }, [open]);
 
   // Task #107 — same lock-watch pattern as ObjectiveDialog. Documents may be
   // unpinned ("none") in which case the lock never applies.
@@ -670,39 +681,58 @@ function DocumentDialog({
 
   const create = useMutation({
     mutationFn: async (values: DocumentForm) => {
-      const payload: Record<string, unknown> = {
-        clientId,
-        documentType: values.documentType,
-        fileName: values.fileName,
-        storageKey: values.storageKey,
-      };
-      if (values.mimeType && values.mimeType.trim() !== "") {
-        payload.mimeType = values.mimeType.trim();
+      if (!pickedFile) {
+        throw new Error("Pick a file to upload");
       }
-      if (values.fileSizeBytes && values.fileSizeBytes.trim() !== "") {
-        const n = Number(values.fileSizeBytes);
-        if (Number.isFinite(n) && n >= 0) payload.fileSizeBytes = Math.floor(n);
-      }
+      // Multipart upload: the server's `buildUploadMiddleware` reads the
+      // file off the `file` field; everything else rides on form fields.
+      // The route returns the freshly inserted clientDocument row including
+      // the server-computed storageKey, so no second POST is needed.
+      const fd = new FormData();
+      fd.append("file", pickedFile, pickedFile.name);
+      fd.append("clientId", String(clientId));
+      fd.append("documentType", values.documentType);
+      fd.append("fileName", pickedFile.name);
+      if (pickedFile.type) fd.append("mimeType", pickedFile.type);
       if (values.adviceRecordId && values.adviceRecordId !== "none") {
-        payload.adviceRecordId = Number(values.adviceRecordId);
+        fd.append("adviceRecordId", values.adviceRecordId);
       }
       if (values.description && values.description.trim() !== "") {
-        payload.description = values.description;
+        fd.append("description", values.description.trim());
       }
-      const res = await apiRequest("POST", "/api/adviser/client-documents", payload);
+      // We deliberately do NOT use apiRequest() here — it forces a JSON
+      // Content-Type which would defeat multer's multipart parser. We DO
+      // forward the bearer token the same way the rest of the app does.
+      const token =
+        (typeof localStorage !== "undefined" &&
+          localStorage.getItem("amax_jwt")) ||
+        "";
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch("/api/adviser/client-documents/upload", {
+        method: "POST",
+        headers,
+        body: fd,
+      });
+      if (!res.ok) {
+        const text = (await res.text()) || res.statusText;
+        throw new Error(`${res.status}: ${text}`);
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ["/api/adviser/client-documents", clientId],
       });
-      toast({ title: "Document recorded" });
+      toast({ title: "Document uploaded" });
       onOpenChange(false);
       form.reset();
+      setPickedFile(null);
+      setFileError(null);
     },
     onError: (err: any) => {
       toast({
-        title: "Could not record document",
+        title: "Could not upload document",
         description: String(err?.message ?? "Unexpected error"),
         variant: "destructive",
       });
@@ -713,11 +743,11 @@ function DocumentDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="dialog-add-document">
         <DialogHeader>
-          <DialogTitle>Record a document</DialogTitle>
+          <DialogTitle>Upload a document</DialogTitle>
           <DialogDescription>
-            File storage is not yet wired up — paste the storage key returned by
-            your upload pipeline. SOA / ROA artefacts stay on the advice record
-            and don't belong here.
+            Pick a file from your computer — it's uploaded straight to secure
+            object storage. SOA / ROA artefacts stay on the advice record and
+            don't belong here.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -806,77 +836,40 @@ function DocumentDialog({
                 adviceRecordId={selectedAdviceRecord.id}
               />
             ) : null}
-            <FormField
-              control={form.control}
-              name="fileName"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>File name</FormLabel>
-                  <FormControl>
-                    <Input
-                      placeholder="e.g. fact-find-aug-2026.pdf"
-                      data-testid="input-document-filename"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
+            <FormItem>
+              <FormLabel>File</FormLabel>
+              <FormControl>
+                <Input
+                  type="file"
+                  data-testid="input-document-file"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    setPickedFile(f);
+                    setFileError(f ? null : "Pick a file to upload");
+                  }}
+                />
+              </FormControl>
+              {pickedFile ? (
+                <FormDescription
+                  className="text-xs"
+                  data-testid="text-document-file-summary"
+                >
+                  {pickedFile.name}
+                  {pickedFile.type ? ` · ${pickedFile.type}` : ""} ·{" "}
+                  {formatBytes(pickedFile.size)}
+                </FormDescription>
+              ) : (
+                <FormDescription className="text-xs">
+                  PDFs, images, Office documents and plain text are accepted
+                  (max 25 MiB).
+                </FormDescription>
               )}
-            />
-            <FormField
-              control={form.control}
-              name="storageKey"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Storage key</FormLabel>
-                  <FormControl>
-                    <Input
-                      placeholder="e.g. s3://amax-docs/clients/123/fact-find.pdf"
-                      data-testid="input-document-key"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <div className="grid grid-cols-2 gap-3">
-              <FormField
-                control={form.control}
-                name="mimeType"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>MIME type</FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="application/pdf"
-                        data-testid="input-document-mime"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="fileSizeBytes"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Size (bytes)</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        min={0}
-                        data-testid="input-document-size"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
+              {fileError ? (
+                <p className="text-xs font-medium text-destructive">
+                  {fileError}
+                </p>
+              ) : null}
+            </FormItem>
             <FormField
               control={form.control}
               name="description"
@@ -905,19 +898,23 @@ function DocumentDialog({
               </Button>
               <Button
                 type="submit"
-                disabled={create.isPending || selectedRecordLocked}
+                disabled={
+                  create.isPending || selectedRecordLocked || !pickedFile
+                }
                 data-testid="button-submit-document"
                 title={
                   selectedRecordLocked
                     ? "This advice record is under compliance review — adviser writes are blocked"
-                    : undefined
+                    : !pickedFile
+                      ? "Pick a file first"
+                      : undefined
                 }
               >
                 {create.isPending
-                  ? "Saving…"
+                  ? "Uploading…"
                   : selectedRecordLocked
                     ? "Locked — under review"
-                    : "Save document"}
+                    : "Upload document"}
               </Button>
             </DialogFooter>
           </form>
