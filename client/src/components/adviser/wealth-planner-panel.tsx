@@ -1557,8 +1557,8 @@ export function WealthPlannerPanel({ clientId, adviceRecords }: WealthPlannerPan
                           >
                             <TableCell className="text-sm">
                               <div className="font-medium">{d.fileName}</div>
-                              <div className="text-xs text-gray-500 break-all">
-                                {d.storageKey}
+                              <div className="text-xs text-gray-500">
+                                #{d.id}
                               </div>
                               {d.description ? (
                                 <div className="text-xs text-gray-500 mt-1">
