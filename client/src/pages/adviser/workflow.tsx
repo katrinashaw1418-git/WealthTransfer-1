@@ -40,6 +40,7 @@ import {
   ClipboardCheck,
   AlertTriangle,
   Check,
+  CheckCircle2,
   Clock,
   ChevronDown,
   ChevronRight,
@@ -279,6 +280,33 @@ export default function AdviserWorkflow() {
     () => (instructions.data ?? []).filter((i) => i.status === "pending_consent"),
     [instructions.data],
   );
+
+  // Recently-completed panel: tasks closed in the last 7 days, newest first,
+  // capped at 10. The /api/adviser/tasks endpoint already returns done rows
+  // when no status filter is passed; we just slice the in-memory list so no
+  // extra round trip is needed and the panel updates the moment the adviser
+  // closes a task on this same page.
+  const recentlyCompletedTasks = useMemo(() => {
+    const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return (tasks.data ?? [])
+      .filter((t) => {
+        if (t.status !== "done") return false;
+        if (!t.completedAt) return false;
+        const completedMs = new Date(t.completedAt).getTime();
+        if (Number.isNaN(completedMs)) return false;
+        return completedMs >= sevenDaysAgoMs;
+      })
+      .sort((a, b) => {
+        const at = a.completedAt ? new Date(a.completedAt).getTime() : 0;
+        const bt = b.completedAt ? new Date(b.completedAt).getTime() : 0;
+        return bt - at;
+      })
+      .slice(0, 10);
+  }, [tasks.data]);
+
+  // Collapsed by default per spec — it's a "small" panel for handover /
+  // mistake-spotting, not the primary working surface.
+  const [recentlyCompletedOpen, setRecentlyCompletedOpen] = useState(false);
 
   const urgentCount = openTasks.filter((t) => t.priority === "urgent" || t.priority === "high").length;
 
@@ -618,6 +646,104 @@ export default function AdviserWorkflow() {
             </Table>
           )}
         </CardContent>
+      </Card>
+
+      {/* Recently completed (Task #312) — collapsible read-only panel for
+          handovers and spotting tasks closed by mistake. Shows the last ~10
+          tasks closed in the past 7 days, newest first. Defaults to collapsed
+          to keep the page focused on the open queue. */}
+      <Card data-testid="card-recently-completed">
+        <CardHeader className="pb-2">
+          <button
+            type="button"
+            onClick={() => setRecentlyCompletedOpen((v) => !v)}
+            className="flex w-full items-center justify-between text-left"
+            aria-expanded={recentlyCompletedOpen}
+            data-testid="button-toggle-recently-completed"
+          >
+            <CardTitle className="text-base flex items-center gap-2">
+              {recentlyCompletedOpen ? (
+                <ChevronDown className="h-4 w-4 text-slate-400" />
+              ) : (
+                <ChevronRight className="h-4 w-4 text-slate-400" />
+              )}
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              Recently completed
+              <span className="ml-2 text-xs font-normal text-slate-500">
+                Last 7 days
+                {tasks.isLoading
+                  ? null
+                  : ` · ${recentlyCompletedTasks.length}`}
+              </span>
+            </CardTitle>
+          </button>
+        </CardHeader>
+        {recentlyCompletedOpen && (
+          <CardContent>
+            {tasks.isLoading ? (
+              <Skeleton className="h-20 w-full" />
+            ) : recentlyCompletedTasks.length === 0 ? (
+              <p
+                className="text-sm text-slate-500"
+                data-testid="text-no-recently-completed"
+              >
+                Nothing has been closed in the past 7 days.
+              </p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Closed</TableHead>
+                    <TableHead>Client</TableHead>
+                    <TableHead>Task</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Notes</TableHead>
+                    <TableHead>Next review</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {recentlyCompletedTasks.map((t) => (
+                    <TableRow
+                      key={t.id}
+                      data-testid={`row-completed-task-${t.id}`}
+                    >
+                      <TableCell className="text-sm whitespace-nowrap text-slate-600">
+                        {formatDate(t.completedAt)}
+                      </TableCell>
+                      <TableCell className="text-sm whitespace-nowrap">
+                        {renderClientCell(t)}
+                      </TableCell>
+                      <TableCell className="text-sm font-medium text-slate-900">
+                        {t.title}
+                      </TableCell>
+                      <TableCell className="text-sm capitalize text-slate-600">
+                        {t.taskType.replace(/_/g, " ")}
+                      </TableCell>
+                      <TableCell className="text-xs text-slate-600 max-w-xs">
+                        {t.completionNotes ? (
+                          <span data-testid={`text-completed-notes-${t.id}`}>
+                            {t.completionNotes}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-sm whitespace-nowrap text-slate-600">
+                        {t.nextReviewAt ? (
+                          <span data-testid={`text-completed-next-review-${t.id}`}>
+                            {formatLongDate(t.nextReviewAt)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        )}
       </Card>
 
       {/* KYC follow-up completion dialog */}
