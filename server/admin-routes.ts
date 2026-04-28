@@ -321,6 +321,117 @@ const updateLinkSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Walk the supersede chain for a given consent OR request and return all
+// artefacts touched, sorted oldest → newest by their authoritative timestamp
+// (request.createdAt, consent.consentedAt). DFS-with-memo over every link
+// type rather than two stitched-together linear walks: that means the same
+// algorithm handles deep multi-supersede chains and future link types
+// without per-direction edge cases. Bounded transitively by the per-id Set
+// so cycles are impossible.
+//
+// Lifted to module scope (Task #353) so the consent-PDF test can unit-test
+// the chain shape directly without reaching through an HTTP route. The
+// behaviour is unchanged from the original closure inside
+// registerAdminRoutes; the consent-PDF endpoints below still call it.
+// ---------------------------------------------------------------------------
+export async function buildConsentSupersedeChain(opts: {
+  kind: "consent" | "request";
+  id: number;
+}): Promise<{
+  chain: Array<{ ref: string; label: string; status: string; when: Date | null }>;
+  requestIds: number[];
+  consentIds: number[];
+}> {
+  const requestIds = new Set<number>();
+  const consentIds = new Set<number>();
+
+  async function visitRequest(id: number): Promise<void> {
+    if (requestIds.has(id)) return;
+    requestIds.add(id);
+    const [row] = await db.select().from(feeConsentRequests)
+      .where(eq(feeConsentRequests.id, id)).limit(1);
+    if (!row) return;
+    if (row.supersedesRequestId) await visitRequest(row.supersedesRequestId);
+    if (row.signedFeeConsentId) await visitConsent(row.signedFeeConsentId);
+  }
+
+  async function visitConsent(id: number): Promise<void> {
+    if (consentIds.has(id)) return;
+    consentIds.add(id);
+    const [row] = await db.select().from(feeConsents)
+      .where(eq(feeConsents.id, id)).limit(1);
+    if (!row) return;
+    const [signingReq] = await db.select({ id: feeConsentRequests.id })
+      .from(feeConsentRequests)
+      .where(eq(feeConsentRequests.signedFeeConsentId, id)).limit(1);
+    if (signingReq) await visitRequest(signingReq.id);
+    if (row.supersededByRequestId) await visitRequest(row.supersededByRequestId);
+  }
+
+  if (opts.kind === "request") await visitRequest(opts.id);
+  else await visitConsent(opts.id);
+
+  const requestIdList = Array.from(requestIds);
+  const consentIdList = Array.from(consentIds);
+  const reqRows = requestIdList.length > 0
+    ? await db.select().from(feeConsentRequests)
+        .where(inArray(feeConsentRequests.id, requestIdList))
+    : [];
+  const conRows = consentIdList.length > 0
+    ? await db.select().from(feeConsents)
+        .where(inArray(feeConsents.id, consentIdList))
+    : [];
+
+  type Entry = {
+    ref: string;
+    label: string;
+    status: string;
+    when: Date | null;
+    sortKey: number;
+  };
+  const entries: Entry[] = [];
+  for (const r of reqRows) {
+    const isAudit = opts.kind === "request" && r.id === opts.id;
+    entries.push({
+      ref: `FCR-${r.id}`,
+      status: r.status,
+      when: r.createdAt,
+      label: isAudit
+        ? "Fee consent request (THIS DOCUMENT)"
+        : `Fee consent request · ${r.feeType}`,
+      sortKey: r.createdAt?.getTime() ?? 0,
+    });
+  }
+  for (const c of conRows) {
+    const isAudit = opts.kind === "consent" && c.id === opts.id;
+    entries.push({
+      ref: `FC-${c.id}`,
+      status: c.renewalStatus,
+      when: c.consentedAt,
+      label: isAudit
+        ? "Signed consent (THIS DOCUMENT)"
+        : `Signed consent · ${c.feeType}`,
+      sortKey: c.consentedAt?.getTime() ?? 0,
+    });
+  }
+  // Stable sort by timestamp; ties broken by ref (FCR-N ordering before
+  // FC-N for the same instant — a request always precedes the consent it
+  // produced, even when the seeded test fixture stamps them on the same
+  // millisecond).
+  entries.sort((a, b) => {
+    if (a.sortKey !== b.sortKey) return a.sortKey - b.sortKey;
+    return a.ref.startsWith("FCR-") && b.ref.startsWith("FC-") ? -1
+      : a.ref.startsWith("FC-") && b.ref.startsWith("FCR-") ? 1 : 0;
+  });
+
+  return {
+    chain: entries.map(({ sortKey, ...rest }) => rest),
+    requestIds: requestIdList,
+    consentIds: consentIdList,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 export function registerAdminRoutes(app: Express): void {
@@ -4532,112 +4643,9 @@ export function registerAdminRoutes(app: Express): void {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Walk the supersede chain for a given consent OR request and return all
-  // artefacts touched, sorted oldest → newest by their authoritative
-  // timestamp (request.createdAt, consent.consentedAt). DFS-with-memo over
-  // every link type rather than two stitched-together linear walks: that
-  // means the same algorithm handles deep multi-supersede chains and
-  // future link types (e.g. a request created by an admin supersede that
-  // is itself superseded again) without needing per-direction edge cases.
-  // Bounded transitively by the per-id Set so cycles are impossible.
-  // ---------------------------------------------------------------------------
-  async function buildConsentSupersedeChain(opts: {
-    kind: "consent" | "request";
-    id: number;
-  }): Promise<{
-    chain: Array<{ ref: string; label: string; status: string; when: Date | null }>;
-    requestIds: number[];
-    consentIds: number[];
-  }> {
-    const requestIds = new Set<number>();
-    const consentIds = new Set<number>();
-
-    async function visitRequest(id: number): Promise<void> {
-      if (requestIds.has(id)) return;
-      requestIds.add(id);
-      const [row] = await db.select().from(feeConsentRequests)
-        .where(eq(feeConsentRequests.id, id)).limit(1);
-      if (!row) return;
-      if (row.supersedesRequestId) await visitRequest(row.supersedesRequestId);
-      if (row.signedFeeConsentId) await visitConsent(row.signedFeeConsentId);
-    }
-
-    async function visitConsent(id: number): Promise<void> {
-      if (consentIds.has(id)) return;
-      consentIds.add(id);
-      const [row] = await db.select().from(feeConsents)
-        .where(eq(feeConsents.id, id)).limit(1);
-      if (!row) return;
-      const [signingReq] = await db.select({ id: feeConsentRequests.id })
-        .from(feeConsentRequests)
-        .where(eq(feeConsentRequests.signedFeeConsentId, id)).limit(1);
-      if (signingReq) await visitRequest(signingReq.id);
-      if (row.supersededByRequestId) await visitRequest(row.supersededByRequestId);
-    }
-
-    if (opts.kind === "request") await visitRequest(opts.id);
-    else await visitConsent(opts.id);
-
-    const requestIdList = Array.from(requestIds);
-    const consentIdList = Array.from(consentIds);
-    const reqRows = requestIdList.length > 0
-      ? await db.select().from(feeConsentRequests)
-          .where(inArray(feeConsentRequests.id, requestIdList))
-      : [];
-    const conRows = consentIdList.length > 0
-      ? await db.select().from(feeConsents)
-          .where(inArray(feeConsents.id, consentIdList))
-      : [];
-
-    type Entry = {
-      ref: string;
-      label: string;
-      status: string;
-      when: Date | null;
-      sortKey: number;
-    };
-    const entries: Entry[] = [];
-    for (const r of reqRows) {
-      const isAudit = opts.kind === "request" && r.id === opts.id;
-      entries.push({
-        ref: `FCR-${r.id}`,
-        status: r.status,
-        when: r.createdAt,
-        label: isAudit
-          ? "Fee consent request (THIS DOCUMENT)"
-          : `Fee consent request · ${r.feeType}`,
-        sortKey: r.createdAt?.getTime() ?? 0,
-      });
-    }
-    for (const c of conRows) {
-      const isAudit = opts.kind === "consent" && c.id === opts.id;
-      entries.push({
-        ref: `FC-${c.id}`,
-        status: c.renewalStatus,
-        when: c.consentedAt,
-        label: isAudit
-          ? "Signed consent (THIS DOCUMENT)"
-          : `Signed consent · ${c.feeType}`,
-        sortKey: c.consentedAt?.getTime() ?? 0,
-      });
-    }
-    // Stable sort by timestamp; ties broken by ref (FCR-N ordering before
-    // FC-N for the same instant — a request always precedes the consent it
-    // produced, even when the seeded test fixture stamps them on the same
-    // millisecond).
-    entries.sort((a, b) => {
-      if (a.sortKey !== b.sortKey) return a.sortKey - b.sortKey;
-      return a.ref.startsWith("FCR-") && b.ref.startsWith("FC-") ? -1
-        : a.ref.startsWith("FC-") && b.ref.startsWith("FCR-") ? 1 : 0;
-    });
-
-    return {
-      chain: entries.map(({ sortKey, ...rest }) => rest),
-      requestIds: requestIdList,
-      consentIds: consentIdList,
-    };
-  }
+  // Note: `buildConsentSupersedeChain` is defined at module scope above so
+  // it can be unit-tested directly (Task #353). The endpoints below import
+  // it via the closing-over module binding.
 
   // Friendly summary line per audit action so the appendix reads like a
   // narrative, not a stream of slugs. Falls back to the raw action when
