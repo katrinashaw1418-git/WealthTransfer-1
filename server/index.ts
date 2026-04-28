@@ -958,6 +958,48 @@ app.use((req, res, next) => {
     }, 30 * 1000);
   }
 
+  // -------------------------------------------------------------------------
+  // Task #299 — Report auto-expire. Hourly job that flips ready rows whose
+  // expiresAt is past to 'expired', deletes the on-disk PDF, and writes an
+  // adviser_report_expired audit row. The download endpoint keeps its
+  // inline expiry check as defence-in-depth. Disable in dev shells with
+  // REPORT_AUTO_EXPIRE_DISABLED=1.
+  // -------------------------------------------------------------------------
+  if (
+    process.env.REPORT_AUTO_EXPIRE_DISABLED &&
+    /^(1|true|yes|on)$/i.test(process.env.REPORT_AUTO_EXPIRE_DISABLED)
+  ) {
+    console.log(
+      "[report-auto-expire] REPORT_AUTO_EXPIRE_DISABLED is set; the hourly auto-expire job is NOT registered.",
+    );
+  } else {
+    const { runReportAutoExpire } = await import("./services/reports");
+    const runReportAutoExpireCron = async () => {
+      try {
+        await withBackgroundJobRunRecord("report-auto-expire", async () => {
+          // Auto-expire writes an audit row + nulls a download URL — those
+          // are mutating ops, so honour the global write kill switch.
+          const ks = await assertWritesAllowed("report-auto-expire");
+          if (!ks.allowed) {
+            return `skipped — write kill switch ON (${ks.source}, reason=${ks.reason ?? "none"})`;
+          }
+          const r = await runReportAutoExpire();
+          return r.expired > 0
+            ? `Expired ${r.expired} report row(s) past their TTL: [${r.expiredIds.join(", ")}], files deleted=${r.filesDeleted}`
+            : `No reports past their TTL (scanned ${r.scanned}).`;
+        });
+      } catch (e) {
+        console.error("[report-auto-expire] cron error", e);
+      }
+    };
+    // First run after 90s so the per-minute sweeper fires first on a cold
+    // boot and the two summary lines arrive in the dashboard separately.
+    setTimeout(() => {
+      void runReportAutoExpireCron();
+      setInterval(runReportAutoExpireCron, 60 * 60 * 1000);
+    }, 90 * 1000);
+  }
+
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     // Expose the original message for 4xx client errors; hide internals for 5xx.

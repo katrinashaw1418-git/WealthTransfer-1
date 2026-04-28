@@ -117,6 +117,108 @@ function fmtDateTimeUtc(d: Date): string {
 }
 
 // ---------------------------------------------------------------------------
+// Task #299 — Auto-expire. The download endpoint already enforces expiry
+// inline (`expiresAt < now` returns 410), but a row that nobody clicks on
+// will sit at status='ready' forever and the on-disk PDF will linger past
+// its retention window. This sweeper, scheduled hourly from server/index.ts,
+// flips every ready row whose expiresAt is past to 'expired', deletes the
+// corresponding PDF on disk, and writes an audit row so the lifecycle is
+// reviewable. The download endpoint's inline check stays in place as
+// defence-in-depth (a row inserted right before the cron fires would still
+// be caught at request time).
+// ---------------------------------------------------------------------------
+export interface ReportAutoExpireSummary {
+  scanned: number;
+  expired: number;
+  expiredIds: number[];
+  filesDeleted: number;
+}
+
+export async function runReportAutoExpire(opts?: {
+  now?: Date;
+}): Promise<ReportAutoExpireSummary> {
+  const now = opts?.now ?? new Date();
+
+  const due = await db
+    .select({
+      id: reportRequests.id,
+      adviserUserId: reportRequests.adviserUserId,
+      clientUserId: reportRequests.clientUserId,
+      reportType: reportRequests.reportType,
+      expiresAt: reportRequests.expiresAt,
+    })
+    .from(reportRequests)
+    .where(
+      and(
+        eq(reportRequests.status, "ready"),
+        lt(reportRequests.expiresAt, now),
+      ),
+    );
+
+  let filesDeleted = 0;
+  const expiredIds: number[] = [];
+  for (const row of due) {
+    // Per-row update so the audit row carries the precise ms-overdue figure.
+    await db
+      .update(reportRequests)
+      .set({ status: "expired", downloadUrl: null })
+      .where(eq(reportRequests.id, row.id));
+
+    // Delete the on-disk PDF best-effort. A missing file is not an error —
+    // the row may have been generated on a different host or already
+    // cleaned up by a previous tick that crashed before writing the audit
+    // row. We log unexpected unlink failures but never throw.
+    const filePath = path.join(REPORTS_DIR, `${row.id}.pdf`);
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        filesDeleted += 1;
+      }
+    } catch (err) {
+      console.error(
+        `[report-auto-expire] failed to delete ${filePath}:`,
+        (err as Error)?.message ?? err,
+      );
+    }
+
+    try {
+      await db.insert(auditLogs).values({
+        userId: null,
+        action: "adviser_report_expired",
+        entityType: "report_request",
+        entityId: String(row.id),
+        metadata: {
+          adviserUserId: row.adviserUserId,
+          clientUserId: row.clientUserId,
+          reportType: row.reportType,
+          expiresAt: row.expiresAt,
+          msOverdue:
+            row.expiresAt != null
+              ? now.getTime() - new Date(row.expiresAt).getTime()
+              : null,
+          fileDeleted: fs.existsSync(filePath) === false,
+        } as any,
+        ipAddress: null,
+      });
+    } catch (err) {
+      console.error(
+        `[report-auto-expire] failed to write audit row for #${row.id}:`,
+        (err as Error)?.message ?? err,
+      );
+    }
+
+    expiredIds.push(row.id);
+  }
+
+  return {
+    scanned: due.length,
+    expired: expiredIds.length,
+    expiredIds,
+    filesDeleted,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Task #315 — Sweeper. Forces stuck rows into a terminal `failed` state so
 // the UI can surface a Retry button instead of the row sitting at
 // `requested` forever, and emits an audit row + one summary line for the
@@ -730,13 +832,16 @@ async function renderPdf(filePath: string, data: RenderInput): Promise<void> {
 
     drawDisclosurePage(doc);
 
-    // Per-page header + footer. Drawn AFTER content so the bufferedPageRange
-    // is final — adding a page from inside this loop would invalidate the
-    // count we use for "page X of Y".
+    // Per-page header + footer + watermark. Drawn AFTER content so the
+    // bufferedPageRange is final — adding a page from inside this loop
+    // would invalidate the count we use for "page X of Y". The watermark
+    // is drawn BEFORE the header/footer so the licensee strip and footer
+    // line stay readable on top of it.
     const range = doc.bufferedPageRange();
     const totalPages = range.count;
     for (let i = range.start; i < range.start + totalPages; i++) {
       doc.switchToPage(i);
+      drawAmaxWatermark(doc);
       drawPageHeader(doc, data);
       drawPageFooter(doc, data, i - range.start + 1, totalPages);
     }
@@ -786,22 +891,65 @@ function drawPageFooter(
 ): void {
   const left = 56;
   const right = doc.page.width - 56;
-  const y = doc.page.height - 50;
+  // Two stacked footer rows: the new Task #299 provenance line on top
+  // (period · client · adviser/licensee · "Generated by AMAX platform")
+  // and the existing pagination + confidentiality line beneath. Page
+  // bottom margin is 80px, so the two 10px rows starting at -56 fit
+  // comfortably.
+  const yProvenance = doc.page.height - 56;
+  const yMeta = doc.page.height - 38;
   doc.save();
   // Hairline above the footer
-  doc.moveTo(left, y).lineTo(right, y).strokeColor("#e2e8f0").lineWidth(0.5).stroke();
+  doc
+    .moveTo(left, yProvenance - 6)
+    .lineTo(right, yProvenance - 6)
+    .strokeColor("#e2e8f0")
+    .lineWidth(0.5)
+    .stroke();
+
+  // Top footer row — Task #299 provenance line. We render it as four
+  // dot-separated segments so a forwarded single-page printout still
+  // tells the reader the date range, the client, the adviser/licensee,
+  // and that the document came from the AMAX platform.
+  const periodSegment =
+    data.periodFrom && data.periodTo
+      ? `${fmtDate(data.periodFrom)} – ${fmtDate(data.periodTo)}`
+      : "All data on record";
+  const clientSegment =
+    `${data.client.firstName} ${data.client.lastName}`.trim() || data.client.email;
+  const adviserSegment =
+    `${data.adviser.firstName} ${data.adviser.lastName}`.trim() || PLATFORM_NAME;
+  const licenseeSegment = `${adviserSegment} · ${PLATFORM_NAME}`;
+  const provenance = [
+    periodSegment,
+    clientSegment,
+    licenseeSegment,
+    "Generated by AMAX platform",
+  ].join(" · ");
+  doc
+    .fillColor("#475569")
+    .fontSize(7.5)
+    .font("Helvetica")
+    .text(provenance, left, yProvenance, {
+      width: right - left,
+      align: "center",
+      lineBreak: false,
+      ellipsis: true,
+    });
+
+  // Bottom footer row — pagination + generation timestamp + confidentiality.
   doc.fillColor("#94a3b8").fontSize(8).font("Helvetica");
-  doc.text(`Generated ${fmtDateTimeUtc(data.generatedAt)} · ${PLATFORM_NAME}`, left, y + 6, {
+  doc.text(`Generated ${fmtDateTimeUtc(data.generatedAt)}`, left, yMeta, {
     width: (right - left) / 2,
     align: "left",
     lineBreak: false,
   });
-  doc.text(`Page ${pageNum} of ${pageCount}`, left, y + 6, {
+  doc.text(`Page ${pageNum} of ${pageCount}`, left, yMeta, {
     width: right - left,
     align: "center",
     lineBreak: false,
   });
-  doc.text("Confidential — not for distribution", left, y + 6, {
+  doc.text("Confidential — not for distribution", left, yMeta, {
     width: right - left,
     align: "right",
     lineBreak: false,
@@ -809,10 +957,34 @@ function drawPageFooter(
   doc.restore();
 }
 
-// Task #318 (rework) — `drawDraftWatermark` was removed. The DRAFT overlay was
-// superseded by the per-download `applyDocumentWatermark()` watermark applied
-// on every download surface (adviser/client/admin), which carries forensic
-// per-request attribution (downloaded-at + purpose).
+// Task #318 (rework) — the legacy `drawDraftWatermark` was removed; the
+// per-recipient forensic watermark (downloaded-at + purpose) is now applied
+// at download time via `applyDocumentWatermark()` on each download surface
+// (adviser/client/admin), so generation no longer produces a DRAFT overlay.
+//
+// Task #299 — in addition to that download-time watermark, generation bakes
+// a faint diagonal "AMAX" *brand* watermark behind the body content of every
+// page. The two layers serve different purposes and intentionally coexist:
+//   - drawAmaxWatermark (this function): brand-only, no PII; ensures any
+//     forwarded screenshot or printout is unambiguously branded as AMAX
+//     regardless of who later downloaded it.
+//   - applyDocumentWatermark (download-time): forensic per-recipient
+//     attribution; only added to the response stream, never persisted.
+function drawAmaxWatermark(doc: PDFKit.PDFDocument): void {
+  doc.save();
+  // Light slate that prints near-invisible but is clearly visible on
+  // screen and on a colour print. Opacity is set explicitly so the
+  // watermark sits BEHIND the body text without bleeding into it.
+  doc.opacity(0.08);
+  doc.fillColor("#0f172a").fontSize(120).font("Helvetica-Bold");
+  doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
+  doc.text("AMAX", 0, doc.page.height / 2 - 60, {
+    width: doc.page.width,
+    align: "center",
+    lineBreak: false,
+  });
+  doc.restore();
+}
 
 function sectionHeading(doc: PDFKit.PDFDocument, title: string): void {
   if (doc.y > doc.page.height - 180) doc.addPage();

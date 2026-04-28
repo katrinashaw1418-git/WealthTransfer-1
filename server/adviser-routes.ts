@@ -893,6 +893,121 @@ export function registerAdviserRoutes(app: Express): void {
   );
 
   // -------------------------------------------------------------------------
+  // Task #299 — Cancel. Only succeeds when the report is still in flight
+  // (status='requested' or 'generating'). Flips the row to 'cancelled' and
+  // writes an audit row so the lifecycle is reviewable. The PDF generator
+  // currently runs inline so 'generating' is a transient sliver of the
+  // request lifecycle, but cancelling it still makes sense for the long-
+  // term shape (a future async worker would honour the status flip).
+  // -------------------------------------------------------------------------
+  app.post(
+    "/api/adviser/reports/:id/cancel",
+    adviserRoute(async (req, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid report id"), { status: 400 });
+      }
+      const [row] = await db
+        .select()
+        .from(reportRequests)
+        .where(eq(reportRequests.id, id))
+        .limit(1);
+      if (!row) {
+        throw Object.assign(new Error("Report not found"), { status: 404 });
+      }
+      if (row.adviserUserId !== auth.userId) {
+        throw Object.assign(
+          new Error("Forbidden — this report does not belong to you"),
+          { status: 403 },
+        );
+      }
+      if (row.status !== "requested" && row.status !== "generating") {
+        throw Object.assign(
+          new Error(
+            `Only requested or generating reports can be cancelled (current status: ${row.status})`,
+          ),
+          { status: 409 },
+        );
+      }
+      await db
+        .update(reportRequests)
+        .set({ status: "cancelled", failureReason: "cancelled_by_adviser" })
+        .where(eq(reportRequests.id, id));
+      await audit(
+        auth.userId,
+        "adviser_report_cancelled",
+        "report_request",
+        String(id),
+        {
+          previousStatus: row.status,
+          clientUserId: row.clientUserId,
+          reportType: row.reportType,
+        },
+        (req as Request).ip || null,
+      );
+      const [final] = await db
+        .select()
+        .from(reportRequests)
+        .where(eq(reportRequests.id, id))
+        .limit(1);
+      return final;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #299 — Audit log for one report. Powers the "View audit log" side
+  // sheet in the adviser Reports page. Scoped strictly to the requesting
+  // adviser's own reports so an adviser cannot read another adviser's
+  // request/generation/download events even by guessing ids.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/adviser/reports/:id/audit-log",
+    adviserRoute(async (req, auth) => {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid report id"), { status: 400 });
+      }
+      const [row] = await db
+        .select({
+          id: reportRequests.id,
+          adviserUserId: reportRequests.adviserUserId,
+        })
+        .from(reportRequests)
+        .where(eq(reportRequests.id, id))
+        .limit(1);
+      if (!row) {
+        throw Object.assign(new Error("Report not found"), { status: 404 });
+      }
+      if (row.adviserUserId !== auth.userId) {
+        throw Object.assign(
+          new Error("Forbidden — this report does not belong to you"),
+          { status: 403 },
+        );
+      }
+      const rows = await db
+        .select({
+          id: auditLogs.id,
+          userId: auditLogs.userId,
+          action: auditLogs.action,
+          entityType: auditLogs.entityType,
+          entityId: auditLogs.entityId,
+          metadata: auditLogs.metadata,
+          createdAt: auditLogs.createdAt,
+        })
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.entityType, "report_request"),
+            eq(auditLogs.entityId, String(id)),
+          ),
+        )
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(200);
+      return { items: rows };
+    }),
+  );
+
+  // -------------------------------------------------------------------------
   // Task #315 — Regenerate. Inserts a new row pointing back at the supplied
   // original via supersedesReportId, then runs the PDF generator inline so
   // the response carries the new row in its terminal state.
