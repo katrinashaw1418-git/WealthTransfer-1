@@ -43,6 +43,7 @@
 import multer from "multer";
 import type { Request, Response, NextFunction, RequestHandler } from "express";
 import { fileTypeFromBuffer } from "file-type";
+import AdmZip from "adm-zip";
 
 export const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MiB
 
@@ -181,6 +182,225 @@ class MimeTypeMismatchError extends Error {
   }
 }
 
+// =============================================================================
+// TASK #272 — second-stage container inspection (zip bombs + Office macros)
+// -----------------------------------------------------------------------------
+// Task #161 closed the "evil.exe renamed to evil.pdf" bypass by sniffing the
+// leading bytes of every upload. This stage covers the next layer: hostile
+// payloads carried INSIDE legitimate zip / OOXML / legacy-Office containers.
+//
+// Two threats, both still allowed by the mime allow-list today because
+// advisers genuinely upload Office attachments:
+//
+//   1. ZIP BOMBS — an archive (raw .zip OR an OOXML .docx/.xlsx/.pptx) whose
+//      central directory declares uncompressed entry sizes that sum to many
+//      gigabytes, intending to crash the server when it later expands the
+//      file. We read the central directory only (no decompression) and reject
+//      with HTTP 400 + UPLOAD_ZIP_BOMB when the declared total exceeds
+//      MAX_UPLOAD_BYTES * ZIP_BOMB_RATIO. The ratio leaves room for honest
+//      Office documents whose embedded media decompresses several-fold while
+//      still rejecting the obvious attacks (1 KiB → 4 GiB).
+//
+//   2. OFFICE MACROS — a VBA macro stream embedded in either:
+//        a) An OOXML container, where macros live in a `vbaProject.bin`
+//           entry under `word/`, `xl/`, or `ppt/`. Adviser uploads of pure
+//           .docx/.xlsx/.pptx never contain this entry; .docm/.xlsm/.pptm
+//           always do.
+//        b) A legacy OLE Compound File container (.doc/.xls/.ppt), where
+//           macros live in a top-level "Macros" or "_VBA_PROJECT_CUR" stream
+//           inside the CFB directory. We don't ship a full CFB parser — we
+//           scan the buffer for those stream names encoded as UTF-16LE with
+//           the directory-entry trailing NUL. That pattern can't be produced
+//           by ordinary document body text (the trailing NUL only appears
+//           inside CFB directory-entry name fields), so the heuristic is
+//           safe against false positives on non-macro docs.
+//
+// Both rejections are stable, structured 400s so callers can adapt without
+// scraping logs (UPLOAD_ZIP_BOMB / UPLOAD_OFFICE_MACRO).
+// =============================================================================
+
+// Allow archives to decompress to up to 10x the configured upload cap. This
+// covers honest cases (PowerPoint decks with embedded media, Excel sheets
+// with shared strings) while still flagging the orders-of-magnitude ratios
+// that characterise real zip-bomb payloads.
+export const ZIP_BOMB_DECOMPRESSED_RATIO = 10;
+
+// Magic numbers for the two container formats we care about. We dispatch on
+// these (not on the declared mime) so that a zip-shaped upload declared as
+// any allow-listed mime still gets inspected.
+const ZIP_LOCAL_FILE_HEADER = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+const ZIP_EMPTY_ARCHIVE_HEADER = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+const ZIP_SPANNED_ARCHIVE_HEADER = Buffer.from([0x50, 0x4b, 0x07, 0x08]);
+const CFB_HEADER = Buffer.from([
+  0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1,
+]);
+
+function bufferStartsWith(buf: Buffer, magic: Buffer): boolean {
+  if (buf.length < magic.length) return false;
+  for (let i = 0; i < magic.length; i++) {
+    if (buf[i] !== magic[i]) return false;
+  }
+  return true;
+}
+
+export function isZipContainer(buffer: Buffer): boolean {
+  return (
+    bufferStartsWith(buffer, ZIP_LOCAL_FILE_HEADER) ||
+    bufferStartsWith(buffer, ZIP_EMPTY_ARCHIVE_HEADER) ||
+    bufferStartsWith(buffer, ZIP_SPANNED_ARCHIVE_HEADER)
+  );
+}
+
+export function isCfbContainer(buffer: Buffer): boolean {
+  return bufferStartsWith(buffer, CFB_HEADER);
+}
+
+// Names of OOXML entries that carry a VBA macro project. Office stores these
+// under the format-specific top folder (`word/`, `xl/`, `ppt/`) plus a few
+// other legitimate locations. Matching on the basename keeps the check
+// resilient to the various Office variants without enumerating every path.
+const OOXML_MACRO_ENTRY_BASENAMES = new Set([
+  "vbaproject.bin",
+  "vbadata.xml",
+]);
+
+export interface ZipInspection {
+  totalDeclaredDecompressedBytes: number;
+  entryCount: number;
+  // First macro-bearing entry name we found, or null when none is present.
+  macroEntryName: string | null;
+}
+
+export class ZipBombError extends Error {
+  readonly status = 400;
+  readonly code = "UPLOAD_ZIP_BOMB";
+  constructor(
+    public readonly decompressedBytes: number,
+    public readonly maxDecompressedBytes: number,
+  ) {
+    super(
+      `Archive declares ${decompressedBytes} decompressed bytes, exceeding the cap of ${maxDecompressedBytes}`,
+    );
+  }
+}
+
+export class OfficeMacroError extends Error {
+  readonly status = 400;
+  readonly code = "UPLOAD_OFFICE_MACRO";
+  constructor(
+    public readonly format: "ooxml" | "cfb",
+    public readonly evidence: string,
+  ) {
+    super(
+      `Office document contains a VBA macro (${format} ${evidence}) and was rejected`,
+    );
+  }
+}
+
+class UnreadableArchiveError extends Error {
+  readonly status = 400;
+  readonly code = "UPLOAD_ARCHIVE_UNREADABLE";
+  constructor(public readonly reason: string) {
+    super(`Archive could not be parsed for safety inspection: ${reason}`);
+  }
+}
+
+// Read the zip's central directory and tally declared uncompressed sizes
+// without ever decompressing an entry. Throws ZipBombError as soon as the
+// running total exceeds the cap so a hostile archive with millions of fake
+// entries can't make us walk the full directory.
+export function inspectZipContainer(
+  buffer: Buffer,
+  maxDecompressedBytes: number,
+): ZipInspection {
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries();
+  let total = 0;
+  let macroEntryName: string | null = null;
+  for (const entry of entries) {
+    // adm-zip's `header.size` is the uncompressed size from the central
+    // directory record. We trust this only insofar as we use it to REJECT —
+    // a liar can claim less than reality, but we never extract here, so the
+    // worst case is that a zip-bomb sneaks past this check and is caught
+    // when something downstream tries to extract it.
+    const declared = Number(entry.header.size);
+    if (Number.isFinite(declared) && declared > 0) total += declared;
+    if (total > maxDecompressedBytes) {
+      throw new ZipBombError(total, maxDecompressedBytes);
+    }
+    if (!macroEntryName) {
+      const basename = entry.entryName.split("/").pop()?.toLowerCase() ?? "";
+      if (OOXML_MACRO_ENTRY_BASENAMES.has(basename)) {
+        macroEntryName = entry.entryName;
+      }
+    }
+  }
+  return {
+    totalDeclaredDecompressedBytes: total,
+    entryCount: entries.length,
+    macroEntryName,
+  };
+}
+
+// Names of CFB streams that carry a VBA macro project. CFB stores stream
+// names as UTF-16LE strings inside fixed-size 64-byte slots in the directory
+// sector, with a trailing NUL terminator. We scan for the encoded bytes
+// (including the NUL) so that ordinary body text containing the word
+// "Macros" or "VBA" cannot trigger a false positive — body text in
+// WordDocument streams is followed by another character, not a NUL.
+const CFB_MACRO_STREAM_NAMES = ["VBA", "Macros", "_VBA_PROJECT_CUR"] as const;
+
+export function findCfbMacroStream(buffer: Buffer): string | null {
+  for (const name of CFB_MACRO_STREAM_NAMES) {
+    // UTF-16LE encoding of the name plus a NUL terminator. Buffer.from with
+    // "utf16le" encodes each char as 2 bytes; appending "\0" adds the
+    // terminator that a real CFB directory entry would have.
+    const needle = Buffer.from(name + "\0", "utf16le");
+    if (buffer.indexOf(needle) !== -1) {
+      return name;
+    }
+  }
+  return null;
+}
+
+// Single entry-point used by the middleware. Returns a rejection error if
+// the buffer represents a hostile container, or `null` if the upload should
+// proceed. Kept side-effect-free so the test suite can exercise it directly
+// without mounting an Express app.
+export function inspectContainerThreats(
+  buffer: Buffer,
+  maxBytes: number,
+): Error | null {
+  if (isZipContainer(buffer)) {
+    try {
+      const inspection = inspectZipContainer(
+        buffer,
+        maxBytes * ZIP_BOMB_DECOMPRESSED_RATIO,
+      );
+      if (inspection.macroEntryName) {
+        return new OfficeMacroError("ooxml", inspection.macroEntryName);
+      }
+      return null;
+    } catch (err) {
+      if (err instanceof ZipBombError) return err;
+      // The buffer claimed to be a zip (PK header) but the central directory
+      // is unreadable. We cannot prove it's safe, so we refuse — the
+      // alternative is letting an attacker bypass the inspection by sending
+      // a deliberately-corrupt central directory.
+      return new UnreadableArchiveError(
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  if (isCfbContainer(buffer)) {
+    const evidence = findCfbMacroStream(buffer);
+    if (evidence) {
+      return new OfficeMacroError("cfb", evidence);
+    }
+  }
+  return null;
+}
+
 export interface UploadMiddlewareOptions {
   // Form-data field name. Defaults to "file" — matches the existing
   // adviser document upload contract.
@@ -285,6 +505,25 @@ export function buildUploadMiddleware(
             );
             return;
           }
+          // Task #272 — second-stage container inspection. Only runs when the
+          // mime allow-list and content-sniff have already approved the
+          // upload, so we never spend cycles parsing untrusted bytes for a
+          // file we'd reject anyway. We dispatch on the buffer's magic
+          // number, NOT the declared mime, so a zip-shaped upload declared
+          // as e.g. an OOXML mime is still inspected for bombs and macros.
+          const containerRejection = inspectContainerThreats(
+            file.buffer,
+            maxBytes,
+          );
+          if (containerRejection) {
+            respondWithUploadRejection(
+              containerRejection,
+              res,
+              maxBytes,
+              allowed,
+            );
+            return;
+          }
         } catch (sniffErr) {
           // file-type can throw on truly malformed buffers; treat as a
           // mismatch (safe default) so we never accept a file we couldn't
@@ -328,6 +567,32 @@ function respondWithUploadRejection(
       declaredMimeType: err.declaredMimeType || null,
       detectedMimeType: err.detectedMimeType,
       allowedMimeTypes: allowed,
+    });
+    return;
+  }
+  if (err instanceof ZipBombError) {
+    res.status(400).json({
+      error: err.message,
+      code: err.code,
+      decompressedBytes: err.decompressedBytes,
+      maxDecompressedBytes: err.maxDecompressedBytes,
+    });
+    return;
+  }
+  if (err instanceof OfficeMacroError) {
+    res.status(400).json({
+      error: err.message,
+      code: err.code,
+      format: err.format,
+      evidence: err.evidence,
+    });
+    return;
+  }
+  if (err instanceof UnreadableArchiveError) {
+    res.status(400).json({
+      error: err.message,
+      code: err.code,
+      reason: err.reason,
     });
     return;
   }

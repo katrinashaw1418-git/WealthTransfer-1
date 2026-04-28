@@ -29,14 +29,23 @@
 import { describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
+import AdmZip from "adm-zip";
 import {
   DEFAULT_ALLOWED_MIME_TYPES,
   DEFAULT_MAX_UPLOAD_BYTES,
+  ZIP_BOMB_DECOMPRESSED_RATIO,
   buildUploadMiddleware,
+  findCfbMacroStream,
+  inspectContainerThreats,
+  inspectZipContainer,
+  isCfbContainer,
   isMimeMatch,
+  isZipContainer,
+  OfficeMacroError,
   resolveAllowedMimeTypes,
   resolveMaxUploadBytes,
   sniffMimeType,
+  ZipBombError,
 } from "./upload-security";
 
 // Task #161 — fixtures for content-based mime sniffing tests. All buffers
@@ -437,5 +446,314 @@ describe("resolveMaxUploadBytes / resolveAllowedMimeTypes", () => {
       if (original === undefined) delete process.env.UPLOAD_ALLOWED_MIME_TYPES;
       else process.env.UPLOAD_ALLOWED_MIME_TYPES = original;
     }
+  });
+});
+
+// =============================================================================
+// Task #272 — zip-bomb + Office-macro container inspection
+// -----------------------------------------------------------------------------
+// The mime allow-list and the Task #161 sniffer between them stop binaries
+// renamed to .pdf, but they still wave through any well-formed zip / OOXML /
+// legacy-Office container. This block covers the second-stage inspection
+// that protects us against:
+//
+//   * "zip bomb" archives whose central directory declares a decompressed
+//     size large enough to exhaust the server when extracted, AND
+//   * macro-bearing Office documents (OOXML .docm/.xlsm/.pptm carrying a
+//     vbaProject.bin entry, or legacy CFB .doc/.xls/.ppt carrying a Macros /
+//     VBA stream in the OLE directory).
+//
+// The fixtures are constructed in-memory so the suite stays hermetic — no
+// binary blobs to commit, and we can deterministically tune sizes against
+// the configured cap.
+// =============================================================================
+
+// Builds a minimal-but-valid OOXML wordprocessingml.document container
+// (file-type's docx detector inspects [Content_Types].xml + the `word/`
+// folder, so we have to ship those for the sniff stage to recognise the
+// upload as docx rather than as a generic zip). When `withMacro` is true
+// the archive also contains `word/vbaProject.bin`, which is the entry
+// real .docm files carry.
+function makeDocxBuffer(opts: { withMacro: boolean }): Buffer {
+  const zip = new AdmZip();
+  zip.addFile(
+    "[Content_Types].xml",
+    Buffer.from(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+        `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+        `<Default Extension="xml" ContentType="application/xml"/>` +
+        `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
+        `</Types>`,
+    ),
+  );
+  zip.addFile(
+    "_rels/.rels",
+    Buffer.from(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>` +
+        `</Relationships>`,
+    ),
+  );
+  zip.addFile(
+    "word/document.xml",
+    Buffer.from(
+      `<?xml version="1.0"?>` +
+        `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+        `<w:body><w:p><w:r><w:t>hello</w:t></w:r></w:p></w:body></w:document>`,
+    ),
+  );
+  if (opts.withMacro) {
+    // Real VBA project bytes start with a small CFB header and follow a
+    // documented binary layout, but the second-stage check only matches on
+    // the entry NAME — the contents are irrelevant for that decision, so a
+    // placeholder is sufficient and keeps the fixture small.
+    zip.addFile(
+      "word/vbaProject.bin",
+      Buffer.from("placeholder VBA project bytes"),
+    );
+  }
+  return zip.toBuffer();
+}
+
+// Build a "zip bomb" — an archive whose central-directory record claims
+// `declaredSize` uncompressed bytes for its single entry. Real zip bombs
+// achieve this by packing repeating zeros that deflate to almost nothing;
+// adm-zip will compress our zero-filled buffer the same way, so the file
+// on disk stays tiny while the central directory's size field reports the
+// full count. That's the exact shape inspectZipContainer() looks for.
+function makeZipBombBuffer(declaredSize: number): Buffer {
+  const zip = new AdmZip();
+  zip.addFile("payload.bin", Buffer.alloc(declaredSize, 0));
+  return zip.toBuffer();
+}
+
+// Build a CFB (legacy Office) container shell with a directory entry whose
+// name is `entryName`. Real legacy Office files have a much richer
+// structure, but the macro check matches purely on the UTF-16LE-encoded
+// stream-name pattern in the directory, so a synthetic CFB is enough to
+// exercise the heuristic deterministically. Without `entryName` the buffer
+// is a CFB-shaped blob with no macro stream — the negative control.
+function makeCfbBuffer(entryName: string | null): Buffer {
+  // 512-byte header + 512-byte directory sector. Directory entries are 128
+  // bytes each; the first slot is the root entry, the second slot is where
+  // we plant `entryName` when present.
+  const header = Buffer.alloc(512, 0);
+  // CFB magic.
+  Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(header, 0);
+  const dirSector = Buffer.alloc(512, 0);
+  if (entryName !== null) {
+    // Plant the UTF-16LE encoded name + NUL terminator inside the second
+    // directory entry's name field (offset 128, name field is 0..63 of the
+    // 128-byte slot).
+    const encoded = Buffer.from(entryName + "\0", "utf16le");
+    encoded.copy(dirSector, 128);
+  }
+  return Buffer.concat([header, dirSector]);
+}
+
+describe("isZipContainer / isCfbContainer", () => {
+  it("recognises a zip local-file-header (PK\\x03\\x04) as a zip", () => {
+    const zip = makeDocxBuffer({ withMacro: false });
+    expect(isZipContainer(zip)).toBe(true);
+    expect(isCfbContainer(zip)).toBe(false);
+  });
+
+  it("recognises a CFB header as CFB but not as zip", () => {
+    const cfb = makeCfbBuffer(null);
+    expect(isCfbContainer(cfb)).toBe(true);
+    expect(isZipContainer(cfb)).toBe(false);
+  });
+
+  it("does not classify arbitrary bytes as either container", () => {
+    expect(isZipContainer(REAL_PDF_BYTES)).toBe(false);
+    expect(isCfbContainer(REAL_PDF_BYTES)).toBe(false);
+    expect(isZipContainer(Buffer.alloc(0))).toBe(false);
+    expect(isCfbContainer(Buffer.alloc(2))).toBe(false);
+  });
+});
+
+describe("inspectZipContainer", () => {
+  it("returns the running totals for an honest archive under the cap", () => {
+    const zip = makeDocxBuffer({ withMacro: false });
+    const result = inspectZipContainer(zip, 10 * 1024 * 1024);
+    expect(result.entryCount).toBeGreaterThan(0);
+    expect(result.totalDeclaredDecompressedBytes).toBeGreaterThan(0);
+    expect(result.macroEntryName).toBeNull();
+  });
+
+  it("flags an OOXML archive that contains word/vbaProject.bin", () => {
+    const zip = makeDocxBuffer({ withMacro: true });
+    const result = inspectZipContainer(zip, 10 * 1024 * 1024);
+    expect(result.macroEntryName).toBe("word/vbaProject.bin");
+  });
+
+  it("throws ZipBombError when the declared decompressed size exceeds the cap", () => {
+    // 11 KiB declared, cap of 10 KiB → must reject.
+    const zip = makeZipBombBuffer(11 * 1024);
+    expect(() => inspectZipContainer(zip, 10 * 1024)).toThrow(ZipBombError);
+    try {
+      inspectZipContainer(zip, 10 * 1024);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ZipBombError);
+      const bomb = err as ZipBombError;
+      expect(bomb.code).toBe("UPLOAD_ZIP_BOMB");
+      expect(bomb.maxDecompressedBytes).toBe(10 * 1024);
+      expect(bomb.decompressedBytes).toBeGreaterThan(10 * 1024);
+    }
+  });
+});
+
+describe("findCfbMacroStream", () => {
+  it("finds the UTF-16LE encoded VBA stream name in a CFB buffer", () => {
+    expect(findCfbMacroStream(makeCfbBuffer("VBA"))).toBe("VBA");
+  });
+
+  it("finds the Macros stream name", () => {
+    expect(findCfbMacroStream(makeCfbBuffer("Macros"))).toBe("Macros");
+  });
+
+  it("finds the _VBA_PROJECT_CUR stream name", () => {
+    expect(findCfbMacroStream(makeCfbBuffer("_VBA_PROJECT_CUR"))).toBe(
+      "_VBA_PROJECT_CUR",
+    );
+  });
+
+  it("returns null when no macro stream is present", () => {
+    expect(findCfbMacroStream(makeCfbBuffer(null))).toBeNull();
+    expect(findCfbMacroStream(makeCfbBuffer("WordDocument"))).toBeNull();
+  });
+
+  it("does not false-positive on body text containing the word 'Macros'", () => {
+    // Body text encoded as UTF-16LE without a NUL terminator must NOT match.
+    // This is the property that makes the substring scan safe to run on
+    // legacy Office files whose body legitimately mentions the word.
+    const body = Buffer.from("The Macros chapter explains everything.", "utf16le");
+    const wrapped = Buffer.concat([
+      Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+      Buffer.alloc(504, 0),
+      body,
+    ]);
+    expect(findCfbMacroStream(wrapped)).toBeNull();
+  });
+});
+
+describe("inspectContainerThreats (integration)", () => {
+  it("returns null for a non-container payload", () => {
+    expect(inspectContainerThreats(REAL_PDF_BYTES, 1024)).toBeNull();
+  });
+
+  it("rejects a zip-bomb fixture with ZipBombError", () => {
+    // maxBytes = 1 KiB → cap = 10 KiB. Declare 12 KiB to clear it.
+    const bomb = makeZipBombBuffer(12 * 1024);
+    const rejection = inspectContainerThreats(bomb, 1024);
+    expect(rejection).toBeInstanceOf(ZipBombError);
+  });
+
+  it("rejects a docm fixture (OOXML with vbaProject.bin) with OfficeMacroError", () => {
+    const docm = makeDocxBuffer({ withMacro: true });
+    const rejection = inspectContainerThreats(docm, 25 * 1024 * 1024);
+    expect(rejection).toBeInstanceOf(OfficeMacroError);
+    const macro = rejection as OfficeMacroError;
+    expect(macro.format).toBe("ooxml");
+    expect(macro.evidence).toBe("word/vbaProject.bin");
+  });
+
+  it("returns null for a clean docx (no macros, sensible decompressed size)", () => {
+    const docx = makeDocxBuffer({ withMacro: false });
+    expect(inspectContainerThreats(docx, 25 * 1024 * 1024)).toBeNull();
+  });
+
+  it("rejects a CFB blob that contains a VBA stream", () => {
+    const macroDoc = makeCfbBuffer("VBA");
+    const rejection = inspectContainerThreats(macroDoc, 25 * 1024 * 1024);
+    expect(rejection).toBeInstanceOf(OfficeMacroError);
+    const macro = rejection as OfficeMacroError;
+    expect(macro.format).toBe("cfb");
+    expect(macro.evidence).toBe("VBA");
+  });
+
+  it("returns null for a CFB blob with no macro stream", () => {
+    expect(inspectContainerThreats(makeCfbBuffer(null), 25 * 1024 * 1024)).toBeNull();
+  });
+
+  it("exposes a sane DECOMPRESSED_RATIO so honest Office docs are not rejected", () => {
+    // Sanity check: a docx whose declared decompressed size is comfortably
+    // under maxBytes * ratio must pass. Without this, a ratio refactor that
+    // accidentally lowers the cap to 1x would silently break every upload.
+    expect(ZIP_BOMB_DECOMPRESSED_RATIO).toBeGreaterThanOrEqual(2);
+    const docx = makeDocxBuffer({ withMacro: false });
+    expect(inspectContainerThreats(docx, 1024 * 1024)).toBeNull();
+  });
+});
+
+describe("buildUploadMiddleware — Task #272 container inspection", () => {
+  it("rejects a zip bomb at the HTTP layer with 400 + UPLOAD_ZIP_BOMB", async () => {
+    // Allow application/zip just for this test so we can attach a raw zip
+    // without tripping the mime allow-list.
+    const { app, onUploaded } = makeApp({
+      maxBytes: 1024,
+      allowedMimeTypes: ["application/zip"],
+    });
+    const bomb = makeZipBombBuffer(12 * 1024);
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", bomb, {
+        filename: "bomb.zip",
+        contentType: "application/zip",
+      });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: "UPLOAD_ZIP_BOMB",
+      maxDecompressedBytes: 1024 * ZIP_BOMB_DECOMPRESSED_RATIO,
+    });
+    expect(res.body.decompressedBytes).toBeGreaterThan(
+      1024 * ZIP_BOMB_DECOMPRESSED_RATIO,
+    );
+    // The route handler — which would have written the bomb to object
+    // storage — must NEVER run.
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it("rejects a macro-laden .docm at the HTTP layer with 400 + UPLOAD_OFFICE_MACRO", async () => {
+    // The default allow-list lets through the wordprocessingml.document
+    // mime that file-type detects from our fixture, so no override is
+    // needed here. This is the exact attack the task is closing: a .docm
+    // re-labelled as a plain .docx slipping past the mime allow-list.
+    const { app, onUploaded } = makeApp();
+    const docm = makeDocxBuffer({ withMacro: true });
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", docm, {
+        filename: "expense-claim.docx",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: "UPLOAD_OFFICE_MACRO",
+      format: "ooxml",
+      evidence: "word/vbaProject.bin",
+    });
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it("accepts a clean .docx (positive control: legitimate Office uploads still work)", async () => {
+    // Without this control we'd be one wrong refactor away from rejecting
+    // every adviser document. The fixture contains no vbaProject.bin and
+    // its declared decompressed size is well under the cap.
+    const { app, onUploaded } = makeApp();
+    const docx = makeDocxBuffer({ withMacro: false });
+    const res = await request(app)
+      .post("/upload")
+      .attach("file", docx, {
+        filename: "client-letter.docx",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true });
+    expect(onUploaded).toHaveBeenCalledTimes(1);
   });
 });
