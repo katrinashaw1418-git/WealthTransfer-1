@@ -35,6 +35,7 @@ import AdviserClientHoldings from "@/pages/adviser/client-holdings";
 import AdviserTasks from "@/pages/adviser/tasks";
 import AdviserReports from "@/pages/adviser/reports";
 import AdviserProducts from "@/pages/adviser/products";
+import AdviserFcsExplainer from "@/pages/adviser/fcs-explainer";
 import AdviserInstructions from "@/pages/adviser/instructions";
 import AdviserWorkflow from "@/pages/adviser/workflow";
 import AdviserBusiness from "@/pages/adviser/business";
@@ -87,6 +88,7 @@ function AdviserApp() {
         <Route path="/adviser/clients/:id/holdings" component={AdviserClientHoldings} />
         <Route path="/adviser/clients/:id" component={AdviserClientDetail} />
         <Route path="/adviser/products" component={AdviserProducts} />
+        <Route path="/adviser/fcs-explainer" component={AdviserFcsExplainer} />
         <Route path="/adviser/instructions" component={AdviserInstructions} />
         <Route path="/adviser/tasks" component={AdviserTasks} />
         <Route path="/adviser/reports" component={AdviserReports} />

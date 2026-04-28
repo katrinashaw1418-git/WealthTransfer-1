@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Building2, AlertCircle, FileSignature, Filter as FilterIcon, X } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  Building2,
+  AlertCircle,
+  FileSignature,
+  Filter as FilterIcon,
+  X,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldX,
+} from "lucide-react";
 import {
   RISK_PROFILE_KEYS,
   RISK_PROFILE_LABELS,
@@ -21,6 +36,10 @@ import {
   riskProfileRank,
   toKnownRiskProfile,
 } from "@shared/risk-profiles";
+import {
+  detectCashDepositProtection,
+  FCS_CAP_PER_ADI_AUD,
+} from "@shared/cash-deposit-protection";
 
 interface AdviserProduct {
   id: number;
@@ -134,6 +153,44 @@ const DEFAULT_FILTERS = {
   sort: "default" as SortBy,
 };
 
+// Lightweight slice of /api/adviser/clients used by the client-context picker.
+// The full row contains many more fields; we only need a label and an id.
+interface AdviserClientPickerRow {
+  userId: number;
+  email: string;
+  firstName: string;
+  lastName: string;
+}
+interface AdviserClientsResponse {
+  asOfDate: string;
+  clients: AdviserClientPickerRow[];
+}
+
+// Lightweight slice of /api/adviser/clients/:id/holdings used to compute the
+// per-product cash-deposit balance attributable to this client. Active rows
+// only are counted toward the FCS cap (matured / withdrawn no longer sit at
+// the ADI).
+interface AdviserClientHoldingRow {
+  productId: number;
+  productCategory: string;
+  investedAmount: string;
+  currentValue: string;
+  status: string;
+}
+
+const NO_CLIENT = "__none__";
+
+function clientPickerLabel(row: AdviserClientPickerRow): string {
+  const name = `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim();
+  return name.length > 0 ? `${name} (${row.email})` : row.email;
+}
+
+const fcsCapFormatter = new Intl.NumberFormat("en-AU", {
+  style: "currency",
+  currency: "AUD",
+  maximumFractionDigits: 0,
+});
+
 export default function AdviserProducts() {
   const [, setLocation] = useLocation();
   const products = useQuery<AdviserProduct[]>({
@@ -154,6 +211,47 @@ export default function AdviserProducts() {
     const n = Number(raw);
     return Number.isFinite(n) && n > 0 ? n : null;
   }, []);
+
+  // ---- Client-context picker for FCS coverage -----------------------------
+  // Fetched lazily so the page still renders for advisers with zero linked
+  // clients (the picker just shows "no clients linked"). The holdings query
+  // below is gated on a real selection so we never make a per-client call
+  // when the adviser is browsing the shelf without a client in mind.
+  // When the page is opened with `?clientUserId=…` (sticky-client mode above)
+  // we pre-select that same client so the FCS coverage hints render without
+  // the adviser having to re-pick from the dropdown.
+  const [selectedClientId, setSelectedClientId] = useState<string>(
+    stickyClientUserId !== null ? String(stickyClientUserId) : NO_CLIENT,
+  );
+
+  const clientsQuery = useQuery<AdviserClientsResponse>({
+    queryKey: ["/api/adviser/clients"],
+    staleTime: 60_000,
+  });
+  const linkedClients = clientsQuery.data?.clients ?? [];
+
+  const holdingsQuery = useQuery<AdviserClientHoldingRow[]>({
+    queryKey: ["/api/adviser/clients", selectedClientId, "holdings"],
+    enabled: selectedClientId !== NO_CLIENT,
+    staleTime: 30_000,
+  });
+
+  // Map productId -> client's currently invested amount (AUD) for active
+  // cash_deposit rows only. Used as the per-ADI FCS-cap consumption hint
+  // (each ADI-issued product on this shelf is treated as one ADI for cap
+  // purposes — there is no separate adi_id field today).
+  const clientCashByProductId = useMemo(() => {
+    const map = new Map<number, number>();
+    if (selectedClientId === NO_CLIENT) return map;
+    for (const h of holdingsQuery.data ?? []) {
+      if (h.productCategory !== "cash_deposit") continue;
+      if (h.status !== "active") continue;
+      const n = Number(h.investedAmount);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      map.set(h.productId, (map.get(h.productId) ?? 0) + n);
+    }
+    return map;
+  }, [holdingsQuery.data, selectedClientId]);
 
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const filtersChanged =
@@ -260,6 +358,119 @@ export default function AdviserProducts() {
     setLocation(`/adviser/instructions?${params.toString()}`);
   };
 
+  const renderFcsBadge = (p: AdviserProduct) => {
+    if (p.category !== "cash_deposit") return null;
+    const protection = detectCashDepositProtection(p.structure);
+    if (protection.isAdi && protection.isFcsProtected) {
+      return (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge
+                variant="outline"
+                className="text-[10px] gap-1 border-emerald-300 bg-emerald-50 text-emerald-800 whitespace-nowrap"
+                data-testid={`badge-fcs-${p.id}`}
+              >
+                <ShieldCheck className="h-3 w-3" />
+                ADI · FCS-protected
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs text-xs">
+              ADI-issued deposit. Covered by the Australian Financial Claims
+              Scheme up to {fcsCapFormatter.format(FCS_CAP_PER_ADI_AUD)} per
+              ADI per account-holder.
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      );
+    }
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge
+              variant="outline"
+              className="text-[10px] gap-1 border-amber-300 bg-amber-50 text-amber-800 whitespace-nowrap"
+              data-testid={`badge-fcs-${p.id}`}
+            >
+              <ShieldX className="h-3 w-3" />
+              Not FCS-protected
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs text-xs">
+            Not an ADI deposit. Returns and capital are not covered by the
+            Financial Claims Scheme — issuer / market risk applies.
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  };
+
+  const renderFcsCoverage = (p: AdviserProduct) => {
+    if (p.category !== "cash_deposit") return null;
+    if (selectedClientId === NO_CLIENT) return null;
+    const protection = detectCashDepositProtection(p.structure);
+    if (!protection.isFcsProtected) return null;
+    if (holdingsQuery.isLoading) {
+      return (
+        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs text-slate-600">
+          Loading client FCS coverage…
+        </div>
+      );
+    }
+    const used = clientCashByProductId.get(p.id) ?? 0;
+    const remaining = Math.max(0, FCS_CAP_PER_ADI_AUD - used);
+    const pct = Math.min(100, (used / FCS_CAP_PER_ADI_AUD) * 100);
+    const overCap = used >= FCS_CAP_PER_ADI_AUD;
+    const nearCap = !overCap && pct >= 80;
+    const tone = overCap
+      ? "border-red-300 bg-red-50 text-red-800"
+      : nearCap
+        ? "border-amber-300 bg-amber-50 text-amber-800"
+        : "border-emerald-200 bg-emerald-50 text-emerald-800";
+    const Icon = overCap || nearCap ? ShieldAlert : ShieldCheck;
+    const barColour = overCap
+      ? "bg-red-500"
+      : nearCap
+        ? "bg-amber-500"
+        : "bg-emerald-500";
+    return (
+      <div
+        className={`mt-3 rounded-md border p-2 text-xs ${tone}`}
+        data-testid={`fcs-coverage-${p.id}`}
+      >
+        <div className="flex items-start gap-2">
+          <Icon className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <div className="font-medium">
+              FCS coverage on this ADI
+            </div>
+            <div className="mt-0.5 tabular-nums">
+              {fcsCapFormatter.format(used)} of{" "}
+              {fcsCapFormatter.format(FCS_CAP_PER_ADI_AUD)} used
+              {overCap ? (
+                <span className="ml-1 font-semibold">
+                  — cap reached, additional deposits would be uncovered.
+                </span>
+              ) : (
+                <span className="ml-1">
+                  · {fcsCapFormatter.format(remaining)} of cover remaining.
+                </span>
+              )}
+            </div>
+            <div className="mt-1.5 h-1.5 w-full rounded bg-white/70 overflow-hidden">
+              <div
+                className={`h-full ${barColour}`}
+                style={{ width: `${pct}%` }}
+                data-testid={`fcs-coverage-bar-${p.id}`}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderCard = (p: AdviserProduct) => (
     <Card key={p.id} data-testid={`card-product-${p.id}`} className="flex flex-col">
       <CardHeader className="pb-3">
@@ -292,6 +503,7 @@ export default function AdviserProducts() {
               {categoryLabel(p.subCategory)}
             </Badge>
           )}
+          {renderFcsBadge(p)}
         </div>
         {p.investmentStrategy && (
           <p
@@ -352,6 +564,7 @@ export default function AdviserProducts() {
             </dd>
           </div>
         </dl>
+        {renderFcsCoverage(p)}
         <div className="mt-4 pt-3 border-t border-gray-100">
           <Button
             type="button"
@@ -388,9 +601,74 @@ export default function AdviserProducts() {
           return ranges shown are target ranges only and are not guarantees. Actual returns may be
           materially lower and capital loss is possible. See the relevant PDS / IM before
           recommending. Digital-asset strategies are a specialist sleeve and require additional
-          suitability assessment.
+          suitability assessment. Cash deposits are FCS-protected only up to{" "}
+          {fcsCapFormatter.format(FCS_CAP_PER_ADI_AUD)} per ADI per
+          account-holder —{" "}
+          <Link
+            href="/adviser/fcs-explainer"
+            className="font-medium text-blue-700 underline hover:text-blue-900"
+            data-testid="link-fcs-explainer"
+          >
+            read the FCS explainer
+          </Link>
+          .
         </p>
       </div>
+
+      <Card data-testid="client-context-picker">
+        <CardContent className="pt-4">
+          <div className="flex flex-col md:flex-row md:items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                Client context for FCS coverage
+              </label>
+              <p className="text-xs text-gray-500">
+                Pick a linked client to see how much of each ADI's{" "}
+                {fcsCapFormatter.format(FCS_CAP_PER_ADI_AUD)} FCS cap their
+                existing cash deposits already use.
+              </p>
+            </div>
+            <div className="md:w-72">
+              <Select
+                value={selectedClientId}
+                onValueChange={(v) => setSelectedClientId(v)}
+                disabled={clientsQuery.isLoading}
+              >
+                <SelectTrigger data-testid="select-client-context">
+                  <SelectValue
+                    placeholder={
+                      clientsQuery.isLoading
+                        ? "Loading clients…"
+                        : "No client selected"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_CLIENT}>No client selected</SelectItem>
+                  {linkedClients.map((c) => (
+                    <SelectItem
+                      key={c.userId}
+                      value={String(c.userId)}
+                      data-testid={`client-option-${c.userId}`}
+                    >
+                      {clientPickerLabel(c)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {selectedClientId !== NO_CLIENT && holdingsQuery.isError && (
+            <p
+              className="mt-2 text-xs text-red-600"
+              data-testid="client-context-error"
+            >
+              Could not load this client's deposits. Coverage figures are
+              hidden.
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       <Card data-testid="products-filter-bar">
         <CardContent className="pt-4">
