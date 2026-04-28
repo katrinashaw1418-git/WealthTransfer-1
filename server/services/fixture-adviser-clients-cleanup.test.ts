@@ -2,6 +2,11 @@
 // the real dev DB. Seeds three adviser↔client pairs (one fixture-on-real,
 // one fixture-on-fixture, one real-on-real) and asserts the sweep flips
 // only the first, writes one audit row per flip, and is idempotent.
+//
+// Task #400 additions: also exercises the burst-alert threshold check —
+// a pure unit test for `evaluateFixtureCleanupBurstAlert` plus an
+// integration test that injects a stub `notifyOperator` to assert the
+// cron pages on-call when the count threshold trips.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, inArray, desc } from "drizzle-orm";
@@ -9,10 +14,17 @@ import { and, eq, inArray, desc } from "drizzle-orm";
 import { db } from "../db";
 import { adviserClients, auditLogs, users } from "@shared/schema";
 import {
+  FIXTURE_ADVISER_CLIENTS_CLEANUP_ALERT_SOURCE,
   deactivateFixtureAdviserClientLinks,
+  evaluateFixtureCleanupBurstAlert,
   findFixtureAdviserClientLinks,
   formatDeactivateSummary,
+  scanFixtureAdviserClientLinks,
 } from "./fixture-adviser-clients-cleanup";
+import type {
+  OperatorAlert,
+  OperatorAlertResult,
+} from "./operator-alerts";
 
 const TAG = "task347-cleanup-test";
 const REAL_ADVISER_EMAIL = `${TAG}-real-adviser@example.invalid`;
@@ -268,5 +280,202 @@ describe("deactivateFixtureAdviserClientLinks — integration", () => {
         ),
       );
     expect(auditsAfterRerun.length).toBe(audits.length);
+  });
+
+  // ===========================================================================
+  // Task #400 — burst-alert behaviour
+  // ===========================================================================
+
+  it("scanFixtureAdviserClientLinks reports total active links alongside the offending subset", async () => {
+    const scan = await scanFixtureAdviserClientLinks();
+    // The dev DB carries other links from prior runs; just assert sanity:
+    // total >= offending count, and total >= our seeded real-on-real link
+    // (which is active and should always be counted).
+    expect(scan.totalActiveLinks).toBeGreaterThanOrEqual(scan.offending.length);
+    expect(scan.totalActiveLinks).toBeGreaterThanOrEqual(1);
+  });
+
+  it("evaluateFixtureCleanupBurstAlert trips on the count threshold", () => {
+    const decision = evaluateFixtureCleanupBurstAlert(50, 10_000, {
+      minCount: 25,
+      minPercent: 100, // disable percent rule
+    });
+    expect(decision.shouldAlert).toBe(true);
+    expect(decision.reason).toContain("deactivated=50 >= minCount=25");
+    expect(decision.percent).toBeCloseTo(0.5, 5);
+  });
+
+  it("evaluateFixtureCleanupBurstAlert trips on the percent threshold", () => {
+    const decision = evaluateFixtureCleanupBurstAlert(6, 100, {
+      minCount: 1_000_000, // disable count rule
+      minPercent: 5,
+    });
+    expect(decision.shouldAlert).toBe(true);
+    expect(decision.reason).toContain("percent=6.00% >= minPercent=5%");
+  });
+
+  it("evaluateFixtureCleanupBurstAlert stays quiet when neither threshold is breached", () => {
+    const decision = evaluateFixtureCleanupBurstAlert(2, 1_000, {
+      minCount: 25,
+      minPercent: 5,
+    });
+    expect(decision.shouldAlert).toBe(false);
+    expect(decision.reason).toBeNull();
+  });
+
+  it("evaluateFixtureCleanupBurstAlert never alerts on a no-op sweep", () => {
+    const decision = evaluateFixtureCleanupBurstAlert(0, 0, {
+      minCount: 0,
+      minPercent: 0,
+    });
+    expect(decision.shouldAlert).toBe(false);
+    expect(decision.percent).toBe(0);
+  });
+
+  it("evaluateFixtureCleanupBurstAlert avoids percent false-positive when total is 0", () => {
+    // total=0 happens on a fresh DB or when every active link is itself
+    // about to be deactivated. The percent rule is intentionally skipped
+    // so we don't page on a 100% sweep of an empty universe.
+    const decision = evaluateFixtureCleanupBurstAlert(3, 0, {
+      minCount: 100, // disable count rule
+      minPercent: 1,
+    });
+    expect(decision.shouldAlert).toBe(false);
+  });
+
+  it("deactivateFixtureAdviserClientLinks dispatches a burst alert when the count threshold trips, with a UTC-date subjectId", async () => {
+    // Re-seed: the previous "apply flips" test left our fixture-on-real
+    // link inactive, so re-flip it before this test exercises the alert.
+    await db
+      .update(adviserClients)
+      .set({ isActive: true, unlinkedAt: null })
+      .where(eq(adviserClients.id, ids.fixtureOnRealLinkId));
+
+    const calls: OperatorAlert[] = [];
+    const stubNotify = async (
+      alert: OperatorAlert,
+    ): Promise<OperatorAlertResult> => {
+      calls.push(alert);
+      return {
+        channelsAttempted: ["log"],
+        outcomes: [{ channel: "log", status: "success", durationMs: 0 }],
+        channels: ["log"],
+        alertId: 1,
+        deliveryStatus: "delivered",
+        occurrences: 1,
+        dedupeKey: "stub",
+      };
+    };
+
+    // minCount=1 forces the alert to trip on our single seeded link
+    // regardless of whatever else the dev DB has lying around.
+    const summary = await deactivateFixtureAdviserClientLinks({
+      dryRun: false,
+      trigger: "test:task-400-burst",
+      alertThresholds: { minCount: 1, minPercent: 100 },
+      notifyOperator: stubNotify,
+    });
+
+    expect(summary.deactivated).toBeGreaterThanOrEqual(1);
+    expect(summary.burstAlert.shouldAlert).toBe(true);
+    expect(summary.burstAlertDispatched).toBe(true);
+    expect(calls.length).toBe(1);
+    const alert = calls[0]!;
+    expect(alert.source).toBe(FIXTURE_ADVISER_CLIENTS_CLEANUP_ALERT_SOURCE);
+    expect(alert.severity).toBe("alert");
+    expect(alert.kind).toBe(FIXTURE_ADVISER_CLIENTS_CLEANUP_ALERT_SOURCE);
+    expect(alert.subjectType).toBe("cron-tick-utc-date");
+    expect(typeof alert.subjectId).toBe("string");
+    expect((alert.subjectId as string)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const details = alert.details as Record<string, unknown>;
+    expect(details.deactivated).toBe(summary.deactivated);
+    expect(details.totalActiveLinks).toBe(summary.totalActiveLinks);
+    expect(details.minCountThreshold).toBe(1);
+    expect(Array.isArray(details.sampleLinkIds)).toBe(true);
+    expect(typeof details.remediation).toBe("string");
+    expect(typeof details.reason).toBe("string");
+    expect(formatDeactivateSummary(summary)).toContain(
+      "BURST_ALERT_DISPATCHED",
+    );
+  });
+
+  it("deactivateFixtureAdviserClientLinks does NOT page when both thresholds are loose enough to absorb the sweep", async () => {
+    // Re-seed again: the previous test's apply step left our link
+    // inactive. Flip it back so this assertion covers both "alert below
+    // count threshold" AND "alert below percent threshold" in one go.
+    await db
+      .update(adviserClients)
+      .set({ isActive: true, unlinkedAt: null })
+      .where(eq(adviserClients.id, ids.fixtureOnRealLinkId));
+
+    const calls: OperatorAlert[] = [];
+    const stubNotify = async (
+      alert: OperatorAlert,
+    ): Promise<OperatorAlertResult> => {
+      calls.push(alert);
+      return {
+        channelsAttempted: ["log"],
+        outcomes: [{ channel: "log", status: "success", durationMs: 0 }],
+        channels: ["log"],
+        alertId: 1,
+        deliveryStatus: "delivered",
+        occurrences: 1,
+        dedupeKey: "stub",
+      };
+    };
+
+    const summary = await deactivateFixtureAdviserClientLinks({
+      dryRun: false,
+      trigger: "test:task-400-quiet",
+      // 1_000_000 absolute + 100% relative = guaranteed quiet.
+      alertThresholds: { minCount: 1_000_000, minPercent: 100 },
+      notifyOperator: stubNotify,
+    });
+
+    expect(summary.burstAlert.shouldAlert).toBe(false);
+    expect(summary.burstAlertDispatched).toBe(false);
+    expect(calls.length).toBe(0);
+  });
+
+  it("deactivateFixtureAdviserClientLinks records the would-fire decision in dry-run without paging", async () => {
+    // Same re-seed dance.
+    await db
+      .update(adviserClients)
+      .set({ isActive: true, unlinkedAt: null })
+      .where(eq(adviserClients.id, ids.fixtureOnRealLinkId));
+
+    const calls: OperatorAlert[] = [];
+    const stubNotify = async (
+      alert: OperatorAlert,
+    ): Promise<OperatorAlertResult> => {
+      calls.push(alert);
+      return {
+        channelsAttempted: ["log"],
+        outcomes: [{ channel: "log", status: "success", durationMs: 0 }],
+        channels: ["log"],
+        alertId: 1,
+        deliveryStatus: "delivered",
+        occurrences: 1,
+        dedupeKey: "stub",
+      };
+    };
+
+    const summary = await deactivateFixtureAdviserClientLinks({
+      dryRun: true,
+      trigger: "test:task-400-dryrun",
+      alertThresholds: { minCount: 1, minPercent: 100 },
+      notifyOperator: stubNotify,
+    });
+
+    expect(summary.dryRun).toBe(true);
+    expect(summary.deactivated).toBe(0);
+    // Pre-sweep decision was based on offending count, which IS >= 1.
+    expect(summary.burstAlert.shouldAlert).toBe(true);
+    // But we're in dry-run, so the dispatcher must NOT have been called.
+    expect(summary.burstAlertDispatched).toBe(false);
+    expect(calls.length).toBe(0);
+    expect(formatDeactivateSummary(summary)).toContain(
+      "BURST_ALERT_WOULD_FIRE",
+    );
   });
 });
