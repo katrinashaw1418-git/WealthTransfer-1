@@ -351,6 +351,15 @@ const EXISTING_SCRIPTS: Array<{
 const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   "scripts/test-fee-insufficient-funds.ts",
   "scripts/test-no-synthetic-portfolio-data.ts",
+  // Task #378 — unit tests for the rebalancing-benchmark resolver
+  // functions (resolveBenchmarkForRiskTolerance,
+  // resolveBenchmarkForRiskProfileRow, computeRebalancingGap) that drive
+  // the rebalancing-gap number on /api/portfolio/real-metrics and
+  // /api/ai-recommendations/generate. The script is purely static (no DB
+  // writes), so the surrounding leak-gate snapshot trivially records zero
+  // drift — same shape as the test-no-synthetic-portfolio-data.ts entry
+  // immediately above.
+  "scripts/test-rebalancing-benchmark.ts",
   // Task #209 — regression test for the per-scenario platform-leg
   // invariant gate (Task #202). Injects a deliberate platform-only
   // ledger entry under a transaction NOT owned by the gate's fixture

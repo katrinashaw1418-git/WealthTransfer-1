@@ -33,6 +33,13 @@ SCRIPTS=(
   scripts/test-task-35-suppression.ts
   scripts/test-fee-insufficient-funds.ts
   scripts/test-no-synthetic-portfolio-data.ts
+  # Task #378 — pure unit tests for the rebalancing-benchmark resolver
+  # functions (resolveBenchmarkForRiskTolerance,
+  # resolveBenchmarkForRiskProfileRow, computeRebalancingGap). The script
+  # makes no DB writes so the surrounding leak-gate snapshot trivially
+  # records zero drift; wiring it here keeps the rebalancing-gap math
+  # gated at PR time alongside the other static safety scripts.
+  scripts/test-rebalancing-benchmark.ts
   # Task #216 — newer safety tests, audited and added to the gate so any
   # future regression into the same try/finally-cleanup leak pattern
   # fixed by Tasks #158 and #187 is caught at PR time.
