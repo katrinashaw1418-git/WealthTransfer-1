@@ -2936,3 +2936,98 @@ export const systemSettings = pgTable("system_settings", {
 }));
 
 export type SystemSettings = typeof systemSettings.$inferSelect;
+
+// =============================================================================
+// TASK #373 — KYC & compliance centre view shape
+// -----------------------------------------------------------------------------
+// View type returned by `GET /api/compliance/overview` and consumed by the
+// client `/compliance` page. Not a persisted table — it is derived from the
+// user's row (`kycStatus`, `userTier`, `kycUpdatedAt`, `createdAt`), the
+// latest fact-find / risk-profile rows, and the wealth onboarding application
+// (if any). Centralised here so the client and server stay in lock-step.
+// =============================================================================
+
+export type ComplianceStepStatus =
+  | "completed"
+  | "in_progress"
+  | "review"
+  | "action_required"
+  | "locked"
+  | "rejected";
+
+export interface ComplianceStep {
+  key: string;
+  status: ComplianceStepStatus;
+  // Human-readable line shown under the step title (e.g. "Completed 2 Aug 2025").
+  description: string;
+  // ISO timestamp the step reached its current status, when known.
+  completedAt: string | null;
+}
+
+export interface ComplianceTierPill {
+  // e.g. "Tier 1 verified", "Tier 2 wholesale"
+  label: string;
+  // tone is mapped to colour classes by the UI
+  tone: "blue" | "green" | "amber" | "gray";
+}
+
+export interface ComplianceWholesalePill {
+  // null when the user is not on a wholesale upgrade path (or already wholesale).
+  label: string | null;
+  state: "not_started" | "in_progress" | "completed" | "completed_wholesale";
+}
+
+export interface ComplianceProgress {
+  percent: number;            // 0-100, rounded
+  complete: number;
+  actionRequired: number;
+  underReview: number;
+  total: number;
+}
+
+export interface ComplianceSumsubBlock {
+  applicantId: string;        // e.g. "AMAX-W-00042" (derived from user.id)
+  createdAt: string;          // user.createdAt (ISO)
+  lastVerifiedAt: string | null; // kycUpdatedAt when kycStatus = verified, else null
+  // Whether the Sumsub session is "Session active" (still working through it),
+  // "Verified", or "Not started".
+  sessionState: "session_active" | "verified" | "not_started" | "rejected";
+  steps: {
+    identity: ComplianceStep;
+    liveness: ComplianceStep;
+    amlPep: ComplianceStep;
+    sourceOfFunds: ComplianceStep;
+  };
+}
+
+export interface ComplianceAmaxBlock {
+  riskAssessment: ComplianceStep;
+  wholesaleCertification: ComplianceStep;
+}
+
+export interface ComplianceClassification {
+  // e.g. "Tier 1 — Verified"
+  currentTierLabel: string;
+  // ISO timestamp of next required re-verification (kycUpdatedAt + 1y when verified).
+  reverificationDueAt: string | null;
+  // Days remaining until reverificationDueAt (negative if overdue, null if not applicable).
+  remainingDays: number | null;
+  // Plain-English description of the wholesale upgrade state for the footer line.
+  wholesaleUpgradeNote: string;
+}
+
+export interface ComplianceOverview {
+  tier: ComplianceTierPill;
+  wholesaleUpgrade: ComplianceWholesalePill;
+  progress: ComplianceProgress;
+  sumsub: ComplianceSumsubBlock;
+  amax: ComplianceAmaxBlock;
+  classification: ComplianceClassification;
+}
+
+// Stable, deterministic Sumsub-style applicant identifier derived from the
+// internal user id. Sumsub is not yet integrated in production — once it is,
+// this helper becomes a fallback for accounts that pre-date the integration.
+export function deriveSumsubApplicantId(userId: number): string {
+  return `AMAX-W-${String(userId).padStart(5, "0")}`;
+}

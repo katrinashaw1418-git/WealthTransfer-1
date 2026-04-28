@@ -25,6 +25,7 @@ import {
   riskProfiles,
   normalizeEmail,
 } from "@shared/schema";
+import { buildComplianceOverview } from "./services/compliance-overview";
 import { getRecommendation } from "@shared/recommendation-engine";
 import { scoreRiskProfile, type RiskAnswers } from "./services/risk-scoring";
 import { sendVerificationEmail, emailConfigured } from "./email";
@@ -4629,6 +4630,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (error.status) return res.status(error.status).json({ error: error.message });
       console.error("Get latest fact find error:", error);
       res.status(500).json({ error: "Failed to fetch fact find" });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task #373 — Client KYC & compliance centre view.
+  // Returns a single derived view that the `/compliance` page renders end to
+  // end (header pills, overall progress counter, sumsub steps, AMAX steps,
+  // sumsub footer audit strip, wholesale classification footer). Building this
+  // view server-side keeps all of the "what counts as completed / under
+  // review / action required" logic in one place.
+  // ---------------------------------------------------------------------------
+  app.get("/api/compliance/overview", async (req, res) => {
+    try {
+      const { userId } = requireAuth(req);
+      const overview = await buildComplianceOverview(userId);
+      if (!overview) return res.status(404).json({ error: "User not found" });
+      res.json(overview);
+    } catch (error: any) {
+      if (error?.status) return res.status(error.status).json({ error: error.message });
+      console.error("Compliance overview error:", error);
+      res.status(500).json({ error: "Failed to load compliance overview" });
     }
   });
 
