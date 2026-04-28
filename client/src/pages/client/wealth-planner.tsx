@@ -38,6 +38,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { apiFetch } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
 // Task #318 — same s912G policy text the adviser surface and the DELETE
@@ -132,67 +133,88 @@ function computeRequiredCagr(
   return { value: rate * 100, mode: "cagr" };
 }
 
+// Task #115 — fire the download route, save the streamed bytes locally
+// using the original filename. The server already sets
+// `Content-Disposition: attachment; filename="..."` but anchor downloads
+// across browsers are flakier than driving the filename ourselves with the
+// row metadata we already have in cache. apiFetch handles auth + 401 redirect
+// + non-OK rejection (which we translate into a friendly toast).
+async function downloadClientDocument(
+  documentId: number,
+  fileName: string,
+): Promise<void> {
+  const res = await apiFetch(`/api/client/documents/${documentId}/download`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName || "document";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    // Release the object URL on the next tick so the browser has time to
+    // start the actual download before we revoke the underlying blob.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+}
+
+// Translate the `${status}: ${body}` Error apiFetch throws into something
+// the client can read in a toast. The body is usually a JSON envelope like
+// `{"error":"Document not found"}` so we try to pull the inner message out;
+// otherwise we fall back to the raw error message.
+function explainDownloadError(err: unknown): {
+  title: string;
+  description: string;
+} {
+  const raw = err instanceof Error ? err.message : "Unexpected error";
+  const match = raw.match(/^(\d+):\s*(.+)$/);
+  let status: number | null = null;
+  let body = raw;
+  if (match) {
+    status = Number(match[1]);
+    body = match[2];
+  }
+  let inner = body;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "error" in parsed &&
+      typeof (parsed as { error: unknown }).error === "string"
+    ) {
+      inner = (parsed as { error: string }).error;
+    }
+  } catch {
+    // body wasn't JSON — keep as-is
+  }
+  if (status === 404) {
+    return { title: "Document not available", description: inner };
+  }
+  return { title: "Could not download document", description: inner };
+}
+
 export default function ClientWealthPlanner() {
+  const { toast } = useToast();
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
   const objectives = useQuery<{ items: ClientObjective[] }>({
     queryKey: ["/api/client/objectives"],
   });
   const documents = useQuery<{ items: ClientDocument[] }>({
     queryKey: ["/api/client/documents"],
   });
-  const { toast } = useToast();
-  // Per-row "downloading…" state. A Set rather than a single id so that
-  // clicking Download on row B while row A is still in flight does NOT
-  // erase row A's spinner — both rows stay correctly marked until each
-  // download settles.
-  const [downloadingIds, setDownloadingIds] = useState<Set<number>>(
-    () => new Set(),
-  );
-  const markDownloading = (id: number, on: boolean) =>
-    setDownloadingIds((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(id);
-      else next.delete(id);
-      return next;
-    });
 
-  // Task #113 — the download endpoint requires a Bearer token, so a plain
-  // <a href> would 401. We fetch the bytes with the same auth header the
-  // rest of the app uses, then trigger a save via a transient blob URL.
-  // The server resolves the storageKey to the underlying object-storage
-  // bytes; the browser never sees the storageKey at all.
   const handleDownload = async (doc: ClientDocument) => {
-    markDownloading(doc.id, true);
+    setDownloadingId(doc.id);
     try {
-      const token =
-        (typeof localStorage !== "undefined" &&
-          localStorage.getItem("amax_jwt")) ||
-        "";
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch(`/api/client/documents/${doc.id}/download`, {
-        headers,
-      });
-      if (!res.ok) {
-        const text = (await res.text()) || res.statusText;
-        throw new Error(`${res.status}: ${text}`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = doc.fileName || `document-${doc.id}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: any) {
-      toast({
-        title: "Could not download document",
-        description: String(err?.message ?? "Unexpected error"),
-        variant: "destructive",
-      });
+      await downloadClientDocument(doc.id, doc.fileName);
+    } catch (err) {
+      const { title, description } = explainDownloadError(err);
+      toast({ title, description, variant: "destructive" });
     } finally {
-      markDownloading(doc.id, false);
+      setDownloadingId(null);
     }
   };
 
@@ -558,15 +580,16 @@ export default function ClientWealthPlanner() {
                             </TableCell>
                             <TableCell className="text-right">
                               <Button
-                                variant="ghost"
+                                variant="outline"
                                 size="sm"
-                                disabled={downloadingIds.has(d.id)}
                                 onClick={() => handleDownload(d)}
+                                disabled={downloadingId === d.id}
                                 data-testid={`button-download-document-${d.id}`}
                                 aria-label={`Download ${d.fileName}`}
+                                title={`Download ${d.fileName}`}
                               >
                                 <Download className="h-4 w-4 mr-1" />
-                                {downloadingIds.has(d.id)
+                                {downloadingId === d.id
                                   ? "Downloading…"
                                   : "Download"}
                               </Button>

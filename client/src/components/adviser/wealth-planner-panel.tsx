@@ -3,7 +3,13 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { queryClient, apiFetch, apiRequest } from "@/lib/queryClient";
+import {
+  queryClient,
+  apiFetch,
+  apiRequest,
+  apiUpload,
+  ApiUploadError,
+} from "@/lib/queryClient";
 import {
   Card,
   CardContent,
@@ -621,20 +627,84 @@ function ObjectiveDialog({
 // Document upload form
 // =============================================================================
 
-// Task #113 — the dialog now wraps a real multipart upload to
-// `/api/adviser/client-documents/upload`. The browser file picker drives the
-// flow: the picked File supplies the storageKey-bearing payload (the server
-// computes the storageKey itself and returns it), the mimeType, and the
-// fileSizeBytes — none of those are typed in by hand any more. The form only
-// captures the metadata the server CAN'T derive from the file: which
-// document type it is, which advice record (if any) to pin it to, and an
-// optional description.
+// Task #115 — the dialog now performs a real multipart upload to
+// `POST /api/adviser/client-documents/upload`. The server computes the
+// storageKey, byte length and detected mime type itself (the legacy JSON
+// route that took a hand-typed storageKey is no longer used here), so the
+// schema only carries the metadata fields the route accepts:
+//   - clientId (injected from the panel props)
+//   - documentType (required enum)
+//   - adviceRecordId (optional — "none" means unpinned)
+//   - description (optional)
+// The file itself lives in component state because react-hook-form's
+// register() doesn't play nicely with file inputs across browsers.
 const documentFormSchema = z.object({
   documentType: z.enum(CLIENT_DOCUMENT_TYPES),
   adviceRecordId: z.string().optional(),
   description: z.string().max(2000).optional(),
 });
 type DocumentForm = z.infer<typeof documentFormSchema>;
+
+// File-picker hint that mirrors the server's default allow-list in
+// server/services/upload-security.ts. The `accept` attribute is only a
+// hint — the server still enforces the real allow-list and rejects
+// anything outside it with UPLOAD_MIME_REJECTED / UPLOAD_MIME_MISMATCH.
+const UPLOAD_ACCEPT_HINT = [
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+  "image/tiff",
+  "text/plain",
+  "text/csv",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+].join(",");
+
+// Task #115 — translate the structured upload error codes
+// (server/services/upload-security.ts + advice-write-gate.ts) into toast
+// titles a non-technical adviser can act on. Anything we don't recognise
+// falls through to a generic "Could not upload document" with the raw
+// server message as the description so we never swallow a real error.
+function explainUploadError(err: unknown): {
+  title: string;
+  description: string;
+} {
+  if (err instanceof ApiUploadError) {
+    const description = err.message || "Unexpected error";
+    switch (err.code) {
+      case "UPLOAD_TOO_LARGE":
+        return { title: "File is too large", description };
+      case "UPLOAD_MIME_REJECTED":
+        return { title: "File type is not allowed", description };
+      case "UPLOAD_MIME_MISMATCH":
+        return {
+          title: "File contents don't match the file type",
+          description,
+        };
+      case "UPLOAD_REJECTED":
+        return { title: "Upload was rejected", description };
+      default:
+        if (err.status === 423) {
+          return {
+            title: "Advice record is under review",
+            description,
+          };
+        }
+        return { title: "Could not upload document", description };
+    }
+  }
+  const description =
+    err instanceof Error ? err.message : "Unexpected error";
+  return { title: "Could not upload document", description };
+}
 
 function DocumentDialog({
   open,
@@ -648,7 +718,7 @@ function DocumentDialog({
   adviceRecords: AdviceRecordOption[];
 }) {
   const { toast } = useToast();
-  const [pickedFile, setPickedFile] = useState<File | null>(null);
+  const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const form = useForm<DocumentForm>({
     resolver: zodResolver(documentFormSchema),
@@ -659,11 +729,11 @@ function DocumentDialog({
     },
   });
 
-  // Reset the picked file whenever the dialog is closed so re-opening for
-  // another upload doesn't silently retain a previously-chosen file.
+  // Reset transient state every time the dialog opens so a re-opened dialog
+  // doesn't show last upload's file or error.
   useEffect(() => {
-    if (!open) {
-      setPickedFile(null);
+    if (open) {
+      setFile(null);
       setFileError(null);
     }
   }, [open]);
@@ -681,43 +751,23 @@ function DocumentDialog({
 
   const create = useMutation({
     mutationFn: async (values: DocumentForm) => {
-      if (!pickedFile) {
+      if (!file) {
         throw new Error("Pick a file to upload");
       }
-      // Multipart upload: the server's `buildUploadMiddleware` reads the
-      // file off the `file` field; everything else rides on form fields.
-      // The route returns the freshly inserted clientDocument row including
-      // the server-computed storageKey, so no second POST is needed.
       const fd = new FormData();
-      fd.append("file", pickedFile, pickedFile.name);
+      fd.append("file", file, file.name);
       fd.append("clientId", String(clientId));
       fd.append("documentType", values.documentType);
-      fd.append("fileName", pickedFile.name);
-      if (pickedFile.type) fd.append("mimeType", pickedFile.type);
       if (values.adviceRecordId && values.adviceRecordId !== "none") {
         fd.append("adviceRecordId", values.adviceRecordId);
       }
       if (values.description && values.description.trim() !== "") {
         fd.append("description", values.description.trim());
       }
-      // We deliberately do NOT use apiRequest() here — it forces a JSON
-      // Content-Type which would defeat multer's multipart parser. We DO
-      // forward the bearer token the same way the rest of the app does.
-      const token =
-        (typeof localStorage !== "undefined" &&
-          localStorage.getItem("amax_jwt")) ||
-        "";
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch("/api/adviser/client-documents/upload", {
-        method: "POST",
-        headers,
-        body: fd,
-      });
-      if (!res.ok) {
-        const text = (await res.text()) || res.statusText;
-        throw new Error(`${res.status}: ${text}`);
-      }
+      const res = await apiUpload(
+        "/api/adviser/client-documents/upload",
+        fd,
+      );
       return res.json();
     },
     onSuccess: () => {
@@ -727,16 +777,26 @@ function DocumentDialog({
       toast({ title: "Document uploaded" });
       onOpenChange(false);
       form.reset();
-      setPickedFile(null);
+      setFile(null);
       setFileError(null);
     },
-    onError: (err: any) => {
+    onError: (err: unknown) => {
+      const { title, description } = explainUploadError(err);
       toast({
-        title: "Could not upload document",
-        description: String(err?.message ?? "Unexpected error"),
+        title,
+        description,
         variant: "destructive",
       });
     },
+  });
+
+  const handleSubmit = form.handleSubmit((v) => {
+    if (!file) {
+      setFileError("Pick a file to upload");
+      return;
+    }
+    setFileError(null);
+    create.mutate(v);
   });
 
   return (
@@ -745,16 +805,14 @@ function DocumentDialog({
         <DialogHeader>
           <DialogTitle>Upload a document</DialogTitle>
           <DialogDescription>
-            Pick a file from your computer — it's uploaded straight to secure
-            object storage. SOA / ROA artefacts stay on the advice record and
-            don't belong here.
+            Attach a fact-find, ID copy or other client document. The file is
+            stored against this client and the original filename is preserved
+            for download. SOA / ROA artefacts belong on the advice record, not
+            here.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form
-            onSubmit={form.handleSubmit((v) => create.mutate(v))}
-            className="space-y-4"
-          >
+          <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               <FormField
                 control={form.control}
@@ -841,31 +899,25 @@ function DocumentDialog({
               <FormControl>
                 <Input
                   type="file"
+                  accept={UPLOAD_ACCEPT_HINT}
                   data-testid="input-document-file"
                   onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null;
-                    setPickedFile(f);
-                    setFileError(f ? null : "Pick a file to upload");
+                    const next = e.target.files?.[0] ?? null;
+                    setFile(next);
+                    setFileError(null);
                   }}
                 />
               </FormControl>
-              {pickedFile ? (
-                <FormDescription
-                  className="text-xs"
-                  data-testid="text-document-file-summary"
-                >
-                  {pickedFile.name}
-                  {pickedFile.type ? ` · ${pickedFile.type}` : ""} ·{" "}
-                  {formatBytes(pickedFile.size)}
-                </FormDescription>
-              ) : (
-                <FormDescription className="text-xs">
-                  PDFs, images, Office documents and plain text are accepted
-                  (max 25 MiB).
-                </FormDescription>
-              )}
+              <FormDescription className="text-xs">
+                {file
+                  ? `Selected: ${file.name} (${formatBytes(file.size)})`
+                  : "PDF, image, plain text, CSV or Office document. Max 25 MB."}
+              </FormDescription>
               {fileError ? (
-                <p className="text-xs font-medium text-destructive">
+                <p
+                  className="text-sm font-medium text-destructive"
+                  data-testid="error-document-file"
+                >
                   {fileError}
                 </p>
               ) : null}
@@ -899,13 +951,13 @@ function DocumentDialog({
               <Button
                 type="submit"
                 disabled={
-                  create.isPending || selectedRecordLocked || !pickedFile
+                  create.isPending || selectedRecordLocked || !file
                 }
                 data-testid="button-submit-document"
                 title={
                   selectedRecordLocked
                     ? "This advice record is under compliance review — adviser writes are blocked"
-                    : !pickedFile
+                    : !file
                       ? "Pick a file first"
                       : undefined
                 }
@@ -1273,8 +1325,8 @@ export function WealthPlannerPanel({ clientId, adviceRecords }: WealthPlannerPan
                 onClick={() => setDocumentOpen(true)}
                 data-testid="button-add-document"
               >
-                <Plus className="h-4 w-4 mr-1" />
-                Record document
+                <FileUp className="h-4 w-4 mr-1" />
+                Upload document
               </Button>
             </CardHeader>
             <CardContent>

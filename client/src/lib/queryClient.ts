@@ -41,6 +41,95 @@ export async function apiRequest(
   return res;
 }
 
+// Structured error thrown by `apiUpload` on non-OK responses. The shape is
+// intentionally narrow (status + optional code + raw body) so callers can
+// switch on `code` to render friendly toast titles for the well-known
+// upload-rejection codes (UPLOAD_TOO_LARGE, UPLOAD_MIME_REJECTED, …)
+// without resorting to string parsing.
+export class ApiUploadError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+  readonly body: unknown;
+  constructor(
+    message: string,
+    init: { status: number; code?: string; body?: unknown },
+  ) {
+    super(message);
+    this.name = "ApiUploadError";
+    this.status = init.status;
+    this.code = init.code;
+    this.body = init.body;
+  }
+}
+
+interface UploadErrorBody {
+  error?: string;
+  message?: string;
+  code?: string;
+}
+
+function parseUploadErrorBody(raw: string): UploadErrorBody | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const obj = parsed as Record<string, unknown>;
+      const out: UploadErrorBody = {};
+      if (typeof obj.error === "string") out.error = obj.error;
+      if (typeof obj.message === "string") out.message = obj.message;
+      if (typeof obj.code === "string") out.code = obj.code;
+      return out;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Multipart upload helper. Mirrors apiRequest's auth + 401 handling but
+// deliberately omits the JSON Content-Type so the browser can set the
+// multipart boundary itself. On non-OK responses it tries to parse the
+// JSON body so the caller can read `code`/`error` fields straight off the
+// thrown ApiUploadError and surface a friendly toast (e.g. UPLOAD_TOO_LARGE,
+// UPLOAD_MIME_REJECTED). Falls back to the raw response text when the body
+// is not JSON.
+export async function apiUpload(
+  url: string,
+  body: FormData,
+): Promise<Response> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: authHeaders(),
+    body,
+  });
+  if (res.status === 401) {
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+    throw new Error("401: token expired");
+  }
+  if (!res.ok) {
+    const raw = await res.text();
+    const parsed = parseUploadErrorBody(raw);
+    const message =
+      parsed?.error ||
+      parsed?.message ||
+      raw ||
+      `${res.status}: upload failed`;
+    throw new ApiUploadError(message, {
+      status: res.status,
+      code: parsed?.code,
+      body: parsed ?? raw,
+    });
+  }
+  return res;
+}
+
 export async function apiFetch(url: string): Promise<Response> {
   const res = await fetch(url, { headers: authHeaders() });
   // Mirror the default queryFn's 401 behavior so callers using apiFetch
