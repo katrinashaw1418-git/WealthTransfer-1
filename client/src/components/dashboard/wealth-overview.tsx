@@ -16,7 +16,7 @@ export default function WealthOverview() {
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-6">
         {[1, 2, 3, 4, 5].map((i) => (
           <Card key={i}>
             <CardContent className="p-6">
@@ -32,7 +32,7 @@ export default function WealthOverview() {
 
   if (error) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-6">
         <Card>
           <CardContent className="p-6">
             <p className="text-sm text-destructive">Failed to load portfolio data</p>
@@ -44,7 +44,7 @@ export default function WealthOverview() {
 
   if (!portfolio) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-6">
         <Card>
           <CardContent className="p-6">
             <p className="text-sm text-muted-foreground">No portfolio data available</p>
@@ -66,7 +66,7 @@ export default function WealthOverview() {
   const investmentPercent = totalValue > 0 ? (investmentValue / totalValue) * 100 : 0;
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-6">
+    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-6">
       <Card data-testid="kpi-total-portfolio">
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-4">
