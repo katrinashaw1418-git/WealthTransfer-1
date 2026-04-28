@@ -3,13 +3,60 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Bot, Lightbulb, TrendingUp, AlertTriangle, Info } from "lucide-react";
 import { useAiRecommendations } from "@/hooks/use-portfolio";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { apiFetch } from "@/lib/queryClient";
 import { Skeleton } from "@/components/ui/skeleton";
+import { BenchmarkDerivationPopover } from "@/components/ai-advisory/benchmark-derivation";
+
+// Task #401 — minimal shape of `/api/portfolio/real-metrics` actually consumed
+// by the dashboard's allocation snapshot. The full payload (sharpe, drawdown,
+// CAGR, period returns, etc.) is intentionally not modelled here — we only
+// need the allocation comparison + benchmark-source fields to decide whether
+// to render the snapshot and to draw the four bucket rows. Server source of
+// truth lives in `server/portfolio-real-metrics-route.ts`.
+interface RealMetricsAllocationResponse {
+  rebalancingBenchmarkType?: string;
+  hasAllocationData?: boolean;
+  currentAllocation?: {
+    fiat?: number;
+    crypto?: number;
+    stablecoin?: number;
+    investment?: number;
+  };
+  benchmarkAllocation?: {
+    fiat?: number;
+    crypto?: number;
+    stablecoin?: number;
+    investment?: number;
+  };
+}
 
 export default function AiAdvisoryPanel() {
   const { data: recommendations, isLoading } = useAiRecommendations();
   const queryClient = useQueryClient();
+
+  // Task #401 — surface the same risk-profile → platform-bucket benchmark
+  // mapping that lives on /ai-advisory directly on the dashboard. We only
+  // render the allocation snapshot (and its per-bucket derivation popovers)
+  // when the backend has resolved a `risk_profile_personalised` benchmark,
+  // so equal-weight illustrative comparisons don't get a misleading
+  // "derived from your risk profile" explanation. The popover copy itself
+  // is shared via `@/components/ai-advisory/benchmark-derivation` so the
+  // dashboard and Market Insights page cannot drift apart.
+  const { data: realMetrics, isLoading: metricsLoading } = useQuery<RealMetricsAllocationResponse>({
+    queryKey: ["/api/portfolio/real-metrics"],
+    queryFn: async () =>
+      (await apiFetch("/api/portfolio/real-metrics")).json() as Promise<RealMetricsAllocationResponse>,
+  });
+  const currentAllocation = realMetrics?.currentAllocation;
+  const benchmarkAllocation = realMetrics?.benchmarkAllocation;
+  const showAllocationSnapshot =
+    !metricsLoading
+    && realMetrics?.rebalancingBenchmarkType === "risk_profile_personalised"
+    && realMetrics?.hasAllocationData === true
+    && currentAllocation != null
+    && benchmarkAllocation != null;
 
   const markAsReadMutation = useMutation({
     mutationFn: (id: number) => api.markRecommendationAsRead(id),
@@ -140,6 +187,94 @@ export default function AiAdvisoryPanel() {
             Acting on any AI-generated insight is currently disabled platform-wide. Execution will only be authorised after a licensed adviser issues a Statement of Advice (SOA), you accept the advice in writing, and a valid Designated Benefits Funded Ongoing Fee (DBFO) consent is recorded. Until then, any "apply" action will be rejected by the platform.
           </p>
         </div>
+
+        {/* Task #401 — risk-profile allocation snapshot. Mirrors the
+           per-row "How is this benchmark derived?" popovers from the
+           Allocation comparison card on /ai-advisory so the four
+           platform buckets (fiat, crypto, stablecoin, investment) and
+           the five risk-profile classes (cash, bonds, equities,
+           alternatives, crypto) have a single, consistent explanation
+           wherever they are surfaced. Only rendered for the
+           personalised variant — equal-weight illustrative comparisons
+           never get the "derived from your risk profile" copy. */}
+        {showAllocationSnapshot ? (
+          <div
+            className="mb-4 rounded-lg border border-gray-200 bg-white p-3"
+            data-testid="block-allocation-snapshot-dashboard"
+          >
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-gray-900">Allocation vs. risk-profile benchmark</p>
+              <Badge
+                variant="outline"
+                className="text-[10px] border-blue-200 text-blue-700 bg-blue-50"
+                data-testid="badge-benchmark-source-dashboard"
+              >
+                From your risk profile
+              </Badge>
+            </div>
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-200 text-[10px] uppercase text-gray-500">
+                  <th className="text-left font-medium py-1.5">Asset class</th>
+                  <th className="text-right font-medium py-1.5">Current</th>
+                  <th className="text-right font-medium py-1.5">Benchmark</th>
+                  <th className="text-right font-medium py-1.5">Diff</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(["fiat", "crypto", "stablecoin", "investment"] as const).map((cls) => {
+                  const current = Number(currentAllocation?.[cls] ?? 0);
+                  const benchmark = Number(benchmarkAllocation?.[cls] ?? 0);
+                  const diff = +(current - benchmark).toFixed(1);
+                  const diffColor =
+                    Math.abs(diff) < 0.1
+                      ? "text-gray-500"
+                      : diff > 0
+                        ? "text-amber-700"
+                        : "text-blue-700";
+                  const label =
+                    cls === "fiat" ? "Fiat"
+                      : cls === "crypto" ? "Crypto"
+                      : cls === "stablecoin" ? "Stablecoin"
+                      : "Investment";
+                  return (
+                    <tr
+                      key={cls}
+                      className="border-b border-gray-100 last:border-b-0"
+                      data-testid={`row-allocation-dashboard-${cls}`}
+                    >
+                      <td className="py-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-gray-900">{label}</span>
+                          <BenchmarkDerivationPopover assetClass={cls} />
+                        </div>
+                      </td>
+                      <td
+                        className="py-1.5 text-right font-medium text-gray-900"
+                        data-testid={`text-current-dashboard-${cls}`}
+                      >
+                        {current.toFixed(1)}%
+                      </td>
+                      <td
+                        className="py-1.5 text-right font-medium text-gray-700"
+                        data-testid={`text-benchmark-dashboard-${cls}`}
+                      >
+                        {benchmark.toFixed(1)}%
+                      </td>
+                      <td
+                        className={`py-1.5 text-right font-medium ${diffColor}`}
+                        data-testid={`text-diff-dashboard-${cls}`}
+                      >
+                        {diff > 0 ? "+" : ""}{diff.toFixed(1)}%
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
         <div className="space-y-4">
           {recommendations?.map((recommendation: any) => {
             const Icon = getRecommendationIcon(recommendation.type);
