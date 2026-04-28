@@ -332,4 +332,59 @@ describe("reconcileRuleConsentState (Task #294)", () => {
     // new audit rows for any of our four.
     expect(auditCountAfter[0].n).toBe(auditCountBefore[0].n);
   });
+
+  // Task #324 — the rollup admin "consent reconciliation history" UI
+  // correlates a rollup audit row (action='fee_rules_consent_reconciled')
+  // back to its per-rule transitions by `metadata->>'triggeredAt'`. The
+  // service guarantees that `summary.triggeredAt` matches the
+  // `triggeredAt` stamped on every per-rule audit line emitted by the
+  // same call. Lock that contract here so a future refactor can't
+  // silently desync the two values and break the history UI's expand.
+  it("returns a `triggeredAt` ISO string that matches every per-rule audit line's metadata.triggeredAt", async () => {
+    // Re-mark the withdrawn consent so we get at least one fresh
+    // transition (the previous tests left everything aligned).
+    await db
+      .update(feeConsents)
+      .set({ withdrawnAt: null })
+      .where(eq(feeConsents.id, consentWithdrawnId));
+    // Reset the rule back to active so the next reconcile pass produces
+    // a transition for it.
+    await db
+      .update(adviserFeeRules)
+      .set({ status: "active", pausedAt: null, pausedReason: null })
+      .where(eq(adviserFeeRules.id, ruleWithdrawn));
+    await db
+      .update(feeConsents)
+      .set({ withdrawnAt: new Date() })
+      .where(eq(feeConsents.id, consentWithdrawnId));
+
+    const summary = await reconcileRuleConsentState({ actorUserId: null });
+
+    expect(typeof summary.triggeredAt).toBe("string");
+    // ISO 8601 UTC shape — the rollup writer stores this verbatim and the
+    // history endpoint compares it to per-rule rows by string equality,
+    // so any drift in the format would silently break correlation.
+    expect(summary.triggeredAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+    );
+
+    const transitionRows = await db
+      .select({ metadata: auditLogs.metadata })
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.entityType, "adviser_fee_rule"),
+          eq(auditLogs.action, "fee_rule_consent_reconciled"),
+          eq(auditLogs.entityId, String(ruleWithdrawn)),
+        ),
+      );
+    // Should have at least the new transition we just produced. Filter
+    // to the freshly-emitted line by triggeredAt match.
+    const matching = transitionRows.filter(
+      (r) =>
+        ((r.metadata as Record<string, unknown>) ?? {}).triggeredAt ===
+        summary.triggeredAt,
+    );
+    expect(matching.length).toBeGreaterThanOrEqual(1);
+  });
 });

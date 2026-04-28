@@ -442,6 +442,39 @@ app.use((req, res, next) => {
           "./services/fee-engine"
         );
         const summary = await reconcileRuleConsentState({ actorUserId: null });
+        // Task #324 — also write a single roll-up audit_logs row tagged with
+        // trigger='cron' so the admin "consent reconciliation history" panel
+        // can list every run (cron + manual) from one source. The summary's
+        // `triggeredAt` matches the per-rule `fee_rule_consent_reconciled`
+        // rows the service already wrote, so the UI can correlate the
+        // rollup row to its per-rule transitions by metadata->>'triggeredAt'.
+        try {
+          const { writeAuditLog } = await import("./services/audit");
+          await writeAuditLog({
+            userId: null,
+            action: "fee_rules_consent_reconciled",
+            entityType: "adviser_fee_rules",
+            entityId: null,
+            before: null,
+            after: null,
+            extra: {
+              trigger: "cron",
+              summary,
+              triggeredAt: summary.triggeredAt,
+            },
+            ipAddress: null,
+          });
+        } catch (auditErr) {
+          // Audit failures already raise an operator alert via writeAuditLog
+          // itself. Swallow here so the cron summary still lands in
+          // background_job_runs (the rollup audit is observability, not
+          // money-moving — the per-rule audit lines from the service are
+          // the regulator-facing record).
+          console.error(
+            "[fee-rules-consent-reconcile] rollup audit_logs write failed",
+            auditErr,
+          );
+        }
         return (
           `checked=${summary.checked}, expired=${summary.expired}, ` +
           `paused_for_withdrawal=${summary.pausedForWithdrawal}, ` +

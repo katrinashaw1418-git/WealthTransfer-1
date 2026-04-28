@@ -441,6 +441,26 @@ export async function buildConsentSupersedeChain(opts: {
   };
 }
 
+// Task #324 — narrow helpers for safely reading the free-form `metadata`
+// jsonb from audit_logs without spraying `Record<string, any>` through the
+// route handlers. The metadata column is typed as `unknown` at the DB
+// layer; the writers across the codebase produce a known shape, but a
+// regulator-facing read endpoint must defend against legacy / partial /
+// hand-written rows. These helpers narrow each access exactly once and
+// return a typed value or null, which the route then forwards to the
+// frontend (where "—" is rendered for null). No `any` casts.
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function pickString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+function pickNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
@@ -4700,6 +4720,10 @@ export function registerAdminRoutes(app: Express): void {
       });
       // Audit a single roll-up row so operators can see the manual trigger
       // separately from the per-rule transition rows that the service writes.
+      // Task #324 — `triggeredAt` is also stamped on every per-rule
+      // `fee_rule_consent_reconciled` audit row, so the admin "consent
+      // reconciliation history" panel uses it to correlate this rollup row
+      // back to the transitions emitted by the same run.
       await writeAuditLog({
         userId: auth.userId,
         action: "fee_rules_consent_reconciled",
@@ -4710,10 +4734,147 @@ export function registerAdminRoutes(app: Express): void {
         extra: {
           trigger: "manual",
           summary,
+          triggeredAt: summary.triggeredAt,
         },
         ipAddress: req.ip ?? null,
       });
       return summary;
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // Task #324 — Consent reconciliation history
+  // -------------------------------------------------------------------------
+  // Lists the most recent rollup audit rows for the fee-rule consent
+  // reconciliation sweep (action = 'fee_rules_consent_reconciled'). Both the
+  // daily cron AND the manual admin trigger write one rollup row per run,
+  // tagged with `trigger ∈ {cron, manual}` and the `summary` counts the run
+  // produced. Used by the admin "Consent reconciliation history" card on
+  // the Fees page so an operator can answer "did the cron actually run last
+  // night?" without scraping audit_logs by hand.
+  // -------------------------------------------------------------------------
+  app.get(
+    "/api/admin/fee-rules/consent-reconcile-runs",
+    adminRoute(async () => {
+      const HISTORY_LIMIT = 30;
+      const rows = await db
+        .select({
+          id: auditLogs.id,
+          userId: auditLogs.userId,
+          createdAt: auditLogs.createdAt,
+          metadata: auditLogs.metadata,
+        })
+        .from(auditLogs)
+        .where(eq(auditLogs.action, "fee_rules_consent_reconciled"))
+        .orderBy(desc(auditLogs.createdAt))
+        .limit(HISTORY_LIMIT);
+
+      const usersMap = await getUserNameMap(rows.map((r) => r.userId));
+
+      // Re-shape the metadata jsonb into a stable, type-safe view for the
+      // frontend. The writer always passes a `summary` of the documented
+      // shape (see ReconcileRuleConsentStateSummary), but defend against
+      // partial/legacy rows by falling back to nulls where a field is
+      // missing — the UI shows "—" rather than crashing.
+      const items = rows.map((r) => {
+        const m = asRecord(r.metadata);
+        const s = asRecord(m.summary);
+        const trigger =
+          m.trigger === "cron" || m.trigger === "manual" ? m.trigger : null;
+        return {
+          id: r.id,
+          createdAt: r.createdAt,
+          userId: r.userId,
+          trigger,
+          triggeredAt: pickString(m.triggeredAt),
+          summary: {
+            checked: pickNumber(s.checked),
+            expired: pickNumber(s.expired),
+            pausedForWithdrawal: pickNumber(s.pausedForWithdrawal),
+            alreadyAligned: pickNumber(s.alreadyAligned),
+            consentMissing: pickNumber(s.consentMissing),
+          },
+        };
+      });
+
+      return { items, users: usersMap };
+    }),
+  );
+
+  // Per-rule transition lines (action = 'fee_rule_consent_reconciled', note
+  // the singular) emitted by a single reconcile run. Correlated to the
+  // rollup row by `metadata->>'triggeredAt'` — both writers stamp the same
+  // ISO timestamp on the rollup row and on every per-rule audit line they
+  // emit during the same call to reconcileRuleConsentState. Returns an
+  // empty list when the rollup row was written by an idempotent run that
+  // produced no transitions, OR when the rollup is too old to have a
+  // `triggeredAt` (legacy rows pre-Task-#324 fall through here harmlessly).
+  app.get(
+    "/api/admin/fee-rules/consent-reconcile-runs/:id/transitions",
+    adminRoute(async (req) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw Object.assign(new Error("Invalid run id"), { status: 400 });
+      }
+      const [rollup] = await db
+        .select({
+          id: auditLogs.id,
+          action: auditLogs.action,
+          metadata: auditLogs.metadata,
+        })
+        .from(auditLogs)
+        .where(eq(auditLogs.id, id))
+        .limit(1);
+      if (!rollup || rollup.action !== "fee_rules_consent_reconciled") {
+        throw Object.assign(new Error("Reconcile run not found"), {
+          status: 404,
+        });
+      }
+      const meta = asRecord(rollup.metadata);
+      const triggeredAt = pickString(meta.triggeredAt);
+      if (!triggeredAt) {
+        // No correlation key on this rollup row — legacy or partial. Return
+        // an empty transitions list rather than 500-ing; the UI surfaces
+        // "no per-rule lines available for this run" so the operator
+        // understands the gap.
+        return { items: [], triggeredAt: null };
+      }
+      const transitions = await db
+        .select({
+          id: auditLogs.id,
+          createdAt: auditLogs.createdAt,
+          entityId: auditLogs.entityId,
+          metadata: auditLogs.metadata,
+          userId: auditLogs.userId,
+        })
+        .from(auditLogs)
+        .where(
+          and(
+            // Tighter than action alone: only the per-rule lines (which
+            // always have entityType='adviser_fee_rule') are part of a
+            // reconcile run. Excludes any future row that might reuse the
+            // singular action under a different entity tag.
+            eq(auditLogs.entityType, "adviser_fee_rule"),
+            eq(auditLogs.action, "fee_rule_consent_reconciled"),
+            sql`${auditLogs.metadata}->>'triggeredAt' = ${triggeredAt}`,
+          ),
+        )
+        .orderBy(asc(auditLogs.id));
+      const items = transitions.map((t) => {
+        const m = asRecord(t.metadata);
+        const before = asRecord(m.before);
+        const after = asRecord(m.after);
+        return {
+          id: t.id,
+          createdAt: t.createdAt,
+          ruleId: t.entityId,
+          transition: pickString(m.transition),
+          consentId: pickNumber(m.consentId),
+          beforeStatus: pickString(before.status),
+          afterStatus: pickString(after.status),
+        };
+      });
+      return { items, triggeredAt };
     }),
   );
 

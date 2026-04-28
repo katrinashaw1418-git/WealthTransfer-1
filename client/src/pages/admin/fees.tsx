@@ -57,6 +57,10 @@ import {
   AlertTriangle,
   // Task #100 — CSV export buttons on the four reporting tabs
   Download,
+  // Task #324 — chevron toggles on the consent reconciliation history rows
+  ChevronRight,
+  ChevronDown,
+  History,
 } from "lucide-react";
 import {
   Dialog,
@@ -238,6 +242,42 @@ interface Paginated<T> {
   // rows currently held for insufficient funds, regardless of the active
   // filter, so the header counter stays stable as admins toggle filters.
   heldCount?: number;
+}
+
+// =============================================================================
+// Task #324 — Consent reconciliation history shape mirrored from the admin
+// endpoint /api/admin/fee-rules/consent-reconcile-runs.
+// =============================================================================
+interface ConsentReconcileRun {
+  id: number;
+  createdAt: string | null;
+  userId: number | null;
+  trigger: "cron" | "manual" | null;
+  triggeredAt: string | null;
+  summary: {
+    checked: number | null;
+    expired: number | null;
+    pausedForWithdrawal: number | null;
+    alreadyAligned: number | null;
+    consentMissing: number | null;
+  };
+}
+interface ConsentReconcileRunsResp {
+  items: ConsentReconcileRun[];
+  users?: UsersMap;
+}
+interface ConsentReconcileTransition {
+  id: number;
+  createdAt: string | null;
+  ruleId: string | null;
+  transition: string | null;
+  consentId: number | null;
+  beforeStatus: string | null;
+  afterStatus: string | null;
+}
+interface ConsentReconcileTransitionsResp {
+  items: ConsentReconcileTransition[];
+  triggeredAt: string | null;
 }
 
 // =============================================================================
@@ -834,6 +874,154 @@ function AdminRuleTable({
   );
 }
 
+// Task #324 — Compact summary of one reconcile run, used in the history
+// table row. Numbers are presented in the order the toast already uses
+// (checked / expired / paused / aligned / consent missing) so an operator
+// who has been clicking "Reconcile now" sees the same shape on both
+// surfaces.
+function ReconcileSummaryCell({ s }: { s: ConsentReconcileRun["summary"] }) {
+  const fmt = (n: number | null) => (n == null ? "—" : String(n));
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-sm">
+      <span><span className="text-muted-foreground">checked </span>{fmt(s.checked)}</span>
+      <span><span className="text-muted-foreground">expired </span>{fmt(s.expired)}</span>
+      <span><span className="text-muted-foreground">paused </span>{fmt(s.pausedForWithdrawal)}</span>
+      <span><span className="text-muted-foreground">aligned </span>{fmt(s.alreadyAligned)}</span>
+      <span><span className="text-muted-foreground">missing </span>{fmt(s.consentMissing)}</span>
+    </div>
+  );
+}
+
+// Task #324 — single row in the consent reconciliation history table.
+// Click anywhere on the row to expand and lazy-load the per-rule audit
+// lines emitted by the same run. The transitions query is keyed on the
+// rollup row's id so React Query caches each run's expansion
+// independently — re-collapsing and re-expanding doesn't refetch.
+function ConsentReconcileRunRow({
+  run,
+  users,
+}: {
+  run: ConsentReconcileRun;
+  users?: UsersMap;
+}) {
+  const [open, setOpen] = useState(false);
+  const transitionsQ = useQuery<ConsentReconcileTransitionsResp>({
+    queryKey: [
+      "/api/admin/fee-rules/consent-reconcile-runs",
+      run.id,
+      "transitions",
+    ],
+    queryFn: () =>
+      fetchPaginated<ConsentReconcileTransitionsResp>(
+        `/api/admin/fee-rules/consent-reconcile-runs/${run.id}/transitions`,
+      ),
+    // Lazy-load on first expand. Once fetched, keep the data in cache
+    // forever so re-expand is instant.
+    enabled: open,
+  });
+  const triggerLabel =
+    run.trigger === "cron"
+      ? "Cron"
+      : run.trigger === "manual"
+        ? "Manual"
+        : "—";
+  const executor =
+    run.userId != null
+      ? userLabel(users, run.userId)
+      : run.trigger === "cron"
+        ? "system"
+        : "—";
+  const when = run.createdAt ? new Date(run.createdAt) : null;
+  const whenLabel = when
+    ? `${when.toLocaleString()} (${formatRelative(run.createdAt!)})`
+    : "—";
+  return (
+    <>
+      <TableRow
+        className="cursor-pointer hover:bg-muted/40"
+        onClick={() => setOpen((v) => !v)}
+        data-testid={`row-reconcile-run-${run.id}`}
+      >
+        <TableCell className="w-8">
+          {open ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+        </TableCell>
+        <TableCell className="font-mono text-xs">{whenLabel}</TableCell>
+        <TableCell>
+          <Badge
+            variant={run.trigger === "manual" ? "default" : "secondary"}
+            data-testid={`badge-reconcile-trigger-${run.id}`}
+          >
+            {triggerLabel}
+          </Badge>
+        </TableCell>
+        <TableCell className="text-sm">{executor}</TableCell>
+        <TableCell>
+          <ReconcileSummaryCell s={run.summary} />
+        </TableCell>
+      </TableRow>
+      {open && (
+        <TableRow data-testid={`row-reconcile-run-${run.id}-detail`}>
+          <TableCell colSpan={5} className="bg-muted/20">
+            {transitionsQ.isLoading ? (
+              <Skeleton className="h-12 w-full" />
+            ) : transitionsQ.isError ? (
+              <p className="text-sm text-destructive">
+                Failed to load transitions:{" "}
+                {(transitionsQ.error as Error)?.message ?? "unknown error"}
+              </p>
+            ) : !transitionsQ.data || transitionsQ.data.items.length === 0 ? (
+              <p
+                className="text-sm text-muted-foreground"
+                data-testid={`empty-reconcile-transitions-${run.id}`}
+              >
+                {transitionsQ.data?.triggeredAt
+                  ? "This run produced no rule transitions (every rule was already aligned)."
+                  : "No per-rule audit lines available for this run."}
+              </p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Rule</TableHead>
+                    <TableHead>Transition</TableHead>
+                    <TableHead>Before → After</TableHead>
+                    <TableHead>Consent</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {transitionsQ.data.items.map((t) => (
+                    <TableRow
+                      key={t.id}
+                      data-testid={`row-reconcile-transition-${t.id}`}
+                    >
+                      <TableCell className="font-mono text-xs">
+                        #{t.ruleId ?? "—"}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {t.transition ?? "—"}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {(t.beforeStatus ?? "—") + " → " + (t.afterStatus ?? "—")}
+                      </TableCell>
+                      <TableCell>
+                        <ConsentIdLink id={t.consentId ?? undefined} />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
 export default function AdminFeesPage() {
   const { toast } = useToast();
   const [tab, setTab] = useState("rules");
@@ -984,6 +1172,12 @@ export default function AdminFeesPage() {
         description: `Checked ${summary.checked}, expired ${summary.expired}, paused ${summary.pausedForWithdrawal}, aligned ${summary.alreadyAligned}, consent missing ${summary.consentMissing}.`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-rules"] });
+      // Task #324 — refresh the consent reconciliation history card so the
+      // new run (just written to audit_logs by the endpoint) shows up
+      // immediately instead of waiting for the next refetch interval.
+      queryClient.invalidateQueries({
+        queryKey: ["/api/admin/fee-rules/consent-reconcile-runs"],
+      });
     } catch (err: any) {
       toast({
         title: "Reconcile failed",
@@ -1209,6 +1403,15 @@ export default function AdminFeesPage() {
         `/api/admin/fee-rules?${params.toString()}`,
       );
     },
+  });
+
+  // Task #324 — last 30 reconcile runs (rollup audit_logs rows tagged
+  // action = 'fee_rules_consent_reconciled'). Fetched on tab mount and
+  // re-invalidated after a manual reconcile so the new run shows up
+  // immediately. The endpoint is cheap (one indexed select on audit_logs)
+  // so we don't bother polling.
+  const reconcileRunsQ = useQuery<ConsentReconcileRunsResp>({
+    queryKey: ["/api/admin/fee-rules/consent-reconcile-runs"],
   });
 
   const accrualsQ = useQuery<Paginated<FeeAccrualRow>>({
@@ -1978,6 +2181,74 @@ export default function AdminFeesPage() {
                     ? "No history rules match your search."
                     : "No paused, superseded or expired rules."}
                 </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Task #324 — Consent reconciliation history. Lists the last 30
+              rollup audit_logs rows tagged action='fee_rules_consent_reconciled'
+              so an operator can see at a glance whether the daily cron
+              actually ran (and what it produced) without scraping the
+              audit table by hand. Click any row to expand to the per-rule
+              transitions emitted by that same run. */}
+          <Card data-testid="card-consent-reconcile-history">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <History className="h-4 w-4" />
+                Consent reconciliation history
+              </CardTitle>
+              <CardDescription>
+                Each row is one run of the consent ↔ fee-rule reconcile sweep
+                (daily <strong>cron</strong> or a <strong>manual</strong>{" "}
+                trigger). Click a row to see the per-rule transitions it
+                emitted (
+                <code>fee_rule_consent_reconciled</code> audit lines). Last
+                30 runs only.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {reconcileRunsQ.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : reconcileRunsQ.isError ? (
+                <p
+                  className="text-sm text-destructive"
+                  data-testid="error-consent-reconcile-history"
+                >
+                  Failed to load reconciliation history:{" "}
+                  {(reconcileRunsQ.error as Error)?.message ?? "unknown error"}
+                </p>
+              ) : !reconcileRunsQ.data ||
+                reconcileRunsQ.data.items.length === 0 ? (
+                <p
+                  className="text-sm text-muted-foreground"
+                  data-testid="empty-consent-reconcile-history"
+                >
+                  No reconciliation runs recorded yet. The daily cron writes
+                  one row per tick; clicking{" "}
+                  <strong>Reconcile consent state</strong> above also writes
+                  one.
+                </p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-8" />
+                      <TableHead>When</TableHead>
+                      <TableHead>Trigger</TableHead>
+                      <TableHead>Executor</TableHead>
+                      <TableHead>Summary</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {reconcileRunsQ.data.items.map((run) => (
+                      <ConsentReconcileRunRow
+                        key={run.id}
+                        run={run}
+                        users={reconcileRunsQ.data?.users}
+                      />
+                    ))}
+                  </TableBody>
+                </Table>
               )}
             </CardContent>
           </Card>

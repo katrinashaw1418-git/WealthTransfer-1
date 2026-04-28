@@ -424,6 +424,12 @@ export interface ReconcileRuleConsentStateSummary {
   pausedForWithdrawal: number;
   alreadyAligned: number;
   consentMissing: number;
+  // Task #324 — ISO timestamp of the `now` value used for this run. Mirrors
+  // the `triggeredAt` field stamped on each per-rule audit line so the
+  // rollup audit row written by the cron / admin endpoint can carry the
+  // same value, which is what the "consent reconciliation history" admin
+  // UI uses to correlate a run row to its per-rule transitions.
+  triggeredAt: string;
 }
 
 export async function reconcileRuleConsentState(
@@ -562,6 +568,7 @@ export async function reconcileRuleConsentState(
       pausedForWithdrawal,
       alreadyAligned,
       consentMissing,
+      triggeredAt: now.toISOString(),
     };
   });
 }
