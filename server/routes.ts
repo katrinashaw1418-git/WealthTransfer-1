@@ -2839,17 +2839,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // ILLUSTRATIVE math metric only — NOT a personal target. A personalised target
       // is set by an adviser in a Statement of Advice. The response surfaces
       // `rebalancingBenchmarkType` so callers can present it honestly to the user.
-      // This route receives a `riskTolerance` input, so the benchmark is resolved
-      // per risk band; missing/invalid input falls back to equal-weight.
+      // We prefer the client's latest recorded risk-profile allocation when one
+      // exists (so this route tells the same story as `/api/portfolio/real-metrics`),
+      // and only fall back to the per-request `riskTolerance` band when there is
+      // no profile on file. Missing/invalid `riskTolerance` then falls back to
+      // equal-weight inside `resolveBenchmarkForRiskTolerance`.
       const allocationFractions = {
         fiat:       currentAllocation.fiat       / 100,
         crypto:     currentAllocation.crypto     / 100,
         stablecoin: currentAllocation.stablecoin / 100,
         investment: currentAllocation.investment / 100,
       };
-      const rebalancingBenchmark = resolveBenchmarkForRiskTolerance(
-        typeof riskTolerance === "number" ? riskTolerance : Number(riskTolerance),
-      );
+      const [latestRiskProfile] = await db
+        .select({ allocation: riskProfiles.allocation })
+        .from(riskProfiles)
+        .where(eq(riskProfiles.clientId, userId))
+        .orderBy(desc(riskProfiles.createdAt))
+        .limit(1);
+      const rebalancingBenchmark = latestRiskProfile
+        ? resolveBenchmarkForRiskProfileRow(latestRiskProfile)
+        : resolveBenchmarkForRiskTolerance(
+            typeof riskTolerance === "number" ? riskTolerance : Number(riskTolerance),
+          );
       const rebalancingGap = computeRebalancingGap(allocationFractions, rebalancingBenchmark);
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;
