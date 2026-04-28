@@ -58,7 +58,7 @@ export default function WealthOverview() {
   const cryptoValue = parseFloat(portfolio.cryptoValue);
   const stablecoinValue = parseFloat(portfolio.stablecoinValue || "0");
   const fiatValue = parseFloat(portfolio.fiatValue);
-  const investmentValue = parseFloat((portfolio as any).investmentValue || "0");
+  const investmentValue = parseFloat(portfolio.investmentValue || "0");
   const monthlyPnl = portfolio.monthlyPnl != null ? parseFloat(portfolio.monthlyPnl) : null;
   const monthlyPnlPercent = portfolio.monthlyPnlPercent != null ? parseFloat(portfolio.monthlyPnlPercent) : null;
   const monthlyPnlKnown = monthlyPnl !== null && monthlyPnlPercent !== null;
@@ -86,9 +86,9 @@ export default function WealthOverview() {
                 <span className="text-sm text-gray-400">—</span>
               )}
               <span className="text-xs text-gray-500">
-                {(portfolio as any).monthlyPnlSource === 'actual'
+                {portfolio.monthlyPnlSource === 'actual'
                   ? 'vs 30 days ago'
-                  : (portfolio as any).monthlyPnlSource === 'historical_estimate'
+                  : portfolio.monthlyPnlSource === 'historical_estimate'
                   ? 'estimated from historical basis'
                   : 'insufficient history'}
               </span>
@@ -117,7 +117,7 @@ export default function WealthOverview() {
       <Card data-testid="kpi-cash-allocation">
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-medium text-gray-500">Cash Allocation</h3>
+            <h3 className="text-sm font-medium text-gray-500">Cash (fiat)</h3>
             <DollarSign className="w-4 h-4 text-primary" />
           </div>
           <div className="space-y-2">
@@ -134,7 +134,7 @@ export default function WealthOverview() {
       <Card data-testid="kpi-monthly-pnl">
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-medium text-gray-500">Monthly P&L (indicative)</h3>
+            <h3 className="text-sm font-medium text-gray-500">Monthly P&L (est.)</h3>
             {!monthlyPnlKnown ? (
               <TrendingUp className="w-4 h-4 text-gray-400" />
             ) : monthlyPnl! >= 0 ? (

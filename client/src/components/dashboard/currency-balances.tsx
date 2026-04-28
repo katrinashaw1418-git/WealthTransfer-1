@@ -20,22 +20,25 @@ const currencyConfig = {
 
 const fiatCurrencies = ['USD', 'AUD', 'CAD', 'EUR', 'GBP', 'HKD', 'SGD'];
 
-// Task #337 — render the wallet row's updatedAt as a friendly relative
-// timestamp ("just now", "3m ago", "2h ago", "Apr 28") so the happy-path
-// "Last synced …" affordance reads naturally.
+// Task #493 — render the wallet row's updatedAt as a concrete absolute
+// timestamp ("26 Apr 2026 20:09") so investors can match it against the
+// custodian statement timestamp without ambiguity. Falls back to a short
+// dash on missing/invalid input rather than guessing "just now".
 function formatLastSynced(ts?: string | null): string {
-  if (!ts) return "just now";
+  if (!ts) return "—";
   const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "just now";
-  const diffMs = Date.now() - d.getTime();
-  const diffMin = Math.round(diffMs / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.round(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.round(diffHr / 24);
-  if (diffDay < 7) return `${diffDay}d ago`;
-  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  if (Number.isNaN(d.getTime())) return "—";
+  const datePart = d.toLocaleDateString("en-AU", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+  const timePart = d.toLocaleTimeString("en-AU", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  return `${datePart} ${timePart}`;
 }
 
 export default function CurrencyBalances() {
@@ -97,9 +100,9 @@ export default function CurrencyBalances() {
     );
   }
 
-  const investmentValue = portfolio ? parseFloat((portfolio as any).investmentValue || "0") : 0;
-  const cryptoValue = portfolio ? parseFloat((portfolio as any).cryptoValue || "0") : 0;
-  const totalValue = portfolio ? parseFloat((portfolio as any).totalValue || "0") : 0;
+  const investmentValue = portfolio ? parseFloat(portfolio.investmentValue || "0") : 0;
+  const cryptoValue = portfolio ? parseFloat(portfolio.cryptoValue || "0") : 0;
+  const totalValue = portfolio ? parseFloat(portfolio.totalValue || "0") : 0;
   const investmentPct = totalValue > 0 ? (investmentValue / totalValue) * 100 : 0;
   const cryptoPct = totalValue > 0 ? (cryptoValue / totalValue) * 100 : 0;
 

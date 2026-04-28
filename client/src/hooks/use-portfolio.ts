@@ -2,8 +2,29 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { apiFetch } from "@/lib/queryClient";
 
+// Task #493 — strongly-typed shape returned by GET /api/portfolio. Mirrors
+// the response built in server/routes.ts (decimal columns serialised as
+// `.toFixed(2)` strings, plus the derived `monthlyPnlSource` field). Kept
+// here (rather than @shared/schema.ts) because it is a wire-format type
+// for the portfolio summary endpoint, not a DB row type.
+export interface PortfolioApiResponse {
+  id?: number;
+  userId?: number;
+  totalValue: string;
+  fiatValue: string;
+  cryptoValue: string;
+  stablecoinValue: string;
+  investmentValue: string;
+  monthlyPnl: string | null;
+  monthlyPnlPercent: string | null;
+  monthlyPnlSource?: "actual" | "historical_estimate" | "insufficient_history";
+  hasUnpricedWallets?: boolean;
+  unpricedCurrencies?: string[];
+  updatedAt?: string | null;
+}
+
 export function usePortfolio() {
-  return useQuery({
+  return useQuery<PortfolioApiResponse>({
     queryKey: ["/api/portfolio"],
     queryFn: api.getPortfolio,
     refetchInterval: 30000, // Refresh every 30 seconds

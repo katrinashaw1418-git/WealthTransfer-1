@@ -40,15 +40,6 @@ function KycNudgeBanner() {
   const outstanding = data.progress.actionRequired + data.progress.underReview;
   if (outstanding <= 0) return null;
 
-  const headline =
-    data.progress.actionRequired > 0
-      ? "Action required to complete your KYC"
-      : "Your verification is under review";
-  const description =
-    data.progress.actionRequired > 0
-      ? `${data.progress.actionRequired} step${data.progress.actionRequired === 1 ? "" : "s"} need your attention before your account is fully verified.`
-      : `${data.progress.underReview} step${data.progress.underReview === 1 ? "" : "s"} are with AMAX compliance. We'll notify you as soon as the review completes.`;
-
   return (
     <div
       className="bg-amber-50 border border-amber-300 rounded-lg p-4 flex items-start gap-4"
@@ -58,8 +49,9 @@ function KycNudgeBanner() {
         <ShieldAlert className="w-5 h-5 text-amber-700" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="font-semibold text-amber-900">{headline}</p>
-        <p className="text-sm text-amber-800 mt-1">{description}</p>
+        <p className="font-semibold text-amber-900">
+          Complete your KYC — risk assessment required to unlock full investment access
+        </p>
         <p className="text-xs text-amber-700/80 mt-2">
           Verification progress: {data.progress.percent}% complete · {data.classification.currentTierLabel}
         </p>
@@ -71,7 +63,7 @@ function KycNudgeBanner() {
           className="bg-amber-700 hover:bg-amber-800 text-white"
           data-testid="button-kyc-nudge-cta"
         >
-          <Link href="/compliance">Open KYC centre</Link>
+          <Link href="/compliance">Complete now</Link>
         </Button>
       </div>
     </div>
