@@ -1,5 +1,6 @@
 // =============================================================================
 // Task #363 — pin the canonical category enum on admin product writes
+// Task #387 — broaden the non-canonical input coverage
 // =============================================================================
 // Companion to `shared/product-categories.test.ts`. That file covers the
 // schema-layer guard on `insertInvestmentProductSchema`. This file pins
@@ -14,6 +15,19 @@
 // guard, since `adminCreateProductSchema` is built on top of
 // `insertInvestmentProductSchema` and a future refactor that swaps
 // the base out from under it would silently widen the create path.
+//
+// Task #387 broadens the non-canonical inputs covered on both verbs to
+// include the realistic mistakes a future caller might make:
+//   * `"x"`         — the historical fixture-row drift (Task #363).
+//   * `"Real Estate"` — sentence-case label (e.g. someone wires the
+//     human-readable label from `PRODUCT_CATEGORY_LABELS` straight back
+//     into the API instead of the enum key).
+//   * `"realestate"`  — the canonical key with the underscore dropped.
+// All three must be rejected with a 4xx, and the canonical
+// `"real_estate"` must continue to succeed. If any of these slip
+// through, products silently disappear from adviser dropdowns and
+// investor lists because every downstream consumer filters on
+// `PRODUCT_CATEGORY_VALUES` with strict equality.
 //
 // Pattern mirrors `admin-routes-product-risk-profile.test.ts` (Task
 // #365), which is the immediately adjacent enum-guard contract test:
@@ -183,6 +197,41 @@ describe("POST /api/admin/products — category enum guard (Task #363)", () => {
     expect(after.length).toBe(0);
   });
 
+  // Task #387 — broaden the non-canonical input coverage. Each of these
+  // is a plausible mistake (sentence-case label, dropped underscore)
+  // that must be rejected with a 4xx and must never reach the DB.
+  it.each([
+    ["Real Estate", "create_reject_real_estate_label"],
+    ["realestate", "create_reject_realestate_no_underscore"],
+  ])(
+    "rejects non-canonical category %j with a 4xx and never creates the row",
+    async (badCategory, slug) => {
+      const productName = `${seedKey}_${slug}`;
+
+      const before = await db
+        .select({ id: investmentProducts.id })
+        .from(investmentProducts)
+        .where(eq(investmentProducts.name, productName));
+      expect(before.length).toBe(0);
+
+      const { status, body } = await postProduct(
+        buildProductPayload({ name: productName, category: badCategory }),
+      );
+      expect(status).toBeGreaterThanOrEqual(400);
+      expect(status).toBeLessThan(500);
+      expect(String(body.error || "")).toMatch(/Invalid payload/i);
+      for (const canonical of PRODUCT_CATEGORY_VALUES) {
+        expect(String(body.error || "")).toContain(canonical);
+      }
+
+      const after = await db
+        .select({ id: investmentProducts.id })
+        .from(investmentProducts)
+        .where(eq(investmentProducts.name, productName));
+      expect(after.length).toBe(0);
+    },
+  );
+
   it("accepts every canonical category and creates the row", async () => {
     for (const category of PRODUCT_CATEGORY_VALUES) {
       const productName = `${seedKey}_create_accept_${category}`;
@@ -230,6 +279,35 @@ describe("PATCH /api/admin/products/:id — category enum guard (Task #363)", ()
       .limit(1);
     expect(row.category).toBe("real_estate");
   });
+
+  // Task #387 — broaden the non-canonical input coverage on the PATCH
+  // path. Same rationale as the POST loop above: a sentence-case label
+  // or a dropped underscore must never silently mutate a row onto a
+  // category that downstream filters can't see.
+  it.each([
+    ["Real Estate"],
+    ["realestate"],
+  ])(
+    "rejects non-canonical category %j with a 4xx and leaves the row unchanged",
+    async (badCategory) => {
+      const { status, body } = await patchProduct(targetProductId, {
+        category: badCategory,
+      });
+      expect(status).toBeGreaterThanOrEqual(400);
+      expect(status).toBeLessThan(500);
+      expect(String(body.error || "")).toMatch(/Invalid payload/i);
+      for (const canonical of PRODUCT_CATEGORY_VALUES) {
+        expect(String(body.error || "")).toContain(canonical);
+      }
+
+      const [row] = await db
+        .select()
+        .from(investmentProducts)
+        .where(eq(investmentProducts.id, targetProductId))
+        .limit(1);
+      expect(row.category).toBe("real_estate");
+    },
+  );
 
   it("accepts a switch to another canonical category and updates the row", async () => {
     const { status, body } = await patchProduct(targetProductId, {
