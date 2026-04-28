@@ -184,7 +184,30 @@ export default function AiAdvisory() {
 
       <Card>
         <CardContent className="p-6 space-y-4">
-          <p className="font-semibold text-gray-900">Allocation comparison — illustrative only</p>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <p className="font-semibold text-gray-900">
+              {!metricsLoading && realMetrics?.rebalancingBenchmarkType === "risk_profile_personalised"
+                ? "Allocation comparison — from your risk profile"
+                : "Allocation comparison — illustrative only"}
+            </p>
+            {!metricsLoading && realMetrics?.rebalancingBenchmarkType === "risk_profile_personalised" ? (
+              <Badge
+                variant="outline"
+                className="text-xs border-blue-200 text-blue-700 bg-blue-50"
+                data-testid="badge-benchmark-source"
+              >
+                From your risk profile
+              </Badge>
+            ) : !metricsLoading && realMetrics?.rebalancingBenchmarkType === "equal_weight_illustrative" ? (
+              <Badge
+                variant="outline"
+                className="text-xs border-amber-300 text-amber-800 bg-amber-50"
+                data-testid="badge-benchmark-source"
+              >
+                No risk profile recorded — comparison is illustrative only
+              </Badge>
+            ) : null}
+          </div>
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
             <p className="text-sm text-gray-600">Not a suggestion to act. Any rebalancing must be discussed with your adviser and documented in a Statement of Advice.</p>
           </div>
@@ -195,6 +218,11 @@ export default function AiAdvisory() {
               A personalised benchmark must be set by your licensed adviser as part of a Statement of Advice.
               No illustrative comparison is shown until then.
             </p>
+            {!metricsLoading && realMetrics?.rebalancingBenchmarkNote ? (
+              <p className="mt-3 text-xs text-gray-400" data-testid="text-benchmark-note">
+                {realMetrics.rebalancingBenchmarkNote}
+              </p>
+            ) : null}
           </div>
 
           <Button variant="outline" size="sm" className="text-blue-600 border-blue-200">
