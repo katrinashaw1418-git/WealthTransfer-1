@@ -50,6 +50,23 @@ SQL
 # visibility, but the monotonic predicate is the real idempotency guard.
 npx tsx scripts/backfill-kyc-updated-at.ts --apply
 
+# Task #323 — one-time backfill for adviser_fee_rules.{accountNumber,
+# effectiveDate} + supersede chain dedup (companion to Task #294).
+#
+# Task #294 added accountNumber, effectiveDate and the supersededBy*
+# pointers, plus a partial unique index on
+# (clientUserId, feeType, accountNumber) WHERE status IN
+# ('draft','active','paused'). Pre-#294 rows have NULL accountNumber /
+# effectiveDate and may include accidental duplicates that would block
+# any future createFeeRule on the same tuple. The script's WHERE clauses
+# guarantee a second invocation is a no-op once the data is converged,
+# so wiring it into post-merge.sh keeps the active dev DB clean across
+# merges without needing a `_post_merge_state` marker. The PRODUCTION
+# DB is operator-driven — see docs/runbooks/fee-rule-consent-backfill.md
+# for the prod runbook (dry-run → review → apply → verify zero
+# remaining mismatches → confirm reconcile cron is on).
+npx tsx scripts/backfill-fee-rule-consent-state.ts --apply
+
 # Task #356 — auto-trigger the portfolio-snapshot re-anchor whenever the
 # valuation code path or the inline FX seed has changed since the last
 # successful run.
