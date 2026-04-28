@@ -183,6 +183,12 @@ export function registerClientRoutes(app: Express): void {
   // ===========================================================================
 
   // GET /api/client/fee-consent-requests?status=
+  // Task #300 — mirror the admin endpoint's shape so the client UI can show
+  // the supersede chain back-pointer (`supersedesRequestId` is already on
+  // the row via select()) and the server-computed `deductionsBlockedReason`
+  // ("expired" | "pending" | "no_advice_record" | null). Money movement is
+  // gated separately; this is the user-facing reason a request would not be
+  // permitted to drive a deduction TODAY if the kill-switch were lifted.
   app.get("/api/client/fee-consent-requests", async (req, res) => {
     try {
       const auth = requireAuth(req);
@@ -194,7 +200,19 @@ export function registerClientRoutes(app: Express): void {
         .from(feeConsentRequests)
         .where(conds.length === 1 ? conds[0] : and(...conds))
         .orderBy(desc(feeConsentRequests.createdAt));
-      res.json(rows);
+      const now = Date.now();
+      const items = rows.map((r) => {
+        let deductionsBlockedReason: string | null = null;
+        if (!r.adviceRecordId) deductionsBlockedReason = "no_advice_record";
+        else if (r.status === "pending") deductionsBlockedReason = "pending";
+        else if (
+          r.proposedConsentExpiryDate &&
+          r.proposedConsentExpiryDate.getTime() < now
+        )
+          deductionsBlockedReason = "expired";
+        return { ...r, deductionsBlockedReason };
+      });
+      res.json(items);
     } catch (error: any) {
       handleError(res, error, "Failed to list fee consent requests");
     }
@@ -454,15 +472,62 @@ export function registerClientRoutes(app: Express): void {
   });
 
   // GET /api/client/fee-consents — read-only list of executed consents.
+  // Task #300 — surface the supersede chain (both directions) and the
+  // server-computed `deductionsBlockedReason` the same way the admin
+  // endpoint does, so the client UI can render "this consent replaced an
+  // earlier one" trails and the same inline "deductions blocked" warning
+  // an admin sees. The `supersededByRequestId/At/Reason` columns live on
+  // `feeConsents` directly; the reverse `supersedesRequestId` is looked
+  // up via the request that signed THIS consent.
   app.get("/api/client/fee-consents", async (req, res) => {
     try {
       const auth = requireAuth(req);
       const rows = await db
-        .select()
+        .select({
+          id: feeConsents.id,
+          adviceRecordId: feeConsents.adviceRecordId,
+          clientId: feeConsents.clientId,
+          adviserId: feeConsents.adviserId,
+          feeType: feeConsents.feeType,
+          amountType: feeConsents.amountType,
+          amount: feeConsents.amount,
+          calculationMethod: feeConsents.calculationMethod,
+          accountNumber: feeConsents.accountNumber,
+          accountName: feeConsents.accountName,
+          deductionFrequency: feeConsents.deductionFrequency,
+          referenceDay: feeConsents.referenceDay,
+          renewalWindowStart: feeConsents.renewalWindowStart,
+          renewalWindowEnd: feeConsents.renewalWindowEnd,
+          consentExpiryDate: feeConsents.consentExpiryDate,
+          renewalStatus: feeConsents.renewalStatus,
+          clientSignatureName: feeConsents.clientSignatureName,
+          consentedAt: feeConsents.consentedAt,
+          withdrawnAt: feeConsents.withdrawnAt,
+          supersededByRequestId: feeConsents.supersededByRequestId,
+          supersededAt: feeConsents.supersededAt,
+          supersededReason: feeConsents.supersededReason,
+          supersedesRequestId: sql<number | null>`(
+            SELECT supersedes_request_id
+            FROM ${feeConsentRequests} fcr
+            WHERE fcr.signed_fee_consent_id = ${feeConsents.id}
+            LIMIT 1
+          )`,
+        })
         .from(feeConsents)
         .where(eq(feeConsents.clientId, auth.userId))
         .orderBy(desc(feeConsents.consentedAt));
-      res.json(rows);
+      const now = Date.now();
+      const items = rows.map((r) => {
+        let deductionsBlockedReason: string | null = null;
+        if (!r.adviceRecordId) deductionsBlockedReason = "no_advice_record";
+        else if (
+          r.renewalStatus === "expired" ||
+          (r.consentExpiryDate && r.consentExpiryDate.getTime() < now)
+        )
+          deductionsBlockedReason = "expired";
+        return { ...r, deductionsBlockedReason };
+      });
+      res.json(items);
     } catch (error: any) {
       handleError(res, error, "Failed to list fee consents");
     }

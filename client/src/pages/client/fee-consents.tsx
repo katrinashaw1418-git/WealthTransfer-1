@@ -32,9 +32,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Receipt, ShieldAlert } from "lucide-react";
+import { Receipt, ShieldAlert, AlertTriangle, Clock } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
+// Task #300 — client-side rows now carry the same supersede chain links,
+// renewal-window dates, and server-computed `deductionsBlockedReason` the
+// admin oversight surface uses. The UI never recomputes — it just renders
+// what the server returned so a client and an admin can never disagree
+// about why a consent isn't live.
 interface ClientFeeConsentRequestRow {
   id: number;
   adviserUserId: number;
@@ -55,8 +60,10 @@ interface ClientFeeConsentRequestRow {
   status: string;
   declineReason: string | null;
   signedFeeConsentId: number | null;
+  supersedesRequestId: number | null;
   respondedAt: string | null;
   createdAt: string;
+  deductionsBlockedReason: string | null;
 }
 
 interface ClientFeeConsentRow {
@@ -67,13 +74,23 @@ interface ClientFeeConsentRow {
   feeType: string;
   amountType: string;
   amount: string | null;
+  calculationMethod: string | null;
   accountNumber: string;
+  accountName: string | null;
   deductionFrequency: string;
   referenceDay: string;
+  renewalWindowStart: string;
+  renewalWindowEnd: string;
   consentExpiryDate: string;
   renewalStatus: string;
+  clientSignatureName: string | null;
   consentedAt: string;
   withdrawnAt: string | null;
+  supersededByRequestId: number | null;
+  supersededAt: string | null;
+  supersededReason: string | null;
+  supersedesRequestId: number | null;
+  deductionsBlockedReason: string | null;
 }
 
 const signSchema = z.object({
@@ -87,8 +104,11 @@ const declineSchema = z.object({
 type DeclineForm = z.infer<typeof declineSchema>;
 
 function statusBadge(status: string) {
+  // Task #300 — pending must read as "Sent — pending client signature" to
+  // match the admin surface. The previous wording made it ambiguous about
+  // who needed to act next.
   const map: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string }> = {
-    pending: { variant: "secondary", label: "Awaiting your action" },
+    pending: { variant: "secondary", label: "Sent — pending client signature" },
     consented: { variant: "default", label: "You signed" },
     declined: { variant: "destructive", label: "You declined" },
     withdrawn_by_adviser: { variant: "outline", label: "Adviser withdrew" },
@@ -104,6 +124,7 @@ function renewalBadge(status: string) {
     renewal_due: { variant: "secondary", label: "Renewal due" },
     expired: { variant: "destructive", label: "Expired" },
     withdrawn: { variant: "outline", label: "Withdrawn" },
+    superseded: { variant: "outline", label: "Superseded" },
   };
   const e = map[status] ?? { variant: "outline" as const, label: status };
   return <Badge variant={e.variant}>{e.label}</Badge>;
@@ -141,6 +162,60 @@ function daysUntil(value: string | null): number | null {
 
 function formatFeeType(t: string): string {
   return t.replace(/_/g, " ");
+}
+
+// Task #300 — same mapping the admin page uses. Keeping it here verbatim
+// means the two surfaces always describe the same condition with the same
+// words.
+function blockedReasonLabel(reason: string | null): string | null {
+  if (!reason) return null;
+  switch (reason) {
+    case "expired":
+      return "Consent expired — deductions blocked";
+    case "pending":
+      return "Consent pending — deductions blocked";
+    case "no_advice_record":
+      return "No linked advice record — cannot sign";
+    default:
+      return null;
+  }
+}
+
+function BlockedReasonBanner({ reason }: { reason: string | null }) {
+  const label = blockedReasonLabel(reason);
+  if (!label) return null;
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-900"
+      data-testid={`warn-${reason}`}
+    >
+      <AlertTriangle className="h-3 w-3" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+// Task #300 — supersede-chain links: scroll to and briefly highlight the
+// matching row when it's on the same page. Mirrors the admin helper so the
+// behaviour is identical between surfaces.
+function jumpToRow(
+  testId: string,
+  fallbackLabel: string,
+  toast: (args: { title: string; description?: string }) => void,
+): void {
+  const el = document.querySelector(`[data-testid="${testId}"]`);
+  if (el && el instanceof HTMLElement) {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("ring-2", "ring-amber-400", "rounded-md");
+    window.setTimeout(() => {
+      el.classList.remove("ring-2", "ring-amber-400", "rounded-md");
+    }, 1800);
+    return;
+  }
+  toast({
+    title: `${fallbackLabel} not on this page`,
+    description: "Scroll the other table or check back later to find it.",
+  });
 }
 
 export default function ClientFeeConsents() {
@@ -246,80 +321,111 @@ export default function ClientFeeConsents() {
               No fee consent requests at the moment.
             </p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Sent</TableHead>
-                  <TableHead>Fee type</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead>Frequency</TableHead>
-                  <TableHead>Account</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {requests.data.map((r) => (
-                  <TableRow key={r.id} data-testid={`row-client-fee-consent-request-${r.id}`}>
-                    <TableCell className="text-sm">{formatDate(r.createdAt)}</TableCell>
-                    <TableCell className="text-sm capitalize">
-                      {formatFeeType(r.feeType)}
-                      {r.requestNote && (
-                        <div className="text-xs text-gray-500 mt-1">{r.requestNote}</div>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-sm tabular-nums text-right">
-                      {r.amountType === "calculation_method"
-                        ? r.calculationMethod ?? "Calc method"
-                        : r.amountType === "percentage"
-                          ? `${(Number(r.amount ?? 0) * 100).toFixed(4)}%`
-                          : formatAud(r.amount)}
-                    </TableCell>
-                    <TableCell className="text-sm capitalize">{r.deductionFrequency}</TableCell>
-                    <TableCell className="text-sm">
-                      {r.accountNumber}
-                      {r.accountName && (
-                        <div className="text-xs text-gray-500">{r.accountName}</div>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {formatDate(r.proposedConsentExpiryDate)}
-                    </TableCell>
-                    <TableCell>{statusBadge(r.status)}</TableCell>
-                    <TableCell className="text-right">
-                      {r.status === "pending" ? (
-                        <div className="flex gap-2 justify-end">
-                          <Button
-                            size="sm"
-                            onClick={() => {
-                              setSignTarget(r);
-                              signForm.reset({ signatureName: "" });
-                            }}
-                            data-testid={`button-sign-${r.id}`}
-                          >
-                            Sign
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              setDeclineTarget(r);
-                              declineForm.reset({ reason: "" });
-                            }}
-                            data-testid={`button-decline-${r.id}`}
-                          >
-                            Decline
-                          </Button>
-                        </div>
-                      ) : (
-                        <span className="text-xs text-gray-500">—</span>
-                      )}
-                    </TableCell>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Sent</TableHead>
+                    <TableHead>Fee type</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
+                    <TableHead>Frequency</TableHead>
+                    <TableHead>Account</TableHead>
+                    <TableHead>Renewal window</TableHead>
+                    <TableHead>Expires</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {requests.data.map((r) => (
+                    <TableRow key={r.id} data-testid={`row-client-fee-consent-request-${r.id}`}>
+                      <TableCell className="text-sm">{formatDate(r.createdAt)}</TableCell>
+                      <TableCell className="text-sm capitalize">
+                        {formatFeeType(r.feeType)}
+                        {r.requestNote && (
+                          <div className="text-xs text-gray-500 mt-1">{r.requestNote}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-sm tabular-nums text-right">
+                        {r.amountType === "calculation_method"
+                          ? r.calculationMethod ?? "Calc method"
+                          : r.amountType === "percentage"
+                            ? `${(Number(r.amount ?? 0) * 100).toFixed(4)}%`
+                            : formatAud(r.amount)}
+                      </TableCell>
+                      <TableCell className="text-sm capitalize">{r.deductionFrequency}</TableCell>
+                      <TableCell className="text-sm">
+                        {r.accountNumber}
+                        {r.accountName && (
+                          <div className="text-xs text-gray-500">{r.accountName}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-xs whitespace-nowrap text-slate-600">
+                        <div className="flex items-center gap-1">
+                          <Clock className="h-3 w-3 text-slate-400" />
+                          {formatDate(r.proposedRenewalWindowStart)} →{" "}
+                          {formatDate(r.proposedRenewalWindowEnd)}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatDate(r.proposedConsentExpiryDate)}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-col gap-1">
+                          {statusBadge(r.status)}
+                          <BlockedReasonBanner reason={r.deductionsBlockedReason} />
+                          {r.supersedesRequestId && (
+                            <button
+                              type="button"
+                              className="text-[11px] text-blue-700 hover:underline text-left"
+                              data-testid={`link-client-supersedes-request-${r.id}`}
+                              onClick={() =>
+                                jumpToRow(
+                                  `row-client-fee-consent-request-${r.supersedesRequestId}`,
+                                  `Request #${r.supersedesRequestId}`,
+                                  toast,
+                                )
+                              }
+                            >
+                              Supersedes → request #{r.supersedesRequestId}
+                            </button>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {r.status === "pending" ? (
+                          <div className="flex gap-2 justify-end">
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                setSignTarget(r);
+                                signForm.reset({ signatureName: "" });
+                              }}
+                              data-testid={`button-sign-${r.id}`}
+                            >
+                              Sign
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setDeclineTarget(r);
+                                declineForm.reset({ reason: "" });
+                              }}
+                              data-testid={`button-decline-${r.id}`}
+                            >
+                              Decline
+                            </Button>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-500">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -338,44 +444,103 @@ export default function ClientFeeConsents() {
               You haven't signed any fee consents yet.
             </p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Signed</TableHead>
-                  <TableHead>Fee type</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead>Frequency</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {live.data.map((c) => {
-                  const dleft = daysUntil(c.consentExpiryDate);
-                  return (
-                    <TableRow key={c.id} data-testid={`row-client-fee-consent-${c.id}`}>
-                      <TableCell className="text-sm">{formatDate(c.consentedAt)}</TableCell>
-                      <TableCell className="text-sm capitalize">{formatFeeType(c.feeType)}</TableCell>
-                      <TableCell className="text-sm tabular-nums text-right">
-                        {c.amountType === "percentage"
-                          ? `${(Number(c.amount ?? 0) * 100).toFixed(4)}%`
-                          : formatAud(c.amount)}
-                      </TableCell>
-                      <TableCell className="text-sm capitalize">{c.deductionFrequency}</TableCell>
-                      <TableCell className="text-sm">
-                        {formatDate(c.consentExpiryDate)}
-                        {dleft !== null && c.renewalStatus !== "expired" && (
-                          <div className="text-xs text-gray-500">
-                            {dleft >= 0 ? `in ${dleft} days` : `${Math.abs(dleft)} days ago`}
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Signed</TableHead>
+                    <TableHead>Fee type</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
+                    <TableHead>Frequency</TableHead>
+                    <TableHead>Renewal window</TableHead>
+                    <TableHead>Expires</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {live.data.map((c) => {
+                    const dleft = daysUntil(c.consentExpiryDate);
+                    return (
+                      <TableRow key={c.id} data-testid={`row-client-fee-consent-${c.id}`}>
+                        <TableCell className="text-sm">{formatDate(c.consentedAt)}</TableCell>
+                        <TableCell className="text-sm capitalize">
+                          {formatFeeType(c.feeType)}
+                          {c.accountName && (
+                            <div className="text-xs text-gray-500">{c.accountName}</div>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-sm tabular-nums text-right">
+                          {c.amountType === "calculation_method"
+                            ? c.calculationMethod ?? "Calc method"
+                            : c.amountType === "percentage"
+                              ? `${(Number(c.amount ?? 0) * 100).toFixed(4)}%`
+                              : formatAud(c.amount)}
+                        </TableCell>
+                        <TableCell className="text-sm capitalize">{c.deductionFrequency}</TableCell>
+                        <TableCell className="text-xs whitespace-nowrap text-slate-600">
+                          <div className="flex items-center gap-1">
+                            <Clock className="h-3 w-3 text-slate-400" />
+                            {formatDate(c.renewalWindowStart)} →{" "}
+                            {formatDate(c.renewalWindowEnd)}
                           </div>
-                        )}
-                      </TableCell>
-                      <TableCell>{renewalBadge(c.renewalStatus)}</TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {formatDate(c.consentExpiryDate)}
+                          {dleft !== null && c.renewalStatus !== "expired" && (
+                            <div className="text-xs text-gray-500">
+                              {dleft >= 0 ? `in ${dleft} days` : `${Math.abs(dleft)} days ago`}
+                            </div>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col gap-1">
+                            {renewalBadge(c.renewalStatus)}
+                            <BlockedReasonBanner reason={c.deductionsBlockedReason} />
+                            {c.supersededByRequestId && (
+                              <button
+                                type="button"
+                                className="text-[11px] text-blue-700 hover:underline text-left"
+                                data-testid={`link-client-superseded-by-${c.id}`}
+                                onClick={() =>
+                                  jumpToRow(
+                                    `row-client-fee-consent-request-${c.supersededByRequestId}`,
+                                    `Request #${c.supersededByRequestId}`,
+                                    toast,
+                                  )
+                                }
+                              >
+                                Superseded by → request #{c.supersededByRequestId}
+                              </button>
+                            )}
+                            {c.supersededReason && (
+                              <div className="text-[11px] text-slate-500">
+                                {c.supersededReason}
+                              </div>
+                            )}
+                            {c.supersedesRequestId && (
+                              <button
+                                type="button"
+                                className="text-[11px] text-blue-700 hover:underline text-left"
+                                data-testid={`link-client-supersedes-consent-${c.id}`}
+                                onClick={() =>
+                                  jumpToRow(
+                                    `row-client-fee-consent-request-${c.supersedesRequestId}`,
+                                    `Request #${c.supersedesRequestId}`,
+                                    toast,
+                                  )
+                                }
+                              >
+                                Supersedes → request #{c.supersedesRequestId}
+                              </button>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -401,6 +566,11 @@ export default function ClientFeeConsents() {
                 <div className="mt-1">
                   Account: {signTarget.accountNumber} • Expires{" "}
                   {formatDate(signTarget.proposedConsentExpiryDate)}
+                </div>
+                <div className="mt-1 flex items-center gap-1">
+                  <Clock className="h-3 w-3 text-slate-400" />
+                  Renewal window: {formatDate(signTarget.proposedRenewalWindowStart)} →{" "}
+                  {formatDate(signTarget.proposedRenewalWindowEnd)}
                 </div>
               </div>
               <Form {...signForm}>
