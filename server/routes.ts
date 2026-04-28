@@ -80,7 +80,7 @@ import {
   DEFAULT_REBALANCING_BENCHMARK,
   computeRebalancingGap,
   resolvePerClientBenchmark,
-  resolveRecommendationTier,
+  resolveRecommendationKind,
 } from "./config/rebalancing-benchmark";
 import { loadLatestSoaTargetAllocation } from "./services/soa-target";
 import { registerPortfolioRealMetricsRoute } from "./portfolio-real-metrics-route";
@@ -3168,38 +3168,179 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const rebalancingBenchmarkType = rebalancingBenchmark.type;
       const rebalancingBenchmarkNote = rebalancingBenchmark.note;
 
-      // Resolve the risk tier used to flavour the textual recommendations
+      // Resolve the recommendation "kind" used to flavour the textual advice
       // below. We mirror the benchmark-resolution policy: when the client has
-      // a stored `riskProfiles` row, use its `riskBand` (mapping the 5-band
-      // risk-scoring vocabulary onto the 3-tier copy we emit). Only fall back
-      // to the per-request `riskTolerance` 1–5 number when no profile exists.
-      // This keeps the copy aligned with the personalised rebalancing-gap
-      // card so a client with a "growth" profile no longer receives
-      // conservative-flavoured advice when a stale `riskTolerance: 1` is sent.
-      // Task #407 — the policy lives in `resolveRecommendationTier` next to
-      // `resolvePerClientBenchmark` so it can be unit-tested without spinning
-      // up Express; see `scripts/test-recommendation-tier.ts`.
-      const recommendationTier = resolveRecommendationTier(
+      // a stored `riskProfiles` row, use its `riskBand` directly so each of
+      // the five canonical bands (conservative / moderate / balanced / growth
+      // / high_growth) gets its own copy whose thresholds line up with the
+      // band's row in `PORTFOLIO_ALLOCATIONS`
+      // (`server/services/risk-scoring.ts`). Only fall back to the per-request
+      // `riskTolerance` 1–5 number when no profile exists, in which case we
+      // emit the legacy 3-tier copy via the `tol_*` fallback kinds so the
+      // request-only contract does not break.
+      //
+      // Task #407 extracted the resolver so it can be unit-tested without
+      // spinning up Express (see `scripts/test-recommendation-tier.ts`);
+      // Task #408 widened that helper from a 3-tier `RecommendationTier`
+      // into a 5-band-plus-fallback `RecommendationKind` so this route can
+      // emit per-band copy. The helper also defensively guards against
+      // unexpected `riskBand` values (`risk_profiles.risk_band` is plain
+      // text with no DB-level enum constraint) — an unknown band falls
+      // through to the neutral `moderate` kind rather than silently
+      // serving high-growth copy.
+      const recommendationKind = resolveRecommendationKind(
         latestRiskProfile,
         riskTolerance,
       );
 
       // Generate recommendations based on risk profile
       const recommendations: Array<{ userId: number; type: string; title: string; description: string; severity: string; isRead: boolean }> = [];
-      
-      // Risk-based portfolio recommendations
-      if (recommendationTier === "conservative") {
+      const cryptoPct = currentAllocation.crypto.toFixed(1);
+
+      // Risk-based portfolio recommendations.
+      //
+      // The five band branches below mirror the canonical allocations in
+      // `PORTFOLIO_ALLOCATIONS` (`server/services/risk-scoring.ts`):
+      //   conservative: cash 25, bonds 45, equities 25, alternatives 5, crypto  0
+      //   moderate:     cash 15, bonds 35, equities 45, alternatives 5, crypto  0
+      //   balanced:     cash 10, bonds 25, equities 55, alternatives 5, crypto  5
+      //   growth:       cash  5, bonds 10, equities 70, alternatives 5, crypto 10
+      //   high_growth:  cash  0, bonds  5, equities 75, alternatives 5, crypto 15
+      // The three `tol_*` branches at the bottom preserve the legacy copy
+      // used when the request has no `riskProfiles` row to read from.
+      if (recommendationKind === "conservative") {
+        if (currentAllocation.crypto > 5) {
+          recommendations.push({
+            userId,
+            type: "rebalancing",
+            title: "Trim Crypto Exposure",
+            description: `Your crypto allocation (${cryptoPct}%) is above the conservative target of 0%. Consider trimming to 0-5% and rotating into bonds and cash.`,
+            severity: "warning",
+            isRead: false,
+          });
+        }
+        recommendations.push({
+          userId,
+          type: "opportunity",
+          title: "Anchor with Bonds and Cash",
+          description: "A conservative profile targets ~45% bonds and ~25% cash. Lean on government bonds, high-grade corporate bonds and short-duration cash holdings for stable income.",
+          severity: "info",
+          isRead: false,
+        });
+      } else if (recommendationKind === "moderate") {
+        if (currentAllocation.crypto > 5) {
+          recommendations.push({
+            userId,
+            type: "rebalancing",
+            title: "Trim Crypto Exposure",
+            description: `Your crypto allocation (${cryptoPct}%) is above the moderate target of 0%. Consider trimming to 0-5% and redeploying into a 35% bonds / 45% equities mix.`,
+            severity: "warning",
+            isRead: false,
+          });
+        }
+        recommendations.push({
+          userId,
+          type: "opportunity",
+          title: "Balance Bonds with Core Equities",
+          description: "A moderate profile targets ~35% bonds and ~45% equities. Use diversified equity ETFs alongside investment-grade bonds to keep volatility in check while still participating in growth.",
+          severity: "info",
+          isRead: false,
+        });
+      } else if (recommendationKind === "balanced") {
+        if (currentAllocation.crypto > 10) {
+          recommendations.push({
+            userId,
+            type: "rebalancing",
+            title: "Rebalance Crypto Toward Target",
+            description: `Your crypto allocation (${cryptoPct}%) exceeds the balanced target of ~5%. Consider trimming to 5-10% so equities and bonds stay near their 55%/25% targets.`,
+            severity: "info",
+            isRead: false,
+          });
+        } else if (currentAllocation.crypto < 2) {
+          recommendations.push({
+            userId,
+            type: "opportunity",
+            title: "Add a Small Crypto Sleeve",
+            description: `Your crypto allocation (${cryptoPct}%) is below the balanced target of ~5%. A modest 3-5% sleeve adds growth diversification without dominating the portfolio.`,
+            severity: "info",
+            isRead: false,
+          });
+        }
+        recommendations.push({
+          userId,
+          type: "opportunity",
+          title: "Equity-Tilted Diversification",
+          description: "A balanced profile targets ~55% equities and ~25% bonds with a small 5% crypto sleeve. Diversify across global equities and intermediate-duration bonds to capture growth while preserving downside protection.",
+          severity: "info",
+          isRead: false,
+        });
+      } else if (recommendationKind === "growth") {
+        if (currentAllocation.crypto > 15) {
+          recommendations.push({
+            userId,
+            type: "rebalancing",
+            title: "Trim Crypto Toward Growth Target",
+            description: `Your crypto allocation (${cryptoPct}%) is above the growth target of ~10%. Consider trimming to 10-15% so equities can do the heavy lifting at their ~70% target.`,
+            severity: "info",
+            isRead: false,
+          });
+        } else if (currentAllocation.crypto < 5) {
+          recommendations.push({
+            userId,
+            type: "opportunity",
+            title: "Build Toward the Growth Crypto Sleeve",
+            description: `Your crypto allocation (${cryptoPct}%) is below the growth target of ~10%. Consider scaling up to 8-12% and reducing cash, which should sit at only ~5% for a growth profile.`,
+            severity: "info",
+            isRead: false,
+          });
+        }
+        recommendations.push({
+          userId,
+          type: "opportunity",
+          title: "Lead with Global Equities",
+          description: "A growth profile targets ~70% equities, ~10% bonds and ~10% crypto. Concentrate the equity sleeve in diversified global growth funds and keep only a thin bond/cash buffer.",
+          severity: "info",
+          isRead: false,
+        });
+      } else if (recommendationKind === "high_growth") {
+        if (currentAllocation.crypto > 20) {
+          recommendations.push({
+            userId,
+            type: "rebalancing",
+            title: "Cap Crypto Concentration",
+            description: `Your crypto allocation (${cryptoPct}%) is above the high-growth target of ~15%. Consider trimming to 15-20% to avoid single-asset concentration eclipsing the ~75% equity sleeve.`,
+            severity: "warning",
+            isRead: false,
+          });
+        } else if (currentAllocation.crypto < 10) {
+          recommendations.push({
+            userId,
+            type: "opportunity",
+            title: "Scale Up the Crypto Sleeve",
+            description: `Your crypto allocation (${cryptoPct}%) is below the high-growth target of ~15%. A high-growth profile supports a 12-18% crypto sleeve alongside a ~75% equity allocation.`,
+            severity: "info",
+            isRead: false,
+          });
+        }
+        recommendations.push({
+          userId,
+          type: "opportunity",
+          title: "Maximise Growth and Venture Exposure",
+          description: "A high-growth profile targets ~75% equities, ~15% crypto and only ~5% bonds with no cash buffer. Tilt the equity sleeve toward growth stocks, emerging markets and venture-style opportunities — and be prepared for larger drawdowns.",
+          severity: "info",
+          isRead: false,
+        });
+      } else if (recommendationKind === "tol_conservative") {
         if (currentAllocation.crypto > 10) {
           recommendations.push({
             userId,
             type: "rebalancing",
             title: "Reduce Crypto Exposure",
-            description: `Your crypto allocation (${currentAllocation.crypto.toFixed(1)}%) is high for a conservative profile. Consider reducing to 5-10% and increasing fixed income investments.`,
+            description: `Your crypto allocation (${cryptoPct}%) is high for a conservative profile. Consider reducing to 5-10% and increasing fixed income investments.`,
             severity: "warning",
             isRead: false,
           });
         }
-        
         recommendations.push({
           userId,
           type: "opportunity",
@@ -3208,18 +3349,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           severity: "info",
           isRead: false,
         });
-      } else if (recommendationTier === "moderate") {
+      } else if (recommendationKind === "tol_moderate") {
         if (currentAllocation.crypto > 20) {
           recommendations.push({
             userId,
             type: "rebalancing",
             title: "Moderate Crypto Rebalancing",
-            description: `Your crypto allocation (${currentAllocation.crypto.toFixed(1)}%) exceeds moderate risk guidelines. Consider reducing to 15-20% for better risk management.`,
+            description: `Your crypto allocation (${cryptoPct}%) exceeds moderate risk guidelines. Consider reducing to 15-20% for better risk management.`,
             severity: "info",
             isRead: false,
           });
         }
-        
         recommendations.push({
           userId,
           type: "opportunity",
@@ -3228,18 +3368,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           severity: "info",
           isRead: false,
         });
-      } else { // recommendationTier === "aggressive"
+      } else { // recommendationKind === "tol_aggressive"
         if (currentAllocation.crypto < 15) {
           recommendations.push({
             userId,
             type: "opportunity",
             title: "Increase Growth Exposure",
-            description: `Your crypto allocation (${currentAllocation.crypto.toFixed(1)}%) is conservative. Consider increasing to 25-30% for higher growth potential.`,
+            description: `Your crypto allocation (${cryptoPct}%) is conservative. Consider increasing to 25-30% for higher growth potential.`,
             severity: "info",
             isRead: false,
           });
         }
-        
         recommendations.push({
           userId,
           type: "opportunity",

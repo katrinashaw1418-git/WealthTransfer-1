@@ -453,27 +453,72 @@ export function buildAllocationComparisonPayload(
 // stored `riskBand` is caught by `scripts/test-recommendation-tier.ts`.
 export type RecommendationTier = "conservative" | "moderate" | "aggressive";
 
-export function resolveRecommendationTier(
+// `RecommendationKind` is the 5-band evolution introduced by Task #408.
+// When a stored `riskProfiles.riskBand` row exists we now flavour the
+// AI-recommendation copy by the band itself (one of the five canonical
+// `RiskBand` values: conservative / moderate / balanced / growth /
+// high_growth) rather than collapsing it onto the legacy 3-tier
+// "conservative / moderate / aggressive" buckets that #407 used. This
+// lets each band quote thresholds and target ranges that match its row
+// in `PORTFOLIO_ALLOCATIONS` (`server/services/risk-scoring.ts`), so a
+// `balanced` client no longer reads identical advice to a `moderate`
+// one (and likewise for `growth` vs `high_growth`).
+//
+// When no profile is on file we fall back to a 3-tier "fallback" kind
+// derived from the per-request `riskTolerance` 1–5 number — this
+// preserves the request-only contract for callers that don't supply a
+// stored profile. The `tol_*` prefix makes it obvious at the call site
+// whether the kind came from a stored band or from the tolerance ladder.
+export type FallbackTier = "tol_conservative" | "tol_moderate" | "tol_aggressive";
+
+// The set of band values the route handler renders distinct copy for.
+// Kept here (rather than inlined in `resolveRecommendationKind`) so the
+// `default:` branch below and the unit tests in
+// `scripts/test-recommendation-tier.ts` cannot drift from the route's
+// branching surface.
+const KNOWN_RISK_BANDS = new Set<string>([
+  "conservative",
+  "moderate",
+  "balanced",
+  "growth",
+  "high_growth",
+]);
+
+// `RecommendationKind` is one of the five canonical `RiskBand` values
+// (when a profile exists) or one of the three `tol_*` fallback tiers
+// (when it does not). We deliberately do NOT import `RiskBand` here —
+// this module is a config layer and we keep the dependency arrow
+// pointing the other way (services depend on config, not vice versa).
+export type RecommendationKind =
+  | "conservative"
+  | "moderate"
+  | "balanced"
+  | "growth"
+  | "high_growth"
+  | FallbackTier;
+
+export function resolveRecommendationKind(
   latestRiskProfile: { riskBand: string | null | undefined } | null | undefined,
   riskTolerance: number,
-): RecommendationTier {
+): RecommendationKind {
   if (latestRiskProfile) {
-    switch (latestRiskProfile.riskBand) {
-      case "conservative":
-        return "conservative";
-      case "moderate":
-      case "balanced":
-        return "moderate";
-      case "growth":
-      case "high_growth":
-        return "aggressive";
-      default:
-        return "moderate";
+    const band = latestRiskProfile.riskBand;
+    // `risk_profiles.risk_band` is stored as plain text (no DB-level
+    // enum constraint), so guard against unexpected legacy/manual
+    // values rather than blindly trusting them — an unknown band
+    // would otherwise flow into the route handler's final `else` and
+    // quietly serve high-growth copy. Default to "moderate" (the
+    // neutral middle band), matching the safest-default behaviour the
+    // legacy `resolveRecommendationTier` had via its `default:`
+    // switch case.
+    if (typeof band === "string" && KNOWN_RISK_BANDS.has(band)) {
+      return band as RecommendationKind;
     }
+    return "moderate";
   }
-  if (riskTolerance <= 2) return "conservative";
-  if (riskTolerance <= 4) return "moderate";
-  return "aggressive";
+  if (riskTolerance <= 2) return "tol_conservative";
+  if (riskTolerance <= 4) return "tol_moderate";
+  return "tol_aggressive";
 }
 
 // Compute the one-sided turnover distance between an allocation (fractions

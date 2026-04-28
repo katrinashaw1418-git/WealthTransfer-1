@@ -371,12 +371,16 @@ const CI_LEAK_GATE_OTHER_SCRIPTS: string[] = [
   // writes, no ledger entries, so the surrounding leak-gate snapshot
   // records zero drift.
   "scripts/test-portfolio-allocation-per-client.ts",
-  // Task #407 — companion unit tests for `resolveRecommendationTier`,
-  // the helper extracted from the AI-recommendations route handler so
-  // the textual recommendation tier (conservative / moderate /
-  // aggressive) is derived from the latest `riskProfiles.riskBand`
+  // Task #407 / #408 — companion unit tests for
+  // `resolveRecommendationKind`, the helper extracted from the
+  // AI-recommendations route handler so the textual recommendation
+  // copy bucket is derived from the latest `riskProfiles.riskBand`
   // row when one exists (Task #394), falling back to the per-request
   // `riskTolerance` 1–5 number only when no profile is on file.
+  // Task #408 widened the helper's return from a 3-tier
+  // `RecommendationTier` (conservative / moderate / aggressive) into
+  // a 5-band-plus-fallback `RecommendationKind` so the route can emit
+  // distinct copy for each of the five canonical risk bands.
   // Purely static (no DB writes), same shape as the
   // test-rebalancing-benchmark.ts entry immediately above, so the
   // surrounding leak-gate snapshot trivially records zero drift.
