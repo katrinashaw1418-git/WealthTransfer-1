@@ -52,6 +52,17 @@ const RISK_LABEL: Record<string, "Low" | "Medium" | "High"> = {
   high: "High",
 };
 
+// Task #281 — the dev/staging banner used to render unconditionally. We
+// now gate it on `VITE_PUBLIC_ENV` so production deploys can hide it
+// without a code change, while preview/staging deploys keep showing it.
+// Default (unset or unrecognised value) intentionally shows the banner so
+// a misconfigured deploy never silently drops the warning.
+function shouldShowDevStagingBanner(): boolean {
+  const raw = import.meta.env.VITE_PUBLIC_ENV;
+  if (typeof raw !== "string") return true;
+  return raw.trim().toLowerCase() !== "production";
+}
+
 function deriveLandingProduct(p: any): LandingProduct {
   const min = parseFloat(p?.minimumInvestment ?? "0");
   return {
@@ -90,21 +101,25 @@ export default function Landing() {
       .map(deriveLandingProduct);
   }, [apiProducts]);
 
+  const showDevStagingBanner = shouldShowDevStagingBanner();
+
   return (
     <div className="min-h-screen bg-white">
-      <div
-        className="bg-amber-500 border-b-2 border-amber-600 px-4 py-3"
-        role="alert"
-        data-testid="banner-dev-staging"
-      >
-        <div className="max-w-7xl mx-auto flex items-start md:items-center justify-center gap-3">
-          <AlertTriangle className="w-5 h-5 text-white flex-shrink-0 mt-0.5 md:mt-0" />
-          <p className="text-sm md:text-base text-white font-semibold leading-snug text-center">
-            Development / staging environment — this platform is not yet live. Do not submit personal,
-            financial or identity information. Any data entered here may be wiped without notice.
-          </p>
+      {showDevStagingBanner && (
+        <div
+          className="bg-amber-500 border-b-2 border-amber-600 px-4 py-3"
+          role="alert"
+          data-testid="banner-dev-staging"
+        >
+          <div className="max-w-7xl mx-auto flex items-start md:items-center justify-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-white flex-shrink-0 mt-0.5 md:mt-0" />
+            <p className="text-sm md:text-base text-white font-semibold leading-snug text-center">
+              Development / staging environment — this platform is not yet live. Do not submit personal,
+              financial or identity information. Any data entered here may be wiped without notice.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       <header className="bg-sky-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
