@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
+import { Link, useSearch } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { clientDisplayName } from "@shared/display-name";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -40,7 +42,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, Receipt, ShieldAlert } from "lucide-react";
+import { Plus, Receipt, ShieldAlert, Users } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface FeeConsentRequestRow {
@@ -79,6 +81,8 @@ interface ClientLite {
   firstName: string;
   lastName: string;
   email: string;
+  activeFeeConsents?: number;
+  feeConsentExpiringAt?: string | null;
 }
 
 interface AdviceRecordLite {
@@ -203,6 +207,17 @@ export default function AdviserFeeConsents() {
   const [page, setPage] = useState(1);
   const limit = 50;
 
+  // Task #304 — when the Business page "+N more" pill links here with
+  // ?status=active, surface a dedicated card listing every client that
+  // currently holds an active consent, sorted by soonest expiry. The
+  // existing requests table stays beneath so the rest of the page is
+  // unchanged.
+  const searchString = useSearch();
+  const showActiveConsents = useMemo(
+    () => new URLSearchParams(searchString).get("status") === "active",
+    [searchString],
+  );
+
   const requests = useQuery<ListResponse>({
     queryKey: [
       "/api/adviser/fee-consent-requests",
@@ -319,6 +334,20 @@ export default function AdviserFeeConsents() {
     const map = new Map<number, ClientLite>();
     (clients.data ?? []).forEach((c) => map.set(c.userId, c));
     return map;
+  }, [clients.data]);
+
+  // Task #304 — derive the active-consent client roster from the same
+  // /api/adviser/clients payload the Business card uses, so the deep-link
+  // shows exactly the set the pill summarised. Sort by soonest expiry.
+  const activeFeeClients = useMemo(() => {
+    const rows = (clients.data ?? []) as ClientLite[];
+    return rows
+      .filter((r) => (r.activeFeeConsents ?? 0) > 0 && r.feeConsentExpiringAt)
+      .sort(
+        (a, b) =>
+          new Date(a.feeConsentExpiringAt as string).getTime() -
+          new Date(b.feeConsentExpiringAt as string).getTime(),
+      );
   }, [clients.data]);
 
   const totalPages = requests.data ? Math.max(1, Math.ceil(requests.data.total / limit)) : 1;
@@ -669,6 +698,82 @@ export default function AdviserFeeConsents() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {showActiveConsents && (
+        <Card data-testid="card-active-fee-clients">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Users className="h-4 w-4 text-emerald-600" />
+                Active fee consents
+              </CardTitle>
+              <p className="text-xs text-slate-500 mt-1">
+                Clients holding at least one active consent, sorted by soonest expiry.
+              </p>
+            </div>
+            <Badge variant="outline" data-testid="badge-active-fee-clients-count">
+              {activeFeeClients.length}{" "}
+              {activeFeeClients.length === 1 ? "client" : "clients"}
+            </Badge>
+          </CardHeader>
+          <CardContent>
+            {clients.isLoading ? (
+              <Skeleton className="h-24 w-full" />
+            ) : activeFeeClients.length === 0 ? (
+              <p
+                className="text-sm text-gray-500"
+                data-testid="text-no-active-fee-clients"
+              >
+                No clients currently hold an active fee consent.
+              </p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Client</TableHead>
+                    <TableHead>Email</TableHead>
+                    <TableHead>Active consents</TableHead>
+                    <TableHead>Soonest expiry</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {activeFeeClients.map((c) => (
+                    <TableRow
+                      key={c.userId}
+                      data-testid={`row-active-fee-client-${c.userId}`}
+                    >
+                      <TableCell className="text-sm font-medium">
+                        {clientDisplayName(c, c.userId)}
+                      </TableCell>
+                      <TableCell className="text-sm text-gray-600">
+                        {c.email}
+                      </TableCell>
+                      <TableCell className="text-sm tabular-nums">
+                        {c.activeFeeConsents ?? 0}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatDate(c.feeConsentExpiringAt ?? null)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Link href={`/adviser/clients/${c.userId}`}>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            data-testid={`button-open-client-${c.userId}`}
+                          >
+                            Open client
+                          </Button>
+                        </Link>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">

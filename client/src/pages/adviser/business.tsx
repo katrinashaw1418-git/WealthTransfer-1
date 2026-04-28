@@ -380,7 +380,10 @@ export default function AdviserBusiness() {
                     ))}
                     {stats.activeFeeClients.length > 3 ? (
                       <li>
-                        <Link href="/adviser/fee-consents">
+                        {/* Task #304 — deep-link to the dedicated active-consent
+                            client roster on the fee consents page (sorted by
+                            soonest expiry) instead of the generic requests view. */}
+                        <Link href="/adviser/fee-consents?status=active">
                           <a
                             className="inline-block mt-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 hover:bg-slate-200"
                             data-testid="link-active-fee-clients-more"
