@@ -8,3 +8,6 @@ vite.config.ts.*
 .local/object-storage/
 .env
 logs/
+playwright-report/
+test-results/
+.cache/ms-playwright/
