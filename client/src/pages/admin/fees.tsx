@@ -1231,6 +1231,20 @@ export default function AdminFeesPage() {
       setReconcilePending(false);
     }
   }
+  // Task #476 — friendly toast titles for the typed refusal codes the
+  // deduction-approve route returns on 409. Codes are the source of
+  // truth in `server/services/consent-integrity.ts`
+  // (`DEDUCTION_APPROVE_REFUSAL_CODES`); keep this map aligned. Unknown
+  // codes fall back to the raw error message so future additions never
+  // silently swallow a refusal — they just show the generic toast.
+  const APPROVE_REFUSAL_TITLES: Record<string, string> = {
+    consent_missing: "Approval blocked — consent missing",
+    consent_withdrawn: "Approval blocked — consent withdrawn",
+    consent_expired: "Approval blocked — consent expired",
+    consent_renewal_inactive: "Approval blocked — consent renewal inactive",
+    backing_rule_missing: "Approval blocked — backing rule missing",
+  };
+
   async function approveDeduction(id: number) {
     try {
       await apiRequest("POST", `/api/admin/fee-deductions/${id}/approve`, {});
@@ -1241,7 +1255,26 @@ export default function AdminFeesPage() {
       });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/fee-deductions"] });
     } catch (err: any) {
-      toast({ title: "Approve failed", description: err?.message ?? String(err), variant: "destructive" });
+      // The fetch wrapper throws an Error whose message starts with
+      // `<status>: <body-as-text-or-json>`. Try to recover the typed
+      // refusal `code` from that prefix so we can pick a friendly toast
+      // title; fall back to the generic title if parsing fails or the
+      // code isn't one we recognise.
+      const raw: string = err?.message ?? String(err);
+      let title = "Approve failed";
+      const jsonStart = raw.indexOf("{");
+      if (jsonStart !== -1) {
+        try {
+          const parsed = JSON.parse(raw.slice(jsonStart));
+          const code = typeof parsed?.code === "string" ? parsed.code : null;
+          if (code && APPROVE_REFUSAL_TITLES[code]) {
+            title = APPROVE_REFUSAL_TITLES[code];
+          }
+        } catch {
+          // not JSON — keep generic title
+        }
+      }
+      toast({ title, description: raw, variant: "destructive" });
       // Task #34: the backend may have updated the row to
       // `insufficient_funds` (or written a new failureReason) before
       // throwing — invalidate so the table reflects the new status
