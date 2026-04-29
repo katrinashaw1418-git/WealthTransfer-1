@@ -44,12 +44,37 @@
 //         user accounts (`t325-gate-b-{ts}-adv@test.local`, IDs 251, 256,
 //         264, 268, 275, 288, 295, 302, 307, 315, 320) with a stale wallet
 //         cache for AUD: `wallets.balance=0` while `SUM(ledger_entries)=0.80`.
-//         The ledger entries are CORRECT — they are the platform-share legs
-//         posted as part of legitimate balanced fee deductions during the
-//         Gate-B test runs — only the wallet-cache write was missed. Cut 4
-//         calls the sanctioned `refreshWalletCacheBalance(db, userId, 'AUD')`
-//         per pair to snap each cache to the live ledger sum. No ledger
-//         mutations, no acknowledgement rows, no other users touched.
+//         Cut 4 calls `refreshWalletCacheBalance(db, userId, 'AUD')` per
+//         pair as the safe-first attempt. NOTE: in practice these fixture
+//         users have NO `wallets` row at all, so refresh is a no-op (the
+//         helper only does UPDATE, not INSERT). Cut 5 then removes the
+//         users entirely — see below. Cut 4 is kept because it's a
+//         zero-cost safety net for any future fixture-user shape that
+//         genuinely has only a stale cache.
+//
+//   #325  Cut 5 — Same Task #325 fixtures as Cut 4. Each of the 11 users
+//         has exactly one transaction in their history: an UNBALANCED
+//         2-credit fixture journal (`fixture_user += 0.80 AUD`,
+//         `system user 11 += 0.20 AUD`, no offsetting debit). These are
+//         the same shape as the #159 phantom-tx residue (single-direction
+//         legs that were inserted directly into ledger_entries instead of
+//         via postLedgerEntries) — they were never reachable by any
+//         settlement code path and no adviser_fee_deduction row references
+//         them. Cut 5 deletes the users and their entire FK footprint
+//         (portfolio_snapshots, wallet_ledger_reconciliations,
+//         reconciliations, audit_logs, ledger_entries, ledger_postings,
+//         transactions, accounts, then users) inside ONE db.transaction,
+//         walking dependencies in the correct order. Three pre-flight
+//         invariants must hold or Cut 5 ABORTS without writing:
+//             (a) every targeted user matches `t325-gate-b-...@test.local`
+//             (b) every targeted txn has exactly the expected 2-leg
+//                 fixture shape and ONLY touches users in {fixture user,
+//                 system user 11}
+//             (c) no targeted txn is referenced by adviser_fee_deductions
+//         Side effect: the system user 11's stale +0.20 AUD-per-fixture
+//         credits on account 6 (totalling 2.20 AUD) are removed too, which
+//         is correct — they had no offsetting debit and no settled
+//         deduction owns them.
 //
 // Idempotency:
 //   - Each step checks "already done" before mutating, so re-running this
@@ -561,6 +586,303 @@ async function main(): Promise<void> {
   console.log(
     `[cleanup] cut 4 done — refreshed=${cut4Refreshed} skipped=${cut4Skipped}`,
   );
+
+  // -----------------------------------------------------------------
+  // Cut 5 (#325): delete the 11 Task #325 Gate-B fixture users' entire
+  // FINANCIAL footprint (everything that drives the GO/NO-GO ledger ↔
+  // wallet drift gate). See header comment for the full residue
+  // description; Cut 4 above already established that these users have
+  // no `wallets` row and that `refreshWalletCacheBalance` cannot clear
+  // the gate. Cut 5 walks the FK graph in dependency order:
+  //
+  //   1. ledger_postings    (FK → transactions)
+  //   2. ledger_entries     (FK → transactions, accounts, users)
+  //   3. transactions       (the 11 fixture txns)
+  //   4. portfolio_snapshots(FK → users)
+  //   5. wallet_ledger_reconciliations (FK → users)
+  //   6. reconciliations    (FK → users)
+  //   7. accounts           (FK → users; only ledger_entries.account_id
+  //                          FKs into accounts.id, cleared in step 2)
+  //
+  // The `users` row and the `audit_logs` rows for these IDs are
+  // INTENTIONALLY LEFT IN PLACE. `audit_logs` is regulator-grade
+  // append-only (DB triggers `audit_logs_block_*` raise SQLSTATE
+  // restrict_violation on UPDATE/DELETE/TRUNCATE — see
+  // server/services/audit-immutability-migration.ts), and the
+  // `audit_logs.user_id` FK is `ON DELETE NO ACTION`, so neither the
+  // audit rows nor the user row can be physically removed without a
+  // DBA-only superuser override. The 11 users become inert ghost rows
+  // (no wallet, no ledger entries, no accounts, no portfolio, no
+  // transactions, no reconciliations); for the GO/NO-GO drift gate
+  // they read as `cached=0 ledger=0 drift=0` and pass cleanly.
+  //
+  // ALL inside one db.transaction so a partial failure leaves no
+  // half-deleted state. THREE pre-flight invariants must hold or the
+  // entire transaction rolls back without writing:
+  //   (a) every targeted user matches `t325-gate-b-...@test.local`
+  //   (b) every fixture txn touches ONLY users in the safe set
+  //       {fixture user, system user 11} and has the expected unbalanced
+  //       2-credit shape
+  //   (c) no fixture txn is referenced by adviser_fee_deductions
+  //       (settled_transaction_id OR reversal_transaction_id)
+  //
+  // Idempotent: if no users/transactions match (e.g. a previous run
+  // already deleted them), the whole cut is a no-op.
+  // -----------------------------------------------------------------
+  await db.transaction(async (tx) => {
+    // Re-validate the user set INSIDE the transaction (defence in depth
+    // — Cut 4 already validated, but the data could in theory have
+    // changed between the two reads on a busy system).
+    const usersInTx = await tx.execute<{
+      id: number;
+      username: string;
+      email: string;
+    }>(sql`
+      SELECT id, username, email FROM users
+       WHERE id IN (${sql.join(
+         STALE_FEEGATE_FIXTURE_USER_IDS.map((id) => sql`${id}`),
+         sql`, `,
+       )})
+       ORDER BY id
+    `);
+    const userRows = (usersInTx as any).rows ?? [];
+    if (userRows.length === 0) {
+      console.log(
+        "[cleanup] cut 5 — no fixture users present (already deleted by an earlier run); skipping",
+      );
+      return;
+    }
+    // Invariant (a): fixture-pattern safety assertion.
+    const wrongPattern = userRows.filter(
+      (u: any) =>
+        !u.username?.startsWith("t325-gate-b-") ||
+        !u.email?.endsWith("@test.local"),
+    );
+    if (wrongPattern.length > 0) {
+      console.error(
+        "[cleanup] cut 5 ABORTED (invariant a) — non-fixture user(s) " +
+          "in STALE_FEEGATE_FIXTURE_USER_IDS:",
+      );
+      for (const u of wrongPattern) {
+        console.error(
+          `  user=${u.id} username=${u.username} email=${u.email}`,
+        );
+      }
+      throw new Error("cut 5 invariant (a) failed — fixture pattern mismatch");
+    }
+
+    // Discover the fixture txns by walking ledger_entries.user_id — this
+    // avoids hardcoding txn IDs that could drift between environments.
+    const fixtureTxRows = await tx.execute<{ transaction_id: number }>(sql`
+      SELECT DISTINCT transaction_id
+        FROM ledger_entries
+       WHERE user_id IN (${sql.join(
+         STALE_FEEGATE_FIXTURE_USER_IDS.map((id) => sql`${id}`),
+         sql`, `,
+       )})
+         AND transaction_id IS NOT NULL
+       ORDER BY transaction_id
+    `);
+    const fixtureTxIds: number[] = ((fixtureTxRows as any).rows ?? [])
+      .map((r: any) => r.transaction_id)
+      .filter((x: any): x is number => typeof x === "number");
+
+    // Invariant (b): every fixture txn must have ONLY-{fixture user OR
+    // system user 11} legs and the expected 2-leg unbalanced shape.
+    if (fixtureTxIds.length > 0) {
+      const safeUserSet = new Set<number>([
+        ...STALE_FEEGATE_FIXTURE_USER_IDS,
+        SYSTEM_USER_ID,
+      ]);
+      const allLegs = await tx.execute<{
+        transaction_id: number;
+        user_id: number;
+        currency: string;
+        direction: string;
+        amount: string;
+      }>(sql`
+        SELECT transaction_id, user_id, currency, direction, amount::text AS amount
+          FROM ledger_entries
+         WHERE transaction_id IN (${sql.join(
+           fixtureTxIds.map((id) => sql`${id}`),
+           sql`, `,
+         )})
+         ORDER BY transaction_id, id
+      `);
+      const legsByTx = new Map<number, any[]>();
+      for (const l of (allLegs as any).rows ?? []) {
+        const arr = legsByTx.get(l.transaction_id) ?? [];
+        arr.push(l);
+        legsByTx.set(l.transaction_id, arr);
+      }
+      for (const [txId, legs] of legsByTx) {
+        // ONLY safe users may appear on these txns.
+        const strangers = legs.filter((l: any) => !safeUserSet.has(l.user_id));
+        if (strangers.length > 0) {
+          console.error(
+            `[cleanup] cut 5 ABORTED (invariant b) — txn ${txId} has leg(s) for non-safe user(s):`,
+          );
+          for (const s of strangers) {
+            console.error(
+              `  user=${s.user_id} ${s.currency} ${s.direction} ${s.amount}`,
+            );
+          }
+          throw new Error(
+            `cut 5 invariant (b) failed — txn ${txId} touches a non-safe user`,
+          );
+        }
+        // Expected shape: exactly 2 credit legs in AUD totalling +1.00.
+        const allCredit = legs.every((l: any) => l.direction === "credit");
+        const allAud = legs.every((l: any) => l.currency === "AUD");
+        const sum = legs.reduce(
+          (acc: number, l: any) =>
+            acc + (l.direction === "credit" ? +l.amount : -+l.amount),
+          0,
+        );
+        if (legs.length !== 2 || !allCredit || !allAud || Math.abs(sum - 1.0) > 0.001) {
+          console.error(
+            `[cleanup] cut 5 ABORTED (invariant b) — txn ${txId} has unexpected shape (legs=${legs.length}, allCredit=${allCredit}, allAud=${allAud}, sum=${sum}):`,
+          );
+          for (const l of legs) {
+            console.error(
+              `  user=${l.user_id} ${l.currency} ${l.direction} ${l.amount}`,
+            );
+          }
+          throw new Error(
+            `cut 5 invariant (b) failed — txn ${txId} unexpected shape`,
+          );
+        }
+      }
+
+      // Invariant (c): no fixture txn may be referenced by a deduction.
+      const dedRefs = await tx.execute<{
+        id: number;
+        settled_transaction_id: number | null;
+        reversal_transaction_id: number | null;
+      }>(sql`
+        SELECT id, settled_transaction_id, reversal_transaction_id
+          FROM adviser_fee_deductions
+         WHERE settled_transaction_id IN (${sql.join(
+           fixtureTxIds.map((id) => sql`${id}`),
+           sql`, `,
+         )})
+            OR reversal_transaction_id IN (${sql.join(
+              fixtureTxIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})
+      `);
+      const dedRows = (dedRefs as any).rows ?? [];
+      if (dedRows.length > 0) {
+        console.error(
+          "[cleanup] cut 5 ABORTED (invariant c) — adviser_fee_deductions row(s) reference a fixture txn:",
+        );
+        for (const d of dedRows) {
+          console.error(
+            `  deduction=${d.id} settled_tx=${d.settled_transaction_id} reversal_tx=${d.reversal_transaction_id}`,
+          );
+        }
+        throw new Error(
+          "cut 5 invariant (c) failed — deduction references a fixture txn",
+        );
+      }
+    }
+
+    console.log(
+      `[cleanup] cut 5 invariants OK — proceeding to delete ` +
+        `${userRows.length} user(s) and ${fixtureTxIds.length} txn(s)`,
+    );
+
+    // ---- step 1: ledger_postings (receipts for the fixture txns) ----
+    let lpDel = 0;
+    if (fixtureTxIds.length > 0) {
+      const r = await tx.execute(sql`
+        DELETE FROM ledger_postings
+         WHERE transaction_id IN (${sql.join(
+           fixtureTxIds.map((id) => sql`${id}`),
+           sql`, `,
+         )})
+      `);
+      lpDel = (r as any).rowCount ?? 0;
+    }
+    console.log(`[cleanup] cut 5 step 1 — ledger_postings deleted=${lpDel}`);
+
+    // ---- step 2: ledger_entries (BOTH legs of each fixture txn) ----
+    let leDel = 0;
+    if (fixtureTxIds.length > 0) {
+      const r = await tx.execute(sql`
+        DELETE FROM ledger_entries
+         WHERE transaction_id IN (${sql.join(
+           fixtureTxIds.map((id) => sql`${id}`),
+           sql`, `,
+         )})
+      `);
+      leDel = (r as any).rowCount ?? 0;
+    }
+    // Belt-and-braces: also delete any orphan ledger_entries owned by
+    // these users that have NULL transaction_id (shouldn't exist, but
+    // the FK lets it happen). Without this, step 8 (accounts) and step
+    // 9 (users) would FK-fail.
+    const orphanLeR = await tx.execute(sql`
+      DELETE FROM ledger_entries
+       WHERE user_id IN (${sql.join(
+         STALE_FEEGATE_FIXTURE_USER_IDS.map((id) => sql`${id}`),
+         sql`, `,
+       )})
+    `);
+    const orphanLeDel = (orphanLeR as any).rowCount ?? 0;
+    console.log(
+      `[cleanup] cut 5 step 2 — ledger_entries deleted=${leDel} (+${orphanLeDel} orphan)`,
+    );
+
+    // ---- step 3: transactions ----
+    let txnDel = 0;
+    if (fixtureTxIds.length > 0) {
+      const r = await tx.execute(sql`
+        DELETE FROM transactions
+         WHERE id IN (${sql.join(
+           fixtureTxIds.map((id) => sql`${id}`),
+           sql`, `,
+         )})
+      `);
+      txnDel = (r as any).rowCount ?? 0;
+    }
+    console.log(`[cleanup] cut 5 step 3 — transactions deleted=${txnDel}`);
+
+    // ---- steps 4–7: per-user FK rollups ----
+    const userIdsSql = sql.join(
+      STALE_FEEGATE_FIXTURE_USER_IDS.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const psR = await tx.execute(sql`
+      DELETE FROM portfolio_snapshots WHERE user_id IN (${userIdsSql})
+    `);
+    console.log(
+      `[cleanup] cut 5 step 4 — portfolio_snapshots deleted=${(psR as any).rowCount ?? 0}`,
+    );
+    const wlrR = await tx.execute(sql`
+      DELETE FROM wallet_ledger_reconciliations WHERE user_id IN (${userIdsSql})
+    `);
+    console.log(
+      `[cleanup] cut 5 step 5 — wallet_ledger_reconciliations deleted=${(wlrR as any).rowCount ?? 0}`,
+    );
+    const recR = await tx.execute(sql`
+      DELETE FROM reconciliations WHERE user_id IN (${userIdsSql})
+    `);
+    console.log(
+      `[cleanup] cut 5 step 6 — reconciliations deleted=${(recR as any).rowCount ?? 0}`,
+    );
+    // ---- step 7: accounts (now that ledger_entries.account_id is gone) ----
+    const acR = await tx.execute(sql`
+      DELETE FROM accounts WHERE user_id IN (${userIdsSql})
+    `);
+    console.log(
+      `[cleanup] cut 5 step 7 — accounts deleted=${(acR as any).rowCount ?? 0}`,
+    );
+
+    // NOTE: audit_logs and users are INTENTIONALLY NOT deleted — see the
+    // header comment block above for why. The 11 fixture user rows
+    // remain as inert ghosts (no wallet, no ledger, no accounts, etc.).
+  });
 
   // Final state report so the operator can eyeball the result.
   const driftRows = await db.execute<{
