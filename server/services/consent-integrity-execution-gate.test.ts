@@ -96,24 +96,41 @@ type ReasonKey = (typeof reasons)[number];
 // One scenario per (call_site, reason) pair so they cannot interfere with
 // each other. We seed everything healthy first; per-test consent mutations
 // are applied just before the assertion and reverted in afterAll cleanup.
-const accrualScenarios: Record<ReasonKey, RuleScenario> = {} as any;
-const activationScenarios: Record<ReasonKey, RuleScenario> = {} as any;
-const approvalScenarios: Record<
-  ReasonKey,
-  RuleScenario & { accrualId: number; deductionId: number }
-> = {} as any;
+// Scenarios are populated in beforeAll; tests run after, so by the time any
+// test reads them every key is present. We declare them as Partial to keep
+// the build honest about the seeding sequence.
+const accrualScenarios: Partial<Record<ReasonKey, RuleScenario>> = {};
+const activationScenarios: Partial<Record<ReasonKey, RuleScenario>> = {};
+const approvalScenarios: Partial<
+  Record<ReasonKey, RuleScenario & { accrualId: number; deductionId: number }>
+> = {};
 
-// Multi-rule + e2e use their own scenarios to keep the assertions readable.
-let multiRuleScenario: {
+type MultiRuleScenario = {
   ruleA: RuleScenario;
   ruleB: RuleScenario; // the one with a withdrawn consent
   deductionId: number;
-} = null as any;
-
-let e2eScenario: RuleScenario & {
+};
+type E2eScenario = RuleScenario & {
   accrualId: number;
   deductionId: number;
-} = null as any;
+};
+
+// Multi-rule + e2e use their own scenarios to keep the assertions readable.
+// Initialised in beforeAll; tests assert non-null before use.
+let multiRuleScenario: MultiRuleScenario | null = null;
+let e2eScenario: E2eScenario | null = null;
+
+// Tiny non-null guard so reads of beforeAll-populated scenarios stay
+// readable in the test bodies without leaking `!` everywhere. Throws a
+// useful message if the seeding step missed a key.
+function requireScenario<T>(value: T | null | undefined, label: string): T {
+  if (value == null) {
+    throw new Error(
+      `[t476-test] expected scenario "${label}" to be seeded by beforeAll, got ${value === null ? "null" : "undefined"}`,
+    );
+  }
+  return value;
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -243,7 +260,7 @@ async function buildApprovalScenario(
       adviserShareAmount: "0.8000",
       platformShareAmount: "0.2000",
       currency: CURRENCY,
-      accrualIds: [accrual.id] as any,
+      accrualIds: [accrual.id] as number[],
       status: "pending_approval",
     })
     .returning();
@@ -308,7 +325,7 @@ async function seedClientWalletWith(amount: string): Promise<void> {
     });
   }
   await db.transaction(async (tx) => {
-    const [txRow] = await (tx as any)
+    const [txRow] = await tx
       .insert(transactions)
       .values({
         userId: clientUserId,
@@ -524,7 +541,7 @@ beforeAll(async () => {
       adviserShareAmount: "0.8000",
       platformShareAmount: "0.2000",
       currency: CURRENCY,
-      accrualIds: [aA.id, aB.id] as any,
+      accrualIds: [aA.id, aB.id] as number[],
       status: "pending_approval",
     })
     .returning();
@@ -562,7 +579,7 @@ beforeAll(async () => {
       adviserShareAmount: "0.8000",
       platformShareAmount: "0.2000",
       currency: CURRENCY,
-      accrualIds: [e2eAccrual.id] as any,
+      accrualIds: [e2eAccrual.id] as number[],
       status: "pending_approval",
     })
     .returning();
@@ -655,7 +672,7 @@ afterAll(async () => {
 // =============================================================================
 describe("assertConsentValidForExecution (Task #476 helper contract)", () => {
   it("returns ok=true on a healthy consent (happy path)", async () => {
-    const s = activationScenarios.happy;
+    const s = requireScenario(activationScenarios.happy, "activationScenarios.happy");
     const res = await assertConsentValidForExecution(s.consentId);
     expect(res.ok).toBe(true);
     if (res.ok) {
@@ -736,7 +753,7 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
     new Date(Date.UTC(2026, 5, 1 + offsetDays));
 
   it("produces a skipped accrual row with gateReason='consent_withdrawn' (does NOT throw)", async () => {
-    const s = accrualScenarios.withdrawn;
+    const s = requireScenario(accrualScenarios.withdrawn, "accrualScenarios.withdrawn");
     const accrualDate = dateFor(0);
     await applyConsentMutation(s.consentId, "withdrawn");
     const result = await runDailyAccruals({ accrualDate });
@@ -779,7 +796,7 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
   });
 
   it("produces a skipped accrual row with gateReason='consent_expired'", async () => {
-    const s = accrualScenarios.expired;
+    const s = requireScenario(accrualScenarios.expired, "accrualScenarios.expired");
     const accrualDate = dateFor(1);
     await applyConsentMutation(s.consentId, "expired");
     await runDailyAccruals({ accrualDate });
@@ -798,7 +815,7 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
   });
 
   it("produces a skipped accrual row with gateReason='consent_renewal_inactive'", async () => {
-    const s = accrualScenarios.renewal_inactive;
+    const s = requireScenario(accrualScenarios.renewal_inactive, "accrualScenarios.renewal_inactive");
     const accrualDate = dateFor(2);
     await applyConsentMutation(s.consentId, "renewal_inactive");
     await runDailyAccruals({ accrualDate });
@@ -817,7 +834,7 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
   });
 
   it("produces a normal accrual row (no gateReason) for a healthy consent", async () => {
-    const s = accrualScenarios.happy;
+    const s = requireScenario(accrualScenarios.happy, "accrualScenarios.happy");
     const accrualDate = dateFor(3);
     // No mutation applied — consent stays healthy.
     await runDailyAccruals({ accrualDate });
@@ -844,7 +861,7 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
 describe("Rule activation consent integrity gate (Task #476)", () => {
   for (const reason of ["withdrawn", "expired", "renewal_inactive"] as const) {
     it(`refuses with 409 + code=${expectedReason(reason)} and writes a fee_rule_activate.blocked audit row`, async () => {
-      const s = activationScenarios[reason];
+      const s = requireScenario(activationScenarios[reason], `activationScenarios[${reason}]`);
       await applyConsentMutation(s.consentId, reason);
       const { status, body } = await POST(
         `/api/admin/fee-rules/${s.ruleId}/activate`,
@@ -883,7 +900,7 @@ describe("Rule activation consent integrity gate (Task #476)", () => {
   }
 
   it("activates a paused rule whose consent is healthy (happy path)", async () => {
-    const s = activationScenarios.happy;
+    const s = requireScenario(activationScenarios.happy, "activationScenarios.happy");
     const { status, body } = await POST(
       `/api/admin/fee-rules/${s.ruleId}/activate`,
       adminToken,
@@ -914,7 +931,7 @@ describe("Rule activation consent integrity gate (Task #476)", () => {
 describe("Deduction approval consent integrity gate (Task #476)", () => {
   for (const reason of ["withdrawn", "expired", "renewal_inactive"] as const) {
     it(`refuses with 409 + code=${expectedReason(reason)} and writes a deduction.approve.blocked audit row`, async () => {
-      const s = approvalScenarios[reason];
+      const s = requireScenario(approvalScenarios[reason], `approvalScenarios[${reason}]`);
       await applyConsentMutation(s.consentId, reason);
       const { status, body } = await POST(
         `/api/admin/fee-deductions/${s.deductionId}/approve`,
@@ -956,7 +973,7 @@ describe("Deduction approval consent integrity gate (Task #476)", () => {
   }
 
   it("settles a deduction whose consent is healthy (happy path)", async () => {
-    const s = approvalScenarios.happy;
+    const s = requireScenario(approvalScenarios.happy, "approvalScenarios.happy");
     const { status, body } = await POST(
       `/api/admin/fee-deductions/${s.deductionId}/approve`,
       adminToken,
@@ -978,23 +995,24 @@ describe("Deduction approval consent integrity gate (Task #476)", () => {
 // =============================================================================
 describe("Deduction approval consent integrity gate — multi-rule (Task #476)", () => {
   it("refuses when ANY backing rule's consent is invalid (gap previously masked by 'first accrual only' check)", async () => {
+    const m = requireScenario(multiRuleScenario, "multiRuleScenario");
     // ruleA's consent stays healthy. ruleB's consent is withdrawn. The
     // pre-fix code path inspected ONLY the first accrual's rule (ruleA)
     // and would have approved this deduction; the fixed path iterates
     // all distinct rules and refuses on ruleB.
-    await applyConsentMutation(multiRuleScenario.ruleB.consentId, "withdrawn");
+    await applyConsentMutation(m.ruleB.consentId, "withdrawn");
     const { status, body } = await POST(
-      `/api/admin/fee-deductions/${multiRuleScenario.deductionId}/approve`,
+      `/api/admin/fee-deductions/${m.deductionId}/approve`,
       adminToken,
     );
     expect(status).toBe(409);
     expect(body.code).toBe("consent_withdrawn");
-    expect(body.ruleId).toBe(multiRuleScenario.ruleB.ruleId);
+    expect(body.ruleId).toBe(m.ruleB.ruleId);
 
     const [d] = await db
       .select()
       .from(adviserFeeDeductions)
-      .where(eq(adviserFeeDeductions.id, multiRuleScenario.deductionId));
+      .where(eq(adviserFeeDeductions.id, m.deductionId));
     expect(d.status).toBe("pending_approval");
 
     // The audit row records `rulesChecked` so an operator can see how many
@@ -1006,13 +1024,13 @@ describe("Deduction approval consent integrity gate — multi-rule (Task #476)",
         and(
           eq(auditLogs.action, "deduction.approve.blocked"),
           eq(auditLogs.entityType, "adviser_fee_deduction"),
-          eq(auditLogs.entityId, String(multiRuleScenario.deductionId)),
+          eq(auditLogs.entityId, String(m.deductionId)),
         ),
       )
       .orderBy(desc(auditLogs.id))
       .limit(1);
     expect(audit).toBeDefined();
-    const meta = audit.metadata as Record<string, any>;
+    const meta = audit.metadata as Record<string, unknown>;
     expect(meta.rulesChecked).toBeGreaterThanOrEqual(2);
   });
 });
@@ -1068,7 +1086,7 @@ describe("settleApprovedDeduction in-tx consent gate (Task #476 TOCTOU defense)"
         adviserShareAmount: "0.8000",
         platformShareAmount: "0.2000",
         currency: CURRENCY,
-        accrualIds: [accrual.id] as any,
+        accrualIds: [accrual.id] as number[],
         status: "pending_approval",
       })
       .returning();
@@ -1225,14 +1243,15 @@ describe("assertConsentValidForExecution lockForUpdate (Task #476 race closure)"
 // =============================================================================
 describe("End-to-end: consent revoked AFTER accrual is still refused at approval (Task #476)", () => {
   it("refuses the approval even though the accrual was generated when the consent was healthy", async () => {
+    const e = requireScenario(e2eScenario, "e2eScenario");
     // The accrual for e2eScenario was inserted with gateReason=null at
     // setup time (consent was healthy then). Now we withdraw the consent
     // — mirroring a regulator-triggered revocation — and the approval
     // chokepoint must still refuse rather than relying on the stale
     // accrual-time snapshot.
-    await applyConsentMutation(e2eScenario.consentId, "withdrawn");
+    await applyConsentMutation(e.consentId, "withdrawn");
     const { status, body } = await POST(
-      `/api/admin/fee-deductions/${e2eScenario.deductionId}/approve`,
+      `/api/admin/fee-deductions/${e.deductionId}/approve`,
       adminToken,
     );
     expect(status).toBe(409);
@@ -1240,7 +1259,7 @@ describe("End-to-end: consent revoked AFTER accrual is still refused at approval
 
     // No transactions row was created against this deduction's
     // idempotency key (deterministic: fee_deduction_<id>).
-    const idemKey = `fee_deduction_${e2eScenario.deductionId}`;
+    const idemKey = `fee_deduction_${e.deductionId}`;
     const [txRow] = await db
       .select()
       .from(transactions)
@@ -1251,7 +1270,7 @@ describe("End-to-end: consent revoked AFTER accrual is still refused at approval
     const [d] = await db
       .select()
       .from(adviserFeeDeductions)
-      .where(eq(adviserFeeDeductions.id, e2eScenario.deductionId));
+      .where(eq(adviserFeeDeductions.id, e.deductionId));
     expect(d.status).toBe("pending_approval");
   });
 });
