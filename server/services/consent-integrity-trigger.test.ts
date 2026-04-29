@@ -53,15 +53,15 @@ async function seed() {
     VALUES (${`${TAG}-adviser`}, ${`${TAG}-adviser@test.local`}, 'x', 'Test', 'Adviser', 'adviser')
     RETURNING id
   `);
-  clientUserId = (clientRow.rows ?? (clientRow as any))[0].id;
-  adviserUserId = (adviserRow.rows ?? (adviserRow as any))[0].id;
+  clientUserId = clientRow.rows[0].id;
+  adviserUserId = adviserRow.rows[0].id;
 
   const adviceRow = await db.execute<{ id: number }>(sql`
     INSERT INTO advice_records (client_id, adviser_id, advice_type, advice_source, status)
     VALUES (${clientUserId}, ${adviserUserId}, 'personal', 'hybrid', 'issued')
     RETURNING id
   `);
-  adviceRecordId = (adviceRow.rows ?? (adviceRow as any))[0].id;
+  adviceRecordId = adviceRow.rows[0].id;
 
   // Fixed-fee consent for AUD 495.0000 — the canonical drift-bug fixture.
   const oneYearMs = 365 * 24 * 3600 * 1000;
@@ -81,7 +81,7 @@ async function seed() {
     )
     RETURNING id
   `);
-  consentId = (consentRow.rows ?? (consentRow as any))[0].id;
+  consentId = consentRow.rows[0].id;
 }
 
 async function cleanup() {
@@ -192,7 +192,7 @@ describe("adviser_fee_rules amount-equality trigger (Task #475)", () => {
         )
         RETURNING id
       `);
-      driftedRuleId = (seedRow.rows ?? (seedRow as any))[0].id;
+      driftedRuleId = seedRow.rows[0].id;
     } finally {
       await db.execute(
         sql`ALTER TABLE adviser_fee_rules ENABLE TRIGGER adviser_fee_rules_amount_equality`,
@@ -213,7 +213,7 @@ describe("adviser_fee_rules amount-equality trigger (Task #475)", () => {
        WHERE id = ${driftedRuleId!}
        RETURNING id, status
     `);
-    const updated = (updateRow.rows ?? (updateRow as any))[0];
+    const updated = updateRow.rows[0];
     expect(updated.status).toBe("superseded");
     // No tidy-up needed: the row references itself via superseded_by_rule_id,
     // which Postgres permits to be deleted in the same DELETE that removes

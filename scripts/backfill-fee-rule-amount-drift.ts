@@ -204,7 +204,7 @@ async function main() {
   let aligned = 0;
   let alreadyOk = 0;
   let skipped = 0;
-  const skips: Plan[] = [];
+  const skips: Extract<Plan, { kind: "skip" }>[] = [];
 
   for (const { rule, consent } of rows) {
     const plan = planFix(rule, consent);
@@ -239,7 +239,7 @@ async function main() {
   if (skipped > 0) {
     log(`skipped rules need human review:`);
     for (const s of skips) {
-      log(`  rule #${(s as any).ruleId}: ${(s as any).reason}`);
+      log(`  rule #${s.ruleId}: ${s.reason}`);
     }
   }
   log(`finished. mode=${APPLY ? "APPLY" : "DRY-RUN"}.`);
