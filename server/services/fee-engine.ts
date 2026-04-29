@@ -143,6 +143,42 @@ export class RuleNotActiveError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Task #476 — TOCTOU defense for the consent integrity gate.
+//
+// `settleApprovedDeduction` is called from the admin approve route after the
+// route's pre-check has already validated every backing rule's consent. That
+// pre-check is the UX-friendly fast-fail (clean 409 without entering a tx)
+// — but it leaves a milliseconds-wide race window in which a consent could
+// be withdrawn / expire between the pre-check and the start of the
+// settlement transaction. For a regulatory compliance system that races is
+// not acceptable: real money would post against legally-invalid consent.
+//
+// We therefore re-run the consent gate INSIDE the settlement transaction
+// (using the same `tx` snapshot the rest of the transaction observes) and
+// raise this error on any failure. The catch block flips the deduction to
+// `failureReason='consent integrity gate failed: <reason>'` and writes a
+// `fee_deduction_gate_blocked` audit row mirroring the RuleNotActiveError
+// path so a regulator can trace consent-driven refusals from the same
+// query as rule-status-driven refusals.
+// ---------------------------------------------------------------------------
+export class ConsentNotValidError extends Error {
+  readonly status = 409;
+  readonly ruleId: number;
+  readonly consentId: number;
+  readonly gateReason: GateReason;
+  constructor(ruleId: number, consentId: number, gateReason: GateReason) {
+    super(
+      `Cannot settle deduction: rule #${ruleId} consent #${consentId} ` +
+        `failed integrity gate (gateReason='${gateReason}')`,
+    );
+    this.name = "ConsentNotValidError";
+    this.ruleId = ruleId;
+    this.consentId = consentId;
+    this.gateReason = gateReason;
+  }
+}
+
 function ruleStatusToGateReason(status: string): GateReason {
   switch (status) {
     case "paused":
@@ -1006,15 +1042,48 @@ export async function settleApprovedDeduction(opts: {
             .select({
               id: adviserFeeRules.id,
               status: adviserFeeRules.status,
+              feeConsentId: adviserFeeRules.feeConsentId,
             })
             .from(adviserFeeRules)
             .where(inArray(adviserFeeRules.id, ruleIds));
+          // Sort for deterministic "first failure" so retries surface the
+          // same offending rule (matching the route layer's pre-check
+          // ordering — see admin-routes.ts for the parallel sort).
+          contributingRules.sort((a, b) => a.id - b.id);
           for (const r of contributingRules) {
             if (r.status !== "active") {
               throw new RuleNotActiveError(
                 r.id,
                 r.status,
                 ruleStatusToGateReason(r.status),
+              );
+            }
+            // Task #476 — TOCTOU defense. The route's pre-check already
+            // validated this consent, but a withdrawal/expiry could have
+            // landed in the millisecond gap between that check and the
+            // start of this transaction. Re-run the gate using the same
+            // tx snapshot so the read observes the in-tx world. We also
+            // pass `lockForUpdate: true` so the consent row is locked
+            // (`SELECT ... FOR UPDATE`) for the remainder of the
+            // transaction — under the default READ COMMITTED isolation
+            // a concurrent withdrawal that committed AFTER our gate
+            // SELECT but BEFORE our ledger commit would otherwise let
+            // money post against a now-withdrawn consent. The lock
+            // forces the withdrawal to wait until we commit/rollback,
+            // closing the residual race window. If the consent has
+            // moved out of valid since the pre-check, refuse here — the
+            // rolled-back tx writes nothing and the catch block records
+            // the consent-driven gate hit alongside the rule-status-
+            // driven path.
+            const consentCheck = await assertConsentValidForExecution(
+              r.feeConsentId,
+              { executor: tx as any, lockForUpdate: true },
+            );
+            if (!consentCheck.ok) {
+              throw new ConsentNotValidError(
+                r.id,
+                r.feeConsentId,
+                consentCheck.reason,
               );
             }
           }
@@ -1273,6 +1342,33 @@ export async function settleApprovedDeduction(opts: {
             ruleId: err.ruleId,
             ruleStatus: err.ruleStatus,
             gate: "B",
+            approverUserId: opts.approverUserId,
+            errorMessage: message,
+          },
+        });
+      } catch {
+        // ignore — primary error is what matters
+      }
+    }
+    // Task #476 — consent-driven gate hits get the same audit shape so a
+    // regulator can find them in the same `fee_deduction_gate_blocked`
+    // query as rule-status hits. The `gate` discriminator distinguishes
+    // the two cohorts ("consent" vs Gate B's "B") for filtering.
+    if (err instanceof ConsentNotValidError) {
+      try {
+        await writeAuditLog({
+          userId: opts.approverUserId,
+          action: "fee_deduction_gate_blocked",
+          entityType: "adviser_fee_deduction",
+          entityId: String(opts.deductionId),
+          before: null,
+          after: null,
+          extra: {
+            gateReason: err.gateReason,
+            ruleId: err.ruleId,
+            consentId: err.consentId,
+            gate: "consent",
+            source: "settle_tx",
             approverUserId: opts.approverUserId,
             errorMessage: message,
           },

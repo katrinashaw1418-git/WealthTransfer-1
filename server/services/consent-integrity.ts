@@ -56,6 +56,16 @@ export interface AssertConsentValidOpts {
   // boundary; the deduction-approve and rule-resume callsites pass the
   // wall clock at the moment of the operator action.
   now?: Date;
+  // Task #476 — when true, the consent SELECT acquires `FOR UPDATE` on
+  // the row. ONLY meaningful when `executor` is a transaction handle —
+  // the lock is released at tx commit/rollback. Use this from the
+  // in-transaction settlement gate so a concurrent withdrawal cannot
+  // commit between our gate read and the ledger posting (closes the
+  // residual TOCTOU window READ COMMITTED would otherwise leave open).
+  // Read-only callers (UX pre-checks, the accrual loop, the rule
+  // activation route, the helper unit tests) leave this off so the
+  // lock isn't held longer than necessary.
+  lockForUpdate?: boolean;
 }
 
 /**
@@ -77,11 +87,24 @@ export async function assertConsentValidForExecution(
   const handle: DbHandle = opts.executor ?? db;
   const now = opts.now ?? new Date();
 
-  const [consent] = await (handle as typeof db)
+  // Task #476 — when called from inside the settlement transaction we
+  // take a row lock so a concurrent withdrawal cannot land between this
+  // SELECT and the eventual ledger commit. `.for("update")` is a no-op
+  // outside a transaction (still emits the SQL but releases on auto-
+  // commit), so we deliberately gate it behind the explicit opt-in flag
+  // to avoid surprising callers that didn't ask to lock. We use FOR
+  // UPDATE rather than FOR KEY SHARE because a withdrawal is a non-key
+  // UPDATE on fee_consents.withdrawn_at — FOR KEY SHARE would let it
+  // proceed concurrently and re-open the very race this lock is here
+  // to close. FOR UPDATE blocks all UPDATEs on the row.
+  const baseQuery = (handle as typeof db)
     .select()
     .from(feeConsents)
     .where(eq(feeConsents.id, consentId))
     .limit(1);
+  const [consent] = await (opts.lockForUpdate
+    ? baseQuery.for("update")
+    : baseQuery);
 
   if (!consent) {
     return { ok: false, reason: "consent_missing", consent: null };

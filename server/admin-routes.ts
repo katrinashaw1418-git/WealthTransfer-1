@@ -5693,17 +5693,23 @@ export function registerAdminRoutes(app: Express): void {
           }
         : null;
 
-      // Task #307 — runtime consent integrity gate. The accrual job's
-      // gate ladder runs at accrual time, but a consent can be withdrawn,
-      // expire, or move out of `active` between accrual and approval. If
-      // we let the settle path run anyway, an admin click could move
-      // money against a consent that no longer exists. Re-run the same
-      // ladder here using the shared helper so the chokepoint is gated
-      // by exactly the same definition as the accrual loop. Block with a
-      // 409 + structured `code` reason; write a `.blocked` audit row so
-      // the trail captures the gate working.
-      let consentGateConsentId: number | null = null;
-      let consentGateRuleId: number | null = null;
+      // Task #307 / Task #476 — runtime consent integrity gate. The accrual
+      // job's gate ladder runs at accrual time, but a consent can be
+      // withdrawn, expire, or move out of `active` between accrual and
+      // approval. If we let the settle path run anyway, an admin click
+      // could move money against a consent that no longer exists. Re-run
+      // the same ladder here using the shared helper so the chokepoint is
+      // gated by exactly the same definition as the accrual loop.
+      //
+      // Task #476: a single deduction is rolled up by
+      // `generatePendingDeductions` from accruals grouped on
+      // (clientUserId, adviserUserId, currency) — meaning multiple distinct
+      // rules (different fee_types / account numbers) can contribute to
+      // ONE deduction. We must therefore check every distinct rule's
+      // consent, not just the first accrual's. Refuse on the FIRST gate
+      // failure encountered (the audit row records that specific rule +
+      // reason; subsequent failures, if any, will surface on retry once
+      // the operator has resolved the first).
       const accrualIdsRaw = beforeRow?.accrualIds;
       const accrualIds: number[] = Array.isArray(accrualIdsRaw)
         ? (accrualIdsRaw as unknown[]).filter(
@@ -5711,55 +5717,62 @@ export function registerAdminRoutes(app: Express): void {
           )
         : [];
       if (accrualIds.length > 0) {
-        const [firstAccrual] = await db
+        const accrualRows = await db
           .select({ feeRuleId: adviserFeeAccruals.feeRuleId })
           .from(adviserFeeAccruals)
-          .where(eq(adviserFeeAccruals.id, accrualIds[0]))
-          .limit(1);
-        if (firstAccrual) {
-          consentGateRuleId = firstAccrual.feeRuleId;
-          const [rule] = await db
-            .select({ feeConsentId: adviserFeeRules.feeConsentId })
-            .from(adviserFeeRules)
-            .where(eq(adviserFeeRules.id, firstAccrual.feeRuleId))
-            .limit(1);
-          consentGateConsentId = rule?.feeConsentId ?? null;
-        }
-      }
-      if (consentGateConsentId !== null) {
-        const { assertConsentValidForExecution } = await import(
-          "./services/consent-integrity"
+          .where(inArray(adviserFeeAccruals.id, accrualIds));
+        const distinctRuleIds = Array.from(
+          new Set(accrualRows.map((a) => a.feeRuleId)),
         );
-        const gate = await assertConsentValidForExecution(consentGateConsentId);
-        if (!gate.ok) {
-          await writeAuditLog({
-            userId: auth.userId,
-            action: "deduction.approve.blocked",
-            entityType: "adviser_fee_deduction",
-            entityId: String(id),
-            before: beforeSnapshot,
-            after: null,
-            extra: {
-              reason: gate.reason,
-              consentId: consentGateConsentId,
-              ruleId: consentGateRuleId,
-            },
-            ipAddress: req.ip ?? null,
-          });
-          throw Object.assign(
-            new Error(
-              `Cannot approve deduction — consent integrity gate failed: ${gate.reason}`,
-            ),
-            {
-              status: 409,
-              body: {
-                code: gate.reason,
-                reason: gate.reason,
-                consentId: consentGateConsentId,
-                ruleId: consentGateRuleId,
-              },
-            },
+        if (distinctRuleIds.length > 0) {
+          const ruleRows = await db
+            .select({
+              id: adviserFeeRules.id,
+              feeConsentId: adviserFeeRules.feeConsentId,
+            })
+            .from(adviserFeeRules)
+            .where(inArray(adviserFeeRules.id, distinctRuleIds));
+          const { assertConsentValidForExecution } = await import(
+            "./services/consent-integrity"
           );
+          // Iterate in stable id order so the "first failure" is
+          // deterministic across reruns — important for audit-row
+          // reproducibility.
+          ruleRows.sort((a, b) => a.id - b.id);
+          for (const rule of ruleRows) {
+            const gate = await assertConsentValidForExecution(rule.feeConsentId);
+            if (!gate.ok) {
+              await writeAuditLog({
+                userId: auth.userId,
+                action: "deduction.approve.blocked",
+                entityType: "adviser_fee_deduction",
+                entityId: String(id),
+                before: beforeSnapshot,
+                after: null,
+                extra: {
+                  reason: gate.reason,
+                  consentId: rule.feeConsentId,
+                  ruleId: rule.id,
+                  rulesChecked: ruleRows.length,
+                },
+                ipAddress: req.ip ?? null,
+              });
+              throw Object.assign(
+                new Error(
+                  `Cannot approve deduction — consent integrity gate failed: ${gate.reason}`,
+                ),
+                {
+                  status: 409,
+                  body: {
+                    code: gate.reason,
+                    reason: gate.reason,
+                    consentId: rule.feeConsentId,
+                    ruleId: rule.id,
+                  },
+                },
+              );
+            }
+          }
         }
       }
 
