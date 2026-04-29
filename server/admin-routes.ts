@@ -5733,6 +5733,50 @@ export function registerAdminRoutes(app: Express): void {
             .where(inArray(adviserFeeRules.id, distinctRuleIds));
           const { assertConsentValidForExecution, CONSENT_GATE_AUDIT_ACTIONS } =
             await import("./services/consent-integrity");
+
+          // Defensive completeness — if any backing rule has been
+          // deleted (referential integrity is FK-protected today, but
+          // a future migration or a manual intervention could orphan a
+          // deduction), the consent gate would silently skip them and
+          // the approval would proceed against a deduction whose legal
+          // basis we cannot verify. Refuse explicitly with a typed
+          // 409 so the operator surfaces the data-integrity break
+          // rather than money moving on partial evidence.
+          const foundRuleIds = new Set(ruleRows.map((r) => r.id));
+          const missingRuleIds = distinctRuleIds.filter(
+            (rid) => !foundRuleIds.has(rid),
+          );
+          if (missingRuleIds.length > 0) {
+            await writeAuditLog({
+              userId: auth.userId,
+              action: CONSENT_GATE_AUDIT_ACTIONS.deductionApproveRoute,
+              entityType: "adviser_fee_deduction",
+              entityId: String(id),
+              before: beforeSnapshot,
+              after: null,
+              extra: {
+                reason: "backing_rule_missing",
+                missingRuleIds,
+                rulesExpected: distinctRuleIds.length,
+                rulesFound: ruleRows.length,
+              },
+              ipAddress: req.ip ?? null,
+            });
+            throw Object.assign(
+              new Error(
+                `Cannot approve deduction — ${missingRuleIds.length} backing rule(s) missing: [${missingRuleIds.join(", ")}]`,
+              ),
+              {
+                status: 409,
+                body: {
+                  code: "backing_rule_missing",
+                  reason: "backing_rule_missing",
+                  missingRuleIds,
+                },
+              },
+            );
+          }
+
           // Iterate in stable id order so the "first failure" is
           // deterministic across reruns — important for audit-row
           // reproducibility.
