@@ -769,6 +769,42 @@ export async function runDailyAccruals(opts: {
         if (gate) {
           skipped++;
           byGateReason[gate] = (byGateReason[gate] ?? 0) + 1;
+          // Task #476 — consent-driven refusals at accrual time get a
+          // dedicated audit row so a regulator can find every consent
+          // refusal across all three chokepoints (rule activation,
+          // accrual, deduction approval) under a single queryable
+          // action verb. The skipped accrual row already records the
+          // gateReason for run-statistics purposes; this audit row is
+          // the regulator-facing trail. Non-consent gates
+          // (link_inactive, rule_paused, splits_invalid) keep their
+          // pre-existing accrual-row-only treatment — those gates are
+          // owned by other tasks and out of scope here.
+          if (
+            gate === "consent_missing" ||
+            gate === "consent_withdrawn" ||
+            gate === "consent_expired" ||
+            gate === "consent_renewal_inactive"
+          ) {
+            await writeAuditLog({
+              executor: tx,
+              userId: null,
+              action: "fee_accrual_consent_blocked",
+              entityType: "adviser_fee_rule",
+              entityId: String(rule.id),
+              before: null,
+              after: null,
+              extra: {
+                gate: "consent",
+                gateReason: gate,
+                source: "run_daily_accruals",
+                ruleId: rule.id,
+                consentId: rule.feeConsentId,
+                accrualId: inserts[0].id,
+                accrualDate: accrualDate.toISOString(),
+              },
+              ipAddress: null,
+            });
+          }
         }
       } else {
         // Idempotent re-run: a row for (rule, date) already exists.
@@ -1077,7 +1113,7 @@ export async function settleApprovedDeduction(opts: {
             // driven path.
             const consentCheck = await assertConsentValidForExecution(
               r.feeConsentId,
-              { executor: tx as any, lockForUpdate: true },
+              { executor: tx, lockForUpdate: true },
             );
             if (!consentCheck.ok) {
               throw new ConsentNotValidError(

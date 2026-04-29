@@ -753,6 +753,29 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
     expect(row).toBeDefined();
     expect(row.gateReason).toBe("consent_withdrawn");
     expect(Number(row.accrualAmount)).toBe(0);
+
+    // Task #476 — accrual-time consent refusals must also write to
+    // audit_logs so a regulator can find them under the same queryable
+    // action verb shape used by the other two chokepoints.
+    const [audit] = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.action, "fee_accrual_consent_blocked"),
+          eq(auditLogs.entityType, "adviser_fee_rule"),
+          eq(auditLogs.entityId, String(s.ruleId)),
+        ),
+      )
+      .orderBy(desc(auditLogs.id))
+      .limit(1);
+    expect(audit).toBeDefined();
+    const meta = audit.metadata as Record<string, any>;
+    expect(meta.gate).toBe("consent");
+    expect(meta.gateReason).toBe("consent_withdrawn");
+    expect(meta.source).toBe("run_daily_accruals");
+    expect(meta.consentId).toBe(s.consentId);
+    expect(meta.ruleId).toBe(s.ruleId);
   });
 
   it("produces a skipped accrual row with gateReason='consent_expired'", async () => {
@@ -1148,7 +1171,7 @@ describe("assertConsentValidForExecution lockForUpdate (Task #476 race closure)"
     });
     const tx1Done = db.transaction(async (tx1) => {
       const result = await assertConsentValidForExecution(consentId, {
-        executor: tx1 as any,
+        executor: tx1,
         lockForUpdate: true,
       });
       expect(result.ok).toBe(true);

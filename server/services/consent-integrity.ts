@@ -31,6 +31,36 @@ import type { GateReason } from "./fee-engine";
 // remaining reasons in `GateReason` (link_inactive, rule_paused,
 // splits_invalid) describe the rule itself — those gates stay in the
 // accrual loop because they are not a property of the consent.
+//
+// Vocabulary mapping for cross-referencing the original Task #307/#476
+// spec (which used product-team vocabulary) against this codebase's
+// schema-aligned vocabulary:
+//
+//   spec term                      ↔   codebase term (this enum)
+//   ──────────────────────────────────────────────────────────────────
+//   consent_not_signed             ↔   consent_missing
+//                                       (no fee_consents row exists for the
+//                                        rule; the signed-consent lifecycle
+//                                        lives on fee_consent_requests and a
+//                                        row only lands in fee_consents
+//                                        once it has been signed)
+//   consent_revoked                ↔   consent_withdrawn
+//                                       (fee_consents.withdrawn_at IS NOT
+//                                        NULL — the column the operator UI
+//                                        sets on a regulator-driven revoke)
+//   consent_expired                ↔   consent_expired (no rename)
+//   consent_superseded             ↔   consent_renewal_inactive
+//                                       (fee_consents.renewal_status IN
+//                                        ('superseded', 'expired') — this
+//                                        enum subsumes both because the
+//                                        regulator-facing legal-basis
+//                                        question is the same: there is a
+//                                        newer consent or none at all)
+//
+// The codebase vocabulary is preferred at every layer because it maps
+// 1-to-1 to the actual schema columns the gate inspects, which keeps
+// the audit trail self-documenting and avoids translation errors when
+// a regulator follows an audit row back to the row that triggered it.
 export type ConsentGateReason = Extract<
   GateReason,
   | "consent_missing"
