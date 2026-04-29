@@ -40,6 +40,17 @@
 //         ledger-only, and the wallet-ledger drift gate treats a missing
 //         wallet row as cache=0, which now matches a ledger sum of 0.
 //
+//   #325  Cut 4 — Task #325 Gate-B fee-deduction test fixtures left 11 adviser
+//         user accounts (`t325-gate-b-{ts}-adv@test.local`, IDs 251, 256,
+//         264, 268, 275, 288, 295, 302, 307, 315, 320) with a stale wallet
+//         cache for AUD: `wallets.balance=0` while `SUM(ledger_entries)=0.80`.
+//         The ledger entries are CORRECT — they are the platform-share legs
+//         posted as part of legitimate balanced fee deductions during the
+//         Gate-B test runs — only the wallet-cache write was missed. Cut 4
+//         calls the sanctioned `refreshWalletCacheBalance(db, userId, 'AUD')`
+//         per pair to snap each cache to the live ledger sum. No ledger
+//         mutations, no acknowledgement rows, no other users touched.
+//
 // Idempotency:
 //   - Each step checks "already done" before mutating, so re-running this
 //     script after a successful run is a no-op (and exits 0).
@@ -119,6 +130,18 @@ const ORPHAN_DEDUCTION_ID = 144;
 const SYSTEM_USER_ID = 11;
 const ADMIN_USER_ID = 13; // `wise` — used as the reversed_by_user_id actor
 const AFFECTED_WALLET_USER_IDS = [43, 44, 45];
+
+// Cut 4 (#325) — Task #325 Gate-B fee-deduction test fixtures. These 11
+// adviser users (`t325-gate-b-{ts}-adv@test.local`) were created during a
+// Gate-B test run and each ended up with `wallets.balance=0` for AUD while
+// `SUM(ledger_entries)=0.80` (the platform-share leg from a balanced fee
+// deduction whose accompanying `refreshWalletCacheBalance` write was never
+// performed). The ledger is correct; only the cache is stale. Cut 4 calls
+// the sanctioned cache-flush helper for each (id, 'AUD') pair.
+const STALE_FEEGATE_FIXTURE_USER_IDS = [
+  251, 256, 264, 268, 275, 288, 295, 302, 307, 315, 320,
+];
+const STALE_FEEGATE_FIXTURE_CURRENCY = "AUD";
 
 // --dry-run: resolve and PRINT the residue these IDs currently point at,
 // then exit WITHOUT mutating. Lets the operator confirm the hardcoded IDs
@@ -225,6 +248,56 @@ async function previewResidue(): Promise<void> {
       console.log(`  (cut 3 already applied — reversal exists)`);
     } else {
       console.log(`  (cut 3 will be skipped — no settled_transaction_id)`);
+    }
+  }
+
+  // Cut 4 (#325) preview — Gate-B fixture wallets with stale AUD cache.
+  const fixtureDriftRows = await db.execute<{
+    user_id: number;
+    username: string;
+    email: string;
+    cached: string;
+    ledger_sum: string;
+    drift: string;
+  }>(sql`
+    SELECT u.id AS user_id,
+           u.username,
+           u.email,
+           COALESCE(w.balance::text, '0') AS cached,
+           COALESCE(SUM(CASE WHEN le.direction='credit' THEN le.amount::numeric
+                             ELSE -le.amount::numeric END), 0)::text AS ledger_sum,
+           (COALESCE(SUM(CASE WHEN le.direction='credit' THEN le.amount::numeric
+                              ELSE -le.amount::numeric END), 0)
+            - COALESCE(w.balance::numeric, 0))::text AS drift
+      FROM users u
+      LEFT JOIN wallets w
+        ON w.user_id = u.id AND w.currency = ${STALE_FEEGATE_FIXTURE_CURRENCY}
+      LEFT JOIN ledger_entries le
+        ON le.user_id = u.id AND le.currency = ${STALE_FEEGATE_FIXTURE_CURRENCY}
+     WHERE u.id IN (${sql.join(
+       STALE_FEEGATE_FIXTURE_USER_IDS.map((id) => sql`${id}`),
+       sql`, `,
+     )})
+     GROUP BY u.id, u.username, u.email, w.balance
+     ORDER BY u.id
+  `);
+  console.log(
+    "[cleanup] cut 4 preview — Gate-B fixture wallets (cache vs ledger):",
+  );
+  const fixtureRows = (fixtureDriftRows as any).rows ?? [];
+  if (fixtureRows.length === 0) {
+    console.log(
+      `  no users matched IDs ${JSON.stringify(STALE_FEEGATE_FIXTURE_USER_IDS)} ` +
+        "(cut 4 will be skipped)",
+    );
+  } else {
+    for (const row of fixtureRows) {
+      const inSync = Math.abs(Number(row.drift)) < 0.01;
+      console.log(
+        `  user=${row.user_id} ${row.email} ` +
+          `cached=${row.cached} ledger=${row.ledger_sum} drift=${row.drift}` +
+          (inSync ? "  [already in sync — refresh will be a no-op]" : ""),
+      );
     }
   }
 
@@ -405,6 +478,89 @@ async function main(): Promise<void> {
       );
     }
   }
+
+  // -----------------------------------------------------------------
+  // Cut 4 (#325): Task #325 Gate-B fee-deduction test fixtures left 11
+  // adviser users (`t325-gate-b-{ts}-adv@test.local`) with a stale wallet
+  // cache for AUD — the platform-share leg of a balanced fee deduction
+  // posted to ledger_entries without an accompanying refreshWalletCacheBalance
+  // call. The ledger is correct (balanced postings, no unbalanced legs);
+  // only the cache is stale. We DO NOT post reversals or modify any ledger
+  // entry — we just call the sanctioned cache-recompute helper for each
+  // (userId, 'AUD') pair. refreshWalletCacheBalance is itself idempotent
+  // (computes from SUM(ledger_entries) and writes), so re-running this
+  // script after Cut 4 has already snapped the caches is a no-op.
+  //
+  // Pre-flight assertion: every targeted user must still match the
+  // expected fixture username pattern (`t325-gate-b-...`). If even one
+  // does not, we abort Cut 4 entirely without touching any wallet — the
+  // hardcoded ID list has drifted from the residue it was captured against
+  // and the operator must update STALE_FEEGATE_FIXTURE_USER_IDS by hand.
+  // -----------------------------------------------------------------
+  const fixtureUsers = await db.execute<{
+    id: number;
+    username: string;
+    email: string;
+  }>(sql`
+    SELECT id, username, email
+      FROM users
+     WHERE id IN (${sql.join(
+       STALE_FEEGATE_FIXTURE_USER_IDS.map((id) => sql`${id}`),
+       sql`, `,
+     )})
+     ORDER BY id
+  `);
+  const fixtureUserRows = (fixtureUsers as any).rows ?? [];
+  const unexpected = fixtureUserRows.filter(
+    (u: any) =>
+      !u.username?.startsWith("t325-gate-b-") ||
+      !u.email?.endsWith("@test.local"),
+  );
+  if (unexpected.length > 0) {
+    console.error(
+      "[cleanup] cut 4 ABORTED — one or more STALE_FEEGATE_FIXTURE_USER_IDS " +
+        "no longer match the expected `t325-gate-b-{ts}-adv@test.local` " +
+        "fixture pattern. Update the constant and re-run.",
+    );
+    for (const u of unexpected) {
+      console.error(
+        `  user=${u.id} username=${u.username} email=${u.email}`,
+      );
+    }
+    process.exit(1);
+  }
+  if (fixtureUserRows.length !== STALE_FEEGATE_FIXTURE_USER_IDS.length) {
+    console.warn(
+      `[cleanup] cut 4 — expected ${STALE_FEEGATE_FIXTURE_USER_IDS.length} ` +
+        `fixture user(s), found ${fixtureUserRows.length}. Missing IDs ` +
+        "will simply be skipped (no wallet row → no-op).",
+    );
+  }
+  let cut4Refreshed = 0;
+  let cut4Skipped = 0;
+  for (const userId of STALE_FEEGATE_FIXTURE_USER_IDS) {
+    const result = await refreshWalletCacheBalance(
+      db,
+      userId,
+      STALE_FEEGATE_FIXTURE_CURRENCY,
+    );
+    if (result) {
+      console.log(
+        `[cleanup] cut 4 refreshed wallet cache user=${userId} ` +
+          `${STALE_FEEGATE_FIXTURE_CURRENCY} → balance=${result.balance}`,
+      );
+      cut4Refreshed += 1;
+    } else {
+      console.log(
+        `[cleanup] cut 4 no wallet row for user=${userId} ` +
+          `${STALE_FEEGATE_FIXTURE_CURRENCY} (skipped — cache=0 already)`,
+      );
+      cut4Skipped += 1;
+    }
+  }
+  console.log(
+    `[cleanup] cut 4 done — refreshed=${cut4Refreshed} skipped=${cut4Skipped}`,
+  );
 
   // Final state report so the operator can eyeball the result.
   const driftRows = await db.execute<{
