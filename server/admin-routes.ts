@@ -5731,8 +5731,11 @@ export function registerAdminRoutes(app: Express): void {
             })
             .from(adviserFeeRules)
             .where(inArray(adviserFeeRules.id, distinctRuleIds));
-          const { assertConsentValidForExecution, CONSENT_GATE_AUDIT_ACTIONS } =
-            await import("./services/consent-integrity");
+          const {
+            assertConsentValidForExecution,
+            CONSENT_GATE_AUDIT_ACTIONS,
+            DEDUCTION_APPROVE_REFUSAL_CODES,
+          } = await import("./services/consent-integrity");
 
           // Defensive completeness — if any backing rule has been
           // deleted (referential integrity is FK-protected today, but
@@ -5755,7 +5758,7 @@ export function registerAdminRoutes(app: Express): void {
               before: beforeSnapshot,
               after: null,
               extra: {
-                reason: "backing_rule_missing",
+                reason: DEDUCTION_APPROVE_REFUSAL_CODES.backingRuleMissing,
                 missingRuleIds,
                 rulesExpected: distinctRuleIds.length,
                 rulesFound: ruleRows.length,
@@ -5769,8 +5772,8 @@ export function registerAdminRoutes(app: Express): void {
               {
                 status: 409,
                 body: {
-                  code: "backing_rule_missing",
-                  reason: "backing_rule_missing",
+                  code: DEDUCTION_APPROVE_REFUSAL_CODES.backingRuleMissing,
+                  reason: DEDUCTION_APPROVE_REFUSAL_CODES.backingRuleMissing,
                   missingRuleIds,
                 },
               },

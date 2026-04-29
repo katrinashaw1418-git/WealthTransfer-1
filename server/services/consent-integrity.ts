@@ -104,6 +104,32 @@ export const CONSENT_GATE_AUDIT_ACTIONS = {
 export type ConsentGateAuditAction =
   (typeof CONSENT_GATE_AUDIT_ACTIONS)[keyof typeof CONSENT_GATE_AUDIT_ACTIONS];
 
+// Stable refusal codes the deduction-approve route can return on the
+// 409 body (under `code` and `reason`). Centralised so downstream
+// clients (admin UI, ops dashboards) can switch on a typed contract
+// rather than parse magic strings, and so additions / renames are
+// visible at a single grep target.
+//
+// Members:
+// - `consent_*`: come from `ConsentGateReason` and indicate the consent
+//   ladder refused. Codes are passed through verbatim so dashboards
+//   already grouping on `ConsentGateReason` continue to work.
+// - `backing_rule_missing`: defensive integrity refusal — the
+//   deduction's accruals reference a fee_rule row that no longer
+//   exists. FK constraints prevent this today, but a future migration
+//   or manual intervention could orphan a deduction; we refuse
+//   explicitly rather than silently approving against partial
+//   evidence.
+export const DEDUCTION_APPROVE_REFUSAL_CODES = {
+  consentMissing: "consent_missing",
+  consentWithdrawn: "consent_withdrawn",
+  consentExpired: "consent_expired",
+  consentRenewalInactive: "consent_renewal_inactive",
+  backingRuleMissing: "backing_rule_missing",
+} as const;
+export type DeductionApproveRefusalCode =
+  (typeof DEDUCTION_APPROVE_REFUSAL_CODES)[keyof typeof DEDUCTION_APPROVE_REFUSAL_CODES];
+
 // Drizzle-style executor — top-level db OR a tx handle. Callers inside
 // `db.transaction(async (tx) => …)` should pass `tx` so the consent read
 // observes the same snapshot as the rest of the transaction.
