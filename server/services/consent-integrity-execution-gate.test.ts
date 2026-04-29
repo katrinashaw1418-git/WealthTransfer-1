@@ -752,13 +752,15 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
   const dateFor = (offsetDays: number): Date =>
     new Date(Date.UTC(2026, 5, 1 + offsetDays));
 
-  it("produces a skipped accrual row with gateReason='consent_withdrawn' (does NOT throw)", async () => {
+  it("skips the rule (no accrual row written) and writes the consent_withdrawn audit row + structured log line (Task #514: no row, was 'placeholder row' under #476)", async () => {
     const s = requireScenario(accrualScenarios.withdrawn, "accrualScenarios.withdrawn");
     const accrualDate = dateFor(0);
     await applyConsentMutation(s.consentId, "withdrawn");
     const result = await runDailyAccruals({ accrualDate });
     expect(result.byGateReason["consent_withdrawn"] ?? 0).toBeGreaterThan(0);
-    const [row] = await db
+
+    // Task #514 — no accrual row is written for a consent-failed rule.
+    const rows = await db
       .select()
       .from(adviserFeeAccruals)
       .where(
@@ -767,13 +769,12 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
           eq(adviserFeeAccruals.accrualDate, accrualDate),
         ),
       );
-    expect(row).toBeDefined();
-    expect(row.gateReason).toBe("consent_withdrawn");
-    expect(Number(row.accrualAmount)).toBe(0);
+    expect(rows).toHaveLength(0);
 
-    // Task #476 — accrual-time consent refusals must also write to
-    // audit_logs so a regulator can find them under the same queryable
-    // action verb shape used by the other two chokepoints.
+    // The regulator-facing audit row is still written (carried over
+    // from #476). The umbrella reasonCode CONSENT_INVALID_AT_EXECUTION
+    // is added by #514 so log aggregators can fan out a single alert
+    // across all four consent failure modes.
     const [audit] = await db
       .select()
       .from(auditLogs)
@@ -787,20 +788,21 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
       .orderBy(desc(auditLogs.id))
       .limit(1);
     expect(audit).toBeDefined();
-    const meta = audit.metadata as Record<string, any>;
+    const meta = audit.metadata as Record<string, unknown>;
     expect(meta.gate).toBe("consent");
     expect(meta.gateReason).toBe("consent_withdrawn");
+    expect(meta.reasonCode).toBe("CONSENT_INVALID_AT_EXECUTION");
     expect(meta.source).toBe("run_daily_accruals");
     expect(meta.consentId).toBe(s.consentId);
     expect(meta.ruleId).toBe(s.ruleId);
   });
 
-  it("produces a skipped accrual row with gateReason='consent_expired'", async () => {
+  it("skips the rule (no accrual row) for consent_expired (Task #514)", async () => {
     const s = requireScenario(accrualScenarios.expired, "accrualScenarios.expired");
     const accrualDate = dateFor(1);
     await applyConsentMutation(s.consentId, "expired");
     await runDailyAccruals({ accrualDate });
-    const [row] = await db
+    const rows = await db
       .select()
       .from(adviserFeeAccruals)
       .where(
@@ -809,17 +811,15 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
           eq(adviserFeeAccruals.accrualDate, accrualDate),
         ),
       );
-    expect(row).toBeDefined();
-    expect(row.gateReason).toBe("consent_expired");
-    expect(Number(row.accrualAmount)).toBe(0);
+    expect(rows).toHaveLength(0);
   });
 
-  it("produces a skipped accrual row with gateReason='consent_renewal_inactive'", async () => {
+  it("skips the rule (no accrual row) for consent_renewal_inactive (Task #514)", async () => {
     const s = requireScenario(accrualScenarios.renewal_inactive, "accrualScenarios.renewal_inactive");
     const accrualDate = dateFor(2);
     await applyConsentMutation(s.consentId, "renewal_inactive");
     await runDailyAccruals({ accrualDate });
-    const [row] = await db
+    const rows = await db
       .select()
       .from(adviserFeeAccruals)
       .where(
@@ -828,9 +828,7 @@ describe("runDailyAccruals consent integrity gate (Task #476)", () => {
           eq(adviserFeeAccruals.accrualDate, accrualDate),
         ),
       );
-    expect(row).toBeDefined();
-    expect(row.gateReason).toBe("consent_renewal_inactive");
-    expect(Number(row.accrualAmount)).toBe(0);
+    expect(rows).toHaveLength(0);
   });
 
   it("produces a normal accrual row (no gateReason) for a healthy consent", async () => {

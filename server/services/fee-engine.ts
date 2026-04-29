@@ -698,12 +698,47 @@ export async function runDailyAccruals(opts: {
       // the shared assertConsentValidForExecution helper so this loop, the
       // deduction-approve chokepoint and the rule-resume admin action all
       // produce the same gateReason vocabulary against the same definition.
+      //
+      // Task #514 — when the consent gate refuses we SKIP the rule
+      // entirely (no accrual row is inserted) and emit a structured log
+      // line under the umbrella reason code CONSENT_INVALID_AT_EXECUTION
+      // so log aggregators can fan out a single alert across all four
+      // consent failure modes. The regulator-facing audit row is still
+      // written (same shape as the other two chokepoints). Then we
+      // `continue` to the next rule — the batch must NOT abort.
       const consentCheck = await assertConsentValidForExecution(rule.feeConsentId, {
         executor: tx,
         now: accrualDate,
       });
       if (!consentCheck.ok) {
-        gate = consentCheck.reason;
+        console.log("[fee-accrual] CONSENT_INVALID_AT_EXECUTION", {
+          ruleId: rule.id,
+          consentId: rule.feeConsentId,
+          gateReason: consentCheck.reason,
+          accrualDate: accrualDate.toISOString(),
+        });
+        await writeAuditLog({
+          executor: tx,
+          userId: null,
+          action: CONSENT_GATE_AUDIT_ACTIONS.accrual,
+          entityType: "adviser_fee_rule",
+          entityId: String(rule.id),
+          before: null,
+          after: null,
+          extra: {
+            gate: "consent",
+            gateReason: consentCheck.reason,
+            reasonCode: "CONSENT_INVALID_AT_EXECUTION",
+            source: "run_daily_accruals",
+            ruleId: rule.id,
+            consentId: rule.feeConsentId,
+            accrualDate: accrualDate.toISOString(),
+          },
+          ipAddress: null,
+        });
+        skipped++;
+        byGateReason[consentCheck.reason] = (byGateReason[consentCheck.reason] ?? 0) + 1;
+        continue;
       }
 
       // (b) Adviser-client link still active.
@@ -768,44 +803,14 @@ export async function runDailyAccruals(opts: {
       if (inserts.length > 0) {
         inserted++;
         if (gate) {
+          // Non-consent gates (link_inactive, rule_paused, splits_invalid)
+          // still produce a placeholder accrual row with `gateReason` set
+          // and zero amounts — those gates are owned by other tasks and
+          // their downstream consumers depend on the row being present.
+          // Task #514's "no row" behavior is consent-specific (handled
+          // above with a `continue`).
           skipped++;
           byGateReason[gate] = (byGateReason[gate] ?? 0) + 1;
-          // Task #476 — consent-driven refusals at accrual time get a
-          // dedicated audit row so a regulator can find every consent
-          // refusal across all three chokepoints (rule activation,
-          // accrual, deduction approval) under a single queryable
-          // action verb. The skipped accrual row already records the
-          // gateReason for run-statistics purposes; this audit row is
-          // the regulator-facing trail. Non-consent gates
-          // (link_inactive, rule_paused, splits_invalid) keep their
-          // pre-existing accrual-row-only treatment — those gates are
-          // owned by other tasks and out of scope here.
-          if (
-            gate === "consent_missing" ||
-            gate === "consent_withdrawn" ||
-            gate === "consent_expired" ||
-            gate === "consent_renewal_inactive"
-          ) {
-            await writeAuditLog({
-              executor: tx,
-              userId: null,
-              action: CONSENT_GATE_AUDIT_ACTIONS.accrual,
-              entityType: "adviser_fee_rule",
-              entityId: String(rule.id),
-              before: null,
-              after: null,
-              extra: {
-                gate: "consent",
-                gateReason: gate,
-                source: "run_daily_accruals",
-                ruleId: rule.id,
-                consentId: rule.feeConsentId,
-                accrualId: inserts[0].id,
-                accrualDate: accrualDate.toISOString(),
-              },
-              ipAddress: null,
-            });
-          }
         }
       } else {
         // Idempotent re-run: a row for (rule, date) already exists.
