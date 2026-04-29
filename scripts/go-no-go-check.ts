@@ -105,7 +105,16 @@ async function checkLedgerWalletConsistency(): Promise<GateResult> {
     LEFT JOIN ${wallets} w
       ON w.user_id = pair.user_id AND w.currency = pair.currency
     LEFT JOIN (
-      SELECT user_id, currency, SUM(amount)::text AS ledger_sum
+      -- Ledger entries store amounts as UNSIGNED positive decimals with the
+      -- credit/debit sign carried in the direction column (the convention
+      -- used everywhere else in this codebase -- see scripts/pre-launch-safety.ts,
+      -- scripts/ci-ledger-leak-gate.ts, postLedgerEntries(), etc). A bare
+      -- SUM(amount) would treat them as signed and double-count every transfer
+      -- as phantom drift, so we must collapse direction into the sum here.
+      SELECT
+        user_id,
+        currency,
+        SUM(CASE WHEN direction = 'credit' THEN amount ELSE -amount END)::text AS ledger_sum
       FROM ${ledgerEntries}
       GROUP BY user_id, currency
     ) l ON l.user_id = pair.user_id AND l.currency = pair.currency
