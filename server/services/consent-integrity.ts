@@ -73,6 +73,37 @@ export type ConsentIntegrityResult =
   | { ok: true; consent: FeeConsent }
   | { ok: false; reason: ConsentGateReason; consent: FeeConsent | null };
 
+// Stable audit action verbs the consent-integrity gate ladder writes
+// across the three execution chokepoints. Centralising them here gives
+// regulators / dashboards a single source of truth for the queryable
+// surface and makes future drift impossible to introduce silently —
+// every caller imports from this object rather than a string literal.
+// Order: chokepoint name → verb that fires when the consent gate
+// REFUSES at that chokepoint. The shapes are intentionally not
+// uniformly camelCase / dotted because they preserve the historical
+// verbs already present in the audit_log column for backward query
+// compatibility (renaming would require a regulator-visible migration
+// of historical rows, which is out of scope).
+export const CONSENT_GATE_AUDIT_ACTIONS = {
+  // Operator clicked "Activate" on a fee_rule but the linked consent
+  // is no longer valid — the route refused with 409 + this verb.
+  ruleActivate: "fee_rule_activate.blocked",
+  // runDailyAccruals saw an invalid consent for a rule and wrote a
+  // skipped accrual row + this audit verb. One row per refusal.
+  accrual: "fee_accrual_consent_blocked",
+  // Operator clicked "Approve" on a fee_deduction but at least one
+  // backing rule's consent is no longer valid — the route refused
+  // with 409 + this verb. Pre-tx fast-fail.
+  deductionApproveRoute: "deduction.approve.blocked",
+  // The in-tx defense inside settleApprovedDeduction caught a consent
+  // that became invalid AFTER the route's pre-check (TOCTOU window).
+  // Same shape as Gate B's rule-status refusal — they share the verb
+  // and disambiguate via metadata.gate ('consent' vs 'rule_status').
+  deductionApproveSettleTx: "fee_deduction_gate_blocked",
+} as const;
+export type ConsentGateAuditAction =
+  (typeof CONSENT_GATE_AUDIT_ACTIONS)[keyof typeof CONSENT_GATE_AUDIT_ACTIONS];
+
 // Drizzle-style executor — top-level db OR a tx handle. Callers inside
 // `db.transaction(async (tx) => …)` should pass `tx` so the consent read
 // observes the same snapshot as the rest of the transaction.

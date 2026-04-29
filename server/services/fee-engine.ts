@@ -58,6 +58,7 @@ import { writeAuditLog } from "./audit";
 // definition (and the same gateReason vocabulary) as the daily accrual job.
 import {
   assertConsentValidForExecution,
+  CONSENT_GATE_AUDIT_ACTIONS,
   validateRuleAmountAgainstConsent,
 } from "./consent-integrity";
 
@@ -788,7 +789,7 @@ export async function runDailyAccruals(opts: {
             await writeAuditLog({
               executor: tx,
               userId: null,
-              action: "fee_accrual_consent_blocked",
+              action: CONSENT_GATE_AUDIT_ACTIONS.accrual,
               entityType: "adviser_fee_rule",
               entityId: String(rule.id),
               before: null,
@@ -1368,7 +1369,7 @@ export async function settleApprovedDeduction(opts: {
       try {
         await writeAuditLog({
           userId: opts.approverUserId,
-          action: "fee_deduction_gate_blocked",
+          action: CONSENT_GATE_AUDIT_ACTIONS.deductionApproveSettleTx,
           entityType: "adviser_fee_deduction",
           entityId: String(opts.deductionId),
           before: null,
@@ -1394,7 +1395,7 @@ export async function settleApprovedDeduction(opts: {
       try {
         await writeAuditLog({
           userId: opts.approverUserId,
-          action: "fee_deduction_gate_blocked",
+          action: CONSENT_GATE_AUDIT_ACTIONS.deductionApproveSettleTx,
           entityType: "adviser_fee_deduction",
           entityId: String(opts.deductionId),
           before: null,

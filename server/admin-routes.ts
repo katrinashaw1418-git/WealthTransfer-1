@@ -5080,14 +5080,13 @@ export function registerAdminRoutes(app: Express): void {
       // Runtime consent integrity gate — same ladder as the accrual job and
       // the deduction-approve route. Single source of truth lives in
       // server/services/consent-integrity.ts.
-      const { assertConsentValidForExecution } = await import(
-        "./services/consent-integrity"
-      );
+      const { assertConsentValidForExecution, CONSENT_GATE_AUDIT_ACTIONS } =
+        await import("./services/consent-integrity");
       const gate = await assertConsentValidForExecution(beforeRow.feeConsentId);
       if (!gate.ok) {
         await writeAuditLog({
           userId: auth.userId,
-          action: "fee_rule_activate.blocked",
+          action: CONSENT_GATE_AUDIT_ACTIONS.ruleActivate,
           entityType: "adviser_fee_rule",
           entityId: String(ruleId),
           before: {
@@ -5732,9 +5731,8 @@ export function registerAdminRoutes(app: Express): void {
             })
             .from(adviserFeeRules)
             .where(inArray(adviserFeeRules.id, distinctRuleIds));
-          const { assertConsentValidForExecution } = await import(
-            "./services/consent-integrity"
-          );
+          const { assertConsentValidForExecution, CONSENT_GATE_AUDIT_ACTIONS } =
+            await import("./services/consent-integrity");
           // Iterate in stable id order so the "first failure" is
           // deterministic across reruns — important for audit-row
           // reproducibility.
@@ -5744,7 +5742,7 @@ export function registerAdminRoutes(app: Express): void {
             if (!gate.ok) {
               await writeAuditLog({
                 userId: auth.userId,
-                action: "deduction.approve.blocked",
+                action: CONSENT_GATE_AUDIT_ACTIONS.deductionApproveRoute,
                 entityType: "adviser_fee_deduction",
                 entityId: String(id),
                 before: beforeSnapshot,
