@@ -11,3 +11,4 @@ logs/
 playwright-report/
 test-results/
 .cache/ms-playwright/
+.local/

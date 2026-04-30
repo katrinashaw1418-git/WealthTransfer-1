@@ -1,3 +1,5 @@
+import dotenv from 'dotenv';
+dotenv.config();
 import express, { type Request, Response, NextFunction } from "express";
 import { randomUUID } from "crypto";
 import rateLimit from "express-rate-limit";
