@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Clock, X, Copy, ShieldAlert } from "lucide-react";
+import { Clock, X, Copy, ShieldAlert, ArrowRight } from "lucide-react";
 import { Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -15,6 +15,8 @@ import { usePortfolio } from "@/hooks/use-portfolio";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getQueryFn } from "@/lib/queryClient";
 import type { ComplianceOverview } from "@shared/schema";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useAuth } from "@/contexts/auth";
 
 // Task #493 — investor dashboard alignment.
 // Renders a top-of-page KYC nudge banner whenever the client's compliance
@@ -123,6 +125,7 @@ function DashboardWealthFooter() {
 
 export default function Dashboard() {
   const { toast } = useToast();
+  const { user } = useAuth();
   const [application, setApplication] = useState<ApplicationRecord | null>(null);
 
   useEffect(() => {
@@ -151,7 +154,34 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-6 p-4 md:p-6">
+      <section className="rounded-2xl border border-slate-200 bg-gradient-to-r from-white to-sky-50/60 p-5 md:p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm text-slate-600">
+              Overview
+            </p>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">
+              Welcome back{user?.firstName ? `, ${user.firstName}` : ""}
+            </h1>
+            <p className="mt-1 text-sm text-slate-600">
+              Monitor portfolio health, compliance progress, and recent account activity in one place.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline" className="bg-white">
+              <Link href="/portfolio">View portfolio</Link>
+            </Button>
+            <Button asChild className="bg-sky-600 hover:bg-sky-700">
+              <Link href="/transactions">
+                Open transactions
+                <ArrowRight className="ml-1 h-4 w-4" />
+              </Link>
+            </Button>
+          </div>
+        </div>
+      </section>
+
       {/* Task #204 — surface held adviser-fee deductions across the app.
           Renders nothing when no IF rows exist; harmless on dashboards
           for non-clients (the query 401s and stays silent). The banner
@@ -197,23 +227,58 @@ export default function Dashboard() {
       {/* Wealth Overview Cards */}
       <WealthOverview />
 
-      {/* Main Dashboard Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column - Portfolio Chart and FX Tool */}
-        <div className="lg:col-span-2 space-y-6">
-          <PortfolioChart />
-          <FxExchangeTool />
+      {/* Main Dashboard Grid: market + liquidity + action tools */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
+        <div className="space-y-6 xl:col-span-8">
+          <Card className="border-slate-200 shadow-sm">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base text-slate-900">Portfolio performance</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <PortfolioChart />
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-200 shadow-sm">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base text-slate-900">FX exchange</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <FxExchangeTool />
+            </CardContent>
+          </Card>
         </div>
 
-        {/* Right Column - Market Insights and Balances */}
-        <div className="space-y-6">
-          <AiAdvisoryPanel />
-          <CurrencyBalances />
+        <div className="space-y-6 xl:col-span-4">
+          <Card className="border-slate-200 shadow-sm">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base text-slate-900">AI market insights</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <AiAdvisoryPanel />
+            </CardContent>
+          </Card>
+
+          <Card className="border-slate-200 shadow-sm">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base text-slate-900">Currency balances</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <CurrencyBalances />
+            </CardContent>
+          </Card>
         </div>
       </div>
 
       {/* Transaction History */}
-      <TransactionHistory />
+      <Card className="border-slate-200 shadow-sm">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base text-slate-900">Recent transactions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <TransactionHistory />
+        </CardContent>
+      </Card>
 
       {/* Dashboard footer total — bound to the same aggregation as the
           WealthOverview "Total Portfolio Value" card. */}
