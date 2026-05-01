@@ -97,6 +97,9 @@ async function checkLedgerWalletConsistency(): Promise<GateResult> {
   //   * left-joins the most recent ACTIVE drift acknowledgement so we
   //     can ignore pairs ops have already recorded as known-and-tracked
   //   * filters out demo users
+  //   * filters out ledger-only fixture/system identities (platform-style
+  //     usernames + disposable test-email domains) that intentionally have
+  //     no wallet row while still receiving ledger postings
   //
   // We deliberately do NOT call runWalletLedgerReconciliation here — it
   // writes rows and dispatches alerts. A launch check must be read-only.
@@ -132,7 +135,13 @@ async function checkLedgerWalletConsistency(): Promise<GateResult> {
       ON ack.user_id = pair.user_id
      AND ack.currency = pair.currency
      AND ack.cleared_at IS NULL
-    WHERE pair.user_id NOT IN (SELECT id FROM ${users} WHERE is_demo = true)
+    WHERE pair.user_id NOT IN (
+      SELECT id FROM ${users}
+       WHERE is_demo = true
+          OR username LIKE '__t%_platform__'
+          OR email LIKE '%@test.invalid'
+          OR email LIKE '%@test.local'
+    )
   `);
 
   const rows = (rowsRaw as any).rows ?? (rowsRaw as any) ?? [];
