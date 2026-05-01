@@ -1,0 +1,52 @@
+export const investorProhibited = [
+  "wallet",
+  "wallets",
+  "FX",
+  "crypto",
+  "cryptocurrency",
+  "stablecoin",
+  "remittance",
+  "FX exchange",
+  "crypto exchange",
+  "currency exchange",
+  "exchange now",
+  "convert currency",
+  "buy",
+  "sell",
+  "trade",
+  "trading",
+  "execute",
+  "execution",
+  "deposit",
+  "withdraw",
+  "withdrawal",
+  "available balance",
+  "settlement wallet",
+  "custodied",
+  "custody",
+];
+
+export const adviserProhibited = [
+  ...investorProhibited,
+  "trade now",
+  "execute trade",
+  "FX conversion",
+  "remittance transfer",
+  "conversion",
+];
+
+export const replacements: Record<string, string> = {
+  wallet: "external holdings",
+  wallets: "external holdings",
+  buy: "included in your advice",
+  sell: "included in your advice",
+  execute: "subject to adviser recommendation",
+  execution: "adviser-reviewed implementation",
+  deposit: "client-managed funds",
+  withdraw: "client-managed funds",
+  "available balance": "reported holdings",
+  "settlement wallet": "external holdings",
+  trade: "advice record",
+  trading: "adviser-reviewed activity",
+};
+
