@@ -68,6 +68,18 @@ import { Toaster } from "@/components/ui/toaster";
 const mockedUsePortfolioAllocation = vi.mocked(usePortfolioAllocation);
 const mockedApiFetch = vi.mocked(apiFetch);
 
+/** jsdom may omit URL.createObjectURL — assign without mutating the global constructor type. */
+function ensureUrlObjectApiShim(): void {
+  const ctor = URL as unknown as {
+    createObjectURL?: typeof URL.createObjectURL;
+    revokeObjectURL?: typeof URL.revokeObjectURL;
+  };
+  if (typeof ctor.createObjectURL !== "function") {
+    ctor.createObjectURL = () => "";
+    ctor.revokeObjectURL = () => {};
+  }
+}
+
 type AllocationData = { totalValue: number };
 function buildAllocationSuccess(
   totalValue: number,
@@ -112,19 +124,15 @@ afterEach(() => {
 // downloadClientDocument
 // ---------------------------------------------------------------------------
 describe("downloadClientDocument", () => {
-  let createObjectURLSpy: ReturnType<typeof vi.spyOn>;
-  let revokeObjectURLSpy: ReturnType<typeof vi.spyOn>;
-  let createElementSpy: ReturnType<typeof vi.spyOn>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- vitest MockInstance is wider than DOM lib overloads
+  let createObjectURLSpy: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let revokeObjectURLSpy: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let createElementSpy: any;
 
   beforeEach(() => {
-    // jsdom may not ship URL.createObjectURL — back-fill the symbols so the
-    // spy can attach. The mocks below override the implementations anyway.
-    if (typeof URL.createObjectURL !== "function") {
-      // @ts-expect-error - jsdom shim
-      URL.createObjectURL = () => "";
-      // @ts-expect-error - jsdom shim
-      URL.revokeObjectURL = () => {};
-    }
+    ensureUrlObjectApiShim();
     createObjectURLSpy = vi
       .spyOn(URL, "createObjectURL")
       .mockReturnValue("blob:fake-object-url");
@@ -142,14 +150,13 @@ describe("downloadClientDocument", () => {
 
   function captureAnchor(): { current: HTMLAnchorElement | null } {
     const ref: { current: HTMLAnchorElement | null } = { current: null };
-    createElementSpy.mockImplementation((tag: string) => {
+    createElementSpy.mockImplementation((...args: unknown[]) => {
+      const tag = args[0] as string;
+      const options = args[1] as ElementCreationOptions | undefined;
       // Construct via the prototype so we don't recurse through our own spy.
-      const el = Object.getPrototypeOf(document).createElement.call(
-        document,
-        tag,
-      );
+      const el = Object.getPrototypeOf(document).createElement.call(document, tag, options);
       if (tag.toLowerCase() === "a") ref.current = el as HTMLAnchorElement;
-      return el;
+      return el as HTMLElement;
     });
     return ref;
   }
@@ -244,12 +251,7 @@ describe("explainDownloadError", () => {
 // ---------------------------------------------------------------------------
 describe("ClientWealthPlanner — Download button", () => {
   beforeEach(() => {
-    if (typeof URL.createObjectURL !== "function") {
-      // @ts-expect-error - jsdom shim
-      URL.createObjectURL = () => "";
-      // @ts-expect-error - jsdom shim
-      URL.revokeObjectURL = () => {};
-    }
+    ensureUrlObjectApiShim();
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
   });
