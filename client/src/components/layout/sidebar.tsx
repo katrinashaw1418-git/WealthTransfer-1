@@ -5,22 +5,14 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useAuth } from "@/contexts/auth";
 import {
   Home,
-  Briefcase,
   PieChart,
   Bot,
-  History,
-  Shield,
-  Building2,
+  Target,
+  FileText,
+  UserCog,
   Scale,
   User,
   ChevronRight,
-  Users,
-  ClipboardList,
-  ClipboardCheck,
-  FileText,
-  Receipt,
-  Coins,
-  Target,
   type LucideIcon,
 } from "lucide-react";
 import amaxLogo from "@assets/AMAX_LOGO_BLUE_1776303944567.jpg";
@@ -37,38 +29,44 @@ interface NavItem {
 }
 
 // -----------------------------------------------------------------------------
-// Two distinct nav profiles. We keep them as separate constants (rather than
-// filtering one shared list) so it's obvious in code review what each role
-// can navigate to.
+// Investor hub navigation only. This `Sidebar` mounts from `layout.tsx`, which
+// is used exclusively by `ClientApp` in `App.tsx`. Authenticated advisers never
+// render `ClientApp` — they always get `AdviserApp` → `AdviserLayout` →
+// `AdviserSidebar` for all `/adviser/*` routes (Slice 6 Task 1).
 // -----------------------------------------------------------------------------
+
 const clientNav: NavItem[] = [
   { name: "Dashboard", href: "/dashboard", icon: Home },
-  { name: "Portfolio Overview", href: "/wallets", icon: Briefcase },
   { name: "Portfolio", href: "/portfolio", icon: PieChart },
-  { name: "Investments", href: "/investments", icon: Building2 },
-  { name: "Market Insights", href: "/ai-advisory", icon: Bot },
-  { name: "Activity", href: "/transactions", icon: History },
-  { name: "KYC", href: "/compliance", icon: Shield },
-  { name: "Wealth Planner", href: "/client/wealth-planner", icon: Target },
-  { name: "Fee Consents", href: "/client/fee-consents", icon: Receipt },
-  { name: "Your Fees", href: "/client/fees", icon: Receipt },
-  { name: "Legal & Compliance", href: "/legal", icon: Scale },
+  { name: "AI Insights", href: "/ai-insights", icon: Bot },
+  { name: "Goals", href: "/goals", icon: Target },
+  { name: "Reports", href: "/reports", icon: FileText },
+  { name: "Account", href: "/account", icon: UserCog },
 ];
 
+/**
+ * @deprecated Unreachable at runtime with current routing. Do not extend.
+ * `ProtectedApp` assigns `role === "adviser"` to `AdviserApp` only (never
+ * `ClientApp` / this sidebar). Adviser navigation lives in
+ * `components/layout/adviser-sidebar.tsx` behind `AdviserLayout` exclusively.
+ * Kept temporarily so the obsolete branch remains visible to grep/review;
+ * remove when cleaning dead code.
+ */
 const adviserNav: NavItem[] = [
   { name: "Dashboard", href: "/adviser/dashboard", icon: Home },
-  { name: "Clients", href: "/adviser/clients", icon: Users },
-  { name: "Investment Products", href: "/adviser/products", icon: Building2 },
-  { name: "Instructions", href: "/adviser/instructions", icon: ClipboardCheck },
-  { name: "Tasks", href: "/adviser/tasks", icon: ClipboardList },
+  { name: "Clients", href: "/adviser/clients", icon: User },
+  { name: "AI Planning", href: "/adviser/ai-planning", icon: Bot },
   { name: "Reports", href: "/adviser/reports", icon: FileText },
-  { name: "Legal & Compliance", href: "/legal", icon: Scale },
+  { name: "Compliance", href: "/adviser/compliance", icon: Scale },
 ];
 
 function SidebarContent() {
   const [location] = useLocation();
   const { user } = useAuth();
 
+  // Slice 6: `isAdviser` is always false when this component renders (see file
+  // header). Kept so `clientNav` / `adviserNav` typing stays explicit until dead
+  // adviser branch removal.
   const isAdviser = user?.role === "adviser";
   const navigation = isAdviser ? adviserNav : clientNav;
 
@@ -108,7 +106,7 @@ function SidebarContent() {
           <div>
             <h1 className="text-lg font-bold text-gray-900">AMAX WEALTH</h1>
             <p className="text-xs text-gray-500">
-              {isAdviser ? "Adviser Portal" : "Investments / Advice"}
+              {isAdviser ? "Adviser portal" : "Advice & reporting"}
             </p>
           </div>
         </div>

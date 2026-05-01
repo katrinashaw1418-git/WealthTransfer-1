@@ -46,7 +46,11 @@ import {
   type InvestmentInstruction,
 } from "@shared/schema";
 import { and, eq, desc, lt, lte, gte, sql, inArray, notInArray, or, isNull } from "drizzle-orm";
-import { canExecute, ExecutionGateBlockedError } from "./execution-gate";
+import {
+  canExecute,
+  ExecutionGateBlockedError,
+  type ExecutionGateResult,
+} from "./execution-gate";
 import { writeAuditLog } from "./audit";
 import {
   calculatePortfolioTotalsAtDate,
@@ -292,6 +296,74 @@ export interface AdviserClientSummary {
   // only when there is no active consent, so the Business snapshot can
   // amber-flag a recently-lapsed relationship.
   mostRecentExpiredConsentDate: Date | null;
+  /** Slice 6 — book-level enforcement visibility for the adviser client list (read-only labels). */
+  enforcement: AdviserClientEnforcementIndicators;
+}
+
+/** Human-readable adviser-book indicators derived from advice flags + live `canExecute` (never raw gate enum strings). */
+export interface AdviserClientEnforcementIndicators {
+  adviceLifecycleLabel: string;
+  feeConsentStandingLabel: string;
+  executionReadinessLabel: string;
+}
+
+function extractDbExecuteRows<T>(result: unknown): T[] {
+  const wrapped = result as { rows?: T[] } | T[] | null | undefined;
+  if (
+    wrapped &&
+    typeof wrapped === "object" &&
+    "rows" in wrapped &&
+    Array.isArray((wrapped as { rows: T[] }).rows)
+  ) {
+    return (wrapped as { rows: T[] }).rows;
+  }
+  if (Array.isArray(wrapped)) return wrapped;
+  return [];
+}
+
+type LatestAdviceListRow = {
+  id: number;
+  clientId: number;
+  soaIssued: boolean;
+  soaViewed: boolean;
+  soaDownloaded: boolean;
+  adviceAccepted: boolean;
+  adviceDeclined: boolean;
+};
+
+function adviserBookAdviceLifecycleLabel(row?: LatestAdviceListRow): string {
+  if (!row) return "No advice record yet";
+  if (row.adviceDeclined) return "Advice declined by client";
+  if (!row.soaIssued) return "SOA not issued yet";
+  if (!(row.soaViewed || row.soaDownloaded)) return "SOA issued · client access pending";
+  if (!row.adviceAccepted) return "SOA viewed · awaiting acceptance";
+  return "Advice accepted";
+}
+
+function adviserBookFeeConsentStandingLabel(
+  activeFeeConsents: number,
+  gate: ExecutionGateResult | null,
+): string {
+  if (activeFeeConsents === 0) return "Missing";
+  if (!gate || gate.allowed) return "Valid";
+  if (
+    gate.allowed === false &&
+    (gate.reason === "fee_consent_missing" ||
+      gate.reason === "fee_consent_inactive" ||
+      gate.reason === "fee_consent_expired")
+  ) {
+    return "Mismatched";
+  }
+  return "Valid";
+}
+
+function adviserBookExecutionReadinessLabel(
+  hasAdvicePackage: boolean,
+  gate: ExecutionGateResult | null,
+): string {
+  if (!hasAdvicePackage) return "Blocked";
+  if (!gate) return "Blocked";
+  return gate.allowed ? "Ready" : "Blocked";
 }
 
 /**
@@ -487,6 +559,44 @@ export async function listAdviserClients(
   mergeActivity(taskRows);
   mergeActivity(noteRows);
 
+  // Slice 6 — latest advice record per linked client + live execution gate snapshot
+  // for adviser-list visibility (human labels only downstream).
+  const latestAdviceExecRaw = await db.execute(sql`
+    SELECT DISTINCT ON (ar.client_id)
+      ar.id AS "id",
+      ar.client_id AS "clientId",
+      ar.soa_issued AS "soaIssued",
+      ar.soa_viewed AS "soaViewed",
+      ar.soa_downloaded AS "soaDownloaded",
+      ar.advice_accepted AS "adviceAccepted",
+      ar.advice_declined AS "adviceDeclined"
+    FROM advice_records ar
+    WHERE ar.adviser_id = ${adviserUserId}
+      AND ar.client_id IN (${sql.join(
+        clientIds.map((cid) => sql`${cid}`),
+        sql`, `,
+      )})
+    ORDER BY ar.client_id, ar.updated_at DESC NULLS LAST, ar.id DESC
+  `);
+  const latestAdviceRows = extractDbExecuteRows<LatestAdviceListRow>(
+    latestAdviceExecRaw,
+  );
+  const latestAdviceByClient = new Map<number, LatestAdviceListRow>(
+    latestAdviceRows.map((row) => [row.clientId, row]),
+  );
+
+  const gateByClientId = new Map<number, ExecutionGateResult | null>();
+  await Promise.all(
+    clientIds.map(async (cid) => {
+      const adv = latestAdviceByClient.get(cid);
+      if (!adv) {
+        gateByClientId.set(cid, null);
+        return;
+      }
+      gateByClientId.set(cid, await canExecute(adv.id));
+    }),
+  );
+
   // Portfolio totals — compute LIVE per client via the same valuation engine
   // the per-client portfolio detail endpoint uses. Reading the
   // `portfolios.totalValue` snapshot column directly would surface "$0" for
@@ -550,6 +660,9 @@ export async function listAdviserClients(
     // value the UI should be flagging.
     const mostRecentExpiredConsentDate =
       activeCount > 0 ? null : expiredByClient.get(r.userId) ?? null;
+    const advLatest = latestAdviceByClient.get(r.userId);
+    const gateOutcome = gateByClientId.get(r.userId) ?? null;
+    const hasAdvicePackage = !!advLatest;
     return {
       ...r,
       activeFeeConsents: activeCount,
@@ -557,6 +670,17 @@ export async function listAdviserClients(
       portfolioValueAud: portfolioByClient.get(r.userId) ?? "0",
       lastActivityAt,
       mostRecentExpiredConsentDate,
+      enforcement: {
+        adviceLifecycleLabel: adviserBookAdviceLifecycleLabel(advLatest),
+        feeConsentStandingLabel: adviserBookFeeConsentStandingLabel(
+          activeCount,
+          gateOutcome,
+        ),
+        executionReadinessLabel: adviserBookExecutionReadinessLabel(
+          hasAdvicePackage,
+          advLatest ? gateOutcome : null,
+        ),
+      },
     };
   });
 

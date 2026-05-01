@@ -11,12 +11,10 @@ import AdminLayout from "@/components/layout/admin-layout";
 import Landing from "@/pages/landing";
 import Dashboard from "@/pages/dashboard";
 import WalletsNew from "@/pages/wallets-new";
-import Portfolio from "@/pages/portfolio";
-import AiAdvisory from "@/pages/ai-advisory";
+import PortfolioAdvicePage from "@/pages/portfolio-advice";
 import Transactions from "@/pages/transactions";
-import Compliance from "@/pages/compliance";
-import RiskAssessment from "@/pages/risk-assessment";
 import Investments from "@/pages/investments";
+import FxExchange from "@/pages/fx-exchange";
 import Login from "@/pages/login";
 import Signup from "@/pages/signup";
 import VerifyEmail from "@/pages/verify-email";
@@ -28,19 +26,8 @@ import ResetPassword from "@/pages/reset-password";
 import Onboarding from "@/pages/onboarding";
 import Legal from "@/pages/legal";
 import NotFound from "@/pages/not-found";
-import AdviserDashboard from "@/pages/adviser/dashboard";
-import AdviserClients from "@/pages/adviser/clients";
-import AdviserClientDetail from "@/pages/adviser/client-detail";
-import AdviserClientHoldings from "@/pages/adviser/client-holdings";
-import AdviserTasks from "@/pages/adviser/tasks";
-import AdviserReports from "@/pages/adviser/reports";
-import AdviserProducts from "@/pages/adviser/products";
-import AdviserFcsExplainer from "@/pages/adviser/fcs-explainer";
-import AdviserInstructions from "@/pages/adviser/instructions";
-import AdviserWorkflow from "@/pages/adviser/workflow";
-import AdviserBusiness from "@/pages/adviser/business";
-import AdviserFeeConsents from "@/pages/adviser/fee-consents";
-import AdviserFees from "@/pages/adviser/fees";
+import AdviserDashboardV2 from "@/pages/adviser/dashboard-v2";
+import AdviserClientsV2 from "@/pages/adviser/clients-v2";
 import AdminDashboard from "@/pages/admin/dashboard";
 import AdminApplications from "@/pages/admin/applications";
 import AdminAdvisers from "@/pages/admin/advisers";
@@ -58,14 +45,25 @@ import AdminReconciliation from "@/pages/admin/reconciliation";
 import AdminBackgroundJobs from "@/pages/admin/background-jobs";
 import AdminKillSwitches from "@/pages/admin/kill-switches";
 import AdminErrorLog from "@/pages/admin/error-log";
-import ClientInstructions from "@/pages/client-instructions";
-import ClientFeeConsents from "@/pages/client/fee-consents";
-import ClientWealthPlanner from "@/pages/client/wealth-planner";
-import ClientAdviceViewer from "@/pages/client/advice-viewer";
-import ClientFees from "@/pages/fees";
 import RegisterInvite from "@/pages/register-invite";
+import GoalsPage from "@/pages/goals";
+import ReportsPage from "@/pages/reports";
+import AccountPage from "@/pages/account";
+import AdviserAiPlanningV2 from "@/pages/adviser/ai-planning-v2";
+import AdviserCompliancePage from "@/pages/adviser/compliance";
+import AiInsightsPage from "@/pages/ai-insights";
+import AdviserReportsV2 from "@/pages/adviser/reports-v2";
+import { uiFeatures } from "@/uiFeatures";
 import { Loader2 } from "lucide-react";
 
+// -----------------------------------------------------------------------------
+// Route exposure (Slice 2 — legacy audit)
+// - Client: /wallets, /transactions, /investments, /fx-exchange use uiFeatures;
+//   /crypto, /remittance always redirect; /client/wealth-planner, /client/instructions,
+//   /client/advice/:id redirect until legacy UI pass (components remain on disk).
+// - Adviser: /adviser/clients/:id* redirect to /adviser/clients (no client-detail).
+// - Admin: /admin/* only mounts for role === "admin" (ProtectedApp); non-admins are
+//   redirected away. Prohibited-term UI pass is tracked separately (admin slice).
 // -----------------------------------------------------------------------------
 // Two distinct portals, picked by user role:
 //   - Advisers see <AdviserLayout> with the dark sidebar + top search shell and
@@ -81,19 +79,23 @@ function AdviserApp() {
       <Switch>
         <Route path="/adviser"><Redirect to="/adviser/dashboard" /></Route>
         <Route path="/adviser/"><Redirect to="/adviser/dashboard" /></Route>
-        <Route path="/adviser/dashboard" component={AdviserDashboard} />
-        <Route path="/adviser/workflow" component={AdviserWorkflow} />
-        <Route path="/adviser/business" component={AdviserBusiness} />
-        <Route path="/adviser/clients" component={AdviserClients} />
-        <Route path="/adviser/clients/:id/holdings" component={AdviserClientHoldings} />
-        <Route path="/adviser/clients/:id" component={AdviserClientDetail} />
-        <Route path="/adviser/products" component={AdviserProducts} />
-        <Route path="/adviser/fcs-explainer" component={AdviserFcsExplainer} />
-        <Route path="/adviser/instructions" component={AdviserInstructions} />
-        <Route path="/adviser/tasks" component={AdviserTasks} />
-        <Route path="/adviser/reports" component={AdviserReports} />
-        <Route path="/adviser/fee-consents" component={AdviserFeeConsents} />
-        <Route path="/adviser/fees" component={AdviserFees} />
+        <Route path="/adviser/dashboard" component={AdviserDashboardV2} />
+        <Route path="/adviser/ai-planning" component={AdviserAiPlanningV2} />
+        <Route path="/adviser/clients" component={AdviserClientsV2} />
+        <Route path="/adviser/clients/:id/holdings"><Redirect to="/adviser/clients" /></Route>
+        <Route path="/adviser/clients/:id"><Redirect to="/adviser/clients" /></Route>
+        <Route path="/adviser/reports" component={AdviserReportsV2} />
+        <Route path="/adviser/compliance" component={AdviserCompliancePage} />
+        <Route path="/adviser/workflow"><Redirect to="/adviser/ai-planning" /></Route>
+        <Route path="/adviser/business"><Redirect to="/adviser/dashboard" /></Route>
+        <Route path="/adviser/products"><Redirect to="/adviser/clients" /></Route>
+        <Route path="/adviser/fcs-explainer"><Redirect to="/adviser/compliance" /></Route>
+        <Route path="/adviser/instructions"><Redirect to="/adviser/ai-planning" /></Route>
+        <Route path="/adviser/tasks"><Redirect to="/adviser/ai-planning" /></Route>
+        <Route path="/adviser/fee-consents"><Redirect to="/adviser/compliance" /></Route>
+        <Route path="/adviser/fees"><Redirect to="/adviser/compliance" /></Route>
+        <Route path="/fee-consents"><Redirect to="/adviser/compliance" /></Route>
+        <Route path="/fee-rules"><Redirect to="/adviser/compliance" /></Route>
         <Route path="/legal" component={Legal} />
         <Route component={NotFound} />
       </Switch>
@@ -136,19 +138,40 @@ function ClientApp() {
     <Layout>
       <Switch>
         <Route path="/dashboard" component={Dashboard} />
-        <Route path="/wallets" component={WalletsNew} />
-        <Route path="/portfolio" component={Portfolio} />
-        <Route path="/ai-advisory" component={AiAdvisory} />
-        <Route path="/transactions" component={Transactions} />
-        <Route path="/compliance" component={Compliance} />
-        <Route path="/risk-assessment" component={RiskAssessment} />
-        <Route path="/investments" component={Investments} />
+        <Route path="/wallets">
+          {!uiFeatures.showWallets ? <Redirect to="/dashboard" /> : <WalletsNew />}
+        </Route>
+        <Route path="/portfolio" component={PortfolioAdvicePage} />
+        <Route path="/ai-insights" component={AiInsightsPage} />
+        <Route path="/goals" component={GoalsPage} />
+        <Route path="/reports" component={ReportsPage} />
+        <Route path="/account" component={AccountPage} />
+        <Route path="/ai-advisory"><Redirect to="/ai-insights" /></Route>
+        <Route path="/transactions">
+          {!uiFeatures.showExecutionActions ? <Redirect to="/dashboard" /> : <Transactions />}
+        </Route>
+        <Route path="/compliance"><Redirect to="/account" /></Route>
+        <Route path="/risk-assessment"><Redirect to="/goals" /></Route>
+        <Route path="/investments">
+          {!uiFeatures.showBuySellTerms ? <Redirect to="/dashboard" /> : <Investments />}
+        </Route>
+        <Route path="/fx-exchange">
+          {!uiFeatures.showFx ? <Redirect to="/dashboard" /> : <FxExchange />}
+        </Route>
+        <Route path="/crypto">
+          <Redirect to="/dashboard" />
+        </Route>
+        <Route path="/remittance">
+          <Redirect to="/dashboard" />
+        </Route>
+        <Route path="/fee-consents"><Redirect to="/reports" /></Route>
+        <Route path="/fee-rules"><Redirect to="/reports" /></Route>
         <Route path="/legal" component={Legal} />
-        <Route path="/client/instructions" component={ClientInstructions} />
-        <Route path="/client/fee-consents" component={ClientFeeConsents} />
-        <Route path="/client/fees" component={ClientFees} />
-        <Route path="/client/wealth-planner" component={ClientWealthPlanner} />
-        <Route path="/client/advice/:id" component={ClientAdviceViewer} />
+        <Route path="/client/instructions"><Redirect to="/reports" /></Route>
+        <Route path="/client/fee-consents"><Redirect to="/reports" /></Route>
+        <Route path="/client/fees"><Redirect to="/reports" /></Route>
+        <Route path="/client/wealth-planner"><Redirect to="/goals" /></Route>
+        <Route path="/client/advice/:id"><Redirect to="/reports" /></Route>
         <Route component={NotFound} />
       </Switch>
     </Layout>

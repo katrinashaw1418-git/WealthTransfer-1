@@ -7,13 +7,8 @@ import { useAuth } from "@/contexts/auth";
 import {
   Home,
   Users,
-  Building2,
-  ClipboardCheck,
-  ListChecks,
   FileText,
-  HandCoins,
-  Coins,
-  TrendingUp,
+  Bot,
   Scale,
   User,
   ChevronRight,
@@ -40,28 +35,13 @@ interface NavSection {
 
 const adviserSections: NavSection[] = [
   {
-    heading: "Practice",
+    heading: "Portal",
     items: [
       { name: "Dashboard", href: "/adviser/dashboard", icon: Home },
-      { name: "Workflow", href: "/adviser/workflow", icon: ListChecks, hint: "Tasks + pending consents" },
-      { name: "Business", href: "/adviser/business", icon: TrendingUp, hint: "Book snapshot" },
-    ],
-  },
-  {
-    heading: "Clients",
-    items: [
-      { name: "Client book", href: "/adviser/clients", icon: Users },
-      { name: "Investment products", href: "/adviser/products", icon: Building2 },
-      { name: "Instructions", href: "/adviser/instructions", icon: ClipboardCheck },
-      { name: "Fee consents", href: "/adviser/fee-consents", icon: HandCoins, hint: "DBFO requests + signed" },
-      { name: "Fee engine", href: "/adviser/fees", icon: HandCoins, hint: "Read-only — Gate A" },
-    ],
-  },
-  {
-    heading: "Operations",
-    items: [
+      { name: "Clients", href: "/adviser/clients", icon: Users },
+      { name: "AI Planning", href: "/adviser/ai-planning", icon: Bot },
       { name: "Reports", href: "/adviser/reports", icon: FileText },
-      { name: "Legal & compliance", href: "/legal", icon: Scale },
+      { name: "Compliance", href: "/adviser/compliance", icon: Scale },
     ],
   },
 ];
@@ -104,7 +84,11 @@ function SidebarBody() {
                 location === item.href ||
                 (item.href !== "/adviser/dashboard" && location.startsWith(item.href + "/"));
               return (
-                <Link key={item.name} href={item.href}>
+                <Link
+                  key={item.name}
+                  href={item.href}
+                  aria-current={isActive ? "page" : undefined}
+                >
                   <Button
                     variant="ghost"
                     className={cn(

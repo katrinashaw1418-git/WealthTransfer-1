@@ -35,8 +35,9 @@ vi.mock("../db", () => {
     return p;
   };
   const select = vi.fn(() => makeChain(dbResults.shift() ?? []));
+  const execute = vi.fn().mockResolvedValue({ rows: [] });
   return {
-    db: { select, __stage: (rows: any[]) => dbResults.push(rows) },
+    db: { select, execute, __stage: (rows: any[]) => dbResults.push(rows) },
   };
 });
 

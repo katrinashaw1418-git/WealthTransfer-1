@@ -9,6 +9,7 @@ import { Menu, Search, Shield, LogOut } from "lucide-react";
 import NotificationsPopover from "@/components/notifications-popover";
 import WriteKillSwitchBanner from "@/components/write-kill-switch-banner";
 import DeductionsDisabledBanner from "@/components/deductions-disabled-banner";
+import { ComplianceShell } from "@/components/layout/ComplianceShell";
 
 interface AdviserLayoutProps {
   children: React.ReactNode;
@@ -17,7 +18,7 @@ interface AdviserLayoutProps {
 export default function AdviserLayout({ children }: AdviserLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   // useSearch subscribes to the live search-string portion of the URL —
   // wouter's useLocation only tracks pathname, so without this the topbar
   // would not pick up ?q= changes when only the query string moves.
@@ -46,6 +47,10 @@ export default function AdviserLayout({ children }: AdviserLayoutProps) {
     (user?.firstName?.[0] ?? "") + (user?.lastName?.[0] ?? "") ||
     user?.username?.slice(0, 2).toUpperCase() ||
     "AR";
+
+  const showAiDisclaimer = location.startsWith("/adviser/ai-planning");
+  const showRetentionStatement =
+    location.startsWith("/adviser/reports") || location.startsWith("/adviser/compliance");
 
   return (
     <div className="flex min-h-screen bg-slate-50">
@@ -134,7 +139,13 @@ export default function AdviserLayout({ children }: AdviserLayoutProps) {
         </header>
 
         <main className="flex-1 overflow-y-auto" data-testid="adviser-main">
-          {children}
+          <ComplianceShell
+            persona="adviser"
+            showAiDisclaimer={showAiDisclaimer}
+            showRetentionStatement={showRetentionStatement}
+          >
+            {children}
+          </ComplianceShell>
         </main>
       </div>
     </div>
