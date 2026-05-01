@@ -1,5 +1,6 @@
-import dotenv from 'dotenv';
-dotenv.config();
+// Must be first: loads `.env` before any other server module reads `process.env`
+// (e.g. `server/auth.ts` `isLocalDev` used by admin demo seed in `routes.ts`).
+import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { randomUUID } from "crypto";
 import rateLimit from "express-rate-limit";
@@ -1368,11 +1369,15 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = 5000;
-  server.listen({
+  // reusePort is unsupported on Windows (ENOTSUP) — only enable on Unix-like OS.
+  const listenOpts: { port: number; host: string; reusePort?: boolean } = {
     port,
     host: "0.0.0.0",
-    reusePort: true,
-  }, () => {
+  };
+  if (process.platform !== "win32") {
+    listenOpts.reusePort = true;
+  }
+  server.listen(listenOpts, () => {
     log(`serving on port ${port}`);
   });
 })();
