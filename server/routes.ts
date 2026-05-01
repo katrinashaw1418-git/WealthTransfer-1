@@ -85,6 +85,7 @@ import {
 import { loadLatestSoaTargetAllocation } from "./services/soa-target";
 import { registerPortfolioRealMetricsRoute } from "./portfolio-real-metrics-route";
 import { registerPortfolioAllocationRoute } from "./portfolio-allocation-route";
+import { listAggregatedUserInvestments } from "./services/user-investments";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -4381,29 +4382,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/user-investments", async (req, res) => {
     try {
       const { userId } = requireAuth(req);
-      const investments = await storage.getUserInvestments(userId);
-      const allProducts = await storage.getInvestmentProducts();
-      const currentDate = new Date();
-      
-      // Calculate current values with performance using unified midpoint IRR function
-      const investmentsWithPerformance = investments.map(investment => {
-        const product = allProducts.find(p => p.id === investment.productId);
-        if (!product) return investment;
-        
-        const investmentDate = new Date(investment.investmentDate ?? Date.now());
-        const investedAmount = parseFloat(investment.investedAmount);
-        const performance = calculateInvestmentPerformance(product, investedAmount, investmentDate, currentDate);
-        
-        return {
-          ...investment,
-          currentValue: performance.currentValue != null ? performance.currentValue.toFixed(2) : null,
-          totalReturn: performance.returnAmount.toFixed(2),
-          returnPercent: performance.returnPercentage.toFixed(2),
-          ...(performance.valuationStatus ? { valuationStatus: performance.valuationStatus } : {})
-        };
-      });
-      
-      res.json(investmentsWithPerformance);
+      // P0 duplicate-position fix: one row per product_id aggregated at query level.
+      const investments = await listAggregatedUserInvestments(userId);
+      res.json(investments);
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
       res.status(500).json({ error: "Failed to get user investments" });
