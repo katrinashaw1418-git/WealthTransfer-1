@@ -10,12 +10,22 @@ export const isLocalDev =
   process.env.NODE_ENV === "development" &&
   (process.env.APP_ENV === "local" || process.env.ALLOW_LOCAL_DEV_AUTH === "true");
 
-// JWT_SECRET must be set explicitly in any environment that is not isolated
-// local development.
-if (!process.env.JWT_SECRET && !isLocalDev) {
-  throw new Error("FATAL: JWT_SECRET environment variable must be set outside local development.");
+// JWT_SECRET must be set explicitly whenever we are not in the narrow
+// isolated local-dev mode. Production, staging, CI, and NODE_ENV=test never
+// use the dev-only fallback signing key — refuse to boot instead.
+const jwtSecretFromEnv = process.env.JWT_SECRET?.trim();
+const nodeEnvLabel = process.env.NODE_ENV ?? "(unset)";
+if (!jwtSecretFromEnv) {
+  if (!isLocalDev) {
+    throw new Error(
+      "FATAL: JWT_SECRET is required. " +
+        `NODE_ENV="${nodeEnvLabel}" and local-dev shortcuts are inactive ` +
+        `(isolated local dev requires NODE_ENV=development plus APP_ENV=local or ALLOW_LOCAL_DEV_AUTH=true). ` +
+        "Configure a strong JWT_SECRET in the environment — the process will not fall back to a weak default key.",
+    );
+  }
 }
-const JWT_SECRET = process.env.JWT_SECRET || "amax-local-dev-only-secret";
+const JWT_SECRET = jwtSecretFromEnv ?? "amax-local-dev-only-secret";
 const JWT_EXPIRY = "24h";
 
 export interface AuthPayload {
