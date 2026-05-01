@@ -99,9 +99,10 @@ export default function AccountPage() {
       >
         <StatusChip domain="advice">Account scope</StatusChip>
         <p className="min-w-0 flex-1 leading-relaxed">
-          This area covers your profile, how to reach your practice, compliance status, and the AFSL-scoped
-          advice relationship. AMAX Wealth does not hold client assets, does not place orders, and does not
-          move funds on your behalf. Product access and instructions are always adviser-led.
+          This area covers your profile, how to reach your practice, compliance status, and your
+          relationship with your adviser through this platform. AMAX Wealth does not hold client assets,
+          does not place orders, and does not move funds on your behalf. Product access and instructions
+          are always adviser-led.
         </p>
       </div>
 
@@ -157,7 +158,6 @@ export default function AccountPage() {
                 <StatusChip domain="clientFactFind" emphasis="solid">
                   {isWholesale ? "Wholesale client" : "Retail client"}
                 </StatusChip>
-                <span className="text-sm text-slate-600">AFSL [000000] · AR [000000]</span>
               </CardContent>
             </Card>
 
@@ -189,8 +189,9 @@ export default function AccountPage() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm leading-relaxed text-slate-600">
           <p>
-            AMAX Wealth Pty Ltd is an authorised representative of [Licensee Name] AFSL [000000], AR
-            [000000].
+            Your adviser manages your relationship and any formal disclosures. For questions about who
+            provides services to you or official documents, contact your adviser or their practice
+            directly.
           </p>
           <div className="flex flex-wrap gap-2">
             <StatusChip domain="advice">Financial product advice</StatusChip>

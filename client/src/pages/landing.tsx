@@ -162,17 +162,15 @@ export default function Landing() {
       <section className="bg-sky-50 text-sky-900">
         <div className="max-w-7xl mx-auto px-6 py-24 md:py-32">
           <div className="max-w-3xl">
-            <Badge className="bg-white/10 text-sky-900 border-white/20 mb-6">
-              AFSL authorisation pending
-            </Badge>
+            <Badge className="bg-white/10 text-sky-900 border-white/20 mb-6">Platform preview</Badge>
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold leading-tight mb-6">
               A modern wealth platform for investors and financial planners
             </h1>
             <p className="text-lg md:text-xl text-sky-700 mb-8 max-w-2xl">
               Eligible Australian investors access portfolio tools, FX, digital assets and curated
-              investment opportunities. Authorised representatives view linked-client portfolios and
-              advice records, and browse the AMAX product shelf — read-only today, with consent-gated
-              instruction workflows on the roadmap.
+              investment opportunities. Financial planners view linked-client portfolios and advice
+              records, and browse the AMAX product shelf — read-only today, with consent-gated instruction
+              workflows on the roadmap.
             </p>
             <div className="flex flex-col sm:flex-row gap-4">
               <Button
@@ -192,7 +190,7 @@ export default function Landing() {
                 }}
                 data-testid="button-hero-adviser"
               >
-                Wealth Planner (AFSL / AR only)
+                Wealth Planner
                 <ArrowRight className="w-4 h-4 ml-2" />
               </Button>
               <Button
@@ -212,12 +210,17 @@ export default function Landing() {
 
       <section className="py-6 bg-white border-b">
         <div className="max-w-7xl mx-auto px-6">
-          <div className="flex flex-wrap items-center justify-center gap-4 text-xs text-gray-500" data-testid="trust-strip">
-            <span className="flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" />AFSL authorisation — pending</span>
-            <span className="flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" />AUSTRAC registration — pending</span>
-            <span className="flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" />AFCA membership — pending</span>
-          </div>
-          <p className="text-center text-xs text-gray-400 mt-2">Intended for eligible Australian investors and authorised representatives once licensing is finalised.</p>
+          <p
+            className="text-center text-xs text-gray-500 max-w-2xl mx-auto leading-relaxed"
+            data-testid="trust-strip"
+          >
+            This website does not constitute financial advice. Information provided is general in nature
+            and does not take into account your personal circumstances. Before making investment
+            decisions, obtain advice from a qualified financial adviser.
+          </p>
+          <p className="text-center text-xs text-gray-400 mt-2">
+            Intended for eligible Australian investors and financial planners.
+          </p>
         </div>
       </section>
 
@@ -252,7 +255,8 @@ export default function Landing() {
           <div className="text-center mb-16">
             <h2 className="text-3xl font-bold text-gray-900 mb-4">Platform Capabilities</h2>
             <p className="text-gray-600 max-w-2xl mx-auto">
-              A secure, regulated environment for managing cross-border wealth across multiple asset classes and currencies.
+              A secure environment for managing cross-border wealth across multiple asset classes and
+              currencies.
             </p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
@@ -272,19 +276,19 @@ export default function Landing() {
               {
                 icon: TrendingUp, bg: "bg-green-100", fg: "text-green-600",
                 title: "General market insights",
-                desc: "Market commentary and portfolio analytics — published as general information only. Personal investment recommendations are delivered separately, by your licensed adviser, in a Statement of Advice.",
+                desc: "Market commentary and portfolio analytics — published as general information only. Personal investment recommendations are delivered separately, by your financial adviser, in a Statement of Advice.",
                 link: "General info only"
               },
               {
                 icon: FileText, bg: "bg-purple-100", fg: "text-purple-600",
                 title: "Statement of Advice",
-                desc: "Personalised advice delivered through a formal SOA prepared by your licensed adviser. Required before any personal investment recommendations are acted upon.",
-                link: "AFSL regulated"
+                desc: "Personalised advice delivered through a formal SOA prepared by your financial adviser. Required before any personal investment recommendations are acted upon.",
+                link: "SOA-backed where applicable"
               },
               {
                 icon: Globe, bg: "bg-teal-100", fg: "text-teal-600",
                 title: "FX exchange",
-                desc: "Multi-currency FX conversion is intended to be executed via AMAX Global Pty Ltd (AUSTRAC registration pending). Payments and settlement are handled by AMAX Global — separate from the wealth platform.",
+                desc: "Multi-currency FX conversion is intended to be executed via AMAX Global Pty Ltd. Payments and settlement are handled by AMAX Global — separate from the wealth platform.",
                 link: "AMAX Global"
               },
               {
@@ -313,24 +317,20 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
             <div>
-              <Badge className="bg-white/10 text-white border-white/20 mb-6">
-                For Wealth Planners & AFSL Partners
-              </Badge>
+              <Badge className="bg-white/10 text-white border-white/20 mb-6">For wealth planners</Badge>
               <h2 className="text-3xl md:text-4xl font-bold mb-4">
-                A platform layer for external advisers and authorised representatives
+                A platform layer for external advisers and their practices
               </h2>
               <p className="text-sky-100 mb-4">
-                View linked-client portfolios, KYC and advice-record status, and
-                browse the AMAX product shelf — under your AFSL or as an Authorised
-                Representative on the AMAX licence. Instruction and fee-consent
-                workflows are coming in subsequent releases.
+                View linked-client portfolios, KYC and advice-record status, and browse the AMAX product
+                shelf in line with your practice&apos;s arrangements. Instruction and fee-consent workflows
+                are coming in subsequent releases.
               </p>
               <div className="bg-amber-500/20 border border-amber-300/40 rounded-md p-3 mb-8 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 text-amber-200 flex-shrink-0 mt-0.5" />
                 <p className="text-sm text-amber-50">
-                  <strong>Credential-gated.</strong> Adviser access requires a current AFSL or AR
-                  authorisation. There is no self-registration — onboarding is manually approved
-                  by AMAX compliance. Retail clients should use the investor flow above.
+                  <strong>Credential-gated.</strong> Adviser access is approved through AMAX onboarding
+                  only — there is no self-registration. Retail clients should use the investor flow above.
                 </p>
               </div>
               <ul className="space-y-3 mb-8 text-sm text-sky-100">
@@ -358,7 +358,7 @@ export default function Landing() {
                   onClick={() => navigate("/login")}
                   data-testid="button-adviser-signin"
                 >
-                  Adviser Sign In (AFSL / AR)
+                  Adviser Sign In
                   <ArrowRight className="w-4 h-4 ml-2" />
                 </Button>
                 <Button
@@ -379,7 +379,7 @@ export default function Landing() {
                 </div>
                 <div>
                   <p className="font-semibold">Adviser portal</p>
-                  <p className="text-xs text-sky-300">Authorised representatives only</p>
+                  <p className="text-xs text-sky-300">Adviser credentials required</p>
                 </div>
               </div>
               <div className="space-y-4 text-sm">
@@ -412,8 +412,8 @@ export default function Landing() {
                 </div>
               </div>
               <p className="text-xs text-sky-300 mt-6 pt-6 border-t border-sky-700">
-                Adviser access is granted per-client via the AMAX onboarding flow.
-                Contact us to discuss adviser onboarding under your AFSL.
+                Adviser access is granted per-client via the AMAX onboarding flow. Contact us to discuss
+                adviser onboarding for your practice.
               </p>
             </div>
           </div>
@@ -545,7 +545,7 @@ export default function Landing() {
             {[
               "Net assets of $2.5 million or more",
               "Gross income of $250,000+ for prior 2 financial years",
-              "Professional investor (AFSL holder, APRA-regulated body)",
+              "Professional investor (APRA-regulated body or comparable)",
               "Accountant certificate confirming financial threshold",
               "Investment of $500,000+ in the product",
               "SMSF with $10 million+ in assets",
@@ -564,7 +564,7 @@ export default function Landing() {
           <h2 className="text-3xl font-bold mb-4">Ready to apply?</h2>
           <p className="text-sky-700 mb-8">
             If you meet the wholesale investor criteria, apply for access today. Our compliance team will review your 
-            application and a licensed adviser will be in touch.
+            application and a financial adviser will be in touch.
           </p>
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <Button 
@@ -600,7 +600,8 @@ export default function Landing() {
                 <span className="text-lg font-bold text-sky-900">AMAX WEALTH</span>
               </div>
               <p className="text-sm text-sky-900">
-                Institutional-grade wealth management for wholesale investors under Australian Financial Services Licence arrangements.
+                Institutional-style tools and reporting for wholesale investors, used together with your
+                financial planner.
               </p>
             </div>
             <div>
@@ -627,45 +628,10 @@ export default function Landing() {
                 <li>Phone: +61 2 8320 1908</li>
                 <li>Email: info@amaxwealth.com.au</li>
               </ul>
-              <div className="mt-5 pt-4 border-t border-sky-100 space-y-2 text-sm text-sky-900">
-                <p className="text-xs font-semibold text-sky-900 uppercase tracking-wider mb-1">
-                  External dispute resolution
-                </p>
-                <p data-testid="text-afca-helpline">
-                  AFCA helpline: <span className="font-medium">1800 931 678</span>
-                </p>
-                <p data-testid="text-afca-member">
-                  AMAX AFCA Member No:{" "}
-                  <span className="font-medium">Pending — not yet issued</span>
-                </p>
-              </div>
             </div>
-          </div>
-
-          <div className="bg-amber-50 border-2 border-amber-300 rounded-lg p-3 mt-8 text-xs text-amber-900">
-            <span className="font-semibold">Draft — regulatory details pending.</span>{" "}
-            AMAX Wealth's AFSL authorisation, AR number, ABN, AFCA membership and AUSTRAC registration
-            are not yet issued. Final legal review and AFSL partner sign-off are required before
-            external use of this site.
           </div>
 
           <div className="bg-sky-50 border border-sky-100 rounded-lg p-6 mt-4 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-sky-900">
-              <div>
-                <p className="font-medium text-sky-900 mb-1">AMAX Wealth</p>
-                <p>
-                  Authorised Representative number: Pending — not yet issued. AFSL authorisation:
-                  Pending — not yet issued. ABN: Pending — not yet issued.
-                </p>
-              </div>
-              <div>
-                <p className="font-medium text-sky-900 mb-1">AMAX Global</p>
-                <p>
-                  Intended to operate as a Digital Currency Exchange and Remittance provider
-                  registered with AUSTRAC. AUSTRAC registration: Pending — not yet issued.
-                </p>
-              </div>
-            </div>
             <p className="text-xs text-sky-900">
               AMAX Wealth does not hold client funds or assets. All positions are maintained with external regulated custodians. 
               This website does not constitute financial advice. Information provided is general in nature and does not take into 

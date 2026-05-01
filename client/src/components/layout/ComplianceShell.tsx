@@ -17,8 +17,7 @@ export function ComplianceShell({
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-600">
-        AMAX Wealth Pty Ltd · Authorised Representative of [Licensee Name] · AFSL
-        [000000] · AR [000000]
+        AMAX Wealth Pty Ltd
         {lastUpdated ? ` · Last updated: ${lastUpdated}` : ""}
       </div>
 
@@ -33,7 +32,7 @@ export function ComplianceShell({
       {showAiDisclaimer && persona === "adviser" && (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
           AI-generated drafts and suggestions are illustrative only. They do not replace
-          your professional judgement, your AFS licensee’s policies, or a completed
+          your professional judgement, your licensee&apos;s policies, or a completed
           review before you issue any Statement of Advice or Record of Advice to a
           client.
         </div>
@@ -44,23 +43,24 @@ export function ComplianceShell({
       <div className="border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-600">
         {persona === "client" ? (
           <p>
-            AMAX Wealth provides adviser-led financial product advice and reporting
-            only. AMAX Wealth does not provide custody, remittance, exchange, or
-            execution services.
+            AMAX Wealth provides reporting and portfolio information in support of your
+            adviser. Nothing here is personal advice. AMAX Wealth does not provide custody,
+            remittance, exchange, or execution services.
           </p>
         ) : (
           <p>
-            This workspace supports authorised representatives preparing advice and
-            disclosure. Use outputs in line with licensee standards. AMAX Wealth does
-            not provide custody, remittance, exchange, or execution services through
-            this portal.
+            This workspace supports financial planners preparing client materials and
+            disclosure. Use outputs in line with your practice&apos;s policies. AMAX
+            Wealth does not provide custody, remittance, exchange, or execution services
+            through this portal.
           </p>
         )}
         {showRetentionStatement && (
           <p className="mt-1">
             Records are retained under Corporations Act record-keeping obligations,
-            ASIC instruments, regulations, and AFSL conditions. Seven-year record
-            retention applies to advice documents and supporting records.
+            ASIC instruments, regulations, and applicable regulatory requirements.
+            Seven-year record retention applies to advice documents and supporting
+            records.
           </p>
         )}
       </div>
