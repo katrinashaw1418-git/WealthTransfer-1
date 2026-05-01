@@ -462,6 +462,8 @@ beforeAll(async () => {
     isActive: true,
   });
 
+  const soaIssuedAt = new Date(Date.UTC(2026, 0, 1, 10, 0, 0));
+  const soaViewedAt = new Date(Date.UTC(2026, 0, 2, 10, 0, 0));
   const [advice] = await db
     .insert(adviceRecords)
     .values({
@@ -470,6 +472,11 @@ beforeAll(async () => {
       adviceType: "personal",
       adviceSource: "hybrid",
       status: "issued",
+      soaIssued: true,
+      soaIssuedAt,
+      soaViewed: true,
+      soaViewedAt,
+      adviceAccepted: true,
     })
     .returning();
   adviceRecordId = advice.id;

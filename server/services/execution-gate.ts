@@ -3,7 +3,9 @@
 // =============================================================================
 // THIS IS THE AUTHORITATIVE EXECUTION CHECK. Every code path that triggers an
 // actual trade, transfer, or money movement on behalf of advice MUST call
-// canExecute(adviceRecordId) immediately before doing so.
+// canExecute(adviceRecordId, { feeConsentId }) immediately before doing so
+// when the operation is tied to a specific fee_consents row; otherwise pass
+// adviceRecordId alone to evaluate the latest consent for that advice.
 //
 // The `executionAuthorisations` table stores a SNAPSHOT of the gate at the
 // moment the client clicked "I authorise execution". Those snapshot booleans
@@ -20,9 +22,12 @@
 // attempt: live advice flags + live fee-consent status + live expiry date.
 // =============================================================================
 
-import { and, desc, eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { db } from "../db";
 import { adviceRecords, feeConsents } from "@shared/schema";
+
+/** Drizzle handle (top-level `db` or transaction) for read-only gate evaluation. */
+export type ExecutionGateDb = Pick<typeof db, "select">;
 
 export type ExecutionGateFailureReason =
   | "advice_record_not_found"
@@ -67,11 +72,13 @@ export type ExecutionGateResult =
  * decide whether to execute. Always call this function.
  */
 export async function canExecute(
-  adviceRecordId: number
+  adviceRecordId: number,
+  opts?: { executor?: ExecutionGateDb; feeConsentId?: number },
 ): Promise<ExecutionGateResult> {
   const checkedAt = new Date();
+  const dbx = opts?.executor ?? db;
 
-  const [advice] = await db
+  const [advice] = await dbx
     .select()
     .from(adviceRecords)
     .where(eq(adviceRecords.id, adviceRecordId))
@@ -141,13 +148,38 @@ export async function canExecute(
     };
   }
 
-  // Most recent fee consent for this advice record.
-  const [fc] = await db
-    .select()
-    .from(feeConsents)
-    .where(eq(feeConsents.adviceRecordId, adviceRecordId))
-    .orderBy(desc(feeConsents.consentedAt))
-    .limit(1);
+  // Fee consent: when the caller names the exact row (rule / deduction /
+  // instruction linkage), evaluate THAT row — otherwise fall back to the
+  // most recently consented row for this advice (client flows that only know
+  // adviceRecordId).
+  let fc: (typeof feeConsents.$inferSelect) | undefined;
+  if (opts?.feeConsentId != null) {
+    const [pinned] = await dbx
+      .select()
+      .from(feeConsents)
+      .where(eq(feeConsents.id, opts.feeConsentId))
+      .limit(1);
+    if (!pinned || pinned.adviceRecordId !== adviceRecordId) {
+      return {
+        allowed: false,
+        adviceRecordId,
+        checkedAt,
+        reason: "fee_consent_missing",
+        detail: pinned
+          ? `Fee consent #${opts.feeConsentId} is not linked to advice ${adviceRecordId}.`
+          : `No fee consent exists for id=${opts.feeConsentId}.`,
+      };
+    }
+    fc = pinned;
+  } else {
+    const [latest] = await dbx
+      .select()
+      .from(feeConsents)
+      .where(eq(feeConsents.adviceRecordId, adviceRecordId))
+      .orderBy(desc(feeConsents.consentedAt))
+      .limit(1);
+    fc = latest;
+  }
 
   if (!fc) {
     return {
@@ -194,15 +226,41 @@ export async function canExecute(
 }
 
 /**
- * Convenience throw-on-fail wrapper for code paths that just want to assert
- * the gate is open before proceeding. Throws an Error whose message names the
- * specific gate that failed.
+ * Thrown when live advice + SOA + fee-consent preconditions are not satisfied
+ * for an execution-time action. HTTP status defaults to 403 (client-facing
+ * refusal); fee settlement uses 409 with `ruleId` set for operator triage.
  */
-export async function assertCanExecute(adviceRecordId: number): Promise<void> {
-  const result = await canExecute(adviceRecordId);
-  if (!result.allowed) {
-    throw new Error(
-      `Execution blocked for advice ${adviceRecordId}: ${result.reason} — ${result.detail}`
+export class ExecutionGateBlockedError extends Error {
+  readonly adviceRecordId: number;
+  readonly gateReason: ExecutionGateFailureReason;
+  readonly status: number;
+  readonly ruleId?: number;
+
+  constructor(
+    result: Extract<ExecutionGateResult, { allowed: false }>,
+    options?: { httpStatus?: number; ruleId?: number },
+  ) {
+    super(
+      `Execution blocked for advice ${result.adviceRecordId}: ${result.reason} — ${result.detail}`,
     );
+    this.name = "ExecutionGateBlockedError";
+    this.adviceRecordId = result.adviceRecordId;
+    this.gateReason = result.reason;
+    this.status = options?.httpStatus ?? 403;
+    this.ruleId = options?.ruleId;
+  }
+}
+
+/**
+ * Convenience throw-on-fail wrapper for code paths that just want to assert
+ * the gate is open before proceeding.
+ */
+export async function assertCanExecute(
+  adviceRecordId: number,
+  opts?: { executor?: ExecutionGateDb; feeConsentId?: number },
+): Promise<void> {
+  const result = await canExecute(adviceRecordId, opts);
+  if (!result.allowed) {
+    throw new ExecutionGateBlockedError(result);
   }
 }

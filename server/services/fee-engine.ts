@@ -61,6 +61,7 @@ import {
   CONSENT_GATE_AUDIT_ACTIONS,
   validateRuleAmountAgainstConsent,
 } from "./consent-integrity";
+import { canExecute, ExecutionGateBlockedError } from "./execution-gate";
 
 // Task #294 — terminal lifecycle states a rule can land in. Any rule already
 // in one of these states is invisible to createFeeRule (the supersede pass
@@ -741,6 +742,43 @@ export async function runDailyAccruals(opts: {
         continue;
       }
 
+      const execGate = await canExecute(consentCheck.consent.adviceRecordId, {
+        executor: tx,
+        feeConsentId: rule.feeConsentId,
+      });
+      if (!execGate.allowed) {
+        const reasonKey = `advice_execution_${execGate.reason}` as const;
+        console.log("[fee-accrual] ADVICE_EXECUTION_GATE_BLOCKED", {
+          ruleId: rule.id,
+          adviceRecordId: consentCheck.consent.adviceRecordId,
+          gateReason: execGate.reason,
+          accrualDate: accrualDate.toISOString(),
+        });
+        await writeAuditLog({
+          executor: tx,
+          userId: null,
+          action: "fee_accrual_advice_execution_gate_blocked",
+          entityType: "adviser_fee_rule",
+          entityId: String(rule.id),
+          before: null,
+          after: null,
+          extra: {
+            gate: "advice_execution",
+            gateReason: execGate.reason,
+            detail: execGate.detail,
+            adviceRecordId: consentCheck.consent.adviceRecordId,
+            source: "run_daily_accruals",
+            ruleId: rule.id,
+            consentId: rule.feeConsentId,
+            accrualDate: accrualDate.toISOString(),
+          },
+          ipAddress: null,
+        });
+        skipped++;
+        byGateReason[reasonKey] = (byGateReason[reasonKey] ?? 0) + 1;
+        continue;
+      }
+
       // (b) Adviser-client link still active.
       if (!gate) {
         const [link] = await tx
@@ -1128,6 +1166,16 @@ export async function settleApprovedDeduction(opts: {
                 consentCheck.reason,
               );
             }
+            const execGate = await canExecute(consentCheck.consent.adviceRecordId, {
+              executor: tx,
+              feeConsentId: r.feeConsentId,
+            });
+            if (!execGate.allowed) {
+              throw new ExecutionGateBlockedError(execGate, {
+                httpStatus: 409,
+                ruleId: r.id,
+              });
+            }
           }
         }
       }
@@ -1410,6 +1458,29 @@ export async function settleApprovedDeduction(opts: {
             ruleId: err.ruleId,
             consentId: err.consentId,
             gate: "consent",
+            source: "settle_tx",
+            approverUserId: opts.approverUserId,
+            errorMessage: message,
+          },
+        });
+      } catch {
+        // ignore — primary error is what matters
+      }
+    }
+    if (err instanceof ExecutionGateBlockedError) {
+      try {
+        await writeAuditLog({
+          userId: opts.approverUserId,
+          action: CONSENT_GATE_AUDIT_ACTIONS.deductionApproveSettleTx,
+          entityType: "adviser_fee_deduction",
+          entityId: String(opts.deductionId),
+          before: null,
+          after: null,
+          extra: {
+            gateReason: err.gateReason,
+            ruleId: err.ruleId,
+            adviceRecordId: err.adviceRecordId,
+            gate: "advice_execution",
             source: "settle_tx",
             approverUserId: opts.approverUserId,
             errorMessage: message,

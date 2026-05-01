@@ -5082,6 +5082,7 @@ export function registerAdminRoutes(app: Express): void {
       // server/services/consent-integrity.ts.
       const { assertConsentValidForExecution, CONSENT_GATE_AUDIT_ACTIONS } =
         await import("./services/consent-integrity");
+      const { canExecute } = await import("./services/execution-gate");
       const gate = await assertConsentValidForExecution(beforeRow.feeConsentId);
       if (!gate.ok) {
         await writeAuditLog({
@@ -5112,6 +5113,46 @@ export function registerAdminRoutes(app: Express): void {
               reason: gate.reason,
               consentId: beforeRow.feeConsentId,
               ruleId,
+            },
+          },
+        );
+      }
+
+      const execGate = await canExecute(gate.consent.adviceRecordId, {
+        feeConsentId: beforeRow.feeConsentId,
+      });
+      if (!execGate.allowed) {
+        await writeAuditLog({
+          userId: auth.userId,
+          action: CONSENT_GATE_AUDIT_ACTIONS.ruleActivate,
+          entityType: "adviser_fee_rule",
+          entityId: String(ruleId),
+          before: {
+            status: beforeRow.status,
+            pausedAt: beforeRow.pausedAt,
+            pausedReason: beforeRow.pausedReason,
+          },
+          after: null,
+          extra: {
+            reason: execGate.reason,
+            consentId: beforeRow.feeConsentId,
+            adviceRecordId: gate.consent.adviceRecordId,
+            gate: "advice_execution",
+          },
+          ipAddress: req.ip ?? null,
+        });
+        throw Object.assign(
+          new Error(
+            `Cannot activate rule — advice execution gate failed: ${execGate.reason}`,
+          ),
+          {
+            status: 409,
+            body: {
+              code: execGate.reason,
+              reason: execGate.reason,
+              consentId: beforeRow.feeConsentId,
+              ruleId,
+              adviceRecordId: gate.consent.adviceRecordId,
             },
           },
         );
@@ -5736,6 +5777,7 @@ export function registerAdminRoutes(app: Express): void {
             CONSENT_GATE_AUDIT_ACTIONS,
             DEDUCTION_APPROVE_REFUSAL_CODES,
           } = await import("./services/consent-integrity");
+          const { canExecute } = await import("./services/execution-gate");
 
           // Defensive completeness — if any backing rule has been
           // deleted (referential integrity is FK-protected today, but
@@ -5813,6 +5855,43 @@ export function registerAdminRoutes(app: Express): void {
                     reason: gate.reason,
                     consentId: rule.feeConsentId,
                     ruleId: rule.id,
+                  },
+                },
+              );
+            }
+            const execGate = await canExecute(gate.consent.adviceRecordId, {
+              feeConsentId: rule.feeConsentId,
+            });
+            if (!execGate.allowed) {
+              await writeAuditLog({
+                userId: auth.userId,
+                action: CONSENT_GATE_AUDIT_ACTIONS.deductionApproveRoute,
+                entityType: "adviser_fee_deduction",
+                entityId: String(id),
+                before: beforeSnapshot,
+                after: null,
+                extra: {
+                  reason: execGate.reason,
+                  consentId: rule.feeConsentId,
+                  ruleId: rule.id,
+                  adviceRecordId: gate.consent.adviceRecordId,
+                  gate: "advice_execution",
+                  rulesChecked: ruleRows.length,
+                },
+                ipAddress: req.ip ?? null,
+              });
+              throw Object.assign(
+                new Error(
+                  `Cannot approve deduction — advice execution gate failed: ${execGate.reason}`,
+                ),
+                {
+                  status: 409,
+                  body: {
+                    code: execGate.reason,
+                    reason: execGate.reason,
+                    consentId: rule.feeConsentId,
+                    ruleId: rule.id,
+                    adviceRecordId: gate.consent.adviceRecordId,
                   },
                 },
               );

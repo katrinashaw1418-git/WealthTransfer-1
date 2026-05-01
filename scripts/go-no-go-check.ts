@@ -37,17 +37,27 @@
 //        breaker must currently be OFF — launching with writes blocked
 //        is a contradiction.
 //
+//   5. Advice execution readiness (active fee rules)
+//        Every distinct advice_record_id backing an adviser_fee_rules row
+//        in status 'active' must satisfy the live execution gate used at
+//        accrual / deduction / rule-activation time (SOA issued, viewed or
+//        downloaded with post-issuance ordering, advice accepted, valid
+//        active fee consent). Otherwise money could accrue against advice
+//        the platform would refuse to execute.
+//
 // Existing services / utilities reused (NO new business logic):
 //   * server/services/reconciliation.ts — MATCH_EPSILON
 //   * server/services/write-kill-switch.ts — getWriteKillSwitchState,
 //     ensureSystemSettingsTable
 //   * server/db.ts — the shared Drizzle handle
 //   * shared/schema.ts — the table definitions
+//   * server/services/execution-gate.ts — canExecute()
 //
 // Output is intentionally compact and deterministic so CI can diff it.
 // =============================================================================
 
 import { eq, sql } from "drizzle-orm";
+import { canExecute } from "../server/services/execution-gate";
 import { db, pool } from "../server/db";
 import {
   adviserFeeRules,
@@ -370,6 +380,64 @@ async function checkCircuitBreaker(): Promise<GateResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Gate 5 — Advice execution readiness (active fee rules)
+// ---------------------------------------------------------------------------
+async function checkAdviceExecutionReadinessForActiveRules(): Promise<GateResult> {
+  const rows = await db
+    .select({
+      ruleId: adviserFeeRules.id,
+      adviceRecordId: feeConsents.adviceRecordId,
+      feeConsentId: feeConsents.id,
+    })
+    .from(adviserFeeRules)
+    .innerJoin(feeConsents, eq(feeConsents.id, adviserFeeRules.feeConsentId))
+    .where(eq(adviserFeeRules.status, "active"));
+
+  if (rows.length === 0) {
+    return {
+      name: "Advice execution readiness (active fee rules)",
+      status: "PASS",
+      summary: "no active fee rules — nothing to verify",
+    };
+  }
+
+  const failures: { ruleId: number; adviceRecordId: number; reason: string }[] = [];
+  for (const r of rows) {
+    const g = await canExecute(r.adviceRecordId, { feeConsentId: r.feeConsentId });
+    if (!g.allowed) {
+      failures.push({
+        ruleId: r.ruleId,
+        adviceRecordId: r.adviceRecordId,
+        reason: g.reason,
+      });
+    }
+  }
+
+  if (failures.length === 0) {
+    return {
+      name: "Advice execution readiness (active fee rules)",
+      status: "PASS",
+      summary: `${rows.length} active fee rule(s) all pass canExecute() for their linked consent`,
+    };
+  }
+
+  const details = failures.slice(0, 8).map(
+    (f) =>
+      `- rule_id=${f.ruleId} advice_record_id=${f.adviceRecordId} reason=${f.reason}`,
+  );
+  const tail =
+    failures.length > details.length
+      ? [`- (+${failures.length - details.length} more)`]
+      : [];
+  return {
+    name: "Advice execution readiness (active fee rules)",
+    status: "FAIL",
+    summary: `${failures.length} active fee rule(s) fail the live execution gate`,
+    details: [...details, ...tail],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator + checklist printer
 // ---------------------------------------------------------------------------
 async function main(): Promise<void> {
@@ -380,6 +448,9 @@ async function main(): Promise<void> {
   results.push(await runGate("Gate 2", checkFeeRulesAgainstConsent));
   results.push(await runGate("Gate 3", checkKycBlockers));
   results.push(await runGate("Gate 4", checkCircuitBreaker));
+  results.push(
+    await runGate("Gate 5", checkAdviceExecutionReadinessForActiveRules),
+  );
 
   const passed = results.filter((r) => r.status === "PASS").length;
   const failed = results.length - passed;

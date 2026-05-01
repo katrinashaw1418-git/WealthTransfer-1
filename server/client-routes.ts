@@ -12,7 +12,10 @@
 //   3. State machine: pending_consent -> consented OR rejected. Anything
 //      else returns 400.
 //   4. Audit log on every transition.
-//   5. NO downstream cash movement is wired here. "consented" is terminal
+//   5. When adviceRecordId is set, consent is refused unless the live
+//      execution gate (SOA + acceptance + linked fee consent) passes — same
+//      definition as fee settlement (Slice 5).
+//   6. NO downstream cash movement is wired here. "consented" is terminal
 //      for this session.
 // =============================================================================
 

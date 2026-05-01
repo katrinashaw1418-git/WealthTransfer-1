@@ -46,6 +46,8 @@ import {
   type InvestmentInstruction,
 } from "@shared/schema";
 import { and, eq, desc, lt, lte, gte, sql, inArray, notInArray, or, isNull } from "drizzle-orm";
+import { canExecute, ExecutionGateBlockedError } from "./execution-gate";
+import { writeAuditLog } from "./audit";
 import {
   calculatePortfolioTotalsAtDate,
   calculateWalletValuationsAtDate,
@@ -1264,6 +1266,36 @@ export async function consentClientInstruction(
       new Error(`Cannot consent — instruction is in status "${existing.status}"`),
       { status: 400 },
     );
+  }
+  // Slice 5 — advice lifecycle: client consent advances the instruction toward
+  // downstream execution; enforce the same live SOA + acceptance + fee
+  // consent gate as money paths (UI bypass must not weaken this).
+  if (existing.adviceRecordId != null) {
+    const gate = await canExecute(existing.adviceRecordId, {
+      feeConsentId: existing.feeConsentId ?? undefined,
+    });
+    if (!gate.allowed) {
+      const err = new ExecutionGateBlockedError(gate);
+      try {
+        await writeAuditLog({
+          userId: clientUserId,
+          action: "client_instruction_consent_blocked_execution_gate",
+          entityType: "investment_instruction",
+          entityId: String(instructionId),
+          before: { status: existing.status, adviceRecordId: existing.adviceRecordId },
+          after: null,
+          extra: {
+            gateReason: gate.reason,
+            detail: gate.detail,
+            adviceRecordId: existing.adviceRecordId,
+          },
+          ipAddress: null,
+        });
+      } catch {
+        /* audit must not mask the refusal */
+      }
+      throw err;
+    }
   }
   const now = new Date();
   const [row] = await db
