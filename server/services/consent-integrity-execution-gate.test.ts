@@ -54,6 +54,7 @@ import {
   auditLogs,
   feeConsents,
   ledgerEntries,
+  revenueLedger,
   transactions,
   users,
   wallets,
@@ -1136,6 +1137,12 @@ describe("settleApprovedDeduction in-tx consent gate (Task #476 TOCTOU defense)"
       .from(transactions)
       .where(eq(transactions.idempotencyKey, idemKey));
     expect(txRow).toBeUndefined();
+
+    const [revRow] = await db
+      .select()
+      .from(revenueLedger)
+      .where(eq(revenueLedger.deductionId, scenario.deductionId));
+    expect(revRow).toBeUndefined();
 
     // Audit row was written by the catch block with gate='consent' so
     // a regulator can find consent-driven refusals alongside Gate B.

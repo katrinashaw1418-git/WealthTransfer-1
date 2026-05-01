@@ -25,7 +25,7 @@
 
 import "../../scripts/_bootstrap-test-env";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   accounts,
@@ -37,6 +37,7 @@ import {
   auditLogs,
   feeConsents,
   ledgerEntries,
+  revenueLedger,
   transactions,
   users,
   wallets,
@@ -288,6 +289,11 @@ async function cleanup(): Promise<void> {
   // Order matters because of FKs — deductions ref transactions, accruals ref
   // rules, rules ref consents, consents ref advice records.
   try {
+    await db
+      .delete(revenueLedger)
+      .where(eq(revenueLedger.clientUserId, clientUserId));
+  } catch {}
+  try {
     await db.execute(sql`
       DELETE FROM ledger_entries
       WHERE transaction_id IN (
@@ -397,6 +403,12 @@ beforeAll(async () => {
       adviceType: "personal",
       adviceSource: "hybrid",
       status: "issued",
+      soaIssued: true,
+      soaIssuedAt: new Date(),
+      soaViewed: true,
+      soaViewedAt: new Date(),
+      adviceAccepted: true,
+      adviceAcceptedAt: new Date(),
     })
     .returning();
   adviceRecordId = advice.id;
@@ -505,6 +517,30 @@ describe("Gate B — settleApprovedDeduction refuses non-active rules (Task #325
     expect(result.status).toBe("settled");
     expect(result.settledTransactionId).not.toBeNull();
     expect(result.failureReason).toBeNull();
+
+    // No revenue split config exists in this fixture, so settlement succeeds
+    // and attribution is explicitly skipped (non-blocking).
+    const [revCount] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(revenueLedger)
+      .where(eq(revenueLedger.deductionId, s.deductionId));
+    expect(revCount.n).toBe(0);
+
+    const [skipAudit] = await db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.action, "revenue_attribution_skipped"),
+          eq(auditLogs.entityType, "adviser_fee_deduction"),
+          eq(auditLogs.entityId, String(s.deductionId)),
+        ),
+      )
+      .orderBy(desc(auditLogs.id))
+      .limit(1);
+    expect(skipAudit).toBeDefined();
+    const skipMeta = skipAudit.metadata as Record<string, any>;
+    expect(skipMeta.reason).toBe("missing_split_config");
 
     // No gate-blocked audit row for the active scenario.
     const blockedRows = await db

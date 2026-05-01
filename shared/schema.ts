@@ -4,6 +4,10 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { PRODUCT_CATEGORY_VALUES } from "./product-categories";
 
+/** Values persisted on `users.role`. `system` is infra-only (platform accounts; login blocked). */
+export const USER_ROLE_VALUES = ["client", "adviser", "admin", "system"] as const;
+export type UserRole = (typeof USER_ROLE_VALUES)[number];
+
 // ---------------------------------------------------------------------------
 // Email normalisation — single source of truth.
 //
@@ -30,7 +34,7 @@ export const users = pgTable(
     kycStatus: text("kyc_status").notNull().default("pending"), // pending, verified, rejected
     userTier: text("user_tier").notNull().default("standard"), // standard, premium, hnwi
     // Session 3 — Phase 1: role-based access for B2B adviser overlay.
-    // "client" (default) = retail/wholesale account holder; "adviser" = authorised rep linked to clients via adviserClients.
+    // Product roles: client | adviser | admin. `system` reserved for platform ledger users (see users_role_check).
     role: text("role").notNull().default("client"),
     // Email verification — set on signup; required before login is allowed
     emailVerified: boolean("email_verified").notNull().default(false),
@@ -64,6 +68,10 @@ export const users = pgTable(
     // applied by the reconciliation services and admin views. Cheap because
     // the predicate matches at most a handful of rows on any environment.
     isDemoIdx: index("users_is_demo_idx").on(table.isDemo).where(sql`${table.isDemo} = true`),
+    roleCheck: check(
+      "users_role_check",
+      sql`${table.role} in ('client', 'adviser', 'admin', 'system')`,
+    ),
   }),
 );
 
@@ -583,8 +591,8 @@ export type AdviserProfile = typeof adviserProfiles.$inferSelect;
 export type InsertAdviserProfile = z.infer<typeof insertAdviserProfileSchema>;
 
 // Adviser <-> client link table. Both sides reference users.id (integer).
-// Composite unique index prevents duplicate active links between the same
-// adviser and client.
+// Composite unique index prevents duplicate links for the same (adviser, client).
+// `linked_at` is the link / assignment timestamp (Session 1 “assigned_at” semantics).
 export const adviserClients = pgTable("adviser_clients", {
   id: serial("id").primaryKey(),
   adviserUserId: integer("adviser_user_id").references(() => users.id).notNull(),
@@ -2291,6 +2299,97 @@ export const adviserFeeDeductions = pgTable(
   }),
 );
 
+// ---------------------------------------------------------------------------
+// Session 29 — Revenue attribution foundation (backend-only)
+// ---------------------------------------------------------------------------
+// adviser_revenue_splits stores how an adviser's settled fee deductions are
+// attributed between adviser and licensee. Only `revenue_pct` is wired in the
+// settlement service today; `flat_annual` and `hybrid` are placeholders for
+// future sessions.
+export const adviserRevenueSplits = pgTable(
+  "adviser_revenue_splits",
+  {
+    id: serial("id").primaryKey(),
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+    splitModel: text("split_model").notNull(), // flat_annual | revenue_pct | hybrid
+    // For split_model='revenue_pct': bps of deduction.totalAccrued allocated to adviser.
+    revenueShareBps: integer("revenue_share_bps"),
+    // Placeholder fields for future models.
+    flatAnnualAmount: decimal("flat_annual_amount", { precision: 14, scale: 4 }),
+    hybridBaseAmount: decimal("hybrid_base_amount", { precision: 14, scale: 4 }),
+    hybridRevenueBps: integer("hybrid_revenue_bps"),
+    effectiveFrom: timestamp("effective_from").notNull().defaultNow(),
+    effectiveTo: timestamp("effective_to"),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    splitModelCheck: check(
+      "adviser_revenue_splits_split_model_check",
+      sql`${table.splitModel} in ('flat_annual', 'revenue_pct', 'hybrid')`,
+    ),
+    revenueBpsBounds: check(
+      "adviser_revenue_splits_revenue_bps_bounds",
+      sql`${table.revenueShareBps} is null or (${table.revenueShareBps} >= 0 and ${table.revenueShareBps} <= 10000)`,
+    ),
+    adviserActiveIdx: index("adviser_revenue_splits_adviser_active_idx").on(
+      table.adviserUserId,
+      table.isActive,
+      table.effectiveFrom,
+    ),
+  }),
+);
+
+// Immutable attribution rows written at settlement time. A deduction gets at
+// most one row (unique deduction_id). Revenue payout/disbursement is out of
+// scope; this is an attribution ledger only.
+export const revenueLedger = pgTable(
+  "revenue_ledger",
+  {
+    id: serial("id").primaryKey(),
+    deductionId: integer("deduction_id")
+      .references(() => adviserFeeDeductions.id)
+      .notNull()
+      .unique(),
+    settledTransactionId: integer("settled_transaction_id").references(
+      () => transactions.id,
+    ),
+    adviserUserId: integer("adviser_user_id")
+      .references(() => users.id)
+      .notNull(),
+    clientUserId: integer("client_user_id")
+      .references(() => users.id)
+      .notNull(),
+    splitModel: text("split_model").notNull(),
+    grossAmount: decimal("gross_amount", { precision: 14, scale: 4 }).notNull(),
+    adviserAmount: decimal("adviser_amount", { precision: 14, scale: 4 }).notNull(),
+    licenseeAmount: decimal("licensee_amount", { precision: 14, scale: 4 }).notNull(),
+    currency: text("currency").notNull().default("AUD"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    splitModelCheck: check(
+      "revenue_ledger_split_model_check",
+      sql`${table.splitModel} in ('flat_annual', 'revenue_pct', 'hybrid')`,
+    ),
+    nonNegativeAmounts: check(
+      "revenue_ledger_non_negative_amounts",
+      sql`${table.grossAmount} >= 0 and ${table.adviserAmount} >= 0 and ${table.licenseeAmount} >= 0`,
+    ),
+    amountBalanceCheck: check(
+      "revenue_ledger_amount_balance_check",
+      sql`${table.adviserAmount} + ${table.licenseeAmount} = ${table.grossAmount}`,
+    ),
+    adviserCreatedIdx: index("revenue_ledger_adviser_created_idx").on(
+      table.adviserUserId,
+      table.createdAt,
+    ),
+  }),
+);
+
 export const insertAdviserFeeRuleSchema = createInsertSchema(adviserFeeRules).omit({
   id: true,
   status: true,
@@ -2342,6 +2441,25 @@ export const insertAdviserFeeDeductionSchema = createInsertSchema(adviserFeeDedu
 });
 export type AdviserFeeDeduction = typeof adviserFeeDeductions.$inferSelect;
 export type InsertAdviserFeeDeduction = z.infer<typeof insertAdviserFeeDeductionSchema>;
+
+export const insertAdviserRevenueSplitSchema = createInsertSchema(
+  adviserRevenueSplits,
+).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type AdviserRevenueSplit = typeof adviserRevenueSplits.$inferSelect;
+export type InsertAdviserRevenueSplit = z.infer<
+  typeof insertAdviserRevenueSplitSchema
+>;
+
+export const insertRevenueLedgerSchema = createInsertSchema(revenueLedger).omit({
+  id: true,
+  createdAt: true,
+});
+export type RevenueLedger = typeof revenueLedger.$inferSelect;
+export type InsertRevenueLedger = z.infer<typeof insertRevenueLedgerSchema>;
 
 // ---------------------------------------------------------------------------
 // Session 27 (Task #23) — Fee accrual run log

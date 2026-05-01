@@ -34,8 +34,10 @@ import {
   adviserFeeAccruals,
   adviserFeeDeductions,
   adviserFeeRules,
+  adviserRevenueSplits,
   feeAccrualRuns,
   feeConsents,
+  revenueLedger,
   transactions,
   type AdviserFeeAccrual,
   type AdviserFeeDeduction,
@@ -1198,6 +1200,7 @@ export async function settleApprovedDeduction(opts: {
         );
       }
       const platformShare = Number((total - adviserShare).toFixed(8));
+      const settledAt = new Date();
 
       // ---------------------------------------------------------------
       // Task #34 — Insufficient-funds gate.
@@ -1268,6 +1271,107 @@ export async function settleApprovedDeduction(opts: {
           } as any,
         })
         .returning();
+
+      // ---------------------------------------------------------------
+      // Session 29 — revenue attribution (backend-only foundation).
+      //
+      // Runs inside the same settlement transaction, after all gate checks pass.
+      // For now only split_model='revenue_pct' writes `revenue_ledger`.
+      // Missing config, out-of-window config, or placeholder models are
+      // intentionally non-blocking and emit a dedicated audit row.
+      // ---------------------------------------------------------------
+      const [split] = await tx
+        .select()
+        .from(adviserRevenueSplits)
+        .where(
+          and(
+            eq(adviserRevenueSplits.adviserUserId, deduction.adviserUserId),
+            eq(adviserRevenueSplits.isActive, true),
+            lte(adviserRevenueSplits.effectiveFrom, settledAt),
+            or(
+              isNull(adviserRevenueSplits.effectiveTo),
+              gt(adviserRevenueSplits.effectiveTo, settledAt),
+            ),
+          ),
+        )
+        .orderBy(
+          desc(adviserRevenueSplits.effectiveFrom),
+          desc(adviserRevenueSplits.id),
+        )
+        .limit(1);
+
+      if (!split) {
+        await writeAuditLog({
+          executor: tx,
+          userId: opts.approverUserId,
+          action: "revenue_attribution_skipped",
+          entityType: "adviser_fee_deduction",
+          entityId: String(deduction.id),
+          extra: {
+            reason: "missing_split_config",
+            deductionId: deduction.id,
+            adviserUserId: deduction.adviserUserId,
+            currency: deduction.currency,
+          },
+        });
+      } else if (split.splitModel === "revenue_pct") {
+        const revenueShareBps = Number(split.revenueShareBps ?? 0);
+        if (
+          !Number.isFinite(revenueShareBps) ||
+          revenueShareBps < 0 ||
+          revenueShareBps > 10000
+        ) {
+          await writeAuditLog({
+            executor: tx,
+            userId: opts.approverUserId,
+            action: "revenue_attribution_skipped",
+            entityType: "adviser_fee_deduction",
+            entityId: String(deduction.id),
+            extra: {
+              reason: "invalid_revenue_share_bps",
+              deductionId: deduction.id,
+              adviserUserId: deduction.adviserUserId,
+              splitId: split.id,
+              splitModel: split.splitModel,
+              revenueShareBps: split.revenueShareBps,
+            },
+          });
+        } else {
+          const grossAmount = Number(deduction.totalAccrued);
+          const adviserAmount = Number(
+            ((grossAmount * revenueShareBps) / 10000).toFixed(4),
+          );
+          const licenseeAmount = Number(
+            (grossAmount - adviserAmount).toFixed(4),
+          );
+          await tx.insert(revenueLedger).values({
+            deductionId: deduction.id,
+            settledTransactionId: txRow.id,
+            adviserUserId: deduction.adviserUserId,
+            clientUserId: deduction.clientUserId,
+            splitModel: split.splitModel,
+            grossAmount: toDecimalStr(grossAmount),
+            adviserAmount: toDecimalStr(adviserAmount),
+            licenseeAmount: toDecimalStr(licenseeAmount),
+            currency: deduction.currency,
+          });
+        }
+      } else {
+        await writeAuditLog({
+          executor: tx,
+          userId: opts.approverUserId,
+          action: "revenue_attribution_skipped",
+          entityType: "adviser_fee_deduction",
+          entityId: String(deduction.id),
+          extra: {
+            reason: "split_model_not_implemented",
+            deductionId: deduction.id,
+            adviserUserId: deduction.adviserUserId,
+            splitId: split.id,
+            splitModel: split.splitModel,
+          },
+        });
+      }
 
       // (5) Resolve accounts + post the balanced triple.
       // `clientAccount` was already resolved above as part of the
@@ -1350,8 +1454,8 @@ export async function settleApprovedDeduction(opts: {
         .set({
           status: "settled",
           approvedByUserId: opts.approverUserId,
-          approvedAt: new Date(),
-          settledAt: new Date(),
+          approvedAt: settledAt,
+          settledAt,
           settledTransactionId: txRow.id,
           idempotencyKey: idemKey,
           failureReason: null,
