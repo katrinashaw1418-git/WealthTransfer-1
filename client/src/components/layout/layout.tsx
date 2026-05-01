@@ -11,12 +11,15 @@ import { useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import WriteKillSwitchBanner from "@/components/write-kill-switch-banner";
+import { ComplianceShell } from "@/components/layout/ComplianceShell";
+import { useLocation } from "wouter";
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
 export default function Layout({ children }: LayoutProps) {
+  const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showAdvisorBox, setShowAdvisorBox] = useState(true);
   const [advisorModalOpen, setAdvisorModalOpen] = useState(false);
@@ -39,6 +42,20 @@ export default function Layout({ children }: LayoutProps) {
     }
   });
 
+  const showAiDisclaimer = location === "/ai-insights";
+  // Slice 4 — investor hub: same record-retention footer line on all six primary pages
+  // (plus /compliance if routed again).
+  const investorRetentionHub = new Set([
+    "/dashboard",
+    "/portfolio",
+    "/ai-insights",
+    "/goals",
+    "/reports",
+    "/account",
+    "/compliance",
+  ]);
+  const showRetentionStatement = investorRetentionHub.has(location);
+
   return (
     <div className="flex min-h-screen bg-neutral-50">
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
@@ -49,7 +66,12 @@ export default function Layout({ children }: LayoutProps) {
         <WriteKillSwitchBanner />
         <Header onMenuClick={() => setSidebarOpen(true)} />
         <main className="flex-1 overflow-y-auto">
-          {children}
+          <ComplianceShell
+            showAiDisclaimer={showAiDisclaimer}
+            showRetentionStatement={showRetentionStatement}
+          >
+            {children}
+          </ComplianceShell>
         </main>
       </div>
 
