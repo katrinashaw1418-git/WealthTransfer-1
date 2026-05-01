@@ -114,6 +114,18 @@ interface KillSwitchHistoryResponse {
   users: Record<string, { displayName: string }>;
 }
 
+/** User-visible switch title; API `key` and server payloads stay unchanged. */
+function killSwitchUiLabel(key: SwitchKey, serverLabel: string): string {
+  switch (key) {
+    case "deposits":
+      return "Inbound client-managed funds";
+    case "withdrawals":
+      return "Outbound client-managed funds";
+    default:
+      return serverLabel || key.replace(/_/g, " ");
+  }
+}
+
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—";
   try {
@@ -167,8 +179,8 @@ function ToggleDialog({
       queryClient.invalidateQueries({ queryKey: ["/api/kill-switches/status"] });
       toast({
         title: targetEnabled
-          ? `Kill switch engaged: ${row?.label}`
-          : `Kill switch cleared: ${row?.label}`,
+          ? `Kill switch engaged: ${row ? killSwitchUiLabel(row.key, row.label) : ""}`
+          : `Kill switch cleared: ${row ? killSwitchUiLabel(row.key, row.label) : ""}`,
       });
       onOpenChange(false);
     },
@@ -189,7 +201,7 @@ function ToggleDialog({
         <DialogHeader>
           <DialogTitle>
             {targetEnabled ? "Engage" : "Clear"} kill switch:{" "}
-            {row?.label ?? ""}
+            {row ? killSwitchUiLabel(row.key, row.label) : ""}
           </DialogTitle>
           <DialogDescription>
             {targetEnabled
@@ -204,7 +216,7 @@ function ToggleDialog({
             data-testid="input-kill-switch-reason"
             placeholder={
               targetEnabled
-                ? "e.g. Stripe outage — pausing deposits while we investigate"
+                ? "e.g. Stripe outage — pausing inbound client-managed funds while we investigate"
                 : "e.g. Stripe restored — clearing pause"
             }
             value={reason}
@@ -280,7 +292,12 @@ function HistorySheet({
       >
         <SheetHeader>
           <SheetTitle>
-            History: {data?.label ?? switchKey ?? ""}
+            History:{" "}
+            {data
+              ? killSwitchUiLabel(data.key, data.label)
+              : switchKey
+                ? killSwitchUiLabel(switchKey, "")
+                : ""}
           </SheetTitle>
           <SheetDescription>
             Recent kill-switch toggles for this switch, derived from the
@@ -410,7 +427,9 @@ function BlockedAttemptsWidget({
                 data-testid={`blocked-stats-${row.key}`}
               >
                 <div className="flex items-center justify-between">
-                  <div className="font-medium text-sm">{row.label}</div>
+                  <div className="font-medium text-sm">
+                    {killSwitchUiLabel(row.key, row.label)}
+                  </div>
                   {row.enabled ? (
                     <Badge
                       variant="outline"
@@ -488,13 +507,10 @@ export default function AdminKillSwitches() {
 
   return (
     <TooltipProvider>
-      <div className="space-y-6 p-4 sm:p-6">
-        <div>
-          <h1 className="text-2xl font-semibold flex items-center gap-2">
-            <Power className="h-5 w-5" />
-            Kill switches
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
+      <div className="max-w-7xl space-y-6">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold text-slate-900">Kill switches</h1>
+          <p className="text-sm text-slate-500">
             Engage to immediately stop a class of money-movement operations.
             Affected APIs return HTTP 503 and client UIs show a temporary
             unavailability banner. Toggling requires a reason and is
@@ -529,7 +545,7 @@ export default function AdminKillSwitches() {
             <CardTitle>Switches</CardTitle>
             <CardDescription>
               The <code>transactions</code> switch is a master that also
-              blocks deposits, withdrawals, and fee deductions because they
+              blocks inbound client-managed funds, outbound client-managed funds, and fee deductions because they
               all post a transaction row.
             </CardDescription>
           </CardHeader>
@@ -559,7 +575,9 @@ export default function AdminKillSwitches() {
                       data-testid={`row-switch-${row.key}`}
                     >
                       <TableCell>
-                        <div className="font-medium">{row.label}</div>
+                        <div className="font-medium">
+                          {killSwitchUiLabel(row.key, row.label)}
+                        </div>
                         <div className="text-xs text-muted-foreground font-mono">
                           {row.key} · env {row.envVar}
                         </div>

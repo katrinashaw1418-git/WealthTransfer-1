@@ -50,7 +50,7 @@ import {
   Undo2,
   // Task #93 — reporting tab icons
   Scale,
-  Wallet,
+  Landmark,
   TrendingUp,
   Bug,
   ExternalLink,
@@ -693,7 +693,7 @@ function AdminConsentContextCell({ r }: { r: FeeRuleRow }) {
           className="w-fit"
         >
           {r.consentWithdrawnAt
-            ? "Withdrawn"
+            ? "Revoked"
             : r.consentRenewalStatus === "expired"
               ? "Expired"
               : "Signed"}
@@ -706,7 +706,7 @@ function AdminConsentContextCell({ r }: { r: FeeRuleRow }) {
       )}
       {r.consentWithdrawnAt && (
         <span className="text-destructive">
-          withdrawn {r.consentWithdrawnAt.slice(0, 10)}
+          revoked {r.consentWithdrawnAt.slice(0, 10)}
         </span>
       )}
     </div>
@@ -1239,7 +1239,7 @@ export default function AdminFeesPage() {
   // silently swallow a refusal — they just show the generic toast.
   const APPROVE_REFUSAL_TITLES: Record<string, string> = {
     consent_missing: "Approval blocked — consent missing",
-    consent_withdrawn: "Approval blocked — consent withdrawn",
+    consent_withdrawn: "Approval blocked — consent revoked",
     consent_expired: "Approval blocked — consent expired",
     consent_renewal_inactive: "Approval blocked — consent renewal inactive",
     backing_rule_missing: "Approval blocked — backing rule missing",
@@ -1777,7 +1777,7 @@ export default function AdminFeesPage() {
         "",
       ],
       [
-        "Wallet vs ledger drift",
+        "External holdings vs ledger drift",
         d.walletLedgerDrift.count,
         `match epsilon ${d.walletLedgerDrift.matchEpsilon}`,
         "",
@@ -1936,10 +1936,12 @@ export default function AdminFeesPage() {
   }
 
   return (
-    <div className="space-y-6 p-6" data-testid="page-admin-fees">
-      <div className="flex items-center gap-2">
-        <HandCoins className="h-6 w-6 text-primary" />
-        <h1 className="text-2xl font-semibold">Adviser fee engine</h1>
+    <div className="max-w-7xl space-y-6" data-testid="page-admin-fees">
+      <div className="space-y-1">
+        <h1 className="text-2xl font-semibold text-slate-900">Adviser fee engine</h1>
+        <p className="text-sm text-slate-500">
+          Rule lifecycle, accrual and deduction controls, and fee reporting in one admin surface.
+        </p>
       </div>
 
       {/* Task #294 — canonical Gate-A copy. Same wording shipped on
@@ -1947,10 +1949,10 @@ export default function AdminFeesPage() {
           between the three viewers. */}
       <Alert variant="default" data-testid="alert-gate-a">
         <ShieldAlert className="h-4 w-4" />
-        <AlertTitle>Deduction execution is currently disabled</AlertTitle>
+        <AlertTitle>Deduction instruction processing is currently disabled</AlertTitle>
         <AlertDescription>
           Rules, accruals and deductions are visible and auditable. When
-          deduction execution is enabled, deductions in <strong>Settled</strong>{" "}
+          deduction instruction processing is enabled, deductions in <strong>Settled</strong>{" "}
           status will represent completed fund movements. Until then,
           approving a deduction here flips its status and writes an audit
           row only — <strong>no money moves</strong>.
@@ -1958,24 +1960,26 @@ export default function AdminFeesPage() {
       </Alert>
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="flex-wrap h-auto">
-          <TabsTrigger value="rules" data-testid="tab-rules">Rules</TabsTrigger>
-          <TabsTrigger value="accruals" data-testid="tab-accruals">Accruals</TabsTrigger>
-          <TabsTrigger value="deductions" data-testid="tab-deductions">Deductions</TabsTrigger>
-          {/* Task #93 — read-only reporting tabs */}
-          <TabsTrigger value="reconciliation" data-testid="tab-reconciliation">
-            <Scale className="h-3.5 w-3.5 mr-1" /> Reconciliation
-          </TabsTrigger>
-          <TabsTrigger value="adviser-payouts" data-testid="tab-adviser-payouts">
-            <Wallet className="h-3.5 w-3.5 mr-1" /> Adviser payouts
-          </TabsTrigger>
-          <TabsTrigger value="platform-revenue" data-testid="tab-platform-revenue">
-            <TrendingUp className="h-3.5 w-3.5 mr-1" /> Platform revenue
-          </TabsTrigger>
-          <TabsTrigger value="exceptions" data-testid="tab-exceptions">
-            <Bug className="h-3.5 w-3.5 mr-1" /> Exceptions
-          </TabsTrigger>
-        </TabsList>
+        <div className="flex flex-wrap items-end justify-start gap-3">
+          <TabsList className="flex-wrap h-auto">
+            <TabsTrigger value="rules" data-testid="tab-rules">Rules</TabsTrigger>
+            <TabsTrigger value="accruals" data-testid="tab-accruals">Accruals</TabsTrigger>
+            <TabsTrigger value="deductions" data-testid="tab-deductions">Deductions</TabsTrigger>
+            {/* Task #93 — read-only reporting tabs */}
+            <TabsTrigger value="reconciliation" data-testid="tab-reconciliation">
+              <Scale className="h-3.5 w-3.5 mr-1" /> Reconciliation
+            </TabsTrigger>
+            <TabsTrigger value="adviser-payouts" data-testid="tab-adviser-payouts">
+              <Landmark className="h-3.5 w-3.5 mr-1" /> Adviser payouts
+            </TabsTrigger>
+            <TabsTrigger value="platform-revenue" data-testid="tab-platform-revenue">
+              <TrendingUp className="h-3.5 w-3.5 mr-1" /> Platform revenue
+            </TabsTrigger>
+            <TabsTrigger value="exceptions" data-testid="tab-exceptions">
+              <Bug className="h-3.5 w-3.5 mr-1" /> Exceptions
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
         {/* ---- RULES TAB ---- */}
         <TabsContent value="rules" className="space-y-4">
@@ -1983,7 +1987,7 @@ export default function AdminFeesPage() {
             <CardHeader>
               <CardTitle className="text-base">Create a new fee rule</CardTitle>
               <CardDescription>
-                The fee consent must already be signed and not withdrawn. Splits must sum to 10000 bps (100%).
+                The fee consent must already be signed and not revoked. Splits must sum to 10000 bps (100%).
               </CardDescription>
             </CardHeader>
             <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -2161,7 +2165,7 @@ export default function AdminFeesPage() {
               <CardDescription>
                 Active and draft rules accrue daily. Each rule is anchored on
                 a signed fee consent — when the consent expires or is
-                withdrawn, the daily reconcile job pauses or expires the
+                revoked, the daily reconcile job pauses or expires the
                 rule automatically.
               </CardDescription>
             </CardHeader>
@@ -3042,7 +3046,7 @@ export default function AdminFeesPage() {
                         >
                           <CardHeader className="pb-2">
                             <CardTitle className="text-sm font-medium text-muted-foreground flex items-center justify-between">
-                              <span>Wallet vs ledger drift</span>
+                              <span>External holdings vs ledger drift</span>
                               {hasDrift && (
                                 <ExternalLink
                                   className="h-3.5 w-3.5 text-muted-foreground"
@@ -3102,7 +3106,7 @@ export default function AdminFeesPage() {
                           Net payable = settled adviser share − reversed
                           adviser share, in the period. This screen does not
                           transfer any money — it shows what each adviser has
-                          already had credited to their wallet via the
+                          already had credited per settled accruals recorded in the
                           Deductions tab.
                         </CardDescription>
                       </div>

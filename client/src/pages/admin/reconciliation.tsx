@@ -1,9 +1,9 @@
 // =============================================================================
-// SESSION 25 (Task #17) — ADMIN WALLET ↔ LEDGER RECONCILIATION VIEWER
+// SESSION 25 (Task #17) — ADMIN EXTERNAL-HOLDINGS ↔ LEDGER RECONCILIATION VIEWER
 // -----------------------------------------------------------------------------
-// LEDGER IS THE SOURCE OF TRUTH — wallet cache is derived only.
+// LEDGER IS THE SOURCE OF TRUTH — holdings display cache is derived only.
 //
-// This page surfaces the latest wallet-vs-ledger drift check per
+// This page surfaces the latest holdings-vs-ledger drift check per
 // (user, currency). It is read-only with respect to the ledger; the only
 // admin write actions are recording an Acknowledge / Resolve note against a
 // drifted pair (which suppresses operator pages while the case is being
@@ -428,7 +428,7 @@ function AckDialog({
                 : "Use Acknowledge when you are aware of the drift and are investigating. Operator pages stay suppressed for the configured TTL window or until the drift moves materially."}
             </p>
             <p className="italic">
-              The ledger and wallet cache are not modified by this action.
+              The ledger and external-holdings display cache are not modified by this action.
             </p>
           </div>
           <div>
@@ -656,11 +656,11 @@ export default function AdminReconciliation() {
   }
 
   return (
-    <div className="space-y-4 max-w-7xl">
-      <div>
+    <div className="max-w-7xl space-y-6">
+      <div className="space-y-1">
         <h1 className="text-2xl font-semibold text-slate-900">Reconciliation</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Wallet display cache vs. ledger sum, per (user, currency). The ledger
+        <p className="text-sm text-slate-500">
+          External-holdings display cache vs. ledger sum, per (user, currency). The ledger
           is the source of truth — any drift here is either a bug or a
           historical transaction that pre-dates ledger enforcement.
           {data?.ttlDays
@@ -748,7 +748,7 @@ export default function AdminReconciliation() {
       </Card>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-wrap items-end justify-between gap-3">
           <CardTitle className="text-base">
             {isLoading ? "Loading…" : `${data?.total ?? 0} (user, currency) pair(s)`}
             {isFetching && !isLoading ? " · refreshing…" : ""}
@@ -794,7 +794,7 @@ export default function AdminReconciliation() {
                   <TableHead>User</TableHead>
                   <TableHead>Currency</TableHead>
                   <TableHead className="text-right">Ledger balance</TableHead>
-                  <TableHead className="text-right">Wallet cache</TableHead>
+                  <TableHead className="text-right">Holdings cache</TableHead>
                   <TableHead className="text-right">Drift</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Last checked</TableHead>
@@ -963,7 +963,7 @@ export default function AdminReconciliation() {
 
       <p className="text-xs text-slate-500">
         Reconciliation runs daily. The check is observation-only — it never
-        mutates the ledger or the wallet cache. To resolve a mismatch, post a
+        mutates the ledger or the holdings display cache. To resolve a mismatch, post a
         ledger correction; the next reconciliation pass will clear the row.
         Acknowledging or resolving a drift case suppresses operator pages
         without touching balances.

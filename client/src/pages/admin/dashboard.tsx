@@ -169,10 +169,10 @@ export default function AdminDashboard() {
   });
 
   return (
-    <div className="space-y-6 max-w-7xl">
-      <div>
+    <div className="max-w-7xl space-y-6">
+      <div className="space-y-1">
         <h1 className="text-2xl font-semibold text-slate-900">Admin overview</h1>
-        <p className="text-sm text-slate-500 mt-1">
+        <p className="text-sm text-slate-500">
           AFSL operations dashboard. Every state change you trigger here is recorded in the audit log.
         </p>
       </div>
@@ -363,7 +363,7 @@ export default function AdminDashboard() {
                     <span className="font-medium">Failed transactions</span> —
                     rows in <code>transactions</code> with status{" "}
                     <code>failed</code> created in the last 24h. Investigate
-                    via the wallet activity / ledger pages.
+                    via the external-holdings activity / ledger pages.
                   </li>
                   <li>
                     <span className="font-medium">Audit-log write failures</span>{" "}
@@ -392,7 +392,7 @@ export default function AdminDashboard() {
                     /health returns 503 when:
                   </span>{" "}
                   the database <code>SELECT 1</code> probe fails OR any of
-                  the daily background jobs (fee accruals, wallet/ledger
+                  the daily background jobs (fee accruals, external-holdings/ledger
                   reconciliation, operator alert prune) has not recorded a
                   successful run within the last 36 hours. The 503 body
                   always includes the per-check status so the failing signal

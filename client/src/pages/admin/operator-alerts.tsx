@@ -188,9 +188,9 @@ interface AlertTypeDef {
 const ALERT_TYPES: AlertTypeDef[] = [
   {
     source: "wallet-ledger-reconciliation",
-    label: "Wallet ↔ ledger drift",
+    label: "External holdings ↔ ledger drift",
     description:
-      "Daily reconciliation found a wallet cache balance that disagrees with SUM(ledger_entries) for the same (user, currency). Acknowledged on the dedicated Reconciliation page.",
+      "Daily reconciliation found an external-holdings display cache that disagrees with SUM(ledger_entries) for the same (user, currency). Acknowledged on the dedicated Reconciliation page.",
     ackable: false,
   },
   {
@@ -814,10 +814,10 @@ export default function AdminOperatorAlerts() {
   const canDisengageFailover = failoverActive && !failoverMutation.isPending;
 
   return (
-    <div className="space-y-4 max-w-7xl">
-      <div>
+    <div className="max-w-7xl space-y-6">
+      <div className="space-y-1">
         <h1 className="text-2xl font-semibold text-slate-900">Operator alerts</h1>
-        <p className="text-sm text-slate-500 mt-1">
+        <p className="text-sm text-slate-500">
           History of alerts dispatched by background jobs and reconciliation tasks. Read-only.
         </p>
       </div>
@@ -1046,7 +1046,7 @@ export default function AdminOperatorAlerts() {
         <CardContent>
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <Input
-              placeholder="Source (exact, e.g. wallet-ledger-reconciliation)"
+              placeholder="Source (exact match — use server source field)"
               value={sourceInput}
               onChange={(e) => setSourceInput(e.target.value)}
               data-testid="input-filter-source"
@@ -1414,7 +1414,7 @@ export default function AdminOperatorAlerts() {
       </Card>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-wrap items-end justify-between gap-3">
           <CardTitle className="text-base">
             {isLoading ? "Loading…" : `${data?.total ?? 0} alerts`}
           </CardTitle>

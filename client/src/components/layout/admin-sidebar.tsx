@@ -97,6 +97,7 @@ export default function AdminSidebar({ open, onClose }: AdminSidebarProps) {
             return (
               <Link key={item.to} href={item.to}>
                 <a
+                  aria-current={isActive ? "page" : undefined}
                   onClick={onClose}
                   className={cn(
                     "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",

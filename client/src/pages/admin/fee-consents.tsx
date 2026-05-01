@@ -45,7 +45,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  HandCoins,
   ShieldAlert,
   AlertTriangle,
   Eye,
@@ -139,7 +138,7 @@ const REQUEST_STATUSES = [
   { value: "pending", label: "Pending (sent)" },
   { value: "consented", label: "Consented" },
   { value: "declined", label: "Declined" },
-  { value: "withdrawn_by_adviser", label: "Withdrawn / revoked" },
+  { value: "withdrawn_by_adviser", label: "Revoked / rescinded" },
 ];
 
 const RENEWAL_STATUSES = [
@@ -147,7 +146,7 @@ const RENEWAL_STATUSES = [
   { value: "active", label: "Active" },
   { value: "renewal_due", label: "Renewal due" },
   { value: "expired", label: "Expired" },
-  { value: "withdrawn", label: "Withdrawn" },
+  { value: "withdrawn", label: "Revoked" },
   { value: "superseded", label: "Superseded" },
 ];
 
@@ -162,12 +161,12 @@ function statusBadge(status: string) {
     pending: { variant: "secondary", label: "Sent — pending client signature" },
     consented: { variant: "default", label: "Consented" },
     declined: { variant: "destructive", label: "Declined" },
-    withdrawn_by_adviser: { variant: "outline", label: "Withdrawn" },
+    withdrawn_by_adviser: { variant: "outline", label: "Revoked" },
     superseded: { variant: "outline", label: "Superseded" },
     active: { variant: "default", label: "Active" },
     renewal_due: { variant: "secondary", label: "Renewal due" },
     expired: { variant: "destructive", label: "Expired" },
-    withdrawn: { variant: "outline", label: "Withdrawn" },
+    withdrawn: { variant: "outline", label: "Revoked" },
   };
   const e = map[status] ?? { variant: "outline" as const, label: status };
   return <Badge variant={e.variant}>{e.label}</Badge>;
@@ -1308,7 +1307,14 @@ function LiveTab() {
 
 export default function AdminFeeConsents() {
   return (
-    <div className="p-6 space-y-6" data-testid="page-admin-fee-consents">
+    <div className="max-w-7xl space-y-6" data-testid="page-admin-fee-consents">
+      <div className="space-y-1">
+        <h1 className="text-2xl font-semibold text-slate-900">Fee consents</h1>
+        <p className="text-sm text-slate-500">
+          Oversee adviser-issued fee consent requests and recorded consent outcomes.
+        </p>
+      </div>
+
       <div
         className="flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700"
         data-testid="fee-consent-hardening-notice"
@@ -1321,26 +1327,17 @@ export default function AdminFeeConsents() {
         </p>
       </div>
 
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-          <HandCoins className="h-6 w-6 text-emerald-600" />
-          Fee consents
-        </h1>
-        <p className="text-sm text-gray-500 mt-1 max-w-2xl">
-          Oversee adviser-issued fee consent requests and the executed consents that
-          result.
-        </p>
-      </div>
-
       <Tabs defaultValue="requests" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="requests" data-testid="tab-admin-fee-consent-requests">
-            Requests
-          </TabsTrigger>
-          <TabsTrigger value="live" data-testid="tab-admin-fee-consents-live">
-            Live consents
-          </TabsTrigger>
-        </TabsList>
+        <div className="flex flex-wrap items-end justify-start gap-3">
+          <TabsList>
+            <TabsTrigger value="requests" data-testid="tab-admin-fee-consent-requests">
+              Requests
+            </TabsTrigger>
+            <TabsTrigger value="live" data-testid="tab-admin-fee-consents-live">
+              Live consents
+            </TabsTrigger>
+          </TabsList>
+        </div>
         <TabsContent value="requests">
           <RequestsTab />
         </TabsContent>

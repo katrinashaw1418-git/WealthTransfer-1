@@ -173,15 +173,14 @@ export default function AdminInstructions() {
   });
 
   return (
-    <div className="space-y-4 max-w-7xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Investment Instructions</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Read-only review of all adviser-raised instructions. Admins can attach review notes;
-            execution gating remains in the adviser/compliance layer.
-          </p>
-        </div>
+    <div className="max-w-7xl space-y-6">
+      <div className="space-y-1">
+        <h1 className="text-2xl font-semibold text-slate-900">Investment instructions</h1>
+        <p className="text-sm text-slate-500">
+          Read-only review of adviser-raised instructions with admin review notes.
+        </p>
+      </div>
+      <div className="flex flex-wrap items-end justify-end gap-3">
         <Select value={statusFilter} onValueChange={changeStatus}>
           <SelectTrigger className="w-56" data-testid="select-instruction-status-filter">
             <SelectValue placeholder="Filter by status" />
