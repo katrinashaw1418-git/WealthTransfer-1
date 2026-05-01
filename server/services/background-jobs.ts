@@ -178,6 +178,15 @@ export const KNOWN_BACKGROUND_JOBS: readonly KnownJob[] = [
       "Hourly sweep that emails the adviser a one-shot reminder for any 'ready' report still undownloaded and within 24h of expiresAt. Stamps report_requests.expiringSoonNotifiedAt for idempotency.",
   },
   {
+    // Task #299 — hourly job that flips ready rows past expiresAt to
+    // 'expired', deletes the on-disk PDF, and writes an adviser_report_expired
+    // audit row. Disable with REPORT_AUTO_EXPIRE_DISABLED=1.
+    name: "report-auto-expire",
+    label: "Report auto-expire",
+    description:
+      "Hourly sweep that expires undownloaded 'ready' reports past expiresAt, removes PDF files, and writes audit rows. Disable with REPORT_AUTO_EXPIRE_DISABLED=1.",
+  },
+  {
     // Task #347 — daily sweep that deactivates fixture-pattern
     // adviser_clients rows pointing at real (non-fixture) advisers, so the
     // read-time fixture filter in `server/services/adviser-access.ts` can
