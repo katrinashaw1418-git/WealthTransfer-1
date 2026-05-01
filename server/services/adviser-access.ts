@@ -51,6 +51,10 @@ import {
   ExecutionGateBlockedError,
   type ExecutionGateResult,
 } from "./execution-gate";
+import {
+  isClientFacingVisibleProduct,
+  isInternalDraftProductName,
+} from "./product-visibility";
 import { writeAuditLog } from "./audit";
 import {
   calculatePortfolioTotalsAtDate,
@@ -877,7 +881,12 @@ export async function listAdviserProducts(): Promise<InvestmentProduct[]> {
   const rows = await db
     .select()
     .from(investmentProducts)
-    .where(eq(investmentProducts.isActive, true))
+    .where(
+      and(
+        eq(investmentProducts.isActive, true),
+        eq(investmentProducts.isPublished, true),
+      ),
+    )
     .orderBy(desc(investmentProducts.createdAt));
 
   // Drop any product whose `category` is not in the canonical human-readable
@@ -886,7 +895,7 @@ export async function listAdviserProducts(): Promise<InvestmentProduct[]> {
   // adviser dropdowns and cannot be referenced from a new instruction.
   const filtered: InvestmentProduct[] = [];
   for (const row of rows) {
-    if (isKnownProductCategory(row.category)) {
+    if (isKnownProductCategory(row.category) && isClientFacingVisibleProduct(row)) {
       filtered.push(row);
     } else {
       console.warn(
@@ -942,7 +951,13 @@ export async function getAdviserClientHoldings(
     })
     .from(userInvestments)
     .innerJoin(investmentProducts, eq(investmentProducts.id, userInvestments.productId))
-    .where(eq(userInvestments.userId, clientUserId))
+    .where(
+      and(
+        eq(userInvestments.userId, clientUserId),
+        eq(investmentProducts.isActive, true),
+        eq(investmentProducts.isPublished, true),
+      ),
+    )
     .orderBy(desc(userInvestments.investmentDate));
 
   // Drop holdings whose product is no longer on the canonical AMAX shelf
@@ -954,7 +969,7 @@ export async function getAdviserClientHoldings(
   // investigable without log spam.
   const filtered: AdviserClientHoldingRow[] = [];
   for (const row of rows) {
-    if (isKnownProductCategory(row.productCategory)) {
+    if (isKnownProductCategory(row.productCategory) && !isInternalDraftProductName(row.productName)) {
       filtered.push(row);
     } else {
       console.warn(

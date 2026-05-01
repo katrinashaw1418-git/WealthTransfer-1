@@ -86,6 +86,7 @@ import { loadLatestSoaTargetAllocation } from "./services/soa-target";
 import { registerPortfolioRealMetricsRoute } from "./portfolio-real-metrics-route";
 import { registerPortfolioAllocationRoute } from "./portfolio-allocation-route";
 import { listAggregatedUserInvestments } from "./services/user-investments";
+import { isClientFacingVisibleProduct } from "./services/product-visibility";
 
 // ---------------------------------------------------------------------------
 // Zod validation schemas for all money-movement routes.
@@ -4347,7 +4348,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // products (Smoke Test Fund, DraftProduct, InRange825, etc.) so
       // clients only see real funds. Admin routes hit storage directly and
       // skip this filter so internal tooling continues to see everything.
-      const visible = products.filter((p: any) => p.isActive !== false && p.isPublished !== false);
+      const visible = products.filter((p: any) => isClientFacingVisibleProduct(p));
       res.json(visible);
     } catch (error: any) {
       if (error.status) return res.status(error.status).json({ error: error.message });
@@ -4366,7 +4367,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Task #336 — direct lookups by id (e.g. deep links into a product
       // page) must also respect the published flag so a leaked id can't
       // expose a draft fund to an investor.
-      if ((product as any).isActive === false || (product as any).isPublished === false) {
+      if (!isClientFacingVisibleProduct(product as any)) {
         return res.status(404).json({ error: "Investment product not found" });
       }
       res.json(product);

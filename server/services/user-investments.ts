@@ -1,6 +1,7 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, notInArray, sql } from "drizzle-orm";
 import { db } from "../db";
-import { userInvestments } from "@shared/schema";
+import { investmentProducts, userInvestments } from "@shared/schema";
+import { INTERNAL_DRAFT_PRODUCT_NAMES } from "./product-visibility";
 
 type SelectHandle = Pick<typeof db, "select">;
 
@@ -51,7 +52,18 @@ export async function listAggregatedUserInvestments(
       lotCount: sql<number>`count(*)::int`,
     })
     .from(userInvestments)
-    .where(eq(userInvestments.userId, userId))
+    .innerJoin(
+      investmentProducts,
+      eq(investmentProducts.id, userInvestments.productId),
+    )
+    .where(
+      and(
+        eq(userInvestments.userId, userId),
+        eq(investmentProducts.isActive, true),
+        eq(investmentProducts.isPublished, true),
+        notInArray(investmentProducts.name, [...INTERNAL_DRAFT_PRODUCT_NAMES]),
+      ),
+    )
     .groupBy(userInvestments.userId, userInvestments.productId)
     .orderBy(desc(sql`min(${userInvestments.investmentDate})`));
 }

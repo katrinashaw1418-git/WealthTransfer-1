@@ -18,6 +18,7 @@
 // =============================================================================
 
 import { storage } from "../storage";
+import { isClientFacingVisibleProduct } from "./product-visibility";
 
 // ---- Investment performance ------------------------------------------------
 
@@ -173,7 +174,9 @@ export async function calculateInvestmentTotalsAtDate(
   asOfDate: Date = new Date(),
 ): Promise<InvestmentTotals> {
   const investments = await storage.getUserInvestments(userId);
-  const products = await storage.getInvestmentProducts();
+  const products = (await storage.getInvestmentProducts()).filter((p: any) =>
+    isClientFacingVisibleProduct(p),
+  );
 
   let totalInvested = 0;
   let totalCurrentValue = 0;
