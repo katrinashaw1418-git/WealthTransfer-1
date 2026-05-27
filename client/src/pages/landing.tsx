@@ -21,7 +21,6 @@ import {
   BarChart3,
   Send,
   Mail,
-  MapPin,
   Phone,
   Building2,
   Briefcase,
@@ -351,7 +350,7 @@ export default function Landing() {
           <Badge className="mb-4" style={{ background: "#e8f0fe", color: NAVY, border: "none" }}>About AMAX</Badge>
           <h2 className="text-3xl font-bold mb-6" style={{ color: NAVY }}>Australia-Based. Compliance-First.</h2>
           <p className="leading-relaxed text-lg text-slate-600 mb-4">
-            AMAX is an Australian-based FX and remittance service provider, building regulated infrastructure for foreign exchange, multi-currency accounts, cryptocurrency trading, and cross-border remittance. Alongside our digital platform, AMAX will operate from our Kings Court headquarters in Rockdale, Sydney — giving Australians the option to access FX and remittance services in person.
+            AMAX is an Australian-based FX and remittance service provider, building regulated infrastructure for foreign exchange, multi-currency accounts, cryptocurrency trading, and cross-border remittance.
           </p>
           <p className="leading-relaxed text-slate-500 mb-4">
             Our founding team brings experience across financial services, compliance, and technology — with a singular focus on building a platform that regulators, banks, and customers can trust.
@@ -377,7 +376,6 @@ export default function Landing() {
               {[
                 { Icon: Phone,  title: "Phone",  href: "tel:+61283201908",              label: "+61 2 8320 1908" },
                 { Icon: Mail,   title: "Email",  href: "mailto:info@amaxglobal.com.au", label: "info@amaxglobal.com.au" },
-                { Icon: MapPin, title: "Office", href: null,                            label: "Level 2, Kings Court, 8-12 King Street, Rockdale, Sydney NSW 2216" },
               ].map(({ Icon, title, href, label }) => (
                 <div key={title} className="flex items-start gap-4">
                   <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-blue-100">

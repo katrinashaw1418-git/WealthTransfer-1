@@ -1018,14 +1018,14 @@ export default function Compliance() {
                       <Label htmlFor="pii-addr" className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
                         Street Address <span className="text-red-500">*</span>
                       </Label>
-                      <Input id="pii-addr" placeholder="e.g. 12 King Street" value={piiAddress} onChange={e => setPiiAddress(e.target.value)} className="h-10 text-sm" />
+                      <Input id="pii-addr" placeholder="" value={piiAddress} onChange={e => setPiiAddress(e.target.value)} className="h-10 text-sm" />
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5 col-span-2 sm:col-span-1">
                         <Label htmlFor="pii-suburb" className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
                           Suburb / City <span className="text-red-500">*</span>
                         </Label>
-                        <Input id="pii-suburb" placeholder="e.g. Rockdale" value={piiSuburb} onChange={e => setPiiSuburb(e.target.value)} className="h-10 text-sm" />
+                        <Input id="pii-suburb" placeholder="" value={piiSuburb} onChange={e => setPiiSuburb(e.target.value)} className="h-10 text-sm" />
                       </div>
                       <div className="space-y-1.5">
                         <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
@@ -1045,7 +1045,7 @@ export default function Compliance() {
                         <Label htmlFor="pii-postcode" className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
                           Postcode <span className="text-red-500">*</span>
                         </Label>
-                        <Input id="pii-postcode" placeholder="2216" maxLength={8} value={piiPostcode} onChange={e => setPiiPostcode(e.target.value)} className="h-10 text-sm" />
+                        <Input id="pii-postcode" placeholder="" maxLength={8} value={piiPostcode} onChange={e => setPiiPostcode(e.target.value)} className="h-10 text-sm" />
                       </div>
                       <div className="space-y-1.5">
                         <Label htmlFor="pii-addrcountry" className="text-xs font-semibold text-gray-600 uppercase tracking-wide">

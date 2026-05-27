@@ -58,7 +58,7 @@ export default function Signout() {
         {/* Footer */}
         <div className="space-y-1">
           <p className="text-slate-500 text-xs">
-            AMAX GLOBAL Pty Ltd · Level 2, 8–12 King Street, Rockdale NSW 2216 · +61 2 8320 1908
+            AMAX GLOBAL Pty Ltd · +61 2 8320 1908
           </p>
           <p className="text-slate-600 text-xs">
             <a href="mailto:info@amaxglobal.com.au" className="hover:text-slate-400 transition-colors">

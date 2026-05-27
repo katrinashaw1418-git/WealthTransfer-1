@@ -72,8 +72,7 @@ export async function sendVerificationEmail(
         </td></tr>
         <tr><td style="padding:20px 40px;border-top:1px solid #334155;text-align:center">
           <p style="color:#475569;font-size:11px;margin:0">
-            AMAX GLOBAL Pty Ltd &nbsp;·&nbsp; ABN 54 690 827 608 &nbsp;·&nbsp; AUSTRAC Registered<br>
-            Level 2, 8-12 King Street, Rockdale NSW 2216 &nbsp;·&nbsp; +61 2 8320 1908
+            AMAX GLOBAL Pty Ltd &nbsp;·&nbsp; ABN 54 690 827 608 &nbsp;·&nbsp; AUSTRAC Registered &nbsp;·&nbsp; +61 2 8320 1908
           </p>
         </td></tr>
       </table>
