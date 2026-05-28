@@ -111,30 +111,30 @@ export default function Landing() {
     <div className="min-h-screen" style={{ background: "#ffffff" }}>
 
       {/* ── Sticky Nav ── */}
-      <div className="sticky top-0 z-50" style={{ background: NAVY }}>
-        <div className="text-white/60 text-sm text-center py-2 px-6">
+      <div className="sticky top-0 z-50">
+        <div className="text-white/60 text-sm text-center py-2 px-6" style={{ background: NAVY }}>
           Platform in development — services launching following completion of AUSTRAC registration and operational readiness.
         </div>
-        <header>
-          <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+        <header style={{ background: "#ffffff" }}>
+          <div className="max-w-6xl mx-auto px-6 py-1 flex items-center justify-between">
             <div className="flex-1 flex items-center gap-2">
-              <img src="/amax-global-fx-logo.png" alt="AMAX Global FX" className="h-16 w-auto" />
+              <img src="/amax-global-fx-yacht-logo.png" alt="AMAX Global FX" className="h-16 w-auto" />
             </div>
             <nav className="hidden md:flex items-center gap-5 text-sm flex-1 justify-center">
-              <a href="#services"     className="text-white/80 hover:text-white transition-colors whitespace-nowrap">Services</a>
-              <a href="#how-it-works" className="text-white/80 hover:text-white transition-colors whitespace-nowrap">How It Works</a>
-              <a href="#compliance"   className="text-white/80 hover:text-white transition-colors whitespace-nowrap">Compliance</a>
-              <a href="#about"        className="text-white/80 hover:text-white transition-colors whitespace-nowrap">About</a>
-              <a href="#contact"      className="text-white/80 hover:text-white transition-colors whitespace-nowrap">Contact</a>
+              <a href="#services"     className="text-slate-700 hover:text-[#002366] transition-colors whitespace-nowrap">Services</a>
+              <a href="#how-it-works" className="text-slate-700 hover:text-[#002366] transition-colors whitespace-nowrap">How It Works</a>
+              <a href="#compliance"   className="text-slate-700 hover:text-[#002366] transition-colors whitespace-nowrap">Compliance</a>
+              <a href="#about"        className="text-slate-700 hover:text-[#002366] transition-colors whitespace-nowrap">About</a>
+              <a href="#contact"      className="text-slate-700 hover:text-[#002366] transition-colors whitespace-nowrap">Contact</a>
             </nav>
             <div className="flex-1 flex items-center justify-end gap-2">
               <Link href="/login">
-                <Button variant="outline" className="text-sm px-4 text-white hover:text-white hover:bg-white/10 border-white/30" style={{ background: "transparent" }}>
+                <Button variant="outline" className="text-sm px-4 text-[#002366] hover:text-[#002366] hover:bg-[#002366]/10 border-[#002366]/30" style={{ background: "transparent" }}>
                   Sign In
                 </Button>
               </Link>
               <Link href="/register">
-                <Button className={`${WHITE_BTN} text-sm px-4`}>
+                <Button className={`${NAVY_BTN} text-sm px-4`}>
                   Sign Up <ChevronRight className="w-4 h-4 ml-1" />
                 </Button>
               </Link>
