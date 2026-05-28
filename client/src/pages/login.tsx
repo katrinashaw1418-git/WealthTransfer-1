@@ -195,8 +195,7 @@ export default function Login() {
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
           <div className="flex items-center justify-center gap-3 mb-4">
-            <img src="/amax-icon-white.png" alt="AMAX GLOBAL" className="h-10 w-auto" />
-            <span className="font-bold text-white text-2xl tracking-widest">AMAX GLOBAL</span>
+            <img src="/amax-global-fx-logo.png" alt="AMAX Global FX" className="h-10 w-auto" />
           </div>
           <h1 className="text-3xl font-bold text-white">Welcome back</h1>
           <p className="text-slate-400">Sign in to your wealth management platform</p>

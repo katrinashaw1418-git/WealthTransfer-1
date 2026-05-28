@@ -275,8 +275,7 @@ export default function Register() {
         {/* Logo */}
         <div className="text-center mb-6">
           <div className="flex items-center justify-center gap-3 mb-4">
-            <img src="/amax-icon-white.png" alt="AMAX GLOBAL" className="h-10 w-auto" />
-            <span className="font-bold text-white text-2xl tracking-widest">AMAX GLOBAL</span>
+            <img src="/amax-global-fx-logo.png" alt="AMAX Global FX" className="h-10 w-auto" />
           </div>
           <StepDots step={step} />
         </div>
